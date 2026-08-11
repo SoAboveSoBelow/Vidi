@@ -9,6 +9,7 @@ import eu.kanade.domain.track.service.TrackPreferences
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.network.NetworkPreferences
+import eu.kanade.tachiyomi.ui.anime.EpisodeShufflePreferences
 import eu.kanade.tachiyomi.ui.player.settings.AdvancedPlayerPreferences
 import eu.kanade.tachiyomi.ui.player.settings.AudioPreferences
 import eu.kanade.tachiyomi.ui.player.settings.DecoderPreferences
@@ -56,6 +57,9 @@ class PreferenceModule(val app: Application) : InjektModule {
         // AY -->
         addSingletonFactory {
             PlayerPreferences(get())
+        }
+        addSingletonFactory {
+            EpisodeShufflePreferences(get())
         }
         addSingletonFactory {
             GesturePreferences(get())

@@ -27,17 +27,18 @@ import dev.icerock.moko.resources.StringResource
 import eu.kanade.tachiyomi.R
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 
 fun createPipActions(
     context: Context,
     isPaused: Boolean,
-    replaceWithPrevious: Boolean,
+    firstButtonAction: Int,
     playlistCount: Int,
     playlistPosition: Int,
 ): ArrayList<RemoteAction> = arrayListOf(
-    if (replaceWithPrevious) {
-        createPipAction(
+    when (firstButtonAction) {
+        1 -> createPipAction(
             context,
             R.drawable.ic_skip_previous_24dp,
             AYMR.strings.action_previous_episode,
@@ -45,8 +46,14 @@ fun createPipActions(
             PIP_PREVIOUS,
             playlistPosition != 0,
         )
-    } else {
-        createPipAction(
+        2 -> createPipAction(
+            context,
+            R.drawable.ic_headphones_24dp,
+            AMMR.strings.pip_first_button_action_background_play,
+            PIP_BACKGROUND_PLAY,
+            PIP_BACKGROUND_PLAY,
+        )
+        else -> createPipAction(
             context,
             R.drawable.ic_forward_10_24dp,
             AYMR.strings.pref_skip_10,
@@ -111,3 +118,4 @@ const val PIP_PLAY = 2
 const val PIP_PREVIOUS = 3
 const val PIP_NEXT = 4
 const val PIP_SKIP = 5
+const val PIP_BACKGROUND_PLAY = 6

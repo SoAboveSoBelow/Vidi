@@ -1,8 +1,10 @@
 package eu.kanade.presentation.anime.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -91,6 +93,9 @@ fun AnimeEpisodeListItem(
     // AM (FILE_SIZE) -->
     fileSize: Long?,
     // <-- AM (FILE_SIZE)
+    // AM (MINIMAL_EPISODE_LIST) -->
+    minimalView: Boolean = false,
+    // <-- AM (MINIMAL_EPISODE_LIST)
     modifier: Modifier = Modifier,
 ) {
     val start = getSwipeAction(
@@ -152,6 +157,9 @@ fun AnimeEpisodeListItem(
                     // AM (FILE_SIZE) -->
                     fileSize = fileSize,
                     // <-- AM (FILE_SIZE)
+                    // AM (MINIMAL_EPISODE_LIST) -->
+                    minimalView = minimalView,
+                    // <-- AM (MINIMAL_EPISODE_LIST)
                 )
                 return@Row
             }
@@ -161,7 +169,12 @@ fun AnimeEpisodeListItem(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    EpisodeThumbnail(previewUrl = previewUrl)
+                    // AM (MINIMAL_EPISODE_LIST) -->
+                    EpisodeThumbnail(
+                        previewUrl = previewUrl,
+                        watchProgress = watchProgress.takeIf { minimalView },
+                    )
+                    // <-- AM (MINIMAL_EPISODE_LIST)
 
                     Column {
                         Row(
@@ -180,7 +193,7 @@ fun AnimeEpisodeListItem(
                                 color = LocalContentColor.current.copy(alpha = if (seen) DISABLED_ALPHA else 1f),
                             )
 
-                            if (previewUrl == null) {
+                            if (previewUrl == null && !minimalView) {
                                 BookmarkDownloadIcons(
                                     bookmark = bookmark,
                                     downloadIndicatorEnabled = downloadIndicatorEnabled,
@@ -202,32 +215,36 @@ fun AnimeEpisodeListItem(
                     }
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    EpisodeInformation(
-                        seen = seen,
-                        date = date,
-                        watchProgress = watchProgress,
-                        fillermark = fillermark,
-                        scanlator = scanlator,
-                    )
-
-                    if (previewUrl != null) {
-                        BookmarkDownloadIcons(
-                            bookmark = bookmark,
-                            downloadIndicatorEnabled = downloadIndicatorEnabled,
-                            downloadStateProvider = downloadStateProvider,
-                            downloadProgressProvider = downloadProgressProvider,
-                            onDownloadClick = onDownloadClick,
-                            // AM (FILE_SIZE) -->
-                            fileSize = fileSize,
-                            // <-- AM (FILE_SIZE)
+                // AM (MINIMAL_EPISODE_LIST) -->
+                if (!minimalView) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        EpisodeInformation(
+                            seen = seen,
+                            date = date,
+                            watchProgress = watchProgress,
+                            fillermark = fillermark,
+                            scanlator = scanlator,
                         )
+
+                        if (previewUrl != null) {
+                            BookmarkDownloadIcons(
+                                bookmark = bookmark,
+                                downloadIndicatorEnabled = downloadIndicatorEnabled,
+                                downloadStateProvider = downloadStateProvider,
+                                downloadProgressProvider = downloadProgressProvider,
+                                onDownloadClick = onDownloadClick,
+                                // AM (FILE_SIZE) -->
+                                fileSize = fileSize,
+                                // <-- AM (FILE_SIZE)
+                            )
+                        }
                     }
                 }
+                // <-- AM (MINIMAL_EPISODE_LIST)
             }
             // <-- AY
         }
@@ -251,6 +268,9 @@ private fun RowScope.SimpleEpisodeListItemImpl(
     // AM (FILE_SIZE) -->
     fileSize: Long?,
     // <-- AM (FILE_SIZE)
+    // AM (MINIMAL_EPISODE_LIST) -->
+    minimalView: Boolean = false,
+    // <-- AM (MINIMAL_EPISODE_LIST)
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -265,25 +285,33 @@ private fun RowScope.SimpleEpisodeListItemImpl(
             color = LocalContentColor.current.copy(alpha = if (seen) DISABLED_ALPHA else 1f),
         )
 
+        // AM (MINIMAL_EPISODE_LIST) -->
         EpisodeInformation(
             seen = seen,
-            date = date,
+            date = date.takeIf { !minimalView },
             watchProgress = watchProgress,
-            fillermark = fillermark,
-            scanlator = scanlator,
+            fillermark = fillermark && !minimalView,
+            scanlator = scanlator.takeIf { !minimalView },
         )
+        // <-- AM (MINIMAL_EPISODE_LIST)
     }
 
-    BookmarkDownloadIcons(
-        bookmark = bookmark,
-        downloadIndicatorEnabled = downloadIndicatorEnabled,
-        downloadStateProvider = downloadStateProvider,
-        downloadProgressProvider = downloadProgressProvider,
-        onDownloadClick = onDownloadClick,
-        // AM (FILE_SIZE) -->
-        fileSize = fileSize,
-        // <-- AM (FILE_SIZE)
-    )
+    // AM (MINIMAL_EPISODE_LIST) -->
+    if (!minimalView) {
+        // <-- AM (MINIMAL_EPISODE_LIST)
+        BookmarkDownloadIcons(
+            bookmark = bookmark,
+            downloadIndicatorEnabled = downloadIndicatorEnabled,
+            downloadStateProvider = downloadStateProvider,
+            downloadProgressProvider = downloadProgressProvider,
+            onDownloadClick = onDownloadClick,
+            // AM (FILE_SIZE) -->
+            fileSize = fileSize,
+            // <-- AM (FILE_SIZE)
+        )
+        // AM (MINIMAL_EPISODE_LIST) -->
+    }
+    // <-- AM (MINIMAL_EPISODE_LIST)
 }
 // <-- AY
 
@@ -399,18 +427,44 @@ private val swipeActionThreshold = 56.dp
 @Composable
 private fun EpisodeThumbnail(
     previewUrl: String?,
+    // AM (MINIMAL_EPISODE_LIST) -->
+    watchProgress: String? = null,
+    // <-- AM (MINIMAL_EPISODE_LIST)
 ) {
     val targetWidth = ((LocalConfiguration.current.screenWidthDp * 0.4f).coerceAtMost(250f))
     if (previewUrl != null) {
-        AnimeCover.Thumb(
+        Box(
             modifier = Modifier
                 .width(targetWidth.dp)
                 .padding(end = 8.dp),
-            data = ImageRequest.Builder(LocalContext.current)
-                .data(previewUrl)
-                .crossfade(true)
-                .build(),
-        )
+        ) {
+            AnimeCover.Thumb(
+                modifier = Modifier.fillMaxWidth(),
+                data = ImageRequest.Builder(LocalContext.current)
+                    .data(previewUrl)
+                    .crossfade(true)
+                    .build(),
+            )
+
+            // AM (MINIMAL_EPISODE_LIST) -->
+            if (watchProgress != null) {
+                Text(
+                    text = watchProgress,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .background(
+                            color = Color.Black.copy(alpha = 0.6f),
+                            shape = MaterialTheme.shapes.extraSmall,
+                        )
+                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                )
+            }
+            // <-- AM (MINIMAL_EPISODE_LIST)
+        }
     }
 }
 

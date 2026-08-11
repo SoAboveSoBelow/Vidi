@@ -23,6 +23,7 @@ import eu.kanade.tachiyomi.util.system.isReleaseBuildType
 import kotlinx.collections.immutable.toImmutableList
 import tachiyomi.domain.anime.interactor.FetchInterval
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.WheelTextPicker
 import tachiyomi.presentation.core.components.material.padding
@@ -62,6 +63,44 @@ fun DeleteEpisodesDialog(
         },
     )
 }
+
+// AM (CLEAR_ANIME) -->
+
+/**
+ * Clears the anime's episode list from the database only - nothing on disk is touched,
+ * and downloads are left alone. A following Refresh rebuilds the list from scratch.
+ */
+@Composable
+fun ClearAnimeDialog(
+    onDismissRequest: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        dismissButton = {
+            TextButton(onClick = onDismissRequest) {
+                Text(text = stringResource(MR.strings.action_cancel))
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onDismissRequest()
+                    onConfirm()
+                },
+            ) {
+                Text(text = stringResource(MR.strings.action_ok))
+            }
+        },
+        title = {
+            Text(text = stringResource(AMMR.strings.action_clear_anime))
+        },
+        text = {
+            Text(text = stringResource(AMMR.strings.clear_anime_confirm))
+        },
+    )
+}
+// <-- AM (CLEAR_ANIME)
 
 @Composable
 fun SetIntervalDialog(

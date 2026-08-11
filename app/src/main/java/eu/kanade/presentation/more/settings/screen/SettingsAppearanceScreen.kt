@@ -19,9 +19,12 @@ import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.screen.appearance.AppLanguageScreen
 import eu.kanade.presentation.more.settings.widget.AppThemeModePreferenceWidget
 import eu.kanade.presentation.more.settings.widget.AppThemePreferenceWidget
+import eu.kanade.tachiyomi.ui.anime.DefaultEpisodeViewModePreference
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.collections.immutable.toImmutableMap
+import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -111,6 +114,12 @@ object SettingsAppearanceScreen : SearchableSettings {
             UiPreferences.dateFormat(dateFormat).format(now)
         }
 
+        // AM (EPISODE_VIEW_MODE) -->
+        val defaultEpisodeViewModePreference = remember {
+            DefaultEpisodeViewModePreference(Injekt.get())
+        }
+        // <-- AM (EPISODE_VIEW_MODE)
+
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pref_category_display),
             preferenceItems = persistentListOf(
@@ -165,6 +174,18 @@ object SettingsAppearanceScreen : SearchableSettings {
                     preference = uiPreferences.imagesInDescription,
                     title = stringResource(AMMR.strings.am_pref_display_images_description),
                 ),
+                // AM (EPISODE_VIEW_MODE) -->
+                Preference.PreferenceItem.ListPreference(
+                    preference = defaultEpisodeViewModePreference,
+                    entries = persistentMapOf(
+                        Anime.EPISODE_SHOW_NOT_PREVIEWS to stringResource(AMMR.strings.am_pref_default_view_simplified),
+                        Anime.EPISODE_SHOW_PREVIEWS to stringResource(AMMR.strings.am_pref_default_view_preview),
+                        (Anime.EPISODE_SHOW_PREVIEWS or Anime.EPISODE_HIDE_METADATA) to
+                            stringResource(AMMR.strings.am_pref_default_view_minimal),
+                    ),
+                    title = stringResource(AMMR.strings.am_pref_default_view),
+                ),
+                // <-- AM (EPISODE_VIEW_MODE)
             ),
         )
     }

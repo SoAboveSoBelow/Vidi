@@ -210,6 +210,13 @@ class LibraryPreferences(
     )
     // <-- AY
 
+    // AM (EPISODE_VIEW_MODE) -->
+    val hideEpisodeMetadata: Preference<Long> = preferenceStore.getLong(
+        "default_episode_hide_metadata",
+        Anime.EPISODE_SHOW_METADATA,
+    )
+    // <-- AM (EPISODE_VIEW_MODE)
+
     fun setEpisodeSettingsDefault(anime: Anime) {
         filterEpisodeBySeen.set(anime.unseenFilterRaw)
         filterEpisodeByDownloaded.set(anime.downloadedFilterRaw)
@@ -226,6 +233,9 @@ class LibraryPreferences(
         showEpisodeThumbnailPreviews.set(anime.showPreviewsRaw)
         showEpisodeSummaries.set(anime.showSummariesRaw)
         // <-- AY
+        // AM (EPISODE_VIEW_MODE) -->
+        hideEpisodeMetadata.set(anime.hideEpisodeMetadataRaw)
+        // <-- AM (EPISODE_VIEW_MODE)
     }
 
     val hideMissingEpisodes: Preference<Boolean> = preferenceStore.getBoolean(

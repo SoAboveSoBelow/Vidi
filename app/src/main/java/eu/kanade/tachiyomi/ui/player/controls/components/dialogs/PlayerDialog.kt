@@ -23,6 +23,7 @@ fun PlayerDialog(
     modifier: Modifier = Modifier,
     onConfirmRequest: (() -> Unit)? = null,
     onDismissRequest: () -> Unit,
+    titleContent: (@Composable () -> Unit)? = null,
     content: @Composable (() -> Unit)? = null,
 ) {
     val onConfirm = {
@@ -46,11 +47,15 @@ fun PlayerDialog(
             tonalElevation = 1.dp,
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
+                if (titleContent != null) {
+                    titleContent()
+                } else {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
 
                 content?.invoke()
 

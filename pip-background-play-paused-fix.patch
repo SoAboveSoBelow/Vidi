@@ -1,0 +1,20 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerActivity.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerActivity.kt
+index 153e0586c..1b97a2cc2 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerActivity.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerActivity.kt
+@@ -700,9 +700,12 @@ class PlayerActivity : BaseActivity() {
+                             // task) rather than waiting for onPause() to
+                             // pick it up naturally - onPause() explicitly
+                             // skips background playback while still in PIP.
+-                            if (playerPreferences.backgroundPlayback.get() &&
+-                                !viewModel.playbackData.value.paused
+-                            ) {
++                            // NOTE: unlike onPause(), this is an explicit user
++                            // action, so it must start the service even while
++                            // paused - otherwise moveTaskToBack() below has
++                            // nothing keeping the player alive and Android
++                            // just kills it instead of showing the notification.
++                            if (playerPreferences.backgroundPlayback.get()) {
+                                 startBackgroundPlayback()
+                             }
+                             isIntentionalBackgroundTransition = true

@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.ui.player.controls.components.dialogs
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,13 +13,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,10 +34,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import eu.kanade.domain.ui.UiPreferences
@@ -39,11 +54,16 @@ import eu.kanade.presentation.util.formatEpisodeNumber
 import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.util.lang.toRelativeString
 import tachiyomi.domain.anime.model.Anime
+import tachiyomi.i18n.MR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.VerticalFastScroller
 import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.util.clearFocusOnSoftKeyboardHide
+import tachiyomi.presentation.core.util.runOnEnterKeyPressed
+import tachiyomi.presentation.core.util.secondaryItemAlpha
+import tachiyomi.presentation.core.util.showSoftKeyboard
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -62,6 +82,21 @@ fun EpisodeListDialog(
 ) {
     val context = LocalContext.current
 
+    var searchQuery by remember { mutableStateOf<String?>(null) }
+
+    val reversedEpisodeList = remember(episodeList) { episodeList.reversed() }
+    val filteredEpisodeList = remember(reversedEpisodeList, searchQuery) {
+        val query = searchQuery
+        if (query.isNullOrBlank()) {
+            reversedEpisodeList
+        } else {
+            reversedEpisodeList.filter { episode ->
+                episode.name.contains(query, ignoreCase = true) ||
+                    formatEpisodeNumber(episode.episode_number.toDouble()).contains(query, ignoreCase = true)
+            }
+        }
+    }
+
     val itemScrollIndex = (episodeList.size - currentEpisodeIndex) - 1
     val episodeListState = rememberLazyListState(initialFirstVisibleItemIndex = itemScrollIndex)
     val dateFormatter = remember(dateFormat) { UiPreferences.dateFormat(dateFormat) }
@@ -70,6 +105,13 @@ fun EpisodeListDialog(
         title = stringResource(AYMR.strings.episodes),
         modifier = Modifier.fillMaxHeight(fraction = 0.8F).fillMaxWidth(fraction = 0.8F),
         onDismissRequest = onDismissRequest,
+        titleContent = {
+            EpisodeListDialogHeader(
+                title = stringResource(AYMR.strings.episodes),
+                searchQuery = searchQuery,
+                onChangeSearchQuery = { searchQuery = it },
+            )
+        },
     ) {
         VerticalFastScroller(
             listState = episodeListState,
@@ -79,7 +121,7 @@ fun EpisodeListDialog(
                 state = episodeListState,
             ) {
                 items(
-                    items = episodeList.reversed(),
+                    items = filteredEpisodeList,
                     key = { "episode-${it.id}" },
                     contentType = { "episode" },
                 ) { episode ->
@@ -118,6 +160,93 @@ fun EpisodeListDialog(
                         onEpisodeClicked = onEpisodeClicked,
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EpisodeListDialogHeader(
+    title: String,
+    searchQuery: String?,
+    onChangeSearchQuery: (String?) -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (searchQuery == null) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+
+            IconButton(onClick = { onChangeSearchQuery("") }) {
+                Icon(
+                    imageVector = Icons.Outlined.Search,
+                    contentDescription = stringResource(MR.strings.action_search),
+                )
+            }
+        } else {
+            val keyboardController = LocalSoftwareKeyboardController.current
+            val focusManager = LocalFocusManager.current
+
+            val clearFocus: () -> Unit = {
+                focusManager.clearFocus()
+                keyboardController?.hide()
+                focusManager.moveFocus(FocusDirection.Next)
+            }
+
+            BasicTextField(
+                value = searchQuery,
+                onValueChange = onChangeSearchQuery,
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(focusRequester)
+                    .runOnEnterKeyPressed(action = clearFocus)
+                    .showSoftKeyboard(remember { searchQuery.isEmpty() })
+                    .clearFocusOnSoftKeyboardHide(),
+                textStyle = MaterialTheme.typography.titleLarge.copy(
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.Normal,
+                ),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { clearFocus() }),
+                singleLine = true,
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                decorationBox = { innerTextField ->
+                    TextFieldDefaults.DecorationBox(
+                        value = searchQuery,
+                        innerTextField = innerTextField,
+                        enabled = true,
+                        singleLine = true,
+                        visualTransformation = VisualTransformation.None,
+                        interactionSource = remember { MutableInteractionSource() },
+                        placeholder = {
+                            Text(
+                                modifier = Modifier.secondaryItemAlpha(),
+                                text = stringResource(MR.strings.action_search_hint),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.Normal,
+                                ),
+                            )
+                        },
+                        container = {},
+                    )
+                },
+            )
+
+            IconButton(onClick = { onChangeSearchQuery(null) }) {
+                Icon(
+                    imageVector = Icons.Outlined.Close,
+                    contentDescription = stringResource(MR.strings.action_reset),
+                )
             }
         }
     }

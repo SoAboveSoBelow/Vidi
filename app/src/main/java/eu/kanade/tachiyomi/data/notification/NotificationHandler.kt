@@ -9,15 +9,9 @@ import eu.kanade.tachiyomi.extension.util.ExtensionInstaller
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import tachiyomi.core.common.Constants
 
-/**
- * Class that manages [PendingIntent] of activity's
- */
+/** Manages [PendingIntent]s for notification actions. */
 object NotificationHandler {
-    /**
-     * Returns [PendingIntent] that starts a download activity.
-     *
-     * @param context context of application
-     */
+    /** Opens the downloads screen. */
     internal fun openDownloadManagerPendingActivity(context: Context): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -31,12 +25,7 @@ object NotificationHandler {
         )
     }
 
-    /**
-     * Returns [PendingIntent] that starts a gallery activity
-     *
-     * @param context context of application
-     * @param file file containing image
-     */
+    /** Opens [uri] in a gallery app. */
     internal fun openImagePendingActivity(context: Context, uri: Uri): PendingIntent {
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "image/*")
@@ -50,12 +39,7 @@ object NotificationHandler {
         )
     }
 
-    /**
-     * Returns [PendingIntent] that prompts user with apk install intent
-     *
-     * @param context context
-     * @param uri uri of apk that is installed
-     */
+    /** Prompts the user to install the apk at [uri]. */
     fun installApkPendingActivity(context: Context, uri: Uri): PendingIntent {
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, ExtensionInstaller.APK_MIME)

@@ -52,6 +52,10 @@
     <string name="am.download_notifier_unknown_error">Could not download episode due to unexpected error</string>
     <string name="am.channel_new_episodes">Episode updates</string>
     <string name="am.pref_display_images_description">Render images in anime descriptions</string>
+    <string name="am.pref_default_view">Default view</string>
+    <string name="am.pref_default_view_simplified">Simplified</string>
+    <string name="am.pref_default_view_preview">Preview</string>
+    <string name="am.pref_default_view_minimal">Minimal</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesTitle">Hide entries without newer episodes</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesSubtitle">Only show entry if the match has additional episodes</string>
     <string name="am.migrationConfigScreen.prioritizeByChaptersTitle">Match based on episode number</string>
@@ -72,6 +76,10 @@
     <string name="artist_hint">Artist: %1$s</string>
     <string name="action_edit_info">Edit info</string>
     <string name="custom_entry_info">Custom entry info</string>
+
+    <!-- Clear anime -->
+    <string name="action_clear_anime">Clear anime</string>
+    <string name="clear_anime_confirm">Remove this anime\'s episodes from the database? Files on disk and downloads are not affected. The next Refresh will rebuild the episode list from scratch.</string>
 
     <!-- Downloads -->
     <string name="pref_download_ignore_broken_tracks">Skip broken external tracks</string>
@@ -207,6 +215,7 @@
 
     <!-- Player prefs - internal player -->
     <string name="player_pref_switch_on_failure">Switch video on loading failure</string>
+    <string name="player_pref_recent_episode_position_slots">Temporary position memory (episodes)</string>
 
     <!-- Player prefs - subtitles -->
     <string name="player_pref_subtitle_black_bars">Render on black bars</string>
@@ -234,8 +243,19 @@
     <!-- Player - sheets -->
     <string name="player_sheets_track_title_w_lang_no_id" translatable="false">%s (%s)</string>
 
+    <string name="episode_list_shuffle">Shuffle</string>
+    <string name="player_background_playback_channel">Background playback</string>
+    <string name="player_background_playback_stop">Stop</string>
+    <string name="pip_first_button_action">First PIP button</string>
+    <string name="pip_first_button_action_skip_10">Skip 10 seconds</string>
+    <string name="pip_first_button_action_previous_episode">Previous episode</string>
+    <string name="pip_first_button_action_background_play">Background play</string>
+
     <!-- Tracking -->
     <string name="pref_tracking_sync_enhanced">Sync progress from enhanced trackers</string>
     <string name="pref_smart_sync_tracker">Smart sync seasons</string>
     <string name="pref_smart_sync_tracker_summary">Skip completed items and stop at entry in progress</string>
+
+    <!-- Episode search -->
+    <string name="action_search_episodes">Search episodes…</string>
 </resources>

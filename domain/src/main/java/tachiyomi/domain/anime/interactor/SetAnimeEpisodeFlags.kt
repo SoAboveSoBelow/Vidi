@@ -2,6 +2,7 @@ package tachiyomi.domain.anime.interactor
 
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeUpdate
+import tachiyomi.domain.anime.model.EpisodeViewMode
 import tachiyomi.domain.anime.repository.AnimeRepository
 
 class SetAnimeEpisodeFlags(
@@ -100,6 +101,30 @@ class SetAnimeEpisodeFlags(
     }
 // <-- AY
 
+    // AM (EPISODE_VIEW_MODE) -->
+
+    /**
+     * Applies one of the 3 named episode view modes, setting both the previews
+     * and metadata bits together so the result always lands on exactly one of
+     * SIMPLIFIED / PREVIEW / MINIMAL - never the unused 4th bit combination.
+     */
+    suspend fun awaitSetEpisodeViewMode(anime: Anime, viewMode: EpisodeViewMode): Boolean {
+        val (previews, hideMetadata) = when (viewMode) {
+            EpisodeViewMode.SIMPLIFIED -> Anime.EPISODE_SHOW_NOT_PREVIEWS to Anime.EPISODE_SHOW_METADATA
+            EpisodeViewMode.PREVIEW -> Anime.EPISODE_SHOW_PREVIEWS to Anime.EPISODE_SHOW_METADATA
+            EpisodeViewMode.MINIMAL -> Anime.EPISODE_SHOW_PREVIEWS to Anime.EPISODE_HIDE_METADATA
+        }
+        return animeRepository.update(
+            AnimeUpdate(
+                id = anime.id,
+                episodeFlags = anime.episodeFlags
+                    .setFlag(previews, Anime.EPISODE_PREVIEWS_MASK)
+                    .setFlag(hideMetadata, Anime.EPISODE_METADATA_MASK),
+            ),
+        )
+    }
+    // <-- AM (EPISODE_VIEW_MODE)
+
     suspend fun awaitSetAllFlags(
         animeId: Long,
         unseenFilter: Long,
@@ -115,6 +140,9 @@ class SetAnimeEpisodeFlags(
         showPreviews: Long,
         showSummaries: Long,
         // <-- AY
+        // AM (EPISODE_VIEW_MODE) -->
+        hideMetadata: Long,
+        // <-- AM (EPISODE_VIEW_MODE)
     ): Boolean {
         return animeRepository.update(
             AnimeUpdate(
@@ -130,8 +158,11 @@ class SetAnimeEpisodeFlags(
                     .setFlag(displayMode, Anime.EPISODE_DISPLAY_MASK)
                     // AY -->
                     .setFlag(showPreviews, Anime.EPISODE_PREVIEWS_MASK)
-                    .setFlag(showSummaries, Anime.EPISODE_SUMMARIES_MASK),
-                // <-- AY
+                    .setFlag(showSummaries, Anime.EPISODE_SUMMARIES_MASK)
+                    // <-- AY
+                    // AM (EPISODE_VIEW_MODE) -->
+                    .setFlag(hideMetadata, Anime.EPISODE_METADATA_MASK),
+                // <-- AM (EPISODE_VIEW_MODE)
             ),
         )
     }

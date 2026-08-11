@@ -82,6 +82,7 @@ import eu.kanade.tachiyomi.util.system.copyToClipboard
 import kotlinx.coroutines.delay
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.domain.anime.model.Anime
+import tachiyomi.domain.anime.model.EpisodeViewMode
 import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.episode.service.missingEntriesCount
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -131,6 +132,7 @@ fun AnimeScreen(
     onTagSearch: (String) -> Unit,
 
     onFilterButtonClicked: () -> Unit,
+    onShuffleClicked: () -> Unit,
     onRefresh: () -> Unit,
     onContinueWatching: () -> Unit,
     onSearch: (query: String, global: Boolean) -> Unit,
@@ -148,10 +150,19 @@ fun AnimeScreen(
     onSettingsClicked: (() -> Unit)?,
     onSkipIntroClicked: (() -> Unit)?,
     // <-- AY
+    // AM (CLEAR_ANIME) -->
+    onClearAnimeClicked: () -> Unit,
+    // <-- AM (CLEAR_ANIME)
     // AM (CUSTOM_INFORMATION) -->
     onEditInfoClicked: () -> Unit,
     // <-- AM (CUSTOM_INFORMATION)
     onEditNotesClicked: () -> Unit,
+    // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+    // AM (EPISODE_VIEW_MODE) -->
+    episodeViewMode: EpisodeViewMode,
+    onEpisodeViewModeSelected: (EpisodeViewMode) -> Unit,
+    // <-- AM (EPISODE_VIEW_MODE)
+    // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
 
     // For bottom action menu
     onMultiBookmarkClicked: (List<Episode>, bookmarked: Boolean) -> Unit,
@@ -198,6 +209,8 @@ fun AnimeScreen(
             // AM (FILE_SIZE) -->
             showFileSize = showFileSize,
             // <-- AM (FILE_SIZE)
+            // AM (MINIMAL_EPISODE_LIST) -->
+            // <-- AM (MINIMAL_EPISODE_LIST)
             onEpisodeClicked = onEpisodeClicked,
             onDownloadEpisode = onDownloadEpisode,
             onAddToLibraryClicked = onAddToLibraryClicked,
@@ -207,6 +220,7 @@ fun AnimeScreen(
             onTagSearch = onTagSearch,
             onCopyTagToClipboard = onCopyTagToClipboard,
             onFilterClicked = onFilterButtonClicked,
+            onShuffleClicked = onShuffleClicked,
             onRefresh = onRefresh,
             onContinueWatching = onContinueWatching,
             onSearch = onSearch,
@@ -221,9 +235,14 @@ fun AnimeScreen(
             onSkipIntroClicked = onSkipIntroClicked,
             // <-- AY
             // AM (CUSTOM_INFORMATION) -->
+            onClearAnimeClicked = onClearAnimeClicked,
             onEditInfoClicked = onEditInfoClicked,
             // <-- AM (CUSTOM_INFORMATION)
             onEditNotesClicked = onEditNotesClicked,
+            // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+            episodeViewMode = episodeViewMode,
+            onEpisodeViewModeSelected = onEpisodeViewModeSelected,
+            // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
             onMultiBookmarkClicked = onMultiBookmarkClicked,
             // AY -->
             onMultiFillermarkClicked = onMultiFillermarkClicked,
@@ -255,6 +274,8 @@ fun AnimeScreen(
             // AM (FILE_SIZE) -->
             showFileSize = showFileSize,
             // <-- AM (FILE_SIZE)
+            // AM (MINIMAL_EPISODE_LIST) -->
+            // <-- AM (MINIMAL_EPISODE_LIST)
             onEpisodeClicked = onEpisodeClicked,
             onDownloadEpisode = onDownloadEpisode,
             onAddToLibraryClicked = onAddToLibraryClicked,
@@ -264,6 +285,7 @@ fun AnimeScreen(
             onTagSearch = onTagSearch,
             onCopyTagToClipboard = onCopyTagToClipboard,
             onFilterButtonClicked = onFilterButtonClicked,
+            onShuffleClicked = onShuffleClicked,
             onRefresh = onRefresh,
             onContinueWatching = onContinueWatching,
             onSearch = onSearch,
@@ -278,9 +300,14 @@ fun AnimeScreen(
             onSkipIntroClicked = onSkipIntroClicked,
             // <-- AY
             // AM (CUSTOM_INFORMATION) -->
+            onClearAnimeClicked = onClearAnimeClicked,
             onEditInfoClicked = onEditInfoClicked,
             // <-- AM (CUSTOM_INFORMATION)
             onEditNotesClicked = onEditNotesClicked,
+            // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+            episodeViewMode = episodeViewMode,
+            onEpisodeViewModeSelected = onEpisodeViewModeSelected,
+            // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
             onMultiBookmarkClicked = onMultiBookmarkClicked,
             // AY -->
             onMultiFillermarkClicked = onMultiFillermarkClicked,
@@ -331,6 +358,7 @@ private fun AnimeScreenSmallImpl(
     onCopyTagToClipboard: (tag: String) -> Unit,
 
     onFilterClicked: () -> Unit,
+    onShuffleClicked: () -> Unit,
     onRefresh: () -> Unit,
     onContinueWatching: () -> Unit,
     onSearch: (query: String, global: Boolean) -> Unit,
@@ -348,10 +376,19 @@ private fun AnimeScreenSmallImpl(
     onSettingsClicked: (() -> Unit)?,
     onSkipIntroClicked: (() -> Unit)?,
     // <-- AY
+    // AM (CLEAR_ANIME) -->
+    onClearAnimeClicked: () -> Unit,
+    // <-- AM (CLEAR_ANIME)
     // AM (CUSTOM_INFORMATION) -->
     onEditInfoClicked: () -> Unit,
     // <-- AM (CUSTOM_INFORMATION)
     onEditNotesClicked: () -> Unit,
+    // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+    // AM (EPISODE_VIEW_MODE) -->
+    episodeViewMode: EpisodeViewMode,
+    onEpisodeViewModeSelected: (EpisodeViewMode) -> Unit,
+    // <-- AM (EPISODE_VIEW_MODE)
+    // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
 
     // For bottom action menu
     onMultiBookmarkClicked: (List<Episode>, bookmarked: Boolean) -> Unit,
@@ -390,6 +427,21 @@ private fun AnimeScreenSmallImpl(
             isAnySelected = state.isAnySelected,
         )
     }
+
+    // AM (EPISODE_SEARCH) -->
+    var episodeSearchQuery by remember { mutableStateOf<String?>(null) }
+    val filteredListItem = remember(listItem, episodeSearchQuery) {
+        val query = episodeSearchQuery
+        if (query.isNullOrBlank()) {
+            listItem
+        } else {
+            listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
+                item.episode.name.contains(query, ignoreCase = true) ||
+                    formatEpisodeNumber(item.episode.episodeNumber).contains(query, ignoreCase = true)
+            }
+        }
+    }
+    // <-- AM (EPISODE_SEARCH)
 
     var toolbarHeight by remember { mutableIntStateOf(0) }
     // <-- AY
@@ -437,13 +489,22 @@ private fun AnimeScreenSmallImpl(
                     onClickSkipIntro = onSkipIntroClicked,
                     // <-- AY
                     // AM (CUSTOM_INFORMATION) -->
+                    onClickClearAnime = onClearAnimeClicked,
                     onClickEditInfo = onEditInfoClicked.takeIf { state.anime.favorite },
                     // <-- AM (CUSTOM_INFORMATION)
                     onClickEditNotes = onEditNotesClicked,
+                    // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+                    episodeViewMode = state.anime.episodeViewMode(),
+                    onEpisodeViewModeSelected = onEpisodeViewModeSelected,
+                    // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
                     actionModeCounter = selectedEpisodeCount,
                     onCancelActionMode = { onAllEpisodeSelected(false) },
                     onSelectAll = { onAllEpisodeSelected(true) },
                     onInvertSelection = { onInvertSelection() },
+                    // AM (EPISODE_SEARCH) -->
+                    episodeSearchQuery = episodeSearchQuery,
+                    onEpisodeSearchQueryChange = { episodeSearchQuery = it },
+                    // <-- AM (EPISODE_SEARCH)
                     titleAlphaProvider = { titleAlpha },
                     backgroundAlphaProvider = { backgroundAlpha },
                     // AY -->
@@ -609,12 +670,18 @@ private fun AnimeScreenSmallImpl(
                                 FetchType.Seasons -> seasons.size
                                 FetchType.Episodes -> episodes.size
                             },
-                            missingItemsCount = when (state.anime.fetchType) {
-                                FetchType.Seasons -> missingSeasonsCount
-                                FetchType.Episodes -> missingEpisodeCount
+                            missingItemsCount = if (state.hideMissingEpisodes) {
+                                0
+                            } else {
+                                when (state.anime.fetchType) {
+                                    FetchType.Seasons -> missingSeasonsCount
+                                    FetchType.Episodes -> missingEpisodeCount
+                                }
                             },
                             onClick = onFilterClicked,
                             fetchType = state.anime.fetchType,
+                            isShuffleEnabled = state.isShuffleEnabled,
+                            onShuffleClick = onShuffleClicked,
                             modifier = Modifier.ignorePadding(offsetGridPaddingPx),
                         )
                         // <-- AY
@@ -672,7 +739,9 @@ private fun AnimeScreenSmallImpl(
                                 source = state.source,
                                 showFileSize = showFileSize,
                                 // <-- AM (FILE_SIZE)
-                                episodes = listItem,
+                                // AM (MINIMAL_EPISODE_LIST) -->
+                                // <-- AM (MINIMAL_EPISODE_LIST)
+                                episodes = filteredListItem,
                                 isAnyEpisodeSelected = episodes.fastAny { it.selected },
                                 // AY -->
                                 showSummaries = state.showSummaries,
@@ -725,6 +794,7 @@ fun AnimeScreenLargeImpl(
     onCopyTagToClipboard: (tag: String) -> Unit,
 
     onFilterButtonClicked: () -> Unit,
+    onShuffleClicked: () -> Unit,
     onRefresh: () -> Unit,
     onContinueWatching: () -> Unit,
     onSearch: (query: String, global: Boolean) -> Unit,
@@ -742,10 +812,19 @@ fun AnimeScreenLargeImpl(
     onSettingsClicked: (() -> Unit)?,
     onSkipIntroClicked: (() -> Unit)?,
     // <-- AY
+    // AM (CLEAR_ANIME) -->
+    onClearAnimeClicked: () -> Unit,
+    // <-- AM (CLEAR_ANIME)
     // AM (CUSTOM_INFORMATION) -->
     onEditInfoClicked: () -> Unit,
     // <-- AM (CUSTOM_INFORMATION)
     onEditNotesClicked: () -> Unit,
+    // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+    // AM (EPISODE_VIEW_MODE) -->
+    episodeViewMode: EpisodeViewMode,
+    onEpisodeViewModeSelected: (EpisodeViewMode) -> Unit,
+    // <-- AM (EPISODE_VIEW_MODE)
+    // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
 
     // For bottom action menu
     onMultiBookmarkClicked: (List<Episode>, bookmarked: Boolean) -> Unit,
@@ -781,6 +860,21 @@ fun AnimeScreenLargeImpl(
             isAnySelected = state.isAnySelected,
         )
     }
+
+    // AM (EPISODE_SEARCH) -->
+    var episodeSearchQuery by remember { mutableStateOf<String?>(null) }
+    val filteredListItem = remember(listItem, episodeSearchQuery) {
+        val query = episodeSearchQuery
+        if (query.isNullOrBlank()) {
+            listItem
+        } else {
+            listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
+                item.episode.name.contains(query, ignoreCase = true) ||
+                    formatEpisodeNumber(item.episode.episodeNumber).contains(query, ignoreCase = true)
+            }
+        }
+    }
+    // <-- AM (EPISODE_SEARCH)
 
     val insetPadding = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal).asPaddingValues()
     var topBarHeight by remember { mutableIntStateOf(0) }
@@ -821,13 +915,22 @@ fun AnimeScreenLargeImpl(
                     onClickSkipIntro = onSkipIntroClicked,
                     // <-- AY
                     // AM (CUSTOM_INFORMATION) -->
+                    onClickClearAnime = onClearAnimeClicked,
                     onClickEditInfo = onEditInfoClicked.takeIf { state.anime.favorite },
                     // <-- AM (CUSTOM_INFORMATION)
                     onClickEditNotes = onEditNotesClicked,
+                    // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+                    episodeViewMode = state.anime.episodeViewMode(),
+                    onEpisodeViewModeSelected = onEpisodeViewModeSelected,
+                    // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
                     onCancelActionMode = { onAllEpisodeSelected(false) },
                     actionModeCounter = selectedEpisodeCount,
                     onSelectAll = { onAllEpisodeSelected(true) },
                     onInvertSelection = { onInvertSelection() },
+                    // AM (EPISODE_SEARCH) -->
+                    episodeSearchQuery = episodeSearchQuery,
+                    onEpisodeSearchQueryChange = { episodeSearchQuery = it },
+                    // <-- AM (EPISODE_SEARCH)
                     titleAlphaProvider = { 1f },
                     backgroundAlphaProvider = { 1f },
                 )
@@ -975,12 +1078,18 @@ fun AnimeScreenLargeImpl(
                                         FetchType.Seasons -> seasons.size
                                         FetchType.Episodes -> episodes.size
                                     },
-                                    missingItemsCount = when (state.anime.fetchType) {
-                                        FetchType.Seasons -> missingSeasonsCount
-                                        FetchType.Episodes -> missingEpisodeCount
+                                    missingItemsCount = if (state.hideMissingEpisodes) {
+                                        0
+                                    } else {
+                                        when (state.anime.fetchType) {
+                                            FetchType.Seasons -> missingSeasonsCount
+                                            FetchType.Episodes -> missingEpisodeCount
+                                        }
                                     },
                                     onClick = onFilterButtonClicked,
                                     fetchType = state.anime.fetchType,
+                                    isShuffleEnabled = state.isShuffleEnabled,
+                                    onShuffleClick = onShuffleClicked,
                                     modifier = Modifier.ignorePadding(offsetGridPaddingPx),
                                 )
                                 // <-- AY
@@ -1037,7 +1146,9 @@ fun AnimeScreenLargeImpl(
                                         source = state.source,
                                         showFileSize = showFileSize,
                                         // <-- AM (FILE_SIZE)
-                                        episodes = listItem,
+                                        // AM (MINIMAL_EPISODE_LIST) -->
+                                        // <-- AM (MINIMAL_EPISODE_LIST)
+                                        episodes = filteredListItem,
                                         isAnyEpisodeSelected = episodes.fastAny { it.selected },
                                         // AY -->
                                         showSummaries = state.showSummaries,
@@ -1286,6 +1397,11 @@ private fun LazyGridScope.sharedEpisodeItems(
                     // AM (FILE_SIZE) -->
                     fileSize = fileSizeAsync,
                     // <-- AM (FILE_SIZE)
+                    // AM (MINIMAL_EPISODE_LIST) -->
+                    // AM (EPISODE_VIEW_MODE) -->
+                    minimalView = anime.hideEpisodeMetadata(),
+                    // <-- AM (EPISODE_VIEW_MODE)
+                    // <-- AM (MINIMAL_EPISODE_LIST)
                     // AY -->
                     modifier = itemModifier,
                     // <-- AY

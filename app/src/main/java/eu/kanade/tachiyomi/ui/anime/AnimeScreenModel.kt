@@ -92,6 +92,7 @@ import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeUpdate
 import tachiyomi.domain.anime.model.AnimeWithEpisodeCount
 import tachiyomi.domain.anime.model.CustomAnimeInfo
+import tachiyomi.domain.anime.model.EpisodeViewMode
 import tachiyomi.domain.anime.model.NoSeasonsException
 import tachiyomi.domain.anime.model.applyFilter
 import tachiyomi.domain.anime.repository.AnimeRepository
@@ -105,6 +106,7 @@ import tachiyomi.domain.episode.interactor.UpdateEpisode
 import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.episode.model.EpisodeUpdate
 import tachiyomi.domain.episode.model.NoEpisodesException
+import tachiyomi.domain.episode.repository.EpisodeRepository
 import tachiyomi.domain.episode.service.calculateEpisodeGap
 import tachiyomi.domain.episode.service.getEpisodeSort
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -129,6 +131,7 @@ class AnimeScreenModel(
     private val animeId: Long,
     private val isFromSource: Boolean,
     private val libraryPreferences: LibraryPreferences = Injekt.get(),
+    private val episodeShufflePreferences: EpisodeShufflePreferences = Injekt.get(),
     private val trackPreferences: TrackPreferences = Injekt.get(),
     // AY -->
     private val downloadPreferences: DownloadPreferences = Injekt.get(),
@@ -168,6 +171,9 @@ class AnimeScreenModel(
     // AY -->
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId = Injekt.get(),
     // <-- AY
+    // AM (CLEAR_ANIME) -->
+    private val episodeRepository: EpisodeRepository = Injekt.get(),
+    // <-- AM (CLEAR_ANIME)
     private val filterEpisodesForDownload: FilterEpisodesForDownload = Injekt.get(),
     // AM (FILE_SIZE) -->
     private val storagePreferences: StoragePreferences = Injekt.get(),
@@ -327,6 +333,7 @@ class AnimeScreenModel(
                     // <-- AY
                     dialog = null,
                     hideMissingEpisodes = libraryPreferences.hideMissingEpisodes.get(),
+                    episodeShuffleSeed = episodeShufflePreferences.seed(animeId).get(),
                 )
             }
 
@@ -639,6 +646,32 @@ class AnimeScreenModel(
         downloadManager.deleteAnime(state.anime, state.source)
     }
 
+    // AM (CLEAR_ANIME) -->
+    fun showClearAnimeDialog() {
+        updateSuccessState { it.copy(dialog = Dialog.ClearAnime) }
+    }
+
+    /**
+     * Removes the anime's episodes from the database only - nothing on disk is touched,
+     * and downloads are left alone entirely (deleting those is a separate, already-existing
+     * action). Useful for clearing out a stale/broken episode list so the next Refresh
+     * rebuilds it from scratch, without losing anything from the source itself.
+     */
+    fun clearAnime() {
+        val anime = successState?.anime ?: return
+        screenModelScope.launchNonCancellable {
+            try {
+                val episodeIds = getEpisodesByAnimeId.await(anime.id).map { it.id }
+                if (episodeIds.isNotEmpty()) {
+                    episodeRepository.removeEpisodesWithIds(episodeIds)
+                }
+            } catch (e: Throwable) {
+                logcat(LogPriority.ERROR, e)
+            }
+        }
+    }
+    // <-- AM (CLEAR_ANIME)
+
     /**
      * Get user categories.
      *
@@ -816,6 +849,47 @@ class AnimeScreenModel(
         source: AnimeSource,
         manualFetch: Boolean = false,
     ) {
+        // AM (PARTIAL_EPISODE_SYNC) -->
+        // Local folders can hold hundreds of episodes, and thumbnail extraction runs
+        // ffmpeg per episode. Scanning and syncing the episode list first means it shows
+        // up right away, and thumbnails are persisted chunk by chunk as they're generated
+        // instead of the whole refresh being stuck until every last one finishes.
+        if (source is LocalSource) {
+            val sAnime = anime.toSAnime()
+            val episodes = source.scanEpisodeFiles(sAnime)
+
+            val newEpisodes = syncEpisodesWithSource.await(
+                episodes,
+                anime,
+                source,
+                manualFetch,
+            )
+
+            // Thumbnail extraction runs ffmpeg per episode, which can take a while for
+            // a big folder. Kick it off in the background instead of awaiting it here,
+            // so Refresh (and the loading indicator) finishes as soon as the episode
+            // list itself is synced, with thumbnails filling in progressively after.
+            screenModelScope.launchNonCancellable {
+                source.generateMissingThumbnails(sAnime, episodes) { chunk ->
+                    val dbEpisodes = getEpisodesByAnimeId.await(anime.id)
+                    val updates = chunk.mapNotNull { sEpisode ->
+                        dbEpisodes.find { it.url == sEpisode.url }?.let { dbEpisode ->
+                            EpisodeUpdate(id = dbEpisode.id, previewUrl = sEpisode.preview_url)
+                        }
+                    }
+                    if (updates.isNotEmpty()) {
+                        updateEpisode.awaitAll(updates)
+                    }
+                }
+            }
+
+            if (manualFetch) {
+                downloadNewEpisodes(newEpisodes)
+            }
+            return
+        }
+        // <-- AM (PARTIAL_EPISODE_SYNC)
+
         val episodes = source.getEpisodeList(anime.toSAnime())
 
         val newEpisodes = syncEpisodesWithSource.await(
@@ -963,10 +1037,20 @@ class AnimeScreenModel(
 
     /**
      * Returns the next unseen episode or null if everything is seen.
+     * If episode shuffle is active, uses the shuffled display order
+     * (episodeListItems) instead of the normal persisted sort, so
+     * "Continue" picks up wherever the shuffled sequence actually is.
      */
     fun getNextUnseenEpisode(): Episode? {
         val successState = successState ?: return null
-        return successState.episodes.getNextUnseen(successState.anime)
+        return if (successState.isShuffleEnabled) {
+            successState.episodeListItems
+                .filterIsInstance<EpisodeList.Item>()
+                .find { !it.episode.seen }
+                ?.episode
+        } else {
+            successState.episodes.getNextUnseen(successState.anime)
+        }
     }
 
     private fun getUnseenEpisodes(): List<Episode> {
@@ -1371,6 +1455,27 @@ class AnimeScreenModel(
         }
     }
     // <-- AY
+
+    // AM (EPISODE_VIEW_MODE) -->
+
+    /**
+     * Applies one of the 3 named episode view modes (Simplified/Preview/Minimal)
+     * for the current anime. Switching into a mode that shows thumbnails from
+     * Simplified also triggers a refresh, since episodes synced while Simplified
+     * never had their thumbnails looked up/generated.
+     */
+    fun setEpisodeViewMode(viewMode: EpisodeViewMode) {
+        val anime = successState?.anime ?: return
+        val switchingToThumbnails = !anime.showPreviews() && viewMode != EpisodeViewMode.SIMPLIFIED
+
+        screenModelScope.launchNonCancellable {
+            setAnimeEpisodeFlags.awaitSetEpisodeViewMode(anime, viewMode)
+        }
+        if (switchingToThumbnails) {
+            fetchAllFromSource(manualFetch = false)
+        }
+    }
+    // <-- AM (EPISODE_VIEW_MODE)
 
     fun setCurrentSettingsAsDefault(applyToExisting: Boolean) {
         val anime = successState?.anime ?: return
@@ -1806,6 +1911,10 @@ class AnimeScreenModel(
         // <-- AY
         data object TrackSheet : Dialog
         data object FullImages : Dialog
+
+        // AM (CLEAR_ANIME) -->
+        data object ClearAnime : Dialog
+        // <-- AM (CLEAR_ANIME)
     }
 
     fun dismissDialog() {
@@ -1862,6 +1971,21 @@ class AnimeScreenModel(
     }
     // <-- AM (CUSTOM_INFORMATION)
 
+    /**
+     * Toggles episode shuffle for this anime. Persisted as a small per-anime
+     * seed (see EpisodeShufflePreferences), the same way anime.sorting is
+     * persisted on the Anime record itself - so the player independently
+     * reads the same seed and produces an identical order, with no explicit
+     * wiring between this screen and the player.
+     */
+    fun toggleEpisodeShuffle() {
+        val animeId = successState?.anime?.id ?: return
+        episodeShufflePreferences.toggleShuffle(animeId)
+        updateSuccessState {
+            it.copy(episodeShuffleSeed = episodeShufflePreferences.seed(animeId).get())
+        }
+    }
+
     sealed interface State {
         @Immutable
         data object Loading : State
@@ -1886,6 +2010,7 @@ class AnimeScreenModel(
             val dialog: Dialog? = null,
             val hasPromptedToAddBefore: Boolean = false,
             val hideMissingEpisodes: Boolean = false,
+            val episodeShuffleSeed: Long = 0L,
             // AY -->
             val trackItems: List<TrackItem> = emptyList(),
             val nextAiringEpisode: Pair<Int, Long> = Pair(
@@ -1908,7 +2033,16 @@ class AnimeScreenModel(
                 episodes.fastAny { it.selected }
             }
 
+            val isShuffleEnabled: Boolean
+                get() = episodeShuffleSeed != 0L
+
             val episodeListItems by lazy {
+                if (isShuffleEnabled) {
+                    return@lazy processedEpisodes.sortedBy {
+                        episodeShuffleSortKey(episodeShuffleSeed, it.id)
+                    }
+                }
+
                 if (hideMissingEpisodes) {
                     return@lazy processedEpisodes
                 }

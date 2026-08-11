@@ -38,6 +38,8 @@ import eu.kanade.tachiyomi.data.saver.Location
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.data.track.anilist.Anilist
 import eu.kanade.tachiyomi.data.track.myanimelist.MyAnimeList
+import eu.kanade.tachiyomi.ui.anime.EpisodeShufflePreferences
+import eu.kanade.tachiyomi.ui.anime.episodeShuffleSortKey
 import eu.kanade.tachiyomi.ui.player.controls.components.IndexedSegment
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.HosterState
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.getChangedAt
@@ -100,6 +102,7 @@ import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.custombutton.interactor.GetCustomButtons
 import tachiyomi.domain.custombutton.model.CustomButton
 import tachiyomi.domain.download.service.DownloadPreferences
+import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
 import tachiyomi.domain.episode.interactor.UpdateEpisode
 import tachiyomi.domain.episode.model.EpisodeUpdate
@@ -140,6 +143,9 @@ class PlayerViewModel @JvmOverloads constructor(
 
     private val upsertHistory: UpsertHistory = Injekt.get(),
     private val updateEpisode: UpdateEpisode = Injekt.get(),
+    // AM (RECENT_EPISODE_POSITIONS) -->
+    private val getEpisode: GetEpisode = Injekt.get(),
+    // <-- AM (RECENT_EPISODE_POSITIONS)
     private val trackEpisode: TrackEpisode = Injekt.get(),
     private val setAnimeViewerFlags: SetAnimeViewerFlags = Injekt.get(),
 
@@ -150,6 +156,7 @@ class PlayerViewModel @JvmOverloads constructor(
     private val trackerManager: TrackerManager = Injekt.get(),
 
     private val basePreferences: BasePreferences = Injekt.get(),
+    private val episodeShufflePreferences: EpisodeShufflePreferences = Injekt.get(),
     private val libraryPreferences: LibraryPreferences = Injekt.get(),
     private val downloadPreferences: DownloadPreferences = Injekt.get(),
     private val trackPreferences: TrackPreferences = Injekt.get(),
@@ -500,27 +507,54 @@ class PlayerViewModel @JvmOverloads constructor(
 
     // === Setup ===
 
-    /**
-     * The position in the current video. Used to restore from process kill.
-     */
+    /** Restored on process kill. */
     private var episodePosition = savedState.get<Long>("episode_position")
         set(value) {
             savedState["episode_position"] = value
             field = value
         }
 
+    // AM (RECENT_EPISODE_POSITIONS) -->
+
     /**
-     * The current video's quality index. Used to restore from process kill.
+     * Session-local temp-position cache for recently-departed episodes, so an accidental
+     * next/previous click doesn't lose your place - even for an already-seen episode we
+     * otherwise don't persist rewatch position for. Doesn't cover the currently-open
+     * episode; that's already handled by the normal live-tracking/resume path.
+     *
+     * Keyed by episode id; each entry also records the playlist index it was saved at, so
+     * entries are pruned by distance from wherever you're currently navigating rather than
+     * by a raw insertion count - otherwise a forward-forward-back-back click pattern would
+     * evict an entry before you ever get back to it.
      */
+    private data class RecentPosition(val positionMs: Long, val playlistIndex: Int)
+    private val recentEpisodePositions = mutableMapOf<Long, RecentPosition>()
+
+    private fun rememberRecentEpisodePosition() {
+        val episode = stateData.value.currentEpisode ?: return
+        val id = episode.id ?: return
+        val positionMs = (episodePosition ?: 0L) * 1000L
+        if (positionMs <= 0L) return
+
+        recentEpisodePositions[id] = RecentPosition(positionMs, stateData.value.currentPlaylistIndex)
+    }
+
+    private fun pruneRecentEpisodePositions(aroundPlaylistIndex: Int) {
+        val maxSlots = playerPreferences.recentEpisodePositionSlots.get()
+        recentEpisodePositions.entries.removeAll { (_, saved) ->
+            kotlin.math.abs(saved.playlistIndex - aroundPlaylistIndex) > maxSlots
+        }
+    }
+    // <-- AM (RECENT_EPISODE_POSITIONS)
+
+    /** Restored on process kill. */
     private var qualityIndex = savedState.get<Pair<Int, Int>>("quality_index") ?: Pair(-1, -1)
         set(value) {
             savedState["quality_index"] = value
             field = value
         }
 
-    /**
-     * The episode id of the currently loaded episode. Used to restore from process kill.
-     */
+    /** Restored on process kill. */
     private var episodeId = savedState.get<Long>("episode_id") ?: -1L
         set(value) {
             savedState["episode_id"] = value
@@ -581,9 +615,13 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Whether this viewModel is initialized with the correct episode.
+     * Set when re-initializing after reopening from our own background-playback
+     * notification - resumes wherever playback actually was, bypassing the normal
+     * "already watched -> start at 0" rule. Consumed and reset by loadVideo().
      */
-    private fun needsInit(animeId: Long, episodeId: Long): Boolean {
+    var forceResumeFromLastPosition = false
+
+    fun needsInit(animeId: Long, episodeId: Long): Boolean {
         return stateData.value.let {
             it.currentAnime?.id != animeId || it.currentEpisode?.id != episodeId
         }
@@ -704,6 +742,16 @@ class PlayerViewModel @JvmOverloads constructor(
                 }
             }
             .map { it.toDbEpisode() }
+            .let { sorted ->
+                // Mirrors the episode list screen's shuffle via the same persisted
+                // per-anime seed (EpisodeShufflePreferences), no explicit wiring needed.
+                val seed = episodeShufflePreferences.seed(anime.id).get()
+                if (seed == 0L) {
+                    sorted
+                } else {
+                    sorted.sortedBy { episodeShuffleSortKey(seed, it.id ?: 0L) }
+                }
+            }
 
         val selectedEpisode = episodes.find { it.id == episodeId }
             ?: error("Requested episode of id $episodeId not found in episode list")
@@ -940,11 +988,7 @@ class PlayerViewModel @JvmOverloads constructor(
         return true
     }
 
-    /**
-     * Try and load a video
-     *
-     * returns true if successful, false if not
-     */
+    /** Loads [video]; returns true if successful. */
     private suspend fun loadVideo(video: Video, hosterIndex: Int, videoIndex: Int): Boolean {
         val source = stateData.value.currentSource
             ?: throw Exception("No source loaded")
@@ -1039,11 +1083,21 @@ class PlayerViewModel @JvmOverloads constructor(
         if (uiData.value.isLoadingEpisode) {
             stateData.value.currentEpisode?.let { episode ->
                 val preservePos = playerPreferences.preserveWatchingPosition.get()
-                val resumePosition = if (episode.seen && !preservePos) {
+                // AM (RECENT_EPISODE_POSITIONS) -->
+                val recentPosition = episode.id?.let { recentEpisodePositions.remove(it) }
+                // <-- AM (RECENT_EPISODE_POSITIONS)
+                val resumePosition = if (forceResumeFromLastPosition) {
+                    episode.last_second_seen
+                    // AM (RECENT_EPISODE_POSITIONS) -->
+                } else if (recentPosition != null) {
+                    recentPosition.positionMs
+                    // <-- AM (RECENT_EPISODE_POSITIONS)
+                } else if (episode.seen && !preservePos) {
                     0L
                 } else {
                     episode.last_second_seen
                 }
+                forceResumeFromLastPosition = false
                 mpvCommand("set", "start", "${resumePosition / 1000F}")
             }
         } else {
@@ -1215,6 +1269,7 @@ class PlayerViewModel @JvmOverloads constructor(
         setupChapters()
         setupPlayerOrientation()
         checkFileLoaded()
+        generateEpisodeThumbnailIfMissing()
 
         // AniSkip stuff
         val chapterCount = mpv.getPropertyInt("chapter-list/count") ?: 0
@@ -1223,6 +1278,43 @@ class PlayerViewModel @JvmOverloads constructor(
                 aniSkipResponse(playbackData.value.duration)?.let {
                     addTimeStamps(it)
                 }
+            }
+        }
+    }
+
+    // Signals when a thumbnail finishes generating, so notification/metadata artwork
+    // (which only re-checks on episode/anime/duration change) re-checks preview_url too.
+    private val _thumbnailGenerated = MutableStateFlow(0L)
+    val thumbnailGenerated = _thumbnailGenerated.asStateFlow()
+
+    /**
+     * Lazily generates a missing thumbnail for local episodes only, a few seconds into
+     * playback of this episode specifically. Streaming sources are skipped (no local
+     * folder to save alongside).
+     */
+    private fun generateEpisodeThumbnailIfMissing() {
+        val anime = stateData.value.currentAnime ?: return
+        val episode = stateData.value.currentEpisode ?: return
+        val episodeId = episode.id ?: return
+        if (!anime.isLocal()) return
+        if (!episode.preview_url.isNullOrBlank()) return
+
+        viewModelScope.launchIO {
+            // Give mpv a moment to decode a real frame, not a black/loading frame.
+            delay(3000)
+            if (player.isExiting) return@launchIO
+            // Only capture if still on the episode this was scheduled for.
+            if (stateData.value.currentEpisode?.id != episodeId) return@launchIO
+            runCatching {
+                val tempFile = File(context.cacheDir, "${episodeId}_auto_thumbnail_tmp.jpg")
+                mpvCommand("screenshot-to-file", tempFile.absolutePath, "video")
+                if (!tempFile.exists()) return@launchIO
+                tempFile.inputStream().use { stream ->
+                    episode.editThumbnail(anime, Injekt.get(), stream)
+                }
+                tempFile.delete()
+            }.onSuccess {
+                _thumbnailGenerated.update { episodeId }
             }
         }
     }
@@ -1312,11 +1404,7 @@ class PlayerViewModel @JvmOverloads constructor(
         setPropertyNode("chapter-list", node)
     }
 
-    /**
-     * Check when file has loaded and see if the player can be (un)paused.
-     *
-     * If external subs/audio tracks was selected, wait until mpv has fetched them.
-     */
+    /** (Un)pauses once loading finishes; waits on external sub/audio tracks if selected. */
     private fun checkFileLoaded() {
         if (uiData.value.isLoadingEpisode && stateData.value.hasLoadedSubs && stateData.value.hasLoadedAudio) {
             uiData.value.previousPauseState?.let { shouldPause ->
@@ -1344,10 +1432,7 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * When all subtitle/audio tracks are loaded, select the preferred one based on preferences,
-     * or select the first one in the list if trackSelect fails.
-     */
+    /** Selects the preferred subtitle/audio track once all tracks are loaded. */
     fun onTrackListChanged(tracks: MPVNode) {
         val tracks = tracks.toObject<List<TrackNode>>(json).ifEmpty { return }
         updateStateData {
@@ -1361,17 +1446,19 @@ class PlayerViewModel @JvmOverloads constructor(
 
         if (stateData.value.hasLoadedTracks) {
             onTrackAdded(tracks)
+            // mpv can report the embedded track list across multiple events (video
+            // first, audio later); onTrackAdded() only handles external tracks, so
+            // retry embedded selection here if it hasn't actually succeeded yet.
+            if (!stateData.value.hasLoadedAudio || !stateData.value.hasLoadedSubs) {
+                onTracksLoaded(tracks)
+            }
         } else {
             updateStateData { it.copy(hasLoadedTracks = true) }
             onTracksLoaded(tracks)
         }
     }
 
-    /**
-     * Called when a new track has been added to mpv
-     *
-     * Every new external tracks needs to be tracked internally
-     */
+    /** Tracks newly added external tracks internally. */
     private fun onTrackAdded(tracks: List<TrackNode>) {
         val externalSubtitle = tracks.filter {
             it.isSubtitle && it.title?.startsWith(VideoTrack.TRACK_TITLE_TAG) == true
@@ -1415,9 +1502,7 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Called when embedded tracks are first loaded
-     */
+    /** Called when embedded tracks are first loaded. */
     private fun onTracksLoaded(tracks: List<TrackNode>) {
         val embeddedSubs = tracks.filter { it.isSubtitle }
         val embeddedAudio = tracks.filter { it.isAudio }
@@ -1449,7 +1534,9 @@ class PlayerViewModel @JvmOverloads constructor(
             subtitle = false,
         )
         if (preferredAudio == null) {
-            updateStateData { it.copy(hasLoadedAudio = true) }
+            // Deliberately not marking hasLoadedAudio = true: mpv can report the track
+            // list before an embedded audio track is registered (see onTrackListChanged),
+            // and this flag lets that retry logic try again on the next update.
         } else {
             selectAudio(preferredAudio, true)
         }
@@ -1600,8 +1687,22 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
+    // Tracked reactively as the freshest known-good audio track: mpv can spontaneously
+    // clear it ~100-200ms after a decoder reconfig, so onAudioTrackSelectChange below
+    // self-heals reactively from this value instead of timing a one-shot reapply.
+    private var lastKnownAudioTrackId: Int? = null
+
     private fun onAudioTrackSelectChange() {
         val id = mpv.getPropertyInt("aid")
+        if (id != null && id > 0) {
+            lastKnownAudioTrackId = id
+        } else if (!uiData.value.isLoadingEpisode) {
+            // Guarded by isLoadingEpisode so this doesn't fight genuine "no track
+            // selected yet" states during an actual new episode load.
+            lastKnownAudioTrackId?.let { savedId ->
+                if (savedId > 0) setPropertyInt("aid", savedId)
+            }
+        }
 
         updateStateData {
             it.copy(
@@ -1653,10 +1754,7 @@ class PlayerViewModel @JvmOverloads constructor(
         val episodeTitle: String,
     )
 
-    /**
-     * Load an episode, returning the hosterlist, episode title, and source
-     * associated with the episode.
-     */
+    /** Loads an episode, returning its hoster list and title. */
     private suspend fun loadEpisode(episodeId: Long?): EpisodeLoadResult? {
         val anime = stateData.value.currentAnime ?: return null
         val source = sourceManager.getOrStub(anime.source)
@@ -1687,9 +1785,6 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Load next or previous episode
-     */
     fun nextEpisode(next: Boolean, autoplay: Boolean = false) {
         val currentIndex = stateData.value.currentPlaylistIndex
         val newIndex = if (next) currentIndex + 1 else currentIndex - 1
@@ -1700,15 +1795,17 @@ class PlayerViewModel @JvmOverloads constructor(
         changeEpisode(episodeId, autoplay)
     }
 
-    /**
-     * Switches to the episode based on [episodeId],
-     *
-     * @param episodeId id of the episode to switch the player to
-     * @param autoPlay whether the episode is switching due to auto play
-     */
+    /** Switches playback to [episodeId]; [autoPlay] indicates an automatic transition. */
     fun changeEpisode(episodeId: Long?, autoPlay: Boolean = false) {
         pause()
         clearTracks()
+
+        // AM (RECENT_EPISODE_POSITIONS) -->
+        rememberRecentEpisodePosition()
+        stateData.value.currentPlaylist.indexOfFirst { it.id == episodeId }
+            .takeIf { it != -1 }
+            ?.let { pruneRecentEpisodePositions(it) }
+        // <-- AM (RECENT_EPISODE_POSITIONS)
 
         updateStateData { it.copy(hosterList = emptyList()) }
         updateUiData {
@@ -1777,7 +1874,7 @@ class PlayerViewModel @JvmOverloads constructor(
     fun pause() {
         setPropertyBoolean("pause", true)
 
-        // PiP needs to know the state immediately, so we update it here
+        // PiP needs the state immediately
         updatePlaybackData { it.copy(paused = true) }
     }
     fun unpause() {
@@ -1928,7 +2025,7 @@ class PlayerViewModel @JvmOverloads constructor(
         setAspectRatio(newAspectRatio)
     }
 
-    fun setAspectRatio(aspect: VideoAspect) {
+    fun setAspectRatio(aspect: VideoAspect, showConfirmation: Boolean = true) {
         val (pan, ratio) = when (aspect) {
             VideoAspect.Crop -> {
                 1.0 to -1.0
@@ -1944,7 +2041,9 @@ class PlayerViewModel @JvmOverloads constructor(
         setPropertyDouble("panscan", pan)
         setPropertyDouble("video-aspect-override", ratio)
         playerPreferences.aspectState.set(aspect)
-        updateUiData { it.copy(playerUpdate = PlayerUpdates.AspectRatio(aspect)) }
+        if (showConfirmation) {
+            updateUiData { it.copy(playerUpdate = PlayerUpdates.AspectRatio(aspect)) }
+        }
     }
 
     private fun setSpeed(value: Float) {
@@ -2240,10 +2339,7 @@ class PlayerViewModel @JvmOverloads constructor(
 
     // === Aniyomi ===
 
-    /**
-     * Called when the activity is saved and not changing configurations. It updates the database
-     * to persist the current progress of the active episode.
-     */
+    /** Persists progress when the activity is saved without a config change. */
     fun onSaveInstanceStateNonConfigurationChange() {
         val currentEpisode = stateData.value.currentEpisode ?: return
         viewModelScope.launchNonCancellable {
@@ -2253,6 +2349,15 @@ class PlayerViewModel @JvmOverloads constructor(
 
     override fun onCleared() {
         stateData.value.currentEpisode?.let {
+            // AM (PRESERVE_POSITION_SETTING) -->
+            // Per-second saves during playback keep last_second_seen live in the DB so
+            // background/notification playback can resume correctly if the process dies.
+            // On true exit though, only keep that position for an already-seen episode if
+            // the user opted in to preserving watch position on seen episodes.
+            if (it.seen && !playerPreferences.preserveWatchingPosition.get()) {
+                it.last_second_seen = 0L
+            }
+            // <-- AM (PRESERVE_POSITION_SETTING)
             saveWatchingProgress(it)
             episodeToDownload?.let { toDownload ->
                 downloadManager.addDownloadsToStartOfQueue(listOf(toDownload))
@@ -2262,10 +2367,7 @@ class PlayerViewModel @JvmOverloads constructor(
         super.onCleared()
     }
 
-    /**
-     * Called every time a second is reached in the player. Used to mark the flag of episode being
-     * seen, update tracking services, enqueue downloaded episode deletion and download next episode.
-     */
+    /** Called each second; marks episode seen, updates tracking, and queues next-episode download. */
     fun onSecondReached(position: Int) {
         updatePlaybackData { it.copy(position = position) }
         if (uiData.value.isLoadingEpisode) return
@@ -2284,7 +2386,14 @@ class PlayerViewModel @JvmOverloads constructor(
         }
 
         // It's called seconds, but it's supposed to be in milliseconds. WTF?
-        currentEpisode.last_second_seen = position.toLong() * 1000L
+        // AM (PRESERVE_POSITION_SETTING) -->
+        // Skip the live position write for an already-seen episode when the user hasn't
+        // opted in to preserving watch position on seen episodes - otherwise the very
+        // first tick of a rewatch clobbers the "fully watched" position with a low one.
+        if (!currentEpisode.seen || playerPreferences.preserveWatchingPosition.get()) {
+            currentEpisode.last_second_seen = position.toLong() * 1000L
+        }
+        // <-- AM (PRESERVE_POSITION_SETTING)
         currentEpisode.total_seconds = duration.toLong() * 1000L
 
         episodePosition = position.toLong()
@@ -2305,8 +2414,13 @@ class PlayerViewModel @JvmOverloads constructor(
 
     private suspend fun updateEpisodeProgressOnComplete(currentEp: Episode) {
         currentEp.seen = true
+        // Reset resume position now that it's finished, otherwise it stays near the
+        // "seen" threshold (close to the end) for anything reading it later.
+        currentEp.last_second_seen = 0L
         updateTrackEpisodeSeen(currentEp)
         deleteEpisodeIfNeeded(currentEp)
+        // Persist explicitly - not guaranteed to run after onSecondReached()'s own call.
+        saveWatchingProgress(currentEp)
 
         val markDuplicateAsSeen = libraryPreferences.markDuplicateSeenEpisodeAsSeen.get()
             .contains(LibraryPreferences.MARK_DUPLICATE_EPISODE_SEEN_EXISTING)
@@ -2352,9 +2466,7 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Called when episode is changed in player or when activity is paused.
-     */
+    /** Called on episode change or activity pause. */
     private fun saveWatchingProgress(episode: Episode) {
         viewModelScope.launchNonCancellable {
             saveEpisodeProgress(episode)
@@ -2362,13 +2474,29 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Saves this [episode] progress (last second seen and whether it's seen).
-     * If incognito mode isn't on or has at least 1 tracker
-     */
+    /** Saves [episode] progress if not in incognito mode, or has at least one tracker. */
     private suspend fun saveEpisodeProgress(episode: Episode) {
         val stateData = stateData.value
         if (!stateData.incognitoMode || stateData.hasTrackers) {
+            // AM (RECENT_EPISODE_POSITIONS) -->
+            // currentPlaylist is loaded once per player session and never refreshed, so our
+            // in-memory seen can go stale in EITHER direction if it's toggled elsewhere
+            // while this player stays alive (e.g. from the anime screen during PIP). The
+            // `version` column bumps on every real seen/bookmark/last_second_seen change
+            // (see the episodes.sq trigger), so use it to detect a change we don't know
+            // about and defer to the DB's seen instead of blindly overwriting it.
+            val fresh = getEpisode.await(episode.id!!)
+            if (fresh != null && fresh.version != episode.version) {
+                episode.seen = fresh.seen
+                episode.bookmark = fresh.bookmark
+                episode.version = fresh.version
+            }
+            val willChangeTrackedFields = fresh != null && (
+                episode.seen != fresh.seen ||
+                    episode.bookmark != fresh.bookmark ||
+                    episode.last_second_seen != fresh.lastSecondSeen
+                )
+            // <-- AM (RECENT_EPISODE_POSITIONS)
             updateEpisode.await(
                 EpisodeUpdate(
                     id = episode.id!!,
@@ -2379,6 +2507,13 @@ class PlayerViewModel @JvmOverloads constructor(
                     totalSeconds = episode.total_seconds,
                 ),
             )
+            // AM (RECENT_EPISODE_POSITIONS) -->
+            // Mirror the DB trigger's version bump locally so our next save's staleness
+            // check compares against what the DB will actually have, not last tick's.
+            if (willChangeTrackedFields) {
+                episode.version = fresh!!.version + 1
+            }
+            // <-- AM (RECENT_EPISODE_POSITIONS)
             // AM (SYNC) -->
             val isSyncEnabled = syncPreferences.isSyncEnabled()
             val syncTriggerOpt = syncPreferences.getSyncTriggerOptions()
@@ -2389,9 +2524,7 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Saves this [episode] last seen history if incognito mode isn't on.
-     */
+    /** Saves [episode] last-seen history if not in incognito mode. */
     private suspend fun saveEpisodeHistory(episode: Episode) {
         if (!stateData.value.incognitoMode) {
             val episodeId = episode.id!!
@@ -2402,9 +2535,6 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Bookmarks the currently active episode.
-     */
     fun bookmarkEpisode(episodeId: Long?, bookmarked: Boolean) {
         viewModelScope.launchNonCancellable {
             updateEpisode.await(
@@ -2416,9 +2546,6 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Fillermarks the currently active episode.
-     */
     fun fillermarkEpisode(episodeId: Long?, fillermarked: Boolean) {
         viewModelScope.launchNonCancellable {
             updateEpisode.await(
@@ -2437,7 +2564,7 @@ class PlayerViewModel @JvmOverloads constructor(
         val currentPlaylist = stateData.value.currentPlaylist
         val currentPlaylistIndex = stateData.value.currentPlaylistIndex
 
-        // Only download ahead if current + next episode is already downloaded too to avoid jank
+        // Only download ahead if current + next episode are already downloaded (avoids jank)
         if (currentPlaylistIndex == currentPlaylist.lastIndex) return
         val currentEpisode = stateData.value.currentEpisode ?: return
 
@@ -2456,31 +2583,21 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Determines if deleting option is enabled and nth to last episode actually exists.
-     * If both conditions are satisfied enqueues episode for delete
-     * @param chosenEpisode current episode, which is going to be marked as seen.
-     */
+    /** Enqueues the nth-back episode for deletion if the delete-after-seen option is enabled. */
     private fun deleteEpisodeIfNeeded(chosenEpisode: Episode) {
-        // Determine which episode should be deleted and enqueue
         val currentEpisodePosition = stateData.value.currentPlaylist.indexOf(chosenEpisode)
         val removeAfterSeenSlots = downloadPreferences.removeAfterSeenSlots.get()
         val episodeToDelete = stateData.value.currentPlaylist.getOrNull(
             currentEpisodePosition - removeAfterSeenSlots,
         )
-        // If episode is completely seen no need to download it
         episodeToDownload = null
 
-        // Check if deleting option is enabled and episode exists
         if (removeAfterSeenSlots != -1 && episodeToDelete != null) {
             enqueueDeleteSeenEpisodes(episodeToDelete)
         }
     }
 
-    /**
-     * Enqueues this [episode] to be deleted when [deletePendingEpisodes] is called. The download
-     * manager handles persisting it across process deaths.
-     */
+    /** Enqueues [episode] for deletion (persisted across process death) until [deletePendingEpisodes] runs. */
     private fun enqueueDeleteSeenEpisodes(episode: Episode) {
         if (!episode.seen) return
         val anime = stateData.value.currentAnime ?: return
@@ -2489,27 +2606,18 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Deletes all the pending episodes. This operation will run in a background thread and errors
-     * are ignored.
-     */
+    /** Deletes all pending episodes in the background; errors are ignored. */
     fun deletePendingEpisodes() {
         viewModelScope.launchNonCancellable {
             downloadManager.deletePendingEpisodes()
         }
     }
 
-    /**
-     * Results of the save image feature.
-     */
     sealed class SaveImageResult {
         class Success(val uri: Uri) : SaveImageResult()
         class Error(val error: Throwable) : SaveImageResult()
     }
 
-    /**
-     * Sets the screenshot as art and notifies the UI of the result.
-     */
     fun setAsArt(artType: ArtType, imageStream: () -> InputStream) {
         val anime = stateData.value.currentAnime ?: return
         val episode = stateData.value.currentEpisode ?: return
@@ -2536,11 +2644,8 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Shares the screenshot and notifies the UI with the path of the file to share.
-     * The image must be first copied to the internal partition because there are many possible
-     * formats it can come from, like a zipped chapter, in which case it's not possible to directly
-     * get a path to the file, and it has to be decompressed somewhere first. Only the last shared
-     * image will be kept so it won't be taking lots of internal disk space.
+     * Copies the screenshot to internal storage first (source formats vary, some need
+     * decompressing) and shares it. Only the last shared image is kept.
      */
     fun shareImage(imageStream: () -> InputStream) {
         val anime = stateData.value.currentAnime ?: return
@@ -2569,10 +2674,7 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Saves the screenshot on the pictures directory and notifies the UI of the result.
-     * There's also a notification to allow sharing the image somewhere else or deleting it.
-     */
+    /** Saves the screenshot to the pictures directory, with a share/delete notification. */
     fun saveImage(imageStream: () -> InputStream) {
         val anime = stateData.value.currentAnime ?: return
         val pos = playbackData.value.position
@@ -2584,10 +2686,8 @@ class PlayerViewModel @JvmOverloads constructor(
         val seconds = Utils.prettyTime(pos)
         val filename = generateFilename(anime, seconds) ?: return
 
-        // Pictures directory.
         val relativePath = DiskUtil.buildValidFilename(anime.title)
 
-        // Copy file in background.
         viewModelScope.launchNonCancellable {
             try {
                 val uri = imageSaver.save(
@@ -2620,9 +2720,6 @@ class PlayerViewModel @JvmOverloads constructor(
         return newFile.takeIf { it.exists() }?.inputStream()
     }
 
-    /**
-     * Generate a filename for the given [anime] and [timePos]
-     */
     private fun generateFilename(
         anime: Anime,
         timePos: String,
@@ -2722,9 +2819,6 @@ class PlayerViewModel @JvmOverloads constructor(
         skipIntro(chapter.chapterTitle)
     }
 
-    /**
-     * Returns the skipIntroLength used by this anime or the default one.
-     */
     fun getAnimeSkipIntroLength(): Int {
         val default = gesturePreferences.defaultIntroLength.get()
         val anime = stateData.value.currentAnime ?: return default
@@ -2737,13 +2831,9 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Updates the skipIntroLength for the open anime.
-     */
     fun setAnimeSkipIntroLength(skipIntroLength: Long) {
         val anime = stateData.value.currentAnime ?: return
         if (!anime.favorite) return
-        // Skip unnecessary database operation
         if (skipIntroLength == getAnimeSkipIntroLength().toLong()) return
         viewModelScope.launchIO {
             setAnimeViewerFlags.awaitSetSkipIntroLength(anime.id, skipIntroLength)
@@ -2752,11 +2842,7 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Returns the response of the AniSkipApi for this episode.
-     *
-     * Only works if tracking is enabled.
-     */
+    /** AniSkip response for this episode; only works if tracking is enabled. */
     suspend fun aniSkipResponse(playerDuration: Int?): List<TimeStamp>? {
         val animeId = stateData.value.currentAnime?.id ?: return null
         var malId: Long?
@@ -2783,9 +2869,7 @@ class PlayerViewModel @JvmOverloads constructor(
 
     // === Misc ===
 
-    /**
-     * Starts a sleep timer/cancels the current timer if [seconds] is less than 1.
-     */
+    /** Starts a sleep timer; cancels the current one if [seconds] < 1. */
     fun startTimer(seconds: Int) {
         timerJob?.cancel()
         updatePlaybackData { it.copy(remainingTime = seconds) }

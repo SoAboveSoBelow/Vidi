@@ -15,28 +15,29 @@
  * limitations under the License.
  */
 
-/*
- * Code is a mix between PlayerActivity from mpvKt and the former
- * PlayerActivity from Aniyomi.
- */
+// Mix of PlayerActivity from mpvKt and the former PlayerActivity from Aniyomi.
 
 package eu.kanade.tachiyomi.ui.player
 
 import android.annotation.SuppressLint
 import android.app.PictureInPictureParams
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Rect
 import android.media.AudioManager
+import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
@@ -49,11 +50,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.core.graphics.drawable.toBitmap
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import coil3.asDrawable
+import coil3.imageLoader
+import coil3.request.ImageRequest
+import coil3.size.Size
 import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.theme.TachiyomiTheme
 import eu.kanade.tachiyomi.animesource.model.Hoster
@@ -66,7 +72,10 @@ import eu.kanade.tachiyomi.ui.player.settings.PlayerPreferences
 import eu.kanade.tachiyomi.util.system.powerManager
 import eu.kanade.tachiyomi.util.system.toShareIntent
 import eu.kanade.tachiyomi.util.system.toast
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import logcat.LogPriority
@@ -89,6 +98,39 @@ class PlayerActivity : BaseActivity() {
     private val gesturePreferences: GesturePreferences = Injekt.get()
     private val playerPreferences: PlayerPreferences = Injekt.get()
 
+    private var backgroundPlaybackService: PlayerBackgroundPlaybackService? = null
+
+    // Set before we intentionally moveTaskToBack() (e.g. PIP "background play"),
+    // so onPictureInPictureModeChanged doesn't treat it as the user swiping PIP away.
+    private var isIntentionalBackgroundTransition = false
+    private var isBoundToBackgroundPlaybackService = false
+    private val backgroundPlaybackConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val bound = (service as? PlayerBackgroundPlaybackService.LocalBinder)?.getService() ?: return
+            backgroundPlaybackService = bound
+            bound.start(
+                title = viewModel.uiData.value.animeTitle,
+                subtitle = viewModel.uiData.value.mediaTitle,
+                isPlaying = !viewModel.playbackData.value.paused,
+                animeId = viewModel.stateData.value.currentAnime?.id,
+                episodeId = viewModel.stateData.value.currentEpisode?.id,
+                mediaSessionToken = mediaSession?.sessionToken,
+                onTogglePlayPause = {
+                    if (viewModel.playbackData.value.paused) viewModel.unpause() else viewModel.pause()
+                    backgroundPlaybackService?.updatePlaybackState(!viewModel.playbackData.value.paused)
+                },
+                onStopRequested = {
+                    viewModel.pause()
+                    stopBackgroundPlayback()
+                },
+            )
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            backgroundPlaybackService = null
+        }
+    }
+
     // AM (DISCORD_RPC) -->
     // private val connectionPreferences: ConnectionPreferences = Injekt.get()
     // <-- AM (DISCORD_RPC)
@@ -107,6 +149,21 @@ class PlayerActivity : BaseActivity() {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
                 viewModel.pause()
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        var initialized = false
+        override fun onReceive(context: Context?, intent: Intent?) {
+            // Screen-off alone doesn't trigger onPause()/onStop() while still
+            // foreground, so background playback needs its own trigger here.
+            // Not handling ACTION_SCREEN_ON: it fires for any screen-on (e.g. lock
+            // screen), not necessarily app visibility - onStart() covers that.
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
+                    startBackgroundPlayback()
+                }
             }
         }
     }
@@ -149,6 +206,13 @@ class PlayerActivity : BaseActivity() {
             Notifications.ID_NEW_EPISODES,
         )
 
+        if (!viewModel.needsInit(animeId, episodeId)) {
+            // Already playing this exact episode (e.g. reopened from the background-
+            // playback notification) - avoid restarting the whole file-open pipeline.
+            setIntent(intent)
+            return
+        }
+
         viewModel.saveCurrentEpisodeWatchingProgress()
 
         lifecycleScope.launchNonCancellable {
@@ -158,6 +222,10 @@ class PlayerActivity : BaseActivity() {
                 packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
                     playerPreferences.enablePip.get(),
             )
+            // In-memory state was lost (e.g. process killed while backgrounded) and this
+            // is a genuine re-init, not a fresh open - resume from the position just
+            // saved above instead of the normal "already watched -> start at 0" rule.
+            viewModel.forceResumeFromLastPosition = true
 
             val initResult = viewModel.init(animeId, episodeId, hostList, hostIndex, vidIndex)
             if (!initResult.second.getOrDefault(false)) {
@@ -207,9 +275,7 @@ class PlayerActivity : BaseActivity() {
                         enterPictureInPictureMode(createPipParams())
                     }
                     is PlayerViewModel.Event.EpisodeTitle -> {
-                        if (isInPictureInPictureMode) {
-                            showToast(event.name)
-                        }
+                        // No-op: used to toast "<anime> - <episode>" on change; not wanted.
                     }
                     PlayerViewModel.Event.Finish -> {
                         finish()
@@ -246,6 +312,105 @@ class PlayerActivity : BaseActivity() {
             }
             .launchIn(lifecycleScope)
 
+        // PIP params otherwise only refresh right after next/previous, before the new
+        // episode's async-loaded dimensions are known, so react to dimension changes.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            viewModel.stateData
+                .map { it.videoWidth to it.videoHeight }
+                .distinctUntilChanged()
+                .onEach {
+                    if (isInPictureInPictureMode) {
+                        setPictureInPictureParams(createPipParams())
+                    }
+                }
+                .launchIn(lifecycleScope)
+
+            // AM (PIP_NEXT_PAUSE_ICON) -->
+            // changeEpisode() pauses synchronously to freeze the frame during the async
+            // load, then unpauses once the new episode starts. Manual next/previous
+            // refreshes PIP params immediately after triggering the switch, capturing
+            // that transient paused=true before the new episode actually resumes - so
+            // react to paused-state changes too, not just dimension changes, to catch
+            // same-resolution episodes where the dimension observer above never fires.
+            viewModel.playbackData
+                .map { it.paused }
+                .distinctUntilChanged()
+                .onEach {
+                    if (isInPictureInPictureMode) {
+                        setPictureInPictureParams(createPipParams())
+                    }
+                }
+                .launchIn(lifecycleScope)
+            // <-- AM (PIP_NEXT_PAUSE_ICON)
+        }
+
+        // Keep PlaybackState genuinely current - OEM battery managers look for real
+        // STATE_PLAYING/position to exempt media apps from background restrictions.
+        viewModel.playbackData
+            .map { it.paused to it.position }
+            .distinctUntilChanged()
+            .onEach { (paused, position) ->
+                mediaSession?.setPlaybackState(
+                    PlaybackState.Builder()
+                        .setActions(
+                            PlaybackState.ACTION_PLAY or
+                                PlaybackState.ACTION_PAUSE or
+                                PlaybackState.ACTION_STOP or
+                                PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                                PlaybackState.ACTION_SKIP_TO_NEXT,
+                        )
+                        .setState(
+                            if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
+                            position * 1000L,
+                            1f,
+                        )
+                        .build(),
+                )
+            }
+            .launchIn(lifecycleScope)
+
+        // Duration/seek-bar/thumbnail in the media notification come from MediaMetadata,
+        // not PlaybackState - without this they show blank despite PlaybackState working.
+        combine(
+            viewModel.stateData.map { it.currentAnime to it.currentEpisode }.distinctUntilChanged(),
+            viewModel.playbackData.map { it.duration }.distinctUntilChanged(),
+            viewModel.thumbnailGenerated,
+        ) { (anime, episode), duration, _ -> Triple(anime, episode, duration) }
+            .onEach { (anime, episode, duration) ->
+                if (anime == null || episode == null) return@onEach
+                val artwork = runCatching {
+                    val request = ImageRequest.Builder(this@PlayerActivity)
+                        .data(episode.preview_url?.takeIf { it.isNotBlank() } ?: anime)
+                        .size(Size.ORIGINAL)
+                        .build()
+                    imageLoader.execute(request).image
+                        ?.asDrawable(resources)
+                        ?.toBitmap()
+                }.getOrNull()
+
+                mediaSession?.setMetadata(
+                    MediaMetadata.Builder()
+                        .putString(MediaMetadata.METADATA_KEY_TITLE, episode.name)
+                        .putString(MediaMetadata.METADATA_KEY_ARTIST, anime.title)
+                        .putLong(MediaMetadata.METADATA_KEY_DURATION, duration * 1000L)
+                        .apply {
+                            if (artwork != null) {
+                                putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
+                            }
+                        }
+                        .build(),
+                )
+                // Metadata alone won't redraw an already-posted background-playback
+                // notification - keep the service's title/subtitle/reopen-intent in sync too.
+                backgroundPlaybackService?.updateEpisodeInfo(
+                    title = anime.title,
+                    subtitle = episode.name,
+                    animeId = anime.id,
+                    episodeId = episode.id,
+                )
+            }
+            .launchIn(lifecycleScope)
+
         setContent {
             TachiyomiTheme {
                 PlayerScreen(
@@ -278,6 +443,8 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onDestroy() {
+        stopBackgroundPlayback()
+
         viewModel.player.release()
 
         mediaSession?.let {
@@ -290,7 +457,31 @@ class PlayerActivity : BaseActivity() {
             noisyReceiver.initialized = false
         }
 
+        if (screenStateReceiver.initialized) {
+            unregisterReceiver(screenStateReceiver)
+            screenStateReceiver.initialized = false
+        }
+
         super.onDestroy()
+    }
+
+    private fun startBackgroundPlayback() {
+        if (isBoundToBackgroundPlaybackService) return
+        PlayerBackgroundPlaybackService.start(this)
+        bindService(
+            PlayerBackgroundPlaybackService.newIntent(this),
+            backgroundPlaybackConnection,
+            Context.BIND_AUTO_CREATE,
+        )
+        isBoundToBackgroundPlaybackService = true
+    }
+
+    private fun stopBackgroundPlayback() {
+        if (!isBoundToBackgroundPlaybackService) return
+        backgroundPlaybackService?.stopBackgroundPlayback()
+        unbindService(backgroundPlaybackConnection)
+        backgroundPlaybackService = null
+        isBoundToBackgroundPlaybackService = false
     }
 
     override fun onPause() {
@@ -305,6 +496,10 @@ class PlayerActivity : BaseActivity() {
         if (isFinishing) {
             viewModel.deletePendingEpisodes()
             viewModel.mpvCommand("stop")
+        } else if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
+            // Keep mpv running via a foreground service instead of pausing, so the
+            // OS doesn't throttle/kill the process once the screen turns off.
+            startBackgroundPlayback()
         } else {
             viewModel.pause()
         }
@@ -329,6 +524,8 @@ class PlayerActivity : BaseActivity() {
 
     override fun onStart() {
         super.onStart()
+        // Foreground again - background service/notification no longer needed.
+        stopBackgroundPlayback()
         setPictureInPictureParams(createPipParams())
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setFlags(
@@ -372,7 +569,9 @@ class PlayerActivity : BaseActivity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         if (!isInPictureInPictureMode) {
-            viewModel.setAspectRatio(playerPreferences.aspectState.get())
+            // showConfirmation = false: reapplies the persisted aspect on config change
+            // (rotation, initial callback) - not a deliberate user choice, no toast.
+            viewModel.setAspectRatio(playerPreferences.aspectState.get(), showConfirmation = false)
         } else {
             viewModel.hideControls()
         }
@@ -406,7 +605,7 @@ class PlayerActivity : BaseActivity() {
             createPipActions(
                 context = this,
                 isPaused = viewModel.playbackData.value.paused,
-                replaceWithPrevious = playerPreferences.pipReplaceWithPrevious.get(),
+                firstButtonAction = playerPreferences.pipFirstButtonAction.get(),
                 playlistCount = viewModel.stateData.value.currentPlaylist.size,
                 playlistPosition = viewModel.stateData.value.currentPlaylistIndex,
             ),
@@ -433,7 +632,9 @@ class PlayerActivity : BaseActivity() {
                 pipReceiver = null
             }
 
-            if (lifecycle.currentState == Lifecycle.State.CREATED) {
+            if (isIntentionalBackgroundTransition) {
+                isIntentionalBackgroundTransition = false
+            } else if (lifecycle.currentState == Lifecycle.State.CREATED) {
                 window.decorView.postDelayed(
                     {
                         viewModel.player.release()
@@ -465,6 +666,17 @@ class PlayerActivity : BaseActivity() {
                         PIP_NEXT -> viewModel.nextEpisode(next = true)
                         PIP_PREVIOUS -> viewModel.nextEpisode(next = false)
                         PIP_SKIP -> viewModel.seekBy(10)
+                        PIP_BACKGROUND_PLAY -> {
+                            // Manually trigger the background-audio path (onPause() skips
+                            // it while still in PIP), then moveTaskToBack() to exit PIP.
+                            // Must start the service even while paused - it's an explicit
+                            // user action, and nothing else keeps the player alive here.
+                            if (playerPreferences.backgroundPlayback.get()) {
+                                startBackgroundPlayback()
+                            }
+                            isIntentionalBackgroundTransition = true
+                            moveTaskToBack(true)
+                        }
                     }
                     setPictureInPictureParams(createPipParams())
                 }
@@ -609,6 +821,12 @@ class PlayerActivity : BaseActivity() {
         val filter = IntentFilter().apply { addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY) }
         registerReceiver(noisyReceiver, filter)
         noisyReceiver.initialized = true
+
+        val screenStateFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        registerReceiver(screenStateReceiver, screenStateFilter)
+        screenStateReceiver.initialized = true
     }
 
     // ==== END MPVKT ====
@@ -620,10 +838,7 @@ class PlayerActivity : BaseActivity() {
         super.onSaveInstanceState(outState)
     }
 
-    /**
-     * Called from the presenter if the initial load couldn't load the videos of the episode. In
-     * this case the activity is closed and a toast is shown to the user.
-     */
+    /** Shows a toast and closes the activity when the initial episode load fails. */
     private fun setInitialEpisodeError(error: Throwable) {
         if (error is PlayerViewModel.ExceptionWithStringResource) {
             showToast(error.stringResource)
@@ -634,10 +849,7 @@ class PlayerActivity : BaseActivity() {
         finish()
     }
 
-    /**
-     * Called from the presenter when a screenshot is ready to be shared. It shows Android's
-     * default sharing tool.
-     */
+    /** Shows Android's share sheet for a captured screenshot. */
     private fun onShareImageResult(uri: Uri, seconds: String) {
         val anime = viewModel.stateData.value.currentAnime ?: return
         val episode = viewModel.stateData.value.currentEpisode ?: return
@@ -649,10 +861,6 @@ class PlayerActivity : BaseActivity() {
         startActivity(intent)
     }
 
-    /**
-     * Called from the presenter when a screenshot is saved or fails. It shows a message
-     * or logs the event depending on the [result].
-     */
     private fun onSaveImageResult(result: PlayerViewModel.SaveImageResult) {
         when (result) {
             is PlayerViewModel.SaveImageResult.Success -> {
@@ -664,10 +872,6 @@ class PlayerActivity : BaseActivity() {
         }
     }
 
-    /**
-     * Called from the presenter when a screenshot is set as art or fails.
-     * It shows a different message depending on the [result].
-     */
     private fun onSetAsArtResult(result: SetAsArt, artType: ArtType) {
         showToast(
             when (result) {

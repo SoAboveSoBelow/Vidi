@@ -34,6 +34,7 @@ import eu.kanade.presentation.anime.EpisodeOptionsDialogScreen
 import eu.kanade.presentation.anime.EpisodeSettingsDialog
 import eu.kanade.presentation.anime.SeasonSettingsDialog
 import eu.kanade.presentation.anime.components.AnimeImagesDialog
+import eu.kanade.presentation.anime.components.ClearAnimeDialog
 import eu.kanade.presentation.anime.components.DeleteEpisodesDialog
 import eu.kanade.presentation.anime.components.ScanlatorFilterDialog
 import eu.kanade.presentation.anime.components.SetIntervalDialog
@@ -182,6 +183,7 @@ class AnimeScreen(
             },
             onTagSearch = { scope.launch { performGenreSearch(navigator, it, screenModel.source!!) } },
             onFilterButtonClicked = screenModel::showSettingsDialog,
+            onShuffleClicked = { screenModel.toggleEpisodeShuffle() },
             onRefresh = screenModel::fetchAllFromSource,
             onContinueWatching = {
                 // AY -->
@@ -219,11 +221,18 @@ class AnimeScreen(
             // AM (CUSTOM_INFORMATION) -->
             onEditInfoClicked = screenModel::showEditAnimeInfoDialog,
             // <-- AM (CUSTOM_INFORMATION)
+            // AM (CLEAR_ANIME) -->
+            onClearAnimeClicked = screenModel::showClearAnimeDialog,
+            // <-- AM (CLEAR_ANIME)
             onMultiBookmarkClicked = screenModel::bookmarkEpisodes,
             // AY -->
             onMultiFillermarkClicked = screenModel::fillermarkEpisodes,
             // <-- AY
             onEditNotesClicked = { navigator.push(AnimeNotesScreen(anime = successState.anime)) },
+            // AM (EPISODE_VIEW_MODE) -->
+            episodeViewMode = successState.anime.episodeViewMode(),
+            onEpisodeViewModeSelected = screenModel::setEpisodeViewMode,
+            // <-- AM (EPISODE_VIEW_MODE)
             onMultiMarkAsSeenClicked = screenModel::markEpisodesSeen,
             onMarkPreviousAsSeenClicked = screenModel::markPreviousEpisodeSeen,
             onMultiDeleteClicked = screenModel::showDeleteEpisodeDialog,
@@ -453,6 +462,14 @@ class AnimeScreen(
                 )
             }
             // <-- AM (CUSTOM_INFORMATION)
+            // AM (CLEAR_ANIME) -->
+            AnimeScreenModel.Dialog.ClearAnime -> {
+                ClearAnimeDialog(
+                    onDismissRequest = onDismissRequest,
+                    onConfirm = screenModel::clearAnime,
+                )
+            }
+            // <-- AM (CLEAR_ANIME)
         }
 
         if (showScanlatorsDialog) {

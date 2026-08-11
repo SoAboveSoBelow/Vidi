@@ -30,6 +30,9 @@ class SetAnimeDefaultEpisodeFlags(
                     showPreviews = showEpisodeThumbnailPreviews.get(),
                     showSummaries = showEpisodeSummaries.get(),
                     // <-- AY
+                    // AM (EPISODE_VIEW_MODE) -->
+                    hideMetadata = hideEpisodeMetadata.get(),
+                    // <-- AM (EPISODE_VIEW_MODE)
                 )
             }
         }

@@ -6,7 +6,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import eu.kanade.tachiyomi.ui.player.settings.DecoderPreferences
 import `is`.xyz.mpv.MPV
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 // Reference: https://github.com/MakD/AFinity/blob/master/app/src/main/java/com/makd/afinity/ui/player/components/MpvSurface.kt
 @Composable
@@ -15,9 +18,13 @@ fun MpvSurface(
     mpv: MPV,
     videoOutput: String,
 ) {
+    val decoderPreferences: DecoderPreferences = Injekt.get()
+
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { context ->
+            var hasAttachedSurfaceBefore = false
+
             SurfaceView(context).apply {
                 holder.addCallback(
                     object : SurfaceHolder.Callback {
@@ -33,12 +40,33 @@ fun MpvSurface(
                         override fun surfaceCreated(holder: SurfaceHolder) {
                             mpv.attachSurface(holder.surface)
                             mpv.setOptionString("force-window", "yes")
-                            mpv.setPropertyString("vo", videoOutput)
+                            // Force lighter "gpu" (not gpu-next) on reattach to cut
+                            // reconfig cost/audio blip; use user's pref on first start.
+                            mpv.setPropertyString(
+                                "vo",
+                                if (hasAttachedSurfaceBefore) "gpu" else videoOutput,
+                            )
+                            hasAttachedSurfaceBefore = true
                             mpv.setOptionString("vid", "auto")
+                            mpv.setOptionString(
+                                "hwdec",
+                                if (decoderPreferences.tryHWDecoding.get()) "mediacodec,mediacodec-copy" else "no",
+                            )
+                            // Audio track re-selection after this reconfig is handled
+                            // reactively in PlayerViewModel.onAudioTrackSelectChange.
                         }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            mpv.setPropertyString("vid", "no")
+                            // Plain "mediacodec" hwdec needs an attached Surface to init
+                            // a new decoder session, so loading a fresh episode while
+                            // backgrounded (no surface) breaks unless hwdec is off - no
+                            // loss since audio-only playback doesn't need it anyway.
+                            mpv.setOptionString("hwdec", "no")
+                            // Do NOT set vid="no": mpv runs a near-synchronous "anything
+                            // selected?" check on file open, and only vid="auto" satisfies
+                            // it in time (confirmed via logcat - root cause of "No video
+                            // or audio streams selected" on new loads). vo="null" alone
+                            // already blocks real rendering/GPU work, which is the goal.
                             mpv.setPropertyString("vo", "null")
                             mpv.setPropertyString("force-window", "no")
                             mpv.detachSurface()

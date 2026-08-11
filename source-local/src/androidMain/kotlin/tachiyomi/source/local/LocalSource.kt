@@ -253,57 +253,8 @@ actual class LocalSource(
 
     // Episodes
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> = withIOContext {
-        // AY -->
-        val episodesData = fileSystem.getFilesInAnimeDirectory(anime.url)
-            .firstOrNull {
-                it.extension == "json" && it.nameWithoutExtension == "episodes"
-            }?.let { file ->
-                json.decodeFromStream<List<EpisodeDetails>>(file.openInputStream())
-            }
-        // <-- AY
-
-        val episodes = fileSystem.getFilesInAnimeDirectory(anime.url)
-            // Only keep supported formats
-            .filterNot { it.name.orEmpty().startsWith('.') }
-            .filter { Format.isSupported(it) }
-            .map { episodeFile ->
-                SEpisode.create().apply {
-                    url = "${anime.url}/${episodeFile.name}"
-                    name = episodeFile.nameWithoutExtension.orEmpty()
-                    date_upload = episodeFile.lastModified()
-
-                    val episodeNumber = EpisodeRecognition
-                        .parseEpisodeNumber(anime.title, this.name, this.episode_number.toDouble())
-                        .toFloat()
-                    episode_number = episodeNumber
-
-                    // AY -->
-                    // Overwrite data from episodes.json file
-                    episodesData?.also { dataList ->
-                        dataList.firstOrNull { it.episodeNumber.equalsTo(episodeNumber) }?.also { data ->
-                            data.name?.also { name = it }
-                            data.dateUpload?.also { date_upload = parseDate(it) }
-                            scanlator = data.scanlator
-                            summary = data.summary
-                        }
-                    }
-
-                    // Generate the preview from the episode if not available
-                    if (this.preview_url == null) {
-                        try {
-                            val tempFileSuffix = anime.title + this.name + DEFAULT_THUMBNAIL_NAME
-                            val updateThumbnail: (InputStream) -> Unit = { thumbnailManager.update(anime, this, it) }
-                            updateImageFromVideo(this, anime, tempFileSuffix, updateThumbnail)
-                        } catch (e: Exception) {
-                            logcat(LogPriority.ERROR) { "Couldn't extract thumbnail from video: $e" }
-                        }
-                    }
-                    // <-- AY
-                }
-            }
-            .sortedWith { e1, e2 ->
-                e2.name.compareToCaseInsensitiveNaturalOrder(e1.name)
-            }
+        val episodes = scanEpisodeFiles(anime)
+        generateMissingThumbnails(anime, episodes)
 
         // Generate the cover from the first episode found if not available
         // AY -->
@@ -339,6 +290,106 @@ actual class LocalSource(
 
         episodes
     }
+
+    // AM (PARTIAL_EPISODE_SYNC) -->
+
+    /**
+     * Scans the anime directory for episode files and builds the episode list.
+     * Deliberately does not touch video frames - this is the part of episode
+     * listing that stays fast no matter how many episodes are in the folder,
+     * so it's kept separate from thumbnail generation, which doesn't.
+     */
+    suspend fun scanEpisodeFiles(anime: SAnime): List<SEpisode> = withIOContext {
+        val episodesData = fileSystem.getFilesInAnimeDirectory(anime.url)
+            .firstOrNull {
+                it.extension == "json" && it.nameWithoutExtension == "episodes"
+            }?.let { file ->
+                json.decodeFromStream<List<EpisodeDetails>>(file.openInputStream())
+            }
+
+        // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+        // Looking up each episode's thumbnail one at a time means listing the thumbnail
+        // folder(s) fresh per episode - fine for one lookup, but an O(n) directory listing
+        // for each of n episodes adds up fast on a big folder. Doing it once up front here
+        // turns that into a single listing plus an O(1) map lookup per episode below.
+        val existingThumbnails = thumbnailManager.findExistingBatch(anime.url)
+        // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
+
+        fileSystem.getFilesInAnimeDirectory(anime.url)
+            // Only keep supported formats
+            .filterNot { it.name.orEmpty().startsWith('.') }
+            .filter { Format.isSupported(it) }
+            .map { episodeFile ->
+                SEpisode.create().apply {
+                    url = "${anime.url}/${episodeFile.name}"
+                    name = episodeFile.nameWithoutExtension.orEmpty()
+                    date_upload = episodeFile.lastModified()
+
+                    val episodeNumber = EpisodeRecognition
+                        .parseEpisodeNumber(anime.title, this.name, this.episode_number.toDouble())
+                        .toFloat()
+                    episode_number = episodeNumber
+
+                    // Overwrite data from episodes.json file
+                    episodesData?.also { dataList ->
+                        dataList.firstOrNull { it.episodeNumber.equalsTo(episodeNumber) }?.also { data ->
+                            data.name?.also { name = it }
+                            data.dateUpload?.also { date_upload = parseDate(it) }
+                            scanlator = data.scanlator
+                            summary = data.summary
+                        }
+                    }
+
+                    // AM (LOCAL_THUMBNAIL_LOOKUP) -->
+                    // A manually-supplied "{episode name}-thumbnail.jpg" always wins and
+                    // skips extraction entirely.
+                    existingThumbnails[thumbnailManager.batchKeyFor(this.name)]?.let {
+                        this.preview_url = it.uri.toString()
+                    }
+                    // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
+                }
+            }
+            .sortedWith { e1, e2 ->
+                e2.name.compareToCaseInsensitiveNaturalOrder(e1.name)
+            }
+    }
+
+    /**
+     * Generates thumbnails for [episodes] that don't already have one, [chunkSize] at a
+     * time, calling [onChunkGenerated] after each chunk finishes. Thumbnails are generated
+     * regardless of the Simplified/Preview display setting, since they're still used by the
+     * background playback notification.
+     *
+     * Large folders can hold hundreds of episodes, and each one costs an ffprobe + ffmpeg
+     * pass, so generating every thumbnail before returning anything (the old behavior of
+     * this function) meant a sync of a big folder could take long enough to never finish -
+     * and nothing showed up, not even the episodes that were already done. Chunking lets a
+     * caller persist and display progress as it goes instead of waiting on the whole folder.
+     */
+    suspend fun generateMissingThumbnails(
+        anime: SAnime,
+        episodes: List<SEpisode>,
+        chunkSize: Int = THUMBNAIL_CHUNK_SIZE,
+        onChunkGenerated: suspend (List<SEpisode>) -> Unit = {},
+    ) = withIOContext {
+        episodes
+            .filter { it.preview_url == null }
+            .chunked(chunkSize)
+            .forEach { chunk ->
+                chunk.forEach { episode ->
+                    try {
+                        val tempFileSuffix = anime.title + episode.name + DEFAULT_THUMBNAIL_NAME
+                        val updateThumbnail: (InputStream) -> Unit =
+                            { thumbnailManager.update(anime, episode, it) }
+                        updateImageFromVideo(episode, anime, tempFileSuffix, updateThumbnail)
+                    } catch (e: Exception) {
+                        logcat(LogPriority.ERROR) { "Couldn't extract thumbnail from video: $e" }
+                    }
+                }
+                onChunkGenerated(chunk)
+            }
+    }
+    // <-- AM (PARTIAL_EPISODE_SYNC)
 
     // AY -->
     private fun parseDate(isoDate: String): Long {
@@ -400,6 +451,10 @@ actual class LocalSource(
         private const val DEFAULT_BACKGROUND_NAME = "background.jpg"
         private const val DEFAULT_THUMBNAIL_NAME = "thumbnail.jpg"
         // <-- AY
+
+        // AM (PARTIAL_EPISODE_SYNC) -->
+        private const val THUMBNAIL_CHUNK_SIZE = 10
+        // <-- AM (PARTIAL_EPISODE_SYNC)
 
         private val LATEST_THRESHOLD = 7.days.inWholeMilliseconds
     }

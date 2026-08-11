@@ -3,11 +3,18 @@ package eu.kanade.presentation.anime.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -29,34 +36,59 @@ fun ItemHeader(
     // AY -->
     fetchType: FetchType = FetchType.Episodes,
     // <-- AY
+    isShuffleEnabled: Boolean = false,
+    onShuffleClick: (() -> Unit)? = null,
 ) {
-    Column(
+    Row(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(
-                enabled = enabled,
-                onClick = onClick,
-            )
             .padding(horizontal = 16.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = if (itemCount == null) {
-                stringResource(AYMR.strings.episodes)
-            } else {
-                // AY -->
-                val pluralCount = when (fetchType) {
-                    FetchType.Seasons -> AYMR.plurals.anime_num_seasons
-                    FetchType.Episodes -> AYMR.plurals.anime_num_episodes
-                }
-                pluralStringResource(pluralCount, count = itemCount, itemCount)
-                // <-- AY
-            },
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
+        Column(
+            modifier = Modifier
+                .clickable(
+                    enabled = enabled,
+                    onClick = onClick,
+                ),
+            verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
+        ) {
+            Text(
+                text = if (itemCount == null) {
+                    stringResource(AYMR.strings.episodes)
+                } else {
+                    // AY -->
+                    val pluralCount = when (fetchType) {
+                        FetchType.Seasons -> AYMR.plurals.anime_num_seasons
+                        FetchType.Episodes -> AYMR.plurals.anime_num_episodes
+                    }
+                    pluralStringResource(pluralCount, count = itemCount, itemCount)
+                    // <-- AY
+                },
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
 
-        MissingEpisodesWarning(fetchType, missingItemsCount)
+            MissingEpisodesWarning(fetchType, missingItemsCount)
+        }
+
+        // AM (SINGLE_ITEM_SHUFFLE) -->
+        val canShuffle = itemCount == null || itemCount > 1
+        // <-- AM (SINGLE_ITEM_SHUFFLE)
+        if (onShuffleClick != null && canShuffle) {
+            IconButton(onClick = onShuffleClick) {
+                Icon(
+                    imageVector = Icons.Default.Shuffle,
+                    contentDescription = stringResource(AMMR.strings.episode_list_shuffle),
+                    tint = if (isShuffleEnabled) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        LocalContentColor.current
+                    },
+                )
+            }
+        }
     }
 }
 

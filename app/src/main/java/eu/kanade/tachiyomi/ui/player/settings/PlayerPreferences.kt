@@ -13,6 +13,23 @@ class PlayerPreferences(
         "pref_preserve_watching_position",
         false,
     )
+    // AM (RECENT_EPISODE_POSITIONS) -->
+
+    /**
+     * How many recently-departed episodes (not counting the one currently open) keep a
+     * temporary resume position in memory, so an accidental next/previous click doesn't
+     * lose your place. Doesn't affect the currently-open episode's own resume support.
+     */
+    val recentEpisodePositionSlots: Preference<Int> = preferenceStore.getInt(
+        "pref_recent_episode_position_slots",
+        2,
+    )
+
+    // <-- AM (RECENT_EPISODE_POSITIONS)
+    val backgroundPlayback: Preference<Boolean> = preferenceStore.getBoolean(
+        "pref_player_background_playback",
+        true,
+    )
     val switchOnFailure: Preference<Boolean> = preferenceStore.getBoolean(
         "pref_player_switch_on_failure",
         true,
@@ -68,7 +85,7 @@ class PlayerPreferences(
     val enablePip: Preference<Boolean> = preferenceStore.getBoolean("pref_enable_pip", true)
     val pipEpisodeToasts: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_episode_toasts", true)
     val pipOnExit: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_on_exit", false)
-    val pipReplaceWithPrevious: Preference<Boolean> = preferenceStore.getBoolean("pip_replace_with_previous", false)
+    val pipFirstButtonAction: Preference<Int> = preferenceStore.getInt("pip_first_button_action", 0)
 
     // External player
 

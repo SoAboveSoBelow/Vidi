@@ -12,20 +12,18 @@ import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 
-/**
- * Class to manage the basic information of all the notifications used in the app.
- */
+/** Notification channel and id constants used across the app. */
 object Notifications {
 
-    /**
-     * Common notification channel and ids used anywhere.
-     */
+    // Common
     const val CHANNEL_COMMON = "common_channel"
     const val ID_DOWNLOAD_IMAGE = 2
 
-    /**
-     * Notification channel and ids used by the library updater.
-     */
+    // Background/PIP-less playback continuation
+    const val CHANNEL_BACKGROUND_PLAYBACK = "background_playback_channel"
+    const val ID_BACKGROUND_PLAYBACK = -901
+
+    // Library updater
     private const val GROUP_LIBRARY = "group_library"
     const val CHANNEL_LIBRARY_PROGRESS = "library_progress_channel"
     const val ID_LIBRARY_PROGRESS = -101
@@ -33,25 +31,19 @@ object Notifications {
     const val CHANNEL_LIBRARY_ERROR = "library_errors_channel"
     const val ID_LIBRARY_ERROR = -102
 
-    /**
-     * Notification channel and ids used by the downloader.
-     */
+    // Downloader
     private const val GROUP_DOWNLOADER = "group_downloader"
     const val CHANNEL_DOWNLOADER_PROGRESS = "downloader_progress_channel"
     const val ID_DOWNLOAD_EPISODE_PROGRESS = -201
     const val CHANNEL_DOWNLOADER_ERROR = "downloader_error_channel"
     const val ID_DOWNLOAD_EPISODE_ERROR = -202
 
-    /**
-     * Notification channel and ids used by the library updater.
-     */
+    // New episodes
     const val CHANNEL_NEW_EPISODES = "new_episodes_channel"
     const val ID_NEW_EPISODES = -301
     const val GROUP_NEW_EPISODES = "eu.kanade.tachiyomi.NEW_EPISODES"
 
-    /**
-     * Notification channel and ids used by the backup/restore system.
-     */
+    // Backup/restore
     private const val GROUP_BACKUP_RESTORE = "group_backup_restore"
     const val CHANNEL_BACKUP_RESTORE_PROGRESS = "backup_restore_progress_channel"
     const val ID_BACKUP_PROGRESS = -501
@@ -60,24 +52,18 @@ object Notifications {
     const val ID_BACKUP_COMPLETE = -502
     const val ID_RESTORE_COMPLETE = -504
 
-    /**
-     * Notification channel used for Incognito Mode
-     */
+    // Incognito mode
     const val CHANNEL_INCOGNITO_MODE = "incognito_mode_channel"
     const val ID_INCOGNITO_MODE = -701
 
     // AM (DISCORD_RPC) -->
 
-    /**
-     * Notification channel used for Discord RPC
-     */
+    // Discord RPC
     const val CHANNEL_DISCORD_RPC = "${RICH_PRESENCE_TAG}_channel"
     const val ID_DISCORD_RPC = -1701
     // <-- AM (DISCORD_RPC)
 
-    /**
-     * Notification channel and ids used for app and extension updates.
-     */
+    // App/extension updates
     private const val GROUP_APK_UPDATES = "group_apk_updates"
     const val CHANNEL_APP_UPDATE = "app_apk_update_channel"
     const val ID_APP_UPDATER = 1
@@ -102,12 +88,7 @@ object Notifications {
         // <-- AM (DISCORD_RPC)
     )
 
-    /**
-     * Creates the notification channels introduced in Android Oreo.
-     * This won't do anything on Android versions that don't support notification channels.
-     *
-     * @param context The application context.
-     */
+    /** Creates the app's notification channels (no-op below Oreo). */
     fun createChannels(context: Context) {
         val notificationManager = NotificationManagerCompat.from(context)
 
@@ -135,6 +116,10 @@ object Notifications {
             listOf(
                 buildNotificationChannel(CHANNEL_COMMON, IMPORTANCE_LOW) {
                     setName(context.stringResource(MR.strings.channel_common))
+                },
+                buildNotificationChannel(CHANNEL_BACKGROUND_PLAYBACK, IMPORTANCE_LOW) {
+                    setName(context.stringResource(AMMR.strings.player_background_playback_channel))
+                    setShowBadge(false)
                 },
                 buildNotificationChannel(CHANNEL_LIBRARY_PROGRESS, IMPORTANCE_LOW) {
                     setName(context.stringResource(MR.strings.channel_progress))

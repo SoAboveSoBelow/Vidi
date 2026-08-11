@@ -32,6 +32,7 @@
         tools:ignore="ProtectedPermissions" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
         android:name=".App"
@@ -139,7 +140,6 @@
 
         <activity
             android:name=".ui.player.PlayerActivity"
-            android:autoRemoveFromRecents="true"
             android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboardHidden|keyboard|uiMode"
             android:exported="false"
             android:launchMode="singleTask"
@@ -222,6 +222,11 @@
                     android:path="/accounts/oauth/callback" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".ui.player.PlayerBackgroundPlaybackService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
         <service
             android:name=".data.connection.discord.DiscordRPCService"
             android:enabled="true"

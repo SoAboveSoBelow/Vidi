@@ -64,6 +64,13 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 preference = playerPreferences.preserveWatchingPosition,
                 title = stringResource(AYMR.strings.pref_preserve_watching_position),
             ),
+            // AM (RECENT_EPISODE_POSITIONS) -->
+            Preference.PreferenceItem.ListPreference(
+                preference = playerPreferences.recentEpisodePositionSlots,
+                entries = (1..10).associateWith { it.toString() }.toPersistentMap(),
+                title = stringResource(AMMR.strings.player_pref_recent_episode_position_slots),
+            ),
+            // <-- AM (RECENT_EPISODE_POSITIONS)
             Preference.PreferenceItem.SwitchPreference(
                 preference = playerPreferences.switchOnFailure,
                 title = stringResource(AMMR.strings.player_pref_switch_on_failure),
@@ -265,7 +272,7 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
         val enablePip = playerPreferences.enablePip
         val pipEpisodeToasts = playerPreferences.pipEpisodeToasts
         val pipOnExit = playerPreferences.pipOnExit
-        val pipReplaceWithPrevious = playerPreferences.pipReplaceWithPrevious
+        val pipFirstButtonAction = playerPreferences.pipFirstButtonAction
 
         val isPipEnabled by enablePip.collectAsState()
 
@@ -286,9 +293,14 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                     title = stringResource(AYMR.strings.pref_pip_on_exit),
                     enabled = isPipEnabled,
                 ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = pipReplaceWithPrevious,
-                    title = stringResource(AYMR.strings.pref_pip_replace_with_previous),
+                Preference.PreferenceItem.ListPreference(
+                    preference = pipFirstButtonAction,
+                    title = stringResource(AMMR.strings.pip_first_button_action),
+                    entries = persistentMapOf(
+                        0 to stringResource(AMMR.strings.pip_first_button_action_skip_10),
+                        1 to stringResource(AMMR.strings.pip_first_button_action_previous_episode),
+                        2 to stringResource(AMMR.strings.pip_first_button_action_background_play),
+                    ),
                     enabled = isPipEnabled,
                 ),
             ),

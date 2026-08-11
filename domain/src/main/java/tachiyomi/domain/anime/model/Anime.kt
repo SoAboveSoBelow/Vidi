@@ -162,6 +162,28 @@ data class Anime(
         return episodeFlags and EPISODE_SUMMARIES_MASK == EPISODE_SHOW_SUMMARIES
     }
 
+    // AM (EPISODE_VIEW_MODE) -->
+    val hideEpisodeMetadataRaw: Long
+        get() = episodeFlags and EPISODE_METADATA_MASK
+
+    fun hideEpisodeMetadata(): Boolean {
+        return episodeFlags and EPISODE_METADATA_MASK == EPISODE_HIDE_METADATA
+    }
+
+    /**
+     * The three mutually-exclusive episode list display modes. SIMPLIFIED and
+     * PREVIEW behave exactly as before; MINIMAL is PREVIEW's thumbnail with
+     * SIMPLIFIED-plus (file size/date/download marker also hidden).
+     */
+    fun episodeViewMode(): EpisodeViewMode {
+        return when {
+            !showPreviews() -> EpisodeViewMode.SIMPLIFIED
+            hideEpisodeMetadata() -> EpisodeViewMode.MINIMAL
+            else -> EpisodeViewMode.PREVIEW
+        }
+    }
+    // <-- AM (EPISODE_VIEW_MODE)
+
     val seasonDownloadedFilterRaw: Long
         get() = seasonFlags and SEASON_DOWNLOADED_MASK
 
@@ -294,6 +316,12 @@ data class Anime(
         const val EPISODE_SUMMARIES_MASK = 0x00001000L
         // <-- AY
 
+        // AM (EPISODE_VIEW_MODE) -->
+        const val EPISODE_SHOW_METADATA = 0x00000000L
+        const val EPISODE_HIDE_METADATA = 0x00002000L
+        const val EPISODE_METADATA_MASK = 0x00002000L
+        // <-- AM (EPISODE_VIEW_MODE)
+
         const val EPISODE_DISPLAY_NAME = 0x00000000L
         const val EPISODE_DISPLAY_NUMBER = 0x00100000L
         const val EPISODE_DISPLAY_MASK = 0x00100000L
@@ -407,3 +435,17 @@ data class Anime(
         // <-- AM (CUSTOM_INFORMATION)
     }
 }
+
+// AM (EPISODE_VIEW_MODE) -->
+
+/**
+ * Episode list display mode for a single anime. SIMPLIFIED and PREVIEW are the
+ * original two states (thumbnail on/off, full metadata either way). MINIMAL is
+ * PREVIEW's thumbnail with file size/date/download marker also hidden.
+ */
+enum class EpisodeViewMode {
+    SIMPLIFIED,
+    PREVIEW,
+    MINIMAL,
+}
+// <-- AM (EPISODE_VIEW_MODE)
