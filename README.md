@@ -71,7 +71,7 @@ This is a fork of [quickdesh/Animiru](https://github.com/quickdesh/Animiru), whi
 
 Thank you to all the people who have contributed!
 
-<a href="https://github.com/quickdesh/Animiru/graphs/contributors">
+<a href="https://github.com/SoAboveSoBelow/Vidi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=quickdesh/Animiru" alt="Animiru app contributors" title="Animiru app contributors" width="800"/>
 </a>
 
