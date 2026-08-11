@@ -36,7 +36,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "xyz.Quickdev.Animiru.mi"
+        applicationId = "xyz.Quickdev.Vidi.mi"
 
         versionCode = 147
         versionName = "0.19.9.0"
