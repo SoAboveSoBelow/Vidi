@@ -4,8 +4,8 @@
     <img src="./.github/assets/logo.png" alt="Animiru logo" title="Animiru logo" width="80"/>
 </a>
 
-# Animiru [App](#)
-Animiru is a fork of [Aniyomi](https://github.com/aniyomiorg/aniyomi)
+# Vidi [App](#)
+Vidi is a fork of [Animiru](https://github.com/quickdesh/Animiru)
 
 ### Full-featured video player
 Discover and watch anime, donghua, series, and more – easier than ever on your Android device.
@@ -71,7 +71,7 @@ This is a fork of [quickdesh/Animiru](https://github.com/quickdesh/Animiru), whi
 
 Thank you to all the people who have contributed!
 
-<a href="https://github.com/quickdesh/Animiru/graphs/contributors">
+<a href="https://github.com/SoAboveSoBelow/Vidi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=quickdesh/Animiru" alt="Animiru app contributors" title="Animiru app contributors" width="800"/>
 </a>
 
