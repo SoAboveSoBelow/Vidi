@@ -4,8 +4,8 @@
     <img src="./.github/assets/logo.png" alt="Animiru logo" title="Animiru logo" width="80"/>
 </a>
 
-# Animiru [App](#)
-Animiru is a fork of [Aniyomi](https://github.com/aniyomiorg/aniyomi)
+# Vidi [App](#)
+Vidi is a fork of [Animiru](https://github.com/quickdesh/Animiru)
 
 ### Full-featured video player
 Discover and watch anime, donghua, series, and more – easier than ever on your Android device.
