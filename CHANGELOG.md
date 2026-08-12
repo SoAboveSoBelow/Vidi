@@ -11,8 +11,11 @@ The format is a modified version of [Keep a Changelog](https://keepachangelog.co
 - `Other` - for technical stuff.
 
 ## [Unreleased]
+
+## [v0.19.9.1] - 2026-08-12
 ### Other
 - Merge from aniyomi ([@Secozzi](https://github.com/Secozzi)) ([#191](https://github.com/quickdesh/Animiru/pull/191))
+- Rebrand app name and icon to Vidi
 
 ## [v0.19.8.1] - 2026-08-09
 ### Improved
