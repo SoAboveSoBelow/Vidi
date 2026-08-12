@@ -93,7 +93,8 @@ fun PlayerControls(
             val (topLeftControls, topRightControls) = createRefs()
             val (volumeSlider, brightnessSlider) = createRefs()
             val unlockControlsButton = createRef()
-            val (bottomRightControls, bottomLeftControls) = createRefs()
+            val skipButtonRow = createRef()
+            val bottomControls = createRef()
             val centerControls = createRef()
             val thumbnail = createRef()
             val seekbar = createRef()
@@ -361,7 +362,8 @@ fun PlayerControls(
             }
 
             AnimatedVisibility(
-                visible = uiData.controlsShown && !uiData.isControlsLocked,
+                visible = uiData.controlsShown && !uiData.isControlsLocked &&
+                    (uiData.skipIntroText != null || uiData.primaryButton != null),
                 enter = if (!uiData.reduceMotion) {
                     slideInHorizontally(playerControlsEnterAnimationSpec()) { it } +
                         fadeIn(playerControlsEnterAnimationSpec())
@@ -374,21 +376,18 @@ fun PlayerControls(
                 } else {
                     fadeOut(playerControlsExitAnimationSpec())
                 },
-                modifier = Modifier.constrainAs(bottomRightControls) {
-                    bottom.linkTo(seekbar.top)
-                    end.linkTo(seekbar.end)
+                modifier = Modifier.constrainAs(skipButtonRow) {
+                    bottom.linkTo(bottomControls.top, MaterialTheme.padding.large)
+                    end.linkTo(parent.end)
                 },
             ) {
-                BottomRightPlayerControls(
+                SkipButtonRow(
                     customButton = uiData.primaryButton,
                     customButtonTitle = uiData.primaryButtonTitle,
                     skipIntroButton = uiData.skipIntroText,
                     onPressSkipIntroButton = { onPlayerEvent(PlayerEvent.SkipIntro) },
-                    isPipAvailable = stateData.isPipAvailable,
-                    onPipClick = { onPlayerEvent(PlayerEvent.EnterPip) },
                     onCustomButtonClick = { onPlayerEvent(PlayerEvent.ExecuteCustomButton(false)) },
                     onCustomButtonLongClick = { onPlayerEvent(PlayerEvent.ExecuteCustomButton(true)) },
-                    onAspectClick = { onPlayerEvent(PlayerEvent.ChangeAspect) },
                 )
             }
 
@@ -406,21 +405,25 @@ fun PlayerControls(
                 } else {
                     fadeOut(playerControlsExitAnimationSpec())
                 },
-                modifier = Modifier.constrainAs(bottomLeftControls) {
+                modifier = Modifier.constrainAs(bottomControls) {
                     bottom.linkTo(seekbar.top)
                     start.linkTo(seekbar.start)
+                    end.linkTo(seekbar.end)
                     width = Dimension.fillToConstraints
-                    end.linkTo(bottomRightControls.start)
                 },
             ) {
-                BottomLeftPlayerControls(
+                BottomPlayerControls(
+                    selectedButtons = uiData.bottomPlayerButtons,
                     playbackSpeed = playbackSpeed ?: uiData.playerSpeedPref,
                     showChapterIndicator = uiData.showChapterIndicator,
                     currentChapter = stateData.currentChapter,
+                    isPipAvailable = stateData.isPipAvailable,
                     onLockControls = { onPlayerEvent(PlayerEvent.LockControls(true)) },
                     onCycleRotation = { onPlayerEvent(PlayerEvent.CycleRotation) },
                     onPlaybackSpeedChange = { onPlayerEvent(PlayerEvent.ChangeSpeed(it)) },
                     onOpenSheet = { onPlayerEvent(PlayerEvent.SetSheet(it)) },
+                    onPipClick = { onPlayerEvent(PlayerEvent.EnterPip) },
+                    onAspectClick = { onPlayerEvent(PlayerEvent.ChangeAspect) },
                 )
             }
 

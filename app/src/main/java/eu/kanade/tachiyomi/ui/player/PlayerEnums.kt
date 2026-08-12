@@ -65,6 +65,7 @@ enum class SingleActionGesture(val stringRes: StringResource) {
     PlayPause(stringRes = AYMR.strings.single_action_playpause),
     Switch(stringRes = AYMR.strings.single_action_switch),
     Custom(stringRes = AYMR.strings.single_action_custom),
+    Screenshot(stringRes = AYMR.strings.single_action_screenshot),
 }
 
 /**
@@ -117,6 +118,21 @@ enum class Panels {
     SubtitleDelay,
     AudioDelay,
     VideoFilters,
+}
+
+/**
+ * Buttons that can be shown in the customizable row along the bottom of the player.
+ * Order in [entries] is only the declaration order; the user's chosen order and
+ * selection are stored separately via [eu.kanade.tachiyomi.ui.player.settings.GesturePreferences.bottomPlayerButtons].
+ */
+enum class BottomPlayerButton(val stringRes: StringResource) {
+    Lock(AYMR.strings.pref_bottom_button_lock),
+    Rotation(AYMR.strings.pref_bottom_button_rotation),
+    Speed(AYMR.strings.pref_bottom_button_speed),
+    Chapters(AYMR.strings.pref_bottom_button_chapters),
+    PictureInPicture(AYMR.strings.pref_bottom_button_pip),
+    AspectRatio(AYMR.strings.pref_bottom_button_aspect_ratio),
+    Screenshot(AYMR.strings.pref_bottom_button_screenshot),
 }
 
 sealed class Dialogs {

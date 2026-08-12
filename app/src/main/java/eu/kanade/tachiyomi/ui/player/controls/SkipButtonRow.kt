@@ -18,26 +18,19 @@
 package eu.kanade.tachiyomi.ui.player.controls
 
 import androidx.compose.foundation.layout.Row
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AspectRatio
-import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
 import eu.kanade.tachiyomi.ui.player.controls.components.FilledControlsButton
 import tachiyomi.domain.custombutton.model.CustomButton
 
 @Composable
-fun BottomRightPlayerControls(
+fun SkipButtonRow(
     customButton: CustomButton?,
     customButtonTitle: String,
     skipIntroButton: String?,
     onPressSkipIntroButton: () -> Unit,
-    isPipAvailable: Boolean,
     onCustomButtonClick: () -> Unit,
     onCustomButtonLongClick: () -> Unit,
-    onAspectClick: () -> Unit,
-    onPipClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(modifier) {
@@ -54,17 +47,5 @@ fun BottomRightPlayerControls(
                 onLongClick = onCustomButtonLongClick,
             )
         }
-
-        if (isPipAvailable) {
-            ControlsButton(
-                Icons.Default.PictureInPictureAlt,
-                onClick = onPipClick,
-            )
-        }
-
-        ControlsButton(
-            Icons.Default.AspectRatio,
-            onClick = onAspectClick,
-        )
     }
 }

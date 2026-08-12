@@ -1,9 +1,11 @@
 package eu.kanade.tachiyomi.ui.player.settings
 
+import eu.kanade.tachiyomi.ui.player.BottomPlayerButton
 import eu.kanade.tachiyomi.ui.player.SingleActionGesture
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.preference.getEnum
+import tachiyomi.core.common.preference.getEnumSlots
 
 class GesturePreferences(
     preferenceStore: PreferenceStore,
@@ -38,6 +40,13 @@ class GesturePreferences(
         SingleActionGesture.Seek,
     )
 
+    // Long press
+
+    val longPressGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
+        "pref_long_press",
+        SingleActionGesture.Screenshot,
+    )
+
     // Media controls
 
     val mediaPreviousGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
@@ -52,4 +61,27 @@ class GesturePreferences(
         "pref_media_next",
         SingleActionGesture.Switch,
     )
+
+    // Bottom controls
+
+    /**
+     * Fixed [MAX_BOTTOM_PLAYER_BUTTONS]-length list of positions along the bottom of the
+     * player; a null entry means that position is empty. Gaps are preserved so a button
+     * assigned to position 5 stays at position 5 even if earlier positions are empty.
+     */
+    val bottomPlayerButtons: Preference<List<BottomPlayerButton?>> = preferenceStore.getEnumSlots(
+        "pref_bottom_player_buttons",
+        listOf(
+            BottomPlayerButton.Lock,
+            BottomPlayerButton.Rotation,
+            BottomPlayerButton.Speed,
+            BottomPlayerButton.Chapters,
+            BottomPlayerButton.PictureInPicture,
+            BottomPlayerButton.AspectRatio,
+        ),
+    )
+
+    companion object {
+        const val MAX_BOTTOM_PLAYER_BUTTONS = 6
+    }
 }

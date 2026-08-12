@@ -130,11 +130,26 @@
     <string name="single_action_playpause">Play/Pause</string>
     <string name="single_action_switch">Change episode</string>
     <string name="single_action_custom">Custom</string>
+    <string name="single_action_screenshot">Screenshot options</string>
+    <string name="pref_category_long_press">Long press</string>
+    <string name="pref_long_press">Long press (center)</string>
+    <string name="pref_long_press_info">When set to "Custom", long press triggers your favorited custom button instead of opening the screenshot menu.</string>
     <string name="pref_category_media_controls">Media controls</string>
     <string name="pref_media_previous">Previous</string>
     <string name="pref_media_playpause">Play/Pause</string>
     <string name="pref_media_next">Next</string>
     <string name="pref_media_info">When a media control is set to "Custom", it can be bound through input.conf. The key codes are 0x10004 for previous, 0x10005 for play/pause, and 0x10006 for next.</string>
+    <string name="pref_category_bottom_controls">Bottom controls</string>
+    <string name="pref_bottom_player_buttons">Buttons</string>
+    <string name="pref_bottom_player_buttons_info">Tap a position to choose which button appears there, in order along the bottom of the player.</string>
+    <string name="pref_bottom_player_button_slot">Position %d</string>
+    <string name="pref_bottom_button_lock">Lock controls</string>
+    <string name="pref_bottom_button_rotation">Rotation</string>
+    <string name="pref_bottom_button_speed">Playback speed</string>
+    <string name="pref_bottom_button_chapters">Chapter indicator</string>
+    <string name="pref_bottom_button_pip">Picture-in-picture</string>
+    <string name="pref_bottom_button_aspect_ratio">Aspect ratio</string>
+    <string name="pref_bottom_button_screenshot">Screenshot options</string>
     <!-- Player Settings - Decoder -->
     <string name="pref_player_decoder">Decoder</string>
     <string name="pref_player_decoder_summary">Hardware decoding, pixel format, debanding</string>

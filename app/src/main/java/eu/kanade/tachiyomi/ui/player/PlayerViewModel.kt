@@ -213,6 +213,8 @@ class PlayerViewModel @JvmOverloads constructor(
     private val leftDoubleTapGesture = gesturePreferences.leftDoubleTapGesture.get()
     private val centerDoubleTapGesture = gesturePreferences.centerDoubleTapGesture.get()
     private val rightDoubleTapGesture = gesturePreferences.rightDoubleTapGesture.get()
+    private val longPressGesture = gesturePreferences.longPressGesture.get()
+    private val bottomPlayerButtons = gesturePreferences.bottomPlayerButtons.get()
     private val doubleTapToSeekDuration = gesturePreferences.skipLengthPreference.get()
     private val showSeekBar = gesturePreferences.showSeekBar.get()
     private val pipEpisodeToasts = playerPreferences.pipEpisodeToasts.get()
@@ -244,6 +246,7 @@ class PlayerViewModel @JvmOverloads constructor(
             invertDuration = invertDuration,
             smoothSeeking = smoothSeeking,
             showChapterIndicator = showChapterIndicator,
+            bottomPlayerButtons = bottomPlayerButtons,
         ),
     )
     val uiData = _uiData.asStateFlow()
@@ -2381,6 +2384,7 @@ class PlayerViewModel @JvmOverloads constructor(
             SingleActionGesture.Custom -> {
                 mpvCommand("keypress", CustomKeyCodes.DoubleTapLeft.keyCode)
             }
+            SingleActionGesture.Screenshot -> { }
         }
     }
 
@@ -2395,6 +2399,7 @@ class PlayerViewModel @JvmOverloads constructor(
             SingleActionGesture.Custom -> {
                 mpvCommand("keypress", CustomKeyCodes.DoubleTapCenter.keyCode)
             }
+            SingleActionGesture.Screenshot -> { }
         }
     }
 
@@ -2412,6 +2417,25 @@ class PlayerViewModel @JvmOverloads constructor(
             }
             SingleActionGesture.Custom -> {
                 mpvCommand("keypress", CustomKeyCodes.DoubleTapRight.keyCode)
+            }
+            SingleActionGesture.Screenshot -> { }
+        }
+    }
+
+    fun handleLongPress() {
+        when (longPressGesture) {
+            SingleActionGesture.None -> { }
+            SingleActionGesture.Seek -> { }
+            SingleActionGesture.PlayPause -> {
+                pauseUnpause()
+            }
+            SingleActionGesture.Switch -> { }
+            SingleActionGesture.Custom -> {
+                uiData.value.primaryButton?.let { executeButton(it) }
+            }
+            SingleActionGesture.Screenshot -> {
+                pause()
+                setSheet(Sheets.Screenshot)
             }
         }
     }
@@ -3153,6 +3177,7 @@ class PlayerViewModel @JvmOverloads constructor(
         val autoPlayEnabled: Boolean = false,
         val showChapterIndicator: Boolean = true,
         val playerSpeedPref: Float = 1f,
+        val bottomPlayerButtons: List<BottomPlayerButton?> = emptyList(),
     )
 
     @Stable

@@ -745,6 +745,7 @@ class PlayerActivity : BaseActivity() {
                             }
 
                             SingleActionGesture.Switch -> {}
+                            SingleActionGesture.Screenshot -> {}
                         }
                     }
 
@@ -761,6 +762,7 @@ class PlayerActivity : BaseActivity() {
                             }
 
                             SingleActionGesture.Switch -> {}
+                            SingleActionGesture.Screenshot -> {}
                         }
                     }
 
@@ -778,6 +780,7 @@ class PlayerActivity : BaseActivity() {
                             }
 
                             SingleActionGesture.Switch -> viewModel.nextEpisode(next = false)
+                            SingleActionGesture.Screenshot -> {}
                         }
                     }
 
@@ -795,6 +798,7 @@ class PlayerActivity : BaseActivity() {
                             }
 
                             SingleActionGesture.Switch -> viewModel.nextEpisode(next = true)
+                            SingleActionGesture.Screenshot -> {}
                         }
                     }
 

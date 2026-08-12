@@ -60,3 +60,62 @@ inline fun <reified T : Enum<T>> PreferenceStore.getEnum(
         },
     )
 }
+
+/**
+ * Stores an ordered list of enum values as a comma-separated string of their names.
+ * Unknown/removed names are silently dropped on read rather than falling back to the
+ * default, so a single renamed or deleted entry doesn't wipe out the rest of the order.
+ */
+inline fun <reified T : Enum<T>> PreferenceStore.getEnumList(
+    key: String,
+    defaultValue: List<T>,
+): Preference<List<T>> {
+    return getObjectFromString(
+        key = key,
+        defaultValue = defaultValue,
+        serializer = { list -> list.joinToString(",") { it.name } },
+        deserializer = { str ->
+            if (str.isBlank()) {
+                emptyList()
+            } else {
+                str.split(",").mapNotNull {
+                    try {
+                        enumValueOf<T>(it)
+                    } catch (e: IllegalArgumentException) {
+                        null
+                    }
+                }
+            }
+        },
+    )
+}
+
+/**
+ * Stores a fixed-length ordered list of *positions*, each either an enum value or empty
+ * (null), as a comma-separated string. Unlike [getEnumList], empty slots are preserved
+ * on read/write rather than compacted away, so a gap at position 2 stays at position 2
+ * instead of everything after it shifting up.
+ */
+inline fun <reified T : Enum<T>> PreferenceStore.getEnumSlots(
+    key: String,
+    defaultValue: List<T?>,
+): Preference<List<T?>> {
+    return getObjectFromString(
+        key = key,
+        defaultValue = defaultValue,
+        serializer = { list -> list.joinToString(",") { it?.name.orEmpty() } },
+        deserializer = { str ->
+            str.split(",").map { token ->
+                if (token.isEmpty()) {
+                    null
+                } else {
+                    try {
+                        enumValueOf<T>(token)
+                    } catch (e: IllegalArgumentException) {
+                        null
+                    }
+                }
+            }
+        },
+    )
+}

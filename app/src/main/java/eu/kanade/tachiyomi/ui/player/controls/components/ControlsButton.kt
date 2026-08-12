@@ -41,6 +41,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import eu.kanade.tachiyomi.ui.player.controls.LocalPlayerButtonsClickEvent
 import tachiyomi.presentation.core.components.material.Button
+import tachiyomi.presentation.core.components.material.ButtonColors
+import tachiyomi.presentation.core.components.material.ButtonDefaults
 import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
 import tachiyomi.presentation.core.components.material.padding
 
@@ -129,12 +131,25 @@ fun ControlsButton(
     }
 }
 
+/**
+ * A subdued, semi-transparent pill button, styled to sit unobtrusively over video content
+ * rather than drawing the eye like a full-opacity primary-colored [Button] would.
+ */
+@Composable
+fun subtleButtonColors(): ButtonColors = ButtonDefaults.buttonColors(
+    containerColor = Color.Black.copy(alpha = 0.4f),
+    contentColor = Color.White,
+    disabledContainerColor = Color.Black.copy(alpha = 0.4f),
+    disabledContentColor = Color.White.copy(alpha = DISABLED_ALPHA),
+)
+
 @Composable
 fun FilledControlsButton(
     text: String,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     modifier: Modifier = Modifier,
+    colors: ButtonColors = subtleButtonColors(),
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val clickEvent = LocalPlayerButtonsClickEvent.current
@@ -142,7 +157,7 @@ fun FilledControlsButton(
     Box(
         modifier = modifier.padding(end = MaterialTheme.padding.small),
     ) {
-        Button(onClick = {}) {
+        Button(onClick = {}, colors = colors) {
             Text(text = text)
         }
         Box(

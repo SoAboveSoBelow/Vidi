@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.screen.SearchableSettings
+import eu.kanade.presentation.more.settings.screen.player.components.BottomPlayerButtonsDialog
+import eu.kanade.presentation.more.settings.screen.player.components.bottomPlayerButtonsSubtitle
 import eu.kanade.tachiyomi.ui.player.SingleActionGesture
 import eu.kanade.tachiyomi.ui.player.settings.GesturePreferences
 import kotlinx.collections.immutable.persistentListOf
@@ -45,7 +47,9 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
             getSlidersGroup(gesturePreferences = gesturePreferences),
             getSeekingGroup(gesturePreferences = gesturePreferences),
             getDoubleTapGroup(gesturePreferences = gesturePreferences),
+            getLongPressGroup(gesturePreferences = gesturePreferences),
             getMediaControlsGroup(gesturePreferences = gesturePreferences),
+            getBottomControlsGroup(gesturePreferences = gesturePreferences),
         )
     }
 
@@ -176,6 +180,30 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
     }
 
     @Composable
+    private fun getLongPressGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
+        val longPress = gesturePreferences.longPressGesture
+
+        return Preference.PreferenceGroup(
+            title = stringResource(AYMR.strings.pref_category_long_press),
+            preferenceItems = persistentListOf(
+                Preference.PreferenceItem.ListPreference(
+                    preference = longPress,
+                    entries = listOf(
+                        SingleActionGesture.None,
+                        SingleActionGesture.Screenshot,
+                        SingleActionGesture.PlayPause,
+                        SingleActionGesture.Custom,
+                    ).associateWith { stringResource(it.stringRes) }.toPersistentMap(),
+                    title = stringResource(AYMR.strings.pref_long_press),
+                ),
+                Preference.PreferenceItem.InfoPreference(
+                    title = stringResource(AYMR.strings.pref_long_press_info),
+                ),
+            ),
+        )
+    }
+
+    @Composable
     private fun getMediaControlsGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
         val mediaPrevious = gesturePreferences.mediaPreviousGesture
         val mediaPlayPause = gesturePreferences.mediaPlayPauseGesture
@@ -217,6 +245,36 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
                 ),
                 Preference.PreferenceItem.InfoPreference(
                     title = stringResource(AYMR.strings.pref_media_info),
+                ),
+            ),
+        )
+    }
+
+    @Composable
+    private fun getBottomControlsGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
+        val scope = rememberCoroutineScope()
+        val bottomPlayerButtonsPref = gesturePreferences.bottomPlayerButtons
+        val selectedButtons by bottomPlayerButtonsPref.stateIn(scope).collectAsState()
+
+        var showDialog by rememberSaveable { mutableStateOf(false) }
+        if (showDialog) {
+            BottomPlayerButtonsDialog(
+                initialSelection = selectedButtons,
+                onDismissRequest = { showDialog = false },
+                onConfirm = { bottomPlayerButtonsPref.set(it) },
+            )
+        }
+
+        return Preference.PreferenceGroup(
+            title = stringResource(AYMR.strings.pref_category_bottom_controls),
+            preferenceItems = persistentListOf(
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(AYMR.strings.pref_bottom_player_buttons),
+                    subtitle = bottomPlayerButtonsSubtitle(selectedButtons),
+                    onClick = { showDialog = true },
+                ),
+                Preference.PreferenceItem.InfoPreference(
+                    title = stringResource(AYMR.strings.pref_bottom_player_buttons_info),
                 ),
             ),
         )
