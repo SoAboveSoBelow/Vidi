@@ -57,6 +57,9 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
     private fun getSlidersGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
         val enableVolumeBrightnessGestures = gesturePreferences.gestureVolumeBrightness
         val swapVol = gesturePreferences.swapVolumeBrightness
+        // AM (SWIPE_SWITCH) -->
+        val verticalSwipeSwitch = gesturePreferences.gestureVerticalSwipeSwitch
+        // <-- AM (SWIPE_SWITCH)
 
         return Preference.PreferenceGroup(
             title = stringResource(AYMR.strings.pref_category_player_sliders),
@@ -69,6 +72,13 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
                     preference = swapVol,
                     title = stringResource(AYMR.strings.pref_controls_swap_vol_brightness),
                 ),
+                // AM (SWIPE_SWITCH) -->
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = verticalSwipeSwitch,
+                    title = stringResource(AYMR.strings.pref_vertical_swipe_switch),
+                    subtitle = stringResource(AYMR.strings.pref_vertical_swipe_switch_summary),
+                ),
+                // <-- AM (SWIPE_SWITCH)
             ),
         )
     }

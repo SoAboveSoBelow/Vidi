@@ -16,6 +16,12 @@ class GesturePreferences(
         true,
     )
     val swapVolumeBrightness: Preference<Boolean> = preferenceStore.getBoolean("pref_swap_volume_and_brightness", false)
+    // AM (SWIPE_SWITCH) -->
+    val gestureVerticalSwipeSwitch: Preference<Boolean> = preferenceStore.getBoolean(
+        "pref_gesture_vertical_swipe_switch",
+        false,
+    )
+    // <-- AM (SWIPE_SWITCH)
 
     // Seeking
 

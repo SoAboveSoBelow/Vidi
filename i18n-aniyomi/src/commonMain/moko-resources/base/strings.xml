@@ -120,6 +120,8 @@
     <string name="pref_skip_disable">Disable</string>
     <string name="pref_player_smooth_seek">Enable precise seeking</string>
     <string name="pref_player_smooth_seek_summary">When enabled, seeking will not focus on keyframes, leading to slower but precise seeking</string>
+    <string name="pref_vertical_swipe_switch">Enable Vertical Swipe to Switch Episode</string>
+    <string name="pref_vertical_swipe_switch_summary">Swipe up for next episode, swipe down for previous episode. Disables volume and brightness gestures while active</string>
     <string name="pref_category_double_tap">Double tap</string>
     <string name="pref_left_double_tap">Double tap (left)</string>
     <string name="pref_center_double_tap">Double tap (center)</string>

@@ -70,6 +70,9 @@ fun GestureHandler(
     val swapVolumeBrightness by gesturePreferences.swapVolumeBrightness.collectAsState()
     val showSeekbar by gesturePreferences.showSeekBar.collectAsState()
     val volumeBoostingCap by audioPreferences.volumeBoostCap.collectAsState()
+    // AM (SWIPE_SWITCH) -->
+    val verticalSwipeSwitch by gesturePreferences.gestureVerticalSwipeSwitch.collectAsState()
+    // <-- AM (SWIPE_SWITCH)
 
     val uiData by viewModel.uiData.collectAsStateWithLifecycle()
     val stateData by viewModel.stateData.collectAsStateWithLifecycle()
@@ -188,8 +191,10 @@ fun GestureHandler(
                     },
                 )
             }
-            .pointerInput(uiData.isControlsLocked) {
-                if (!gestureVolumeBrightness || uiData.isControlsLocked) return@pointerInput
+            .pointerInput(uiData.isControlsLocked, verticalSwipeSwitch) {
+                // AM (SWIPE_SWITCH) -->
+                if (!gestureVolumeBrightness || uiData.isControlsLocked || verticalSwipeSwitch) return@pointerInput
+                // <-- AM (SWIPE_SWITCH)
 
                 var startingY = 0f
                 var mpvVolumeStartingY = 0f
@@ -273,7 +278,33 @@ fun GestureHandler(
                         if (change.position.x < size.width / 2) changeBrightness() else changeVolume()
                     }
                 }
+            }
+            // AM (SWIPE_SWITCH) -->
+            .pointerInput(uiData.isControlsLocked, verticalSwipeSwitch) {
+                if (!verticalSwipeSwitch || uiData.isControlsLocked) return@pointerInput
+
+                val switchThreshold = size.height * 0.15f
+                var totalDragAmount = 0f
+
+                fun dragEnd() {
+                    if (totalDragAmount <= -switchThreshold) {
+                        viewModel.nextEpisode(next = true)
+                    } else if (totalDragAmount >= switchThreshold) {
+                        viewModel.nextEpisode(next = false)
+                    }
+                    totalDragAmount = 0f
+                }
+
+                detectVerticalDragGestures(
+                    onDragStart = { totalDragAmount = 0f },
+                    onDragEnd = { dragEnd() },
+                    onDragCancel = { totalDragAmount = 0f },
+                ) { change, dragAmount ->
+                    change.consume()
+                    totalDragAmount += dragAmount
+                }
             },
+        // <-- AM (SWIPE_SWITCH)
     )
 }
 
