@@ -125,6 +125,7 @@ android {
                 "libffmpegkit_abidetect",
                 "libffmpegkit",
                 "libimagedecoder",
+                "liblibrary",
                 "libmpv",
                 "libplayer",
                 "libpostproc",
@@ -132,6 +133,7 @@ android {
                 "libsqlite3x",
                 "libswresample",
                 "libswscale",
+                "libtorrserver",
                 "libxml2",
             )
                 .map { "**/$it.so" }
@@ -238,6 +240,7 @@ dependencies {
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.constraintLayout)
     // AY -->
+    implementation(aniyomilibs.localbroadcastmanager)
     implementation(aniyomilibs.compose.constraintlayout)
     // <-- AY
     implementation(libs.androidx.core)
@@ -342,6 +345,9 @@ dependencies {
 
     // true type parser
     implementation(aniyomilibs.truetypeparser)
+
+    // torrserver
+    implementation(aniyomilibs.torrserver)
     // <-- AY
 
     // AM (SYNC_DRIVE) -->

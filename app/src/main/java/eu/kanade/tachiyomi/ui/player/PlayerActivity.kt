@@ -446,6 +446,7 @@ class PlayerActivity : BaseActivity() {
         stopBackgroundPlayback()
 
         viewModel.player.release()
+        viewModel.stopHttpServer()
 
         mediaSession?.let {
             it.isActive = false
