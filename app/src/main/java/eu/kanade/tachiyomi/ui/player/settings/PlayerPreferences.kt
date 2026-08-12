@@ -84,7 +84,12 @@ class PlayerPreferences(
 
     val enablePip: Preference<Boolean> = preferenceStore.getBoolean("pref_enable_pip", true)
     val pipEpisodeToasts: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_episode_toasts", true)
-    val pipOnExit: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_on_exit", false)
+    // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+    // Default true: exiting via Home/Back should auto-enter PIP rather than silently
+    // falling back to audio-only background playback. No settings screen currently
+    // exposes this toggle, so the default is effectively the only way to control it.
+    val pipOnExit: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_on_exit", true)
+    // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     val pipFirstButtonAction: Preference<Int> = preferenceStore.getInt("pip_first_button_action", 0)
 
     // External player

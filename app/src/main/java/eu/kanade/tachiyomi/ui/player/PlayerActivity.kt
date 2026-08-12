@@ -67,6 +67,7 @@ import eu.kanade.tachiyomi.animesource.model.SerializableHoster.Companion.serial
 import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.ui.base.activity.BaseActivity
+import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
 import eu.kanade.tachiyomi.ui.player.settings.GesturePreferences
 import eu.kanade.tachiyomi.ui.player.settings.PlayerPreferences
 import eu.kanade.tachiyomi.util.system.powerManager
@@ -443,6 +444,11 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onDestroy() {
+        // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+        // Safety net: onPictureInPictureModeChanged(false, ...) normally clears this, but
+        // isn't guaranteed to fire if the activity is destroyed directly out of PIP.
+        SecureActivityDelegate.setPipActive(false)
+        // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
         stopBackgroundPlayback()
 
         viewModel.player.release()
@@ -627,6 +633,17 @@ class PlayerActivity : BaseActivity() {
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+        // Entering PIP is safe to mark immediately. Clearing it on exit is deferred into
+        // each branch below so startBackgroundPlayback() (when it runs) can set
+        // isBackgroundServiceActive = true first - otherwise there's a brief window where
+        // both flags are false and a concurrently-firing ProcessLifecycleOwner stop can
+        // wrongly consume the exemption.
+        if (isInPictureInPictureMode) {
+            SecureActivityDelegate.setPipActive(true)
+        }
+        // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
+
         if (!isInPictureInPictureMode) {
             pipReceiver?.let {
                 unregisterReceiver(pipReceiver)
@@ -635,15 +652,39 @@ class PlayerActivity : BaseActivity() {
 
             if (isIntentionalBackgroundTransition) {
                 isIntentionalBackgroundTransition = false
+                SecureActivityDelegate.setPipActive(false)
             } else if (lifecycle.currentState == Lifecycle.State.CREATED) {
-                window.decorView.postDelayed(
-                    {
-                        viewModel.player.release()
-                        finish()
-                    },
-                    100,
-                )
+                // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+                // The system also fires this when the screen turns off during PIP (tearing
+                // down the PIP surface for the lock screen), not just on a genuine user
+                // swipe-away. Only treat it as dismissal when the screen is actually on -
+                // otherwise fall back to background playback the same way onPause() does,
+                // so the session survives and the app lock stays exempt.
+                if (powerManager.isInteractive) {
+                    SecureActivityDelegate.setPipActive(false)
+                    window.decorView.postDelayed(
+                        {
+                            viewModel.player.release()
+                            finish()
+                        },
+                        100,
+                    )
+                } else if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
+                    startBackgroundPlayback()
+                    // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+                    // Use the handoff clear here, not setPipActive(false) - the service
+                    // start above is async, so isBackgroundServiceActive isn't true yet.
+                    SecureActivityDelegate.clearPipForBackgroundHandoff()
+                    // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
+                } else {
+                    viewModel.pause()
+                    SecureActivityDelegate.setPipActive(false)
+                }
+                // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
             } else {
+                // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+                SecureActivityDelegate.setPipActive(false)
+                // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
                 window.attributes = window.attributes.apply {
                     screenBrightness = viewModel.playbackData.value.currentBrightness.coerceIn(0f, 1f)
                 }

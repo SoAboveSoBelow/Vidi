@@ -16,6 +16,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
+import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
@@ -73,6 +74,7 @@ class PlayerBackgroundPlaybackService : Service() {
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
         )
         acquireWakeLock()
+        SecureActivityDelegate.setBackgroundServiceActive(true)
     }
 
     /** Keeps the CPU awake so decode/EOF/episode-load logic keeps running with the screen off. */
@@ -112,6 +114,7 @@ class PlayerBackgroundPlaybackService : Service() {
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
+        SecureActivityDelegate.setBackgroundServiceActive(false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -131,6 +134,9 @@ class PlayerBackgroundPlaybackService : Service() {
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
+        // Safety net: covers the service being killed/destroyed without
+        // stopBackgroundPlayback() having run first (e.g. system-initiated).
+        SecureActivityDelegate.setBackgroundServiceActive(false)
         super.onDestroy()
     }
 
