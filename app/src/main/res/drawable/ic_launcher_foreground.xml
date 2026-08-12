@@ -4,15 +4,17 @@
     android:viewportHeight="256"
     android:viewportWidth="256">
 
+    <!-- AM (VIDI_REBRAND) -->
+    <!-- Thin ring accent, echoing a shutter/lens motif -->
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#5EF2D2"
-        android:strokeWidth="8"
-        android:strokeAlpha="0.55"
-        android:pathData="M38,128 A90,90 0 1,0 218,128 A90,90 0 1,0 38,128 Z" />
+        android:strokeColor="#FFD166"
+        android:strokeWidth="6"
+        android:strokeAlpha="0.5"
+        android:pathData="M40,128 A88,88 0 1,0 216,128 A88,88 0 1,0 40,128 Z" />
 
+    <!-- Bold play triangle, warm amber for contrast against the indigo/violet field -->
     <path
-        android:fillColor="#35E7C0"
-        android:pathData="M100,96 L100,160 Q100,174 112.35,167.40 L173.65,134.60 Q186,128 173.65,121.40 L112.35,88.60 Q100,82 100,96 Z" />
-
+        android:fillColor="#FFD166"
+        android:pathData="M100,94 L100,162 Q100,176 112.8,169.2 L176.4,135.2 Q189,128 176.4,120.8 L112.8,86.8 Q100,80 100,94 Z" />
 </vector>

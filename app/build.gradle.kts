@@ -38,6 +38,12 @@ android {
     defaultConfig {
         applicationId = "xyz.Quickdev.Vidi.mi"
 
+        // AM (VIDI_REBRAND) -->
+        // Overrides app_name from the shared upstream strings.xml at build time, so this
+        // doesn't need to touch (and re-conflict on) a file that's tracked upstream.
+        resValue("string", "app_name", "Vidi")
+        // <-- AM (VIDI_REBRAND)
+
         versionCode = 147
         versionName = "0.19.9.0"
 

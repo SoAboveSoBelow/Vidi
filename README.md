@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://aniyomi.org">
-    <img src="./.github/assets/logo.png" alt="Animiru logo" title="Animiru logo" width="80"/>
+    <img src="./.github/assets/logo.png" alt="Vidi logo" title="Vidi logo" width="80"/>
 </a>
 
 # Vidi [App](#)
