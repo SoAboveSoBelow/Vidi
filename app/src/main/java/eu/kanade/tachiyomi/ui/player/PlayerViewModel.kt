@@ -213,6 +213,11 @@ class PlayerViewModel @JvmOverloads constructor(
     private val leftDoubleTapGesture = gesturePreferences.leftDoubleTapGesture.get()
     private val centerDoubleTapGesture = gesturePreferences.centerDoubleTapGesture.get()
     private val rightDoubleTapGesture = gesturePreferences.rightDoubleTapGesture.get()
+    // AM (MEDIA_CONTROLS) -->
+    private val mediaPreviousGesture = gesturePreferences.mediaPreviousGesture.get()
+    private val mediaPlayPauseGesture = gesturePreferences.mediaPlayPauseGesture.get()
+    private val mediaNextGesture = gesturePreferences.mediaNextGesture.get()
+    // <-- AM (MEDIA_CONTROLS)
     private val longPressGesture = gesturePreferences.longPressGesture.get()
     private val bottomPlayerButtons = gesturePreferences.bottomPlayerButtons.get()
     private val doubleTapToSeekDuration = gesturePreferences.skipLengthPreference.get()
@@ -475,10 +480,14 @@ class PlayerViewModel @JvmOverloads constructor(
                 updateUiData { it.copy(isControlsLocked = event.lock) }
             }
             is PlayerEvent.NextEpisode -> {
-                nextEpisode(event.next)
+                // AM (MEDIA_CONTROLS) -->
+                if (event.next) handleMediaNext() else handleMediaPrevious()
+                // <-- AM (MEDIA_CONTROLS)
             }
             PlayerEvent.PlayPause -> {
-                pauseUnpause()
+                // AM (MEDIA_CONTROLS) -->
+                handleMediaPlayPause()
+                // <-- AM (MEDIA_CONTROLS)
             }
             is PlayerEvent.Seek -> {
                 updateSeekPos(event.position.toFloat())
@@ -2439,6 +2448,60 @@ class PlayerViewModel @JvmOverloads constructor(
             }
         }
     }
+    // AM (MEDIA_CONTROLS) -->
+    fun handleMediaPrevious() {
+        when (mediaPreviousGesture) {
+            SingleActionGesture.None -> { }
+            SingleActionGesture.Seek -> {
+                leftSeek()
+            }
+            SingleActionGesture.PlayPause -> {
+                pauseUnpause()
+            }
+            SingleActionGesture.Switch -> {
+                nextEpisode(next = false)
+            }
+            SingleActionGesture.Custom -> {
+                mpvCommand("keypress", CustomKeyCodes.MediaPrevious.keyCode)
+            }
+            SingleActionGesture.Screenshot -> { }
+        }
+    }
+
+    fun handleMediaPlayPause() {
+        when (mediaPlayPauseGesture) {
+            SingleActionGesture.None -> { }
+            SingleActionGesture.Seek -> { }
+            SingleActionGesture.PlayPause -> {
+                pauseUnpause()
+            }
+            SingleActionGesture.Switch -> { }
+            SingleActionGesture.Custom -> {
+                mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
+            }
+            SingleActionGesture.Screenshot -> { }
+        }
+    }
+
+    fun handleMediaNext() {
+        when (mediaNextGesture) {
+            SingleActionGesture.None -> { }
+            SingleActionGesture.Seek -> {
+                rightSeek()
+            }
+            SingleActionGesture.PlayPause -> {
+                pauseUnpause()
+            }
+            SingleActionGesture.Switch -> {
+                nextEpisode(next = true)
+            }
+            SingleActionGesture.Custom -> {
+                mpvCommand("keypress", CustomKeyCodes.MediaNext.keyCode)
+            }
+            SingleActionGesture.Screenshot -> { }
+        }
+    }
+    // <-- AM (MEDIA_CONTROLS)
 
     fun leftSeek() {
         if (playbackData.value.position > 0) {

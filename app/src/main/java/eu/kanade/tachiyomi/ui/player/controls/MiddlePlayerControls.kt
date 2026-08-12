@@ -16,9 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -30,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -44,6 +42,7 @@ import kotlin.math.abs
 @Composable
 fun MiddlePlayerControls(
     // previous
+    previousIcon: ImageVector?,
     hasPrevious: Boolean,
     onSkipPrevious: () -> Unit,
 
@@ -59,6 +58,7 @@ fun MiddlePlayerControls(
     onPlayPauseClick: () -> Unit,
 
     // next
+    nextIcon: ImageVector?,
     hasNext: Boolean,
     onSkipNext: () -> Unit,
 
@@ -76,9 +76,9 @@ fun MiddlePlayerControls(
             enter = enter,
             exit = exit,
         ) {
-            if (gestureSeekAmount == null) {
+            if (gestureSeekAmount == null && previousIcon != null) {
                 ControlsButton(
-                    Icons.Filled.SkipPrevious,
+                    previousIcon,
                     onClick = onSkipPrevious,
                     iconSize = 48.dp,
                     enabled = hasPrevious,
@@ -137,9 +137,9 @@ fun MiddlePlayerControls(
             enter = enter,
             exit = exit,
         ) {
-            if (gestureSeekAmount == null) {
+            if (gestureSeekAmount == null && nextIcon != null) {
                 ControlsButton(
-                    Icons.Filled.SkipNext,
+                    nextIcon,
                     onClick = onSkipNext,
                     iconSize = 48.dp,
                     enabled = hasNext,

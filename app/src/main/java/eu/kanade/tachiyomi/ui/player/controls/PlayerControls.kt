@@ -17,16 +17,25 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PlayCircleOutline
+import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.LayoutDirection
@@ -37,17 +46,39 @@ import eu.kanade.tachiyomi.ui.player.PlayerUpdates
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
 import eu.kanade.tachiyomi.ui.player.Sheets
+import eu.kanade.tachiyomi.ui.player.SingleActionGesture
 import eu.kanade.tachiyomi.ui.player.controls.components.BrightnessSlider
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
 import eu.kanade.tachiyomi.ui.player.controls.components.SeekbarWithTimers
 import eu.kanade.tachiyomi.ui.player.controls.components.TextPlayerUpdate
 import eu.kanade.tachiyomi.ui.player.controls.components.ThumbnailPreview
 import eu.kanade.tachiyomi.ui.player.controls.components.VolumeSlider
+import eu.kanade.tachiyomi.ui.player.settings.GesturePreferences
 import kotlinx.coroutines.delay
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
+
+// AM (MEDIA_CONTROLS) -->
+/**
+ * Maps a gesture selection to the icon shown on the in-player previous/next buttons,
+ * so the button reflects what it will actually do. `null` means the gesture is
+ * [SingleActionGesture.None] and the button should not be shown at all.
+ */
+private fun mediaGestureIcon(gesture: SingleActionGesture, isNext: Boolean): ImageVector? {
+    return when (gesture) {
+        SingleActionGesture.None -> null
+        SingleActionGesture.Seek -> if (isNext) Icons.Filled.Forward10 else Icons.Filled.Replay10
+        SingleActionGesture.PlayPause -> Icons.Filled.PlayCircleOutline
+        SingleActionGesture.Switch -> if (isNext) Icons.Filled.SkipNext else Icons.Filled.SkipPrevious
+        SingleActionGesture.Custom -> Icons.Filled.TouchApp
+        SingleActionGesture.Screenshot -> Icons.Filled.PhotoCamera
+    }
+}
+// <-- AM (MEDIA_CONTROLS)
 
 @Suppress("CompositionLocalAllowlist")
 val LocalPlayerButtonsClickEvent = staticCompositionLocalOf { {} }
@@ -73,6 +104,26 @@ fun PlayerControls(
         animationSpec = playerControlsExitAnimationSpec(),
         label = "controls_transparent_overlay",
     )
+
+    // AM (MEDIA_CONTROLS) -->
+    val gesturePreferences = remember { Injekt.get<GesturePreferences>() }
+    val mediaPreviousGesture = remember { gesturePreferences.mediaPreviousGesture.get() }
+    val mediaNextGesture = remember { gesturePreferences.mediaNextGesture.get() }
+    val previousIcon = remember(mediaPreviousGesture) { mediaGestureIcon(mediaPreviousGesture, isNext = false) }
+    val nextIcon = remember(mediaNextGesture) { mediaGestureIcon(mediaNextGesture, isNext = true) }
+    // Episode boundaries are only relevant when the gesture actually switches episodes;
+    // seeking/play-pause/custom/screenshot aren't affected by which episode is playing.
+    val previousEnabled = if (mediaPreviousGesture == SingleActionGesture.Switch) {
+        stateData.hasPreviousEpisode
+    } else {
+        true
+    }
+    val nextEnabled = if (mediaNextGesture == SingleActionGesture.Switch) {
+        stateData.hasNextEpisode
+    } else {
+        true
+    }
+    // <-- AM (MEDIA_CONTROLS)
 
     CompositionLocalProvider(
         LocalLayoutDirection provides LayoutDirection.Ltr,
@@ -248,10 +299,14 @@ fun PlayerControls(
                 },
             ) {
                 MiddlePlayerControls(
-                    hasPrevious = stateData.hasPreviousEpisode,
+                    // AM (MEDIA_CONTROLS) -->
+                    previousIcon = previousIcon,
+                    hasPrevious = previousEnabled,
                     onSkipPrevious = { onPlayerEvent(PlayerEvent.NextEpisode(false)) },
-                    hasNext = stateData.hasNextEpisode,
+                    nextIcon = nextIcon,
+                    hasNext = nextEnabled,
                     onSkipNext = { onPlayerEvent(PlayerEvent.NextEpisode(true)) },
+                    // <-- AM (MEDIA_CONTROLS)
                     isStopped = stateData.isStopped,
                     isLoading = pausedForCache == true || (coreIdle == true && !playbackData.paused),
                     isLoadingEpisode = uiData.isLoadingEpisode,
