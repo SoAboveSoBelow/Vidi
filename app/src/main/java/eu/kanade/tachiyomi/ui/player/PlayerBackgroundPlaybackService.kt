@@ -16,8 +16,8 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
-import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -30,6 +30,20 @@ import tachiyomi.i18n.aniyomi.AYMR
 class PlayerBackgroundPlaybackService : Service() {
 
     private val binder = LocalBinder()
+
+    // AM (SERVICE_OWNED_PLAYER) -->
+    // Lazy: only constructed once something actually binds and asks for it, so a
+    // stray start() of this Service never spins up a second live mpv instance.
+    // Step 1: constructed and reachable, but nothing reads from it yet - the
+    // ViewModel-owned player (PlayerViewModel.player) remains the one actually
+    // driving playback until step 2 cuts call sites over.
+    private val mediaHolderLazy = lazy {
+        PlayerMediaHolder(this).also {
+            logcat { "PlayerMediaHolder constructed in PlayerBackgroundPlaybackService" }
+        }
+    }
+    val mediaHolder: PlayerMediaHolder by mediaHolderLazy
+    // <-- AM (SERVICE_OWNED_PLAYER)
 
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -44,6 +58,13 @@ class PlayerBackgroundPlaybackService : Service() {
 
     inner class LocalBinder : Binder() {
         fun getService(): PlayerBackgroundPlaybackService = this@PlayerBackgroundPlaybackService
+
+        // AM (SERVICE_OWNED_PLAYER) -->
+        // Step 1 verification hook: lets PlayerActivity confirm the Service-owned
+        // holder is alive alongside the existing ViewModel-owned player. Not used
+        // for actual playback control until step 2.
+        fun getMediaHolder(): PlayerMediaHolder = mediaHolder
+        // <-- AM (SERVICE_OWNED_PLAYER)
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -74,7 +95,14 @@ class PlayerBackgroundPlaybackService : Service() {
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
         )
         acquireWakeLock()
-        SecureActivityDelegate.setBackgroundServiceActive(true)
+        // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+        // Step 4a: the app-lock exemption used to be set here, tied to "the
+        // notification is showing." That stops being a valid proxy once the
+        // notification can show during ordinary foreground playback too (step 4b) -
+        // the exemption now belongs to PlayerActivity, driven by whether the
+        // Activity itself is actually away from the foreground, not by Service
+        // state. See PlayerActivity's onPause()/onStart()/onDestroy().
+        // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     }
 
     /** Keeps the CPU awake so decode/EOF/episode-load logic keeps running with the screen off. */
@@ -114,7 +142,6 @@ class PlayerBackgroundPlaybackService : Service() {
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
-        SecureActivityDelegate.setBackgroundServiceActive(false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -134,9 +161,18 @@ class PlayerBackgroundPlaybackService : Service() {
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
-        // Safety net: covers the service being killed/destroyed without
-        // stopBackgroundPlayback() having run first (e.g. system-initiated).
-        SecureActivityDelegate.setBackgroundServiceActive(false)
+        // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+        // Step 4a: no longer this Service's job - see the comment in start() above.
+        // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
+        // AM (SERVICE_OWNED_PLAYER) -->
+        // Step 1 only: this Service's onDestroy is still driven by the existing
+        // bind/unbind lifecycle (tied to backgrounding), not by "playback ended".
+        // Guard with isInitialized so a Service that was never actually bound to
+        // for media-holder purposes doesn't construct one just to release it.
+        if (mediaHolderLazy.isInitialized()) {
+            mediaHolder.release()
+        }
+        // <-- AM (SERVICE_OWNED_PLAYER)
         super.onDestroy()
     }
 

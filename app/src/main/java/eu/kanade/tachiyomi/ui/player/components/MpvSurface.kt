@@ -17,6 +17,9 @@ fun MpvSurface(
     modifier: Modifier = Modifier,
     mpv: MPV,
     videoOutput: String,
+    // AM (AUDIO_BLIP_FIX) -->
+    onSurfaceAttachedChanged: (Boolean) -> Unit = {},
+    // <-- AM (AUDIO_BLIP_FIX)
 ) {
     val decoderPreferences: DecoderPreferences = Injekt.get()
 
@@ -54,14 +57,26 @@ fun MpvSurface(
                             )
                             // Audio track re-selection after this reconfig is handled
                             // reactively in PlayerViewModel.onAudioTrackSelectChange.
+                            // AM (AUDIO_BLIP_FIX) -->
+                            onSurfaceAttachedChanged(true)
+                            // <-- AM (AUDIO_BLIP_FIX)
                         }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            // Plain "mediacodec" hwdec needs an attached Surface to init
-                            // a new decoder session, so loading a fresh episode while
-                            // backgrounded (no surface) breaks unless hwdec is off - no
-                            // loss since audio-only playback doesn't need it anyway.
-                            mpv.setOptionString("hwdec", "no")
+                            // AM (AUDIO_BLIP_FIX) -->
+                            // hwdec is deliberately NOT disabled here anymore. It used to be
+                            // ("Plain mediacodec hwdec needs an attached Surface to init a new
+                            // decoder session, so loading a fresh episode while backgrounded
+                            // breaks unless hwdec is off"), but that unconditionally paid a
+                            // heavyweight decoder-reinit cost (audible blip) on every single
+                            // background transition, not just the rarer case of actually
+                            // loading a new episode while backgrounded. PlayerViewModel.loadFile()
+                            // now disables hwdec right before that specific operation instead,
+                            // using isSurfaceAttached (set via the callback below) to know
+                            // whether it's needed - so just continuing the current episode in
+                            // the background no longer touches hwdec at all.
+                            onSurfaceAttachedChanged(false)
+                            // <-- AM (AUDIO_BLIP_FIX)
                             // Do NOT set vid="no": mpv runs a near-synchronous "anything
                             // selected?" check on file open, and only vid="auto" satisfies
                             // it in time (confirmed via logcat - root cause of "No video

@@ -190,8 +190,152 @@ class PlayerViewModel @JvmOverloads constructor(
 ) : AndroidViewModel(context) {
     val videoOutput = if (decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
 
-    val player = MPVPlayer(context, videoOutput)
-    val mpv = player.mpv
+    private var _player = MPVPlayer(context, videoOutput)
+    val player get() = _player
+    val mpv get() = _player.mpv
+
+    // AM (SERVICE_OWNED_PLAYER) -->
+    // Step 3b: player/mpv are now backed by a mutable field instead of a fixed val,
+    // so bindToService() can swap this instance over to the Service's canonical
+    // player on the dedup path below - without that, `player`/`mpv` would have
+    // stayed pointed at an orphaned, released instance for this ViewModel's entire
+    // lifetime whenever a duplicate Activity instance got created (the exact
+    // notification-relaunch bug this whole refactor exists to fix).
+    private var _playerFlowsWired = false
+    private val _playerReady = MutableStateFlow(false)
+    val playerReady = _playerReady.asStateFlow()
+
+    /** Called once PlayerActivity's Service connection delivers a live PlayerMediaHolder. */
+    fun bindToService(holder: PlayerMediaHolder) {
+        val resolvedPlayer = holder.adopt(player)
+        if (resolvedPlayer !== player) {
+            // This instance built its own player, but the Service already had one
+            // adopted from an earlier instance (e.g. a duplicate Activity spun up by
+            // the notification's forced FLAG_ACTIVITY_NEW_TASK). Release our own
+            // before it leaks, and switch this instance over to the canonical one -
+            // wirePlayerFlows() below runs against whichever player we land on, so
+            // nothing ends up wired to the one we're about to discard.
+            val orphaned = player
+            _player = resolvedPlayer
+            orphaned.release()
+            logcat(LogPriority.WARN) {
+                "PlayerViewModel.bindToService: released orphaned player ($orphaned), " +
+                    "switched to holder's canonical player ($resolvedPlayer)"
+            }
+        } else {
+            logcat { "PlayerViewModel.bindToService: holder adopted this player ($player)" }
+        }
+        wirePlayerFlows()
+        _playerReady.value = true
+    }
+
+    /**
+     * Wires every reactive subscription that reads from `player`/`mpv`. Deliberately NOT run
+     * from init{} - it has to run after [bindToService] has resolved which player this
+     * instance actually ends up using, so nothing gets wired up against a player that's
+     * about to be discarded as an orphan. Idempotent: bindToService only ever calls this
+     * once in practice, but a second call would otherwise double-subscribe everything.
+     */
+    private fun wirePlayerFlows() {
+        if (_playerFlowsWired) return
+        _playerFlowsWired = true
+
+        viewModelScope.launch {
+            player.eventFlow
+                .onEach { handlePlayerFlow(it) }
+                .launchIn(viewModelScope)
+
+            playerPreferences.autoplayEnabled.changes()
+                .onEach { v -> updateUiData { it.copy(autoPlayEnabled = v) } }
+                .launchIn(viewModelScope)
+
+            playerPreferences.playerSpeed.changes()
+                .onEach { v -> updateUiData { it.copy(playerSpeedPref = v) } }
+                .launchIn(viewModelScope)
+
+            combine(
+                propFlow<Double>("video-params/aspect"),
+                propFlow<Int>("video-params/rotate"),
+            ) { aspect, rotation -> aspect to rotation }
+                .onEach { (aspect, rotation) ->
+                    _aspectRatio.update { _ ->
+                        aspect?.let {
+                            if (it < 0.001) return@update 0.0
+                            if ((rotation ?: 0) % 180 == 90) 1.0 / it else it
+                        }
+                    }
+                }
+                .launchIn(viewModelScope)
+
+            propFlow<Int>("video-params/w")
+                .filterNotNull()
+                .onEach { v -> updateStateData { it.copy(videoWidth = v) } }
+                .launchIn(viewModelScope)
+
+            propFlow<Int>("video-params/h")
+                .filterNotNull()
+                .onEach { v -> updateStateData { it.copy(videoHeight = v) } }
+                .launchIn(viewModelScope)
+
+            propFlow<MPVNode>("track-list")
+                .filterNotNull()
+                .onEach { onTrackListChanged(it) }
+                .launchIn(viewModelScope)
+
+            propFlow<MPVNode>("chapter-list")
+                .filterNotNull()
+                .onEach { onChapterListChanged(it) }
+                .launchIn(viewModelScope)
+
+            propFlow<Int>("chapter")
+                .onEach { onChapterChanged(it) }
+                .launchIn(viewModelScope)
+
+            propFlow<Int>("duration")
+                .filterNotNull()
+                .onEach { v ->
+                    updatePlaybackData { it.copy(duration = v) }
+                }
+                .launchIn(viewModelScope)
+
+            propFlow<Int>("time-pos")
+                .filterNotNull()
+                .onEach { onSecondReached(it) }
+                .launchIn(viewModelScope)
+
+            propFlow<Boolean>("pause")
+                .filterNotNull()
+                .onEach { v ->
+                    updatePlaybackData { it.copy(paused = v) }
+                }
+                .launchIn(viewModelScope)
+
+            propFlow<Int>("volume-max")
+                .filterNotNull()
+                .onEach { v ->
+                    updateStateData { it.copy(volumeBoostCap = v) }
+                }
+                .launchIn(viewModelScope)
+
+            propFlow<MPVNode>("sid")
+                .onEach { onSubtitleTrackSelectChange() }
+                .launchIn(viewModelScope)
+
+            propFlow<MPVNode>("secondary-sid")
+                .onEach { onSubtitleTrackSelectChange() }
+                .launchIn(viewModelScope)
+
+            propFlow<MPVNode>("aid")
+                .onEach { onAudioTrackSelectChange() }
+                .launchIn(viewModelScope)
+
+            propFlow<Long>("user-data/current-anime/intro-length")
+                .filterNotNull()
+                .onEach { setAnimeSkipIntroLength(it) }
+                .launchIn(viewModelScope)
+        }
+    }
+    // <-- AM (SERVICE_OWNED_PLAYER)
 
     // Prefs
     private val reduceMotion = playerPreferences.reduceMotion.get()
@@ -302,101 +446,11 @@ class PlayerViewModel @JvmOverloads constructor(
                 updateUiData { it.copy(fontList = fetchFonts(fonts)) }
             }
         }
-
-        viewModelScope.launch {
-            player.eventFlow
-                .onEach { handlePlayerFlow(it) }
-                .launchIn(viewModelScope)
-
-            playerPreferences.autoplayEnabled.changes()
-                .onEach { v -> updateUiData { it.copy(autoPlayEnabled = v) } }
-                .launchIn(viewModelScope)
-
-            playerPreferences.playerSpeed.changes()
-                .onEach { v -> updateUiData { it.copy(playerSpeedPref = v) } }
-                .launchIn(viewModelScope)
-
-            combine(
-                propFlow<Double>("video-params/aspect"),
-                propFlow<Int>("video-params/rotate"),
-            ) { aspect, rotation -> aspect to rotation }
-                .onEach { (aspect, rotation) ->
-                    _aspectRatio.update { _ ->
-                        aspect?.let {
-                            if (it < 0.001) return@update 0.0
-                            if ((rotation ?: 0) % 180 == 90) 1.0 / it else it
-                        }
-                    }
-                }
-                .launchIn(viewModelScope)
-
-            propFlow<Int>("video-params/w")
-                .filterNotNull()
-                .onEach { v -> updateStateData { it.copy(videoWidth = v) } }
-                .launchIn(viewModelScope)
-
-            propFlow<Int>("video-params/h")
-                .filterNotNull()
-                .onEach { v -> updateStateData { it.copy(videoHeight = v) } }
-                .launchIn(viewModelScope)
-
-            propFlow<MPVNode>("track-list")
-                .filterNotNull()
-                .onEach { onTrackListChanged(it) }
-                .launchIn(viewModelScope)
-
-            propFlow<MPVNode>("chapter-list")
-                .filterNotNull()
-                .onEach { onChapterListChanged(it) }
-                .launchIn(viewModelScope)
-
-            propFlow<Int>("chapter")
-                .onEach { onChapterChanged(it) }
-                .launchIn(viewModelScope)
-
-            propFlow<Int>("duration")
-                .filterNotNull()
-                .onEach { v ->
-                    updatePlaybackData { it.copy(duration = v) }
-                }
-                .launchIn(viewModelScope)
-
-            propFlow<Int>("time-pos")
-                .filterNotNull()
-                .onEach { onSecondReached(it) }
-                .launchIn(viewModelScope)
-
-            propFlow<Boolean>("pause")
-                .filterNotNull()
-                .onEach { v ->
-                    updatePlaybackData { it.copy(paused = v) }
-                }
-                .launchIn(viewModelScope)
-
-            propFlow<Int>("volume-max")
-                .filterNotNull()
-                .onEach { v ->
-                    updateStateData { it.copy(volumeBoostCap = v) }
-                }
-                .launchIn(viewModelScope)
-
-            propFlow<MPVNode>("sid")
-                .onEach { onSubtitleTrackSelectChange() }
-                .launchIn(viewModelScope)
-
-            propFlow<MPVNode>("secondary-sid")
-                .onEach { onSubtitleTrackSelectChange() }
-                .launchIn(viewModelScope)
-
-            propFlow<MPVNode>("aid")
-                .onEach { onAudioTrackSelectChange() }
-                .launchIn(viewModelScope)
-
-            propFlow<Long>("user-data/current-anime/intro-length")
-                .filterNotNull()
-                .onEach { setAnimeSkipIntroLength(it) }
-                .launchIn(viewModelScope)
-        }
+        // AM (SERVICE_OWNED_PLAYER) -->
+        // The player/mpv-reading subscriptions that used to live here moved into
+        // wirePlayerFlows(), called from bindToService() once it's known which
+        // player this instance actually ends up using. See that function's kdoc.
+        // <-- AM (SERVICE_OWNED_PLAYER)
     }
 
     fun isPlayerExiting(): Boolean {
@@ -450,6 +504,30 @@ class PlayerViewModel @JvmOverloads constructor(
     fun mpvCommand(vararg command: String) {
         mpv.command(*command)
     }
+
+    // AM (AUDIO_BLIP_FIX) -->
+    // Flips true/false by MpvSurface's attach/detach callbacks (via PlayerScreen.kt).
+    // Defaults true since a surface is normally attached when playback starts.
+    var isSurfaceAttached: Boolean = true
+
+    /**
+     * loadfile, but disables hwdec first if there's currently no attached Surface -
+     * MediaCodec hwdec needs one to initialize a decoder session, so loading while
+     * backgrounded would otherwise fail. Previously this was handled by
+     * unconditionally disabling hwdec on every surface detach (MpvSurface.kt's
+     * surfaceDestroyed), which caused an audible blip on every single background
+     * transition, not just the (much rarer) case of loading a new episode while
+     * already backgrounded. Doing it here, right before the one operation that
+     * actually needs it, means the common "just keep playing the same episode in
+     * the background" case never touches hwdec at all.
+     */
+    private fun loadFile(url: String, options: String) {
+        if (!isSurfaceAttached) {
+            mpv.setOptionString("hwdec", "no")
+        }
+        mpvCommand("loadfile", url, "replace", "0", options)
+    }
+    // <-- AM (AUDIO_BLIP_FIX)
 
     fun handlePlayerEvent(event: PlayerEvent) {
         when (event) {
@@ -1187,13 +1265,7 @@ class PlayerViewModel @JvmOverloads constructor(
                     updateStateData { it.copy(currentVideo = newVideo) }
                 }
 
-                mpvCommand(
-                    "loadfile",
-                    parseVideoUrl(videoUrl)!!,
-                    "replace",
-                    "0",
-                    videoOptions,
-                )
+                loadFile(parseVideoUrl(videoUrl)!!, videoOptions)
             }
         }
     }
@@ -1207,13 +1279,7 @@ class PlayerViewModel @JvmOverloads constructor(
             val torrent = torrentServerApi.uploadTorrent(videoInputStream!!, title, false)
             val torrentUrl = torrentServerUtils.getTorrentPlayLink(torrent, 0)
 
-            mpvCommand(
-                "loadfile",
-                torrentUrl,
-                "replace",
-                "0",
-                videoOptions,
-            )
+            loadFile(torrentUrl, videoOptions)
             return
         }
 
@@ -1231,13 +1297,7 @@ class PlayerViewModel @JvmOverloads constructor(
         val currentTorrent = torrentServerApi.addTorrent(videoUrl, title, "", "", false)
         val videoTorrentUrl = torrentServerUtils.getTorrentPlayLink(currentTorrent, index)
 
-        mpvCommand(
-            "loadfile",
-            videoTorrentUrl,
-            "replace",
-            "0",
-            videoOptions,
-        )
+        loadFile(videoTorrentUrl, videoOptions)
     }
 
     private fun isTorrent(video: Video): Boolean {

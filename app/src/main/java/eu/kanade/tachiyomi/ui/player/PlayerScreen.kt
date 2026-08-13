@@ -12,6 +12,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -91,6 +92,19 @@ fun PlayerScreen(
         val playbackSpeed by viewModel.propFlow<Float>("speed").collectAsStateWithLifecycle()
         val currentChapter by viewModel.propFlow<Int>("chapter").collectAsStateWithLifecycle()
 
+        // AM (SERVICE_OWNED_PLAYER) -->
+        // Reading (not just collecting) playerReady here forces this scope to
+        // recompose once bindToService resolves - including the (rare) case where
+        // it swapped viewModel.mpv out from under an orphaned player. key(viewModel.mpv)
+        // below then re-reads mpv fresh on that recomposition, and AndroidView tears
+        // down/rebuilds against whatever changed (AndroidView's factory only runs once
+        // per composable identity - it doesn't react to a later parameter change on
+        // its own). Just calling collectAsStateWithLifecycle() without reading .value
+        // wouldn't establish this dependency - Compose only recomposes readers of a
+        // State's value, not callers of the function that produced it.
+        val playerReady by viewModel.playerReady.collectAsStateWithLifecycle()
+        // <-- AM (SERVICE_OWNED_PLAYER)
+
         BackHandler(
             enabled = stateData.isPipAvailable && !playbackData.paused && playerPreferences.pipOnExit.get() &&
                 uiData.sheetShown == Sheets.None &&
@@ -100,11 +114,22 @@ fun PlayerScreen(
             viewModel.handlePlayerEvent(PlayerEvent.EnterPip)
         }
 
-        MpvSurface(
-            modifier = Modifier.fillMaxSize(),
-            mpv = viewModel.mpv,
-            videoOutput = viewModel.videoOutput,
-        )
+        // AM (SERVICE_OWNED_PLAYER) -->
+        // key(viewModel.mpv, playerReady): forces AndroidView to fully tear down and
+        // rebuild (re-running MpvSurface's factory, which attaches a fresh SurfaceView)
+        // whenever mpv's identity changes - the orphan-dedup swap in
+        // PlayerViewModel.bindToService(), specifically. Without this, the surface
+        // would stay permanently attached to whatever player was live at first
+        // composition, even after the ViewModel switched to a different one.
+        key(viewModel.mpv, playerReady) {
+            MpvSurface(
+                modifier = Modifier.fillMaxSize(),
+                mpv = viewModel.mpv,
+                videoOutput = viewModel.videoOutput,
+                onSurfaceAttachedChanged = { attached -> viewModel.isSurfaceAttached = attached },
+            )
+        }
+        // <-- AM (SERVICE_OWNED_PLAYER)
 
         GestureHandler(
             modifier = Modifier.fillMaxSize(),

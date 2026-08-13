@@ -95,7 +95,14 @@ class PlayerActivity : BaseActivity() {
     private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
     private val inputMethodManager by lazy { getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager }
 
-    private var mediaSession: MediaSession? = null
+    // AM (MEDIA_SESSION_SERVICE_OWNED) -->
+    // Backed by the Service-owned holder instead of a locally-constructed session, so
+    // it survives this Activity's destruction the same way the player now does. Every
+    // existing `mediaSession?.xxx` call site elsewhere in this file keeps working
+    // unchanged - only the backing storage moved.
+    private val mediaSession: MediaSession?
+        get() = mediaHolder?.mediaSession
+    // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
     private val gesturePreferences: GesturePreferences = Injekt.get()
     private val playerPreferences: PlayerPreferences = Injekt.get()
 
@@ -104,33 +111,73 @@ class PlayerActivity : BaseActivity() {
     // Set before we intentionally moveTaskToBack() (e.g. PIP "background play"),
     // so onPictureInPictureModeChanged doesn't treat it as the user swiping PIP away.
     private var isIntentionalBackgroundTransition = false
-    private var isBoundToBackgroundPlaybackService = false
-    private val backgroundPlaybackConnection = object : ServiceConnection {
+
+    // AM (SERVICE_OWNED_PLAYER) -->
+    // Bound for the whole playback session (established in onCreate, torn down in
+    // onDestroy) rather than only while backgrounded - keeps PlayerMediaHolder alive
+    // and, since step 4b, also posts/owns the always-on playback notification as
+    // soon as this connects (not just once backgrounded).
+    private var mediaHolder: PlayerMediaHolder? = null
+    private val mediaHolderConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            val bound = (service as? PlayerBackgroundPlaybackService.LocalBinder)?.getService() ?: return
-            backgroundPlaybackService = bound
-            bound.start(
-                title = viewModel.uiData.value.animeTitle,
-                subtitle = viewModel.uiData.value.mediaTitle,
-                isPlaying = !viewModel.playbackData.value.paused,
-                animeId = viewModel.stateData.value.currentAnime?.id,
-                episodeId = viewModel.stateData.value.currentEpisode?.id,
-                mediaSessionToken = mediaSession?.sessionToken,
-                onTogglePlayPause = {
-                    if (viewModel.playbackData.value.paused) viewModel.unpause() else viewModel.pause()
-                    backgroundPlaybackService?.updatePlaybackState(!viewModel.playbackData.value.paused)
-                },
-                onStopRequested = {
-                    viewModel.pause()
-                    stopBackgroundPlayback()
-                },
-            )
+            val binder = service as? PlayerBackgroundPlaybackService.LocalBinder ?: return
+
+            val bound = binder.getMediaHolder()
+            mediaHolder = bound
+            logcat { "PlayerActivity bound to PlayerMediaHolder: $bound (viewModel.player=${viewModel.player})" }
+            viewModel.bindToService(bound)
+
+            // AM (MEDIA_SESSION_SERVICE_OWNED) -->
+            // The MediaSession is now Service-owned (via the holder), same reasoning
+            // as the player: it needs to survive this Activity's destruction, not get
+            // garbage-collected along with it. ensureMediaSession() creates it once and
+            // redirects the callback on every later call, so a reattaching instance's
+            // media-button presses route to the current ViewModel, not a dead one.
+            setupMediaSessionCallback(bound)
+            // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
+
+            // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+            // Step 4b: the notification now posts as soon as the Service is bound -
+            // i.e. as soon as playback exists at all, not only once backgrounded -
+            // per the YouTube-style always-on-notification decision. Whatever
+            // title/subtitle is available right now (possibly still blank, since
+            // this fires before onNewIntent's episode load in some orderings) gets
+            // corrected shortly after by the existing reactive updateEpisodeInfo()
+            // collector further down in onCreate - that collector already runs
+            // unconditionally and doesn't care when the Service connected.
+            backgroundPlaybackService = binder.getService().also { svc ->
+                svc.start(
+                    title = viewModel.uiData.value.animeTitle,
+                    subtitle = viewModel.uiData.value.mediaTitle,
+                    isPlaying = !viewModel.playbackData.value.paused,
+                    animeId = viewModel.stateData.value.currentAnime?.id,
+                    episodeId = viewModel.stateData.value.currentEpisode?.id,
+                    mediaSessionToken = mediaSession?.sessionToken,
+                    onTogglePlayPause = {
+                        if (viewModel.playbackData.value.paused) viewModel.unpause() else viewModel.pause()
+                        backgroundPlaybackService?.updatePlaybackState(!viewModel.playbackData.value.paused)
+                    },
+                    onStopRequested = {
+                        // Tapping "stop" now ends the whole session (there's no more
+                        // "hide the notification but keep the player alive" state to
+                        // fall back to, since the notification is meant to track
+                        // playback existing at all) - matches onDestroy's isFinishing
+                        // teardown path.
+                        viewModel.pause()
+                        stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
+                        finish()
+                    },
+                )
+            }
+            // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            mediaHolder = null
             backgroundPlaybackService = null
         }
     }
+    // <-- AM (SERVICE_OWNED_PLAYER)
 
     // AM (DISCORD_RPC) -->
     // private val connectionPreferences: ConnectionPreferences = Injekt.get()
@@ -258,8 +305,31 @@ class PlayerActivity : BaseActivity() {
         registerSecureActivity(this)
         super.onCreate(savedInstanceState)
 
-        setupMediaSession()
+        // AM (MEDIA_SESSION_SERVICE_OWNED) -->
+        // No longer set up synchronously here - it's created/redirected via the
+        // holder once mediaHolderConnection binds (setupMediaSessionCallback()),
+        // same timing as the notification and player adoption below.
+        // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
         viewModel.setupPlayerOrientation()
+
+        // AM (SERVICE_OWNED_PLAYER) -->
+        // Step 3: an explicit (non-foreground) start, independent of any bind/unbind
+        // cycle, so the Service - and the player it ends up holding - survives this
+        // Activity's destruction whenever playback is meant to continue (see onDestroy).
+        // Deliberately NOT startForegroundService here: that requires calling
+        // startForeground() within ~5s or the process crashes. In practice that
+        // deadline is met anyway, since mediaHolderConnection's onServiceConnected
+        // (below) calls the Service's real notification-posting start() - which does
+        // call startForeground() - essentially immediately after this. Using a plain
+        // start() here just means the Service surviving isn't ITSELF gated on that
+        // 5s deadline if binding is ever slower than expected.
+        startService(PlayerBackgroundPlaybackService.newIntent(this))
+        bindService(
+            PlayerBackgroundPlaybackService.newIntent(this),
+            mediaHolderConnection,
+            Context.BIND_AUTO_CREATE,
+        )
+        // <-- AM (SERVICE_OWNED_PLAYER)
 
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
             runOnUiThread {
@@ -449,15 +519,34 @@ class PlayerActivity : BaseActivity() {
         // isn't guaranteed to fire if the activity is destroyed directly out of PIP.
         SecureActivityDelegate.setPipActive(false)
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
-        stopBackgroundPlayback()
 
-        viewModel.player.release()
-        viewModel.stopHttpServer()
-
-        mediaSession?.let {
-            it.isActive = false
-            it.release()
+        // AM (SERVICE_OWNED_PLAYER) -->
+        // Step 3: onDestroy fires both when this session genuinely ends (isFinishing)
+        // and when the OS destroys an invisible backgrounded Activity to reclaim
+        // memory while playback is meant to continue - those need very different
+        // teardown. Previously every line below ran unconditionally, which meant an
+        // ordinary background eviction would kill the notification/foreground state
+        // and, shortly after, playback itself - likely a real contributor to the
+        // lifecycle-order-dependent bugs this refactor exists to fix.
+        if (isFinishing) {
+            // Genuine end of this playback session - tear everything down.
+            stopBackgroundPlayback()
+            viewModel.player.release()
+            viewModel.stopHttpServer()
+            mediaSession?.let {
+                it.isActive = false
+                it.release()
+            }
+            stopService(PlayerBackgroundPlaybackService.newIntent(this))
         }
+        // else: this Activity instance is being destroyed while playback is meant to
+        // continue - leave the Service, its player, its notification (if active), and
+        // the MediaSession running. A future reattach adopts the same player via
+        // PlayerMediaHolder.adopt() instead of these being torn down out from under it.
+
+        unbindService(mediaHolderConnection)
+        mediaHolder = null
+        // <-- AM (SERVICE_OWNED_PLAYER)
 
         if (noisyReceiver.initialized) {
             unregisterReceiver(noisyReceiver)
@@ -473,22 +562,22 @@ class PlayerActivity : BaseActivity() {
     }
 
     private fun startBackgroundPlayback() {
-        if (isBoundToBackgroundPlaybackService) return
-        PlayerBackgroundPlaybackService.start(this)
-        bindService(
-            PlayerBackgroundPlaybackService.newIntent(this),
-            backgroundPlaybackConnection,
-            Context.BIND_AUTO_CREATE,
-        )
-        isBoundToBackgroundPlaybackService = true
+        // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+        // Step 4a: represents "the user is leaving the foreground UI while playback
+        // continues," independent of notification state. Step 4b: this function no
+        // longer starts/binds the Service or posts the notification - mediaHolderConnection
+        // (bound for the whole session in onCreate) already handles that unconditionally,
+        // since the notification is now always-on while playing. This is just the
+        // exemption toggle now; setBackgroundServiceActive is idempotent, so no guard
+        // is needed against calling it more than once.
+        SecureActivityDelegate.setBackgroundServiceActive(true)
+        // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     }
 
     private fun stopBackgroundPlayback() {
-        if (!isBoundToBackgroundPlaybackService) return
-        backgroundPlaybackService?.stopBackgroundPlayback()
-        unbindService(backgroundPlaybackConnection)
-        backgroundPlaybackService = null
-        isBoundToBackgroundPlaybackService = false
+        // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+        SecureActivityDelegate.setBackgroundServiceActive(false)
+        // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     }
 
     override fun onPause() {
@@ -504,8 +593,10 @@ class PlayerActivity : BaseActivity() {
             viewModel.deletePendingEpisodes()
             viewModel.mpvCommand("stop")
         } else if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
-            // Keep mpv running via a foreground service instead of pausing, so the
-            // OS doesn't throttle/kill the process once the screen turns off.
+            // The Service/player/notification keep running regardless (they're not
+            // tied to this Activity's visibility since step 4b) - this branch is only
+            // about whether backgrounding should also mark the app-lock exemption and
+            // leave playback running, versus falling through to an actual pause below.
             startBackgroundPlayback()
         } else {
             viewModel.pause()
@@ -531,7 +622,9 @@ class PlayerActivity : BaseActivity() {
 
     override fun onStart() {
         super.onStart()
-        // Foreground again - background service/notification no longer needed.
+        // Foreground again - the app-lock "user is away while playback continues"
+        // exemption no longer applies. The notification itself is untouched here -
+        // it stays up regardless of foreground/background state since step 4b.
         stopBackgroundPlayback()
         setPictureInPictureParams(createPipParams())
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -765,91 +858,104 @@ class PlayerActivity : BaseActivity() {
         return super.onKeyUp(keyCode, event)
     }
 
-    private fun setupMediaSession() {
+    // AM (MEDIA_SESSION_SERVICE_OWNED) -->
+    // Builds the media-button callback and registers/redirects it via the holder's
+    // ensureMediaSession(). Callback body is otherwise unchanged from before this
+    // moved to the Service - it still closes over this instance's viewModel/gesture
+    // prefs, which is correct: ensureMediaSession() redirects the session to
+    // whichever instance called it most recently, so a reattach's callback always
+    // wins over a stale one from a dead Activity.
+    private fun setupMediaSessionCallback(holder: PlayerMediaHolder) {
+        // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
         val previousAction = gesturePreferences.mediaPreviousGesture.get()
         val playAction = gesturePreferences.mediaPlayPauseGesture.get()
         val nextAction = gesturePreferences.mediaNextGesture.get()
 
-        mediaSession = MediaSession(this, "PlayerActivity").apply {
-            setCallback(
-                object : MediaSession.Callback() {
-                    override fun onPlay() {
-                        when (playAction) {
-                            SingleActionGesture.None -> {}
-                            SingleActionGesture.Seek -> {}
-                            SingleActionGesture.PlayPause -> {
-                                super.onPlay()
-                                viewModel.unpause()
-                            }
-                            SingleActionGesture.Custom -> {
-                                viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
-                            }
+        // Declared before the callback below so onStop() can reference the session
+        // it's attached to - the callback object is built before ensureMediaSession()
+        // returns it, so it can't be captured any other way. Safe: onStop() only ever
+        // runs later, once session is definitely assigned.
+        lateinit var session: MediaSession
 
-                            SingleActionGesture.Switch -> {}
-                            SingleActionGesture.Screenshot -> {}
-                        }
+        val callback = object : MediaSession.Callback() {
+            override fun onPlay() {
+                when (playAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {}
+                    SingleActionGesture.PlayPause -> {
+                        super.onPlay()
+                        viewModel.unpause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
                     }
 
-                    override fun onPause() {
-                        when (playAction) {
-                            SingleActionGesture.None -> {}
-                            SingleActionGesture.Seek -> {}
-                            SingleActionGesture.PlayPause -> {
-                                super.onPause()
-                                viewModel.pause()
-                            }
-                            SingleActionGesture.Custom -> {
-                                viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
-                            }
+                    SingleActionGesture.Switch -> {}
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
 
-                            SingleActionGesture.Switch -> {}
-                            SingleActionGesture.Screenshot -> {}
-                        }
+            override fun onPause() {
+                when (playAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {}
+                    SingleActionGesture.PlayPause -> {
+                        super.onPause()
+                        viewModel.pause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
                     }
 
-                    override fun onSkipToPrevious() {
-                        when (previousAction) {
-                            SingleActionGesture.None -> {}
-                            SingleActionGesture.Seek -> {
-                                viewModel.leftSeek()
-                            }
-                            SingleActionGesture.PlayPause -> {
-                                viewModel.pauseUnpause()
-                            }
-                            SingleActionGesture.Custom -> {
-                                viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPrevious.keyCode)
-                            }
+                    SingleActionGesture.Switch -> {}
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
 
-                            SingleActionGesture.Switch -> viewModel.nextEpisode(next = false)
-                            SingleActionGesture.Screenshot -> {}
-                        }
+            override fun onSkipToPrevious() {
+                when (previousAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {
+                        viewModel.leftSeek()
+                    }
+                    SingleActionGesture.PlayPause -> {
+                        viewModel.pauseUnpause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPrevious.keyCode)
                     }
 
-                    override fun onSkipToNext() {
-                        when (nextAction) {
-                            SingleActionGesture.None -> {}
-                            SingleActionGesture.Seek -> {
-                                viewModel.rightSeek()
-                            }
-                            SingleActionGesture.PlayPause -> {
-                                viewModel.pauseUnpause()
-                            }
-                            SingleActionGesture.Custom -> {
-                                viewModel.mpvCommand("keypress", CustomKeyCodes.MediaNext.keyCode)
-                            }
+                    SingleActionGesture.Switch -> viewModel.nextEpisode(next = false)
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
 
-                            SingleActionGesture.Switch -> viewModel.nextEpisode(next = true)
-                            SingleActionGesture.Screenshot -> {}
-                        }
+            override fun onSkipToNext() {
+                when (nextAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {
+                        viewModel.rightSeek()
+                    }
+                    SingleActionGesture.PlayPause -> {
+                        viewModel.pauseUnpause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaNext.keyCode)
                     }
 
-                    override fun onStop() {
-                        super.onStop()
-                        isActive = false
-                        this@PlayerActivity.onStop()
-                    }
-                },
-            )
+                    SingleActionGesture.Switch -> viewModel.nextEpisode(next = true)
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
+
+            override fun onStop() {
+                super.onStop()
+                session.isActive = false
+                this@PlayerActivity.onStop()
+            }
+        }
+
+        session = holder.ensureMediaSession(this, callback).apply {
             setPlaybackState(
                 PlaybackState.Builder()
                     .setActions(
@@ -864,15 +970,25 @@ class PlayerActivity : BaseActivity() {
             isActive = true
         }
 
-        val filter = IntentFilter().apply { addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY) }
-        registerReceiver(noisyReceiver, filter)
-        noisyReceiver.initialized = true
-
-        val screenStateFilter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
+        // AM (MEDIA_SESSION_SERVICE_OWNED) -->
+        // Guarded: this function now runs from mediaHolderConnection.onServiceConnected,
+        // which could in theory fire more than once per Activity instance if the Service
+        // ever disconnects and reconnects mid-session - without this check that would
+        // double-register these receivers and crash.
+        if (!noisyReceiver.initialized) {
+            val filter = IntentFilter().apply { addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY) }
+            registerReceiver(noisyReceiver, filter)
+            noisyReceiver.initialized = true
         }
-        registerReceiver(screenStateReceiver, screenStateFilter)
-        screenStateReceiver.initialized = true
+
+        if (!screenStateReceiver.initialized) {
+            val screenStateFilter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+            registerReceiver(screenStateReceiver, screenStateFilter)
+            screenStateReceiver.initialized = true
+        }
+        // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
     }
 
     // ==== END MPVKT ====
