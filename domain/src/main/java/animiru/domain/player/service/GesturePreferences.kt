@@ -1,7 +1,7 @@
 package animiru.domain.player.service
 
+import animiru.domain.player.model.BottomPlayerButton
 import animiru.domain.player.model.SingleActionGesture
-import eu.kanade.tachiyomi.ui.player.BottomPlayerButton
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.preference.getEnum

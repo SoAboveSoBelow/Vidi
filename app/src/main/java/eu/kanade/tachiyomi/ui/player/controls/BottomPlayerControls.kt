@@ -30,8 +30,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import animiru.domain.player.model.BottomPlayerButton
 import dev.vivvvek.seeker.Segment
-import eu.kanade.tachiyomi.ui.player.BottomPlayerButton
 import eu.kanade.tachiyomi.ui.player.Sheets
 import eu.kanade.tachiyomi.ui.player.components.CurrentChapter
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton

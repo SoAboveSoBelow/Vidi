@@ -2,8 +2,6 @@ package eu.kanade.tachiyomi.ui.player
 
 import animiru.domain.player.model.VideoAspect
 import dev.icerock.moko.resources.StringResource
-import eu.kanade.tachiyomi.util.system.castIncluded
-import tachiyomi.i18n.aniyomi.AYMR
 
 enum class Sheets {
     None,
@@ -22,21 +20,6 @@ enum class Panels {
     SubtitleDelay,
     AudioDelay,
     VideoFilters,
-}
-
-/**
- * Buttons that can be shown in the customizable row along the bottom of the player.
- * Order in [entries] is only the declaration order; the user's chosen order and
- * selection are stored separately via [animiru.domain.player.service.GesturePreferences.bottomPlayerButtons].
- */
-enum class BottomPlayerButton(val stringRes: StringResource) {
-    Lock(AYMR.strings.pref_bottom_button_lock),
-    Rotation(AYMR.strings.pref_bottom_button_rotation),
-    Speed(AYMR.strings.pref_bottom_button_speed),
-    Chapters(AYMR.strings.pref_bottom_button_chapters),
-    PictureInPicture(AYMR.strings.pref_bottom_button_pip),
-    AspectRatio(AYMR.strings.pref_bottom_button_aspect_ratio),
-    Screenshot(AYMR.strings.pref_bottom_button_screenshot),
 }
 
 sealed class Dialogs {

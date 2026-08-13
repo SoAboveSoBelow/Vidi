@@ -25,8 +25,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import animiru.domain.player.model.BottomPlayerButton
 import animiru.domain.player.service.GesturePreferences.Companion.MAX_BOTTOM_PLAYER_BUTTONS
-import eu.kanade.tachiyomi.ui.player.BottomPlayerButton
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.padding
