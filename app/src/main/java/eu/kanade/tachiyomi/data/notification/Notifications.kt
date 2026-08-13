@@ -79,7 +79,18 @@ object Notifications {
     const val ID_DISCORD_RPC = -1701
     // <-- AM (DISCORD_RPC)
 
-    // App/extension updates
+    // AM (CAST) -->
+
+    /**
+     * Notification channel used for Cast
+     */
+    const val CHANNEL_CAST_SERVER = "cast_server_channel"
+    const val ID_CAST_SERVER = -1702
+    // <-- AM (CAST)
+
+    /**
+     * Notification channel and ids used for app and extension updates.
+     */
     private const val GROUP_APK_UPDATES = "group_apk_updates"
     const val CHANNEL_APP_UPDATE = "app_apk_update_channel"
     const val ID_APP_UPDATER = 1
@@ -189,6 +200,11 @@ object Notifications {
                     setShowBadge(false)
                 },
                 // <-- AY
+                // AM (CAST) -->
+                buildNotificationChannel(CHANNEL_CAST_SERVER, IMPORTANCE_LOW) {
+                    setName(context.stringResource(AMMR.strings.pref_cast_server))
+                },
+                // <-- AM (CAST)
                 buildNotificationChannel(CHANNEL_APP_UPDATE, IMPORTANCE_DEFAULT) {
                     setGroup(GROUP_APK_UPDATES)
                     setName(context.stringResource(MR.strings.channel_app_updates))

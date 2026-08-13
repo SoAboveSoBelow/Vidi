@@ -41,19 +41,19 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.constraintlayout.compose.ConstraintLayout
 import androidx.constraintlayout.compose.Dimension
+import animiru.domain.player.model.SingleActionGesture
+import animiru.domain.player.service.GesturePreferences
 import eu.kanade.tachiyomi.ui.player.Panels
 import eu.kanade.tachiyomi.ui.player.PlayerUpdates
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
 import eu.kanade.tachiyomi.ui.player.Sheets
-import eu.kanade.tachiyomi.ui.player.SingleActionGesture
 import eu.kanade.tachiyomi.ui.player.controls.components.BrightnessSlider
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
 import eu.kanade.tachiyomi.ui.player.controls.components.SeekbarWithTimers
 import eu.kanade.tachiyomi.ui.player.controls.components.TextPlayerUpdate
 import eu.kanade.tachiyomi.ui.player.controls.components.ThumbnailPreview
 import eu.kanade.tachiyomi.ui.player.controls.components.VolumeSlider
-import eu.kanade.tachiyomi.ui.player.settings.GesturePreferences
 import kotlinx.coroutines.delay
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
@@ -96,7 +96,6 @@ fun PlayerControls(
     readAhead: Float?,
     remaining: Int?,
     playbackSpeed: Float?,
-    currentChapter: Int?,
     modifier: Modifier = Modifier,
 ) {
     val transparentOverlay by animateFloatAsState(
@@ -144,12 +143,12 @@ fun PlayerControls(
             val (topLeftControls, topRightControls) = createRefs()
             val (volumeSlider, brightnessSlider) = createRefs()
             val unlockControlsButton = createRef()
-            val skipButtonRow = createRef()
             val bottomControls = createRef()
             val centerControls = createRef()
             val thumbnail = createRef()
             val seekbar = createRef()
             val (playerUpdates) = createRefs()
+            val skipButton = createRef()
 
             LaunchedEffect(playbackData.currentVolume, mpvVolume, uiData.isVolumeSliderShown) {
                 delay(2.seconds)
@@ -335,7 +334,7 @@ fun PlayerControls(
                     fadeOut(playerControlsExitAnimationSpec())
                 },
                 modifier = Modifier.constrainAs(seekbar) {
-                    bottom.linkTo(parent.bottom, MaterialTheme.padding.medium)
+                    bottom.linkTo(bottomLeftControls.top)
                 },
             ) {
                 SeekbarWithTimers(
@@ -383,6 +382,7 @@ fun PlayerControls(
                     onBackClick = onBack,
                 )
             }
+
             AnimatedVisibility(
                 visible = uiData.controlsShown && !uiData.isControlsLocked,
                 enter = if (!uiData.reduceMotion) {
@@ -420,23 +420,23 @@ fun PlayerControls(
                 visible = uiData.controlsShown && !uiData.isControlsLocked &&
                     (uiData.skipIntroText != null || uiData.primaryButton != null),
                 enter = if (!uiData.reduceMotion) {
-                    slideInHorizontally(playerControlsEnterAnimationSpec()) { it } +
+                    slideInVertically(playerControlsEnterAnimationSpec()) { it } +
                         fadeIn(playerControlsEnterAnimationSpec())
                 } else {
                     fadeIn(playerControlsEnterAnimationSpec())
                 },
                 exit = if (!uiData.reduceMotion) {
-                    slideOutHorizontally(playerControlsExitAnimationSpec()) { it } +
+                    slideOutVertically(playerControlsExitAnimationSpec()) { it } +
                         fadeOut(playerControlsExitAnimationSpec())
                 } else {
                     fadeOut(playerControlsExitAnimationSpec())
                 },
-                modifier = Modifier.constrainAs(skipButtonRow) {
-                    bottom.linkTo(bottomControls.top, MaterialTheme.padding.large)
-                    end.linkTo(parent.end)
+                modifier = Modifier.constrainAs(skipButton) {
+                    end.linkTo(seekbar.end, MaterialTheme.padding.small)
+                    bottom.linkTo(seekbar.top)
                 },
             ) {
-                SkipButtonRow(
+                SkipIntroControls(
                     customButton = uiData.primaryButton,
                     customButtonTitle = uiData.primaryButtonTitle,
                     skipIntroButton = uiData.skipIntroText,
@@ -449,12 +449,6 @@ fun PlayerControls(
             AnimatedVisibility(
                 visible = uiData.controlsShown && !uiData.isControlsLocked,
                 enter = if (!uiData.reduceMotion) {
-                    slideInHorizontally(playerControlsEnterAnimationSpec()) { -it } +
-                        fadeIn(playerControlsEnterAnimationSpec())
-                } else {
-                    fadeIn(playerControlsEnterAnimationSpec())
-                },
-                exit = if (!uiData.reduceMotion) {
                     slideOutHorizontally(playerControlsExitAnimationSpec()) { -it } +
                         fadeOut(playerControlsExitAnimationSpec())
                 } else {
@@ -473,6 +467,9 @@ fun PlayerControls(
                     showChapterIndicator = uiData.showChapterIndicator,
                     currentChapter = stateData.currentChapter,
                     isPipAvailable = stateData.isPipAvailable,
+                    castEnabled = uiData.enableCast,
+                    castLoading = stateData.isLoadingCasting,
+                    castError = stateData.isErrorCasting,
                     onLockControls = { onPlayerEvent(PlayerEvent.LockControls(true)) },
                     onCycleRotation = { onPlayerEvent(PlayerEvent.CycleRotation) },
                     onPlaybackSpeedChange = { onPlayerEvent(PlayerEvent.ChangeSpeed(it)) },
@@ -525,7 +522,6 @@ private fun PlayerControlsPreview() {
             readAhead = 0f,
             remaining = 0,
             playbackSpeed = 1f,
-            currentChapter = 0,
         )
     }
 }

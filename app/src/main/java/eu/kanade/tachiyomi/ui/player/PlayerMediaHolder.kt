@@ -4,8 +4,8 @@ package eu.kanade.tachiyomi.ui.player
 import android.content.Context
 import android.media.session.MediaSession
 import android.view.Surface
+import animiru.domain.player.service.DecoderPreferences
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
-import eu.kanade.tachiyomi.ui.player.settings.DecoderPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import uy.kohesive.injekt.Injekt

@@ -45,6 +45,9 @@ android {
         buildConfigField("String", "COMMIT_SHA", "\"${getLatestCommitSha()}\"")
         buildConfigField("String", "BUILD_TIME", "\"${getBuildTime(useLatestCommitTime = false)}\"")
         buildConfigField("boolean", "UPDATER_ENABLED", "${Config.enableUpdater}")
+        // AM -->
+        buildConfigField("boolean", "CAST_INCLUDED", "${Config.includeCast}")
+        // <-- AM
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -70,6 +73,13 @@ android {
 
         val commonMatchingFallbacks = listOf(release.name)
 
+        create("foss") {
+            initWith(release)
+
+            applicationIdSuffix = ".foss"
+
+            matchingFallbacks.addAll(commonMatchingFallbacks)
+        }
         create("preview") {
             initWith(release)
 
@@ -198,6 +208,7 @@ dependencies {
     // <-- AY
     // AM -->
     implementation(projects.i18nAnimiru)
+    implementation(projects.cast)
     // <-- AM
     implementation(projects.core.archive)
     implementation(projects.core.common)
@@ -354,6 +365,10 @@ dependencies {
     implementation(aniyomilibs.google.api.services.drive)
     implementation(aniyomilibs.google.api.client.oauth)
     // <-- AM (SYNC_DRIVE)
+
+    // AM (CAST) -->
+    implementation(aniyomilibs.nanohttpd)
+    // <-- AM (CAST)
 
     testImplementation(libs.kotlinx.coroutines.test)
 }

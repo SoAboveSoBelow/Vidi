@@ -1,7 +1,7 @@
-package eu.kanade.tachiyomi.ui.player.settings
+package animiru.domain.player.service
 
-import eu.kanade.tachiyomi.ui.player.PlayerOrientation
-import eu.kanade.tachiyomi.ui.player.VideoAspect
+import animiru.domain.player.model.PlayerOrientation
+import animiru.domain.player.model.VideoAspect
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.preference.getEnum
@@ -91,6 +91,14 @@ class PlayerPreferences(
     val pipOnExit: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_on_exit", true)
     // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     val pipFirstButtonAction: Preference<Int> = preferenceStore.getInt("pip_first_button_action", 0)
+
+    // AM (CAST) -->
+    // Cast
+
+    val enableCast: Preference<Boolean> = preferenceStore.getBoolean("pref_enable_cast", true)
+    val castProxy: Preference<Boolean> = preferenceStore.getBoolean("pref_enable_cast_proxy", true)
+    val castProxyPort: Preference<String> = preferenceStore.getString("pref_cast_proxy_port", "8091")
+    // <-- AM (CAST)
 
     // External player
 

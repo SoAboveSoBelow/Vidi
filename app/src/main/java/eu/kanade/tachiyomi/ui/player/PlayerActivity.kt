@@ -56,6 +56,12 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import animiru.domain.player.model.ArtType
+import animiru.domain.player.model.CustomKeyCodes
+import animiru.domain.player.model.SetAsArt
+import animiru.domain.player.model.SingleActionGesture
+import animiru.domain.player.service.GesturePreferences
+import animiru.domain.player.service.PlayerPreferences
 import coil3.asDrawable
 import coil3.imageLoader
 import coil3.request.ImageRequest
@@ -68,8 +74,6 @@ import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.ui.base.activity.BaseActivity
 import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
-import eu.kanade.tachiyomi.ui.player.settings.GesturePreferences
-import eu.kanade.tachiyomi.ui.player.settings.PlayerPreferences
 import eu.kanade.tachiyomi.util.system.powerManager
 import eu.kanade.tachiyomi.util.system.toShareIntent
 import eu.kanade.tachiyomi.util.system.toast
@@ -488,7 +492,7 @@ class PlayerActivity : BaseActivity() {
                     viewModel = viewModel,
                     onBack = {
                         if (isPipSupportedAndEnabled && !viewModel.playbackData.value.paused &&
-                            playerPreferences.pipOnExit.get()
+                            playerPreferences.pipOnExit.get() && !viewModel.stateData.value.isCasting
                         ) {
                             enterPictureInPictureMode(createPipParams())
                         } else {

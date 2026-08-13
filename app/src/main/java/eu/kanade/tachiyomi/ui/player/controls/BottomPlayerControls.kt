@@ -33,18 +33,21 @@ import androidx.compose.ui.Modifier
 import dev.vivvvek.seeker.Segment
 import eu.kanade.tachiyomi.ui.player.BottomPlayerButton
 import eu.kanade.tachiyomi.ui.player.Sheets
+import eu.kanade.tachiyomi.ui.player.components.CurrentChapter
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
-import eu.kanade.tachiyomi.ui.player.controls.components.CurrentChapter
+import eu.kanade.tachiyomi.util.system.castIncluded
+import tachiyomi.cast.CastButton
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 
 /**
- * Renders the fixed-length (see [eu.kanade.tachiyomi.ui.player.settings.GesturePreferences.MAX_BOTTOM_PLAYER_BUTTONS])
+ * Renders the fixed-length (see [animiru.domain.player.service.GesturePreferences.MAX_BOTTOM_PLAYER_BUTTONS])
  * list of bottom-row positions, split into a left half (positions 1..half) and a right half
  * (the rest). Each half packs its buttons tightly together; any slack from empty positions
  * or unused width collects as a single gap between the two halves instead of being spread
- * out as extra spacing between every icon.
+ * out as extra spacing between every icon. The cast button, when available, is always shown
+ * at the end of the right half rather than being one of the configurable slots.
  */
 @Composable
 fun BottomPlayerControls(
@@ -53,6 +56,9 @@ fun BottomPlayerControls(
     currentChapter: Segment?,
     showChapterIndicator: Boolean,
     isPipAvailable: Boolean,
+    castEnabled: Boolean,
+    castLoading: Boolean,
+    castError: Boolean,
     onLockControls: () -> Unit,
     onCycleRotation: () -> Unit,
     onPlaybackSpeedChange: (Float) -> Unit,
@@ -83,19 +89,31 @@ fun BottomPlayerControls(
             onPipClick = onPipClick,
             onAspectClick = onAspectClick,
         )
-        ButtonGroup(
-            buttons = rightButtons,
-            playbackSpeed = playbackSpeed,
-            currentChapter = currentChapter,
-            showChapterIndicator = showChapterIndicator,
-            isPipAvailable = isPipAvailable,
-            onLockControls = onLockControls,
-            onCycleRotation = onCycleRotation,
-            onPlaybackSpeedChange = onPlaybackSpeedChange,
-            onOpenSheet = onOpenSheet,
-            onPipClick = onPipClick,
-            onAspectClick = onAspectClick,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
+        ) {
+            if (castIncluded && castEnabled) {
+                CastButton(
+                    loading = castLoading,
+                    error = castError,
+                    verticalSpacing = MaterialTheme.padding.small,
+                )
+            }
+            ButtonGroup(
+                buttons = rightButtons,
+                playbackSpeed = playbackSpeed,
+                currentChapter = currentChapter,
+                showChapterIndicator = showChapterIndicator,
+                isPipAvailable = isPipAvailable,
+                onLockControls = onLockControls,
+                onCycleRotation = onCycleRotation,
+                onPlaybackSpeedChange = onPlaybackSpeedChange,
+                onOpenSheet = onOpenSheet,
+                onPipClick = onPipClick,
+                onAspectClick = onAspectClick,
+            )
+        }
     }
 }
 

@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
-import eu.kanade.tachiyomi.ui.player.settings.DecoderPreferences
+import animiru.domain.player.service.DecoderPreferences
 import `is`.xyz.mpv.MPV
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
