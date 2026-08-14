@@ -356,8 +356,17 @@ class PlayerViewModel @JvmOverloads constructor(
     private val _playerReady = MutableStateFlow(false)
     val playerReady = _playerReady.asStateFlow()
 
+    // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
+    // Kept so needsInit() (called from PlayerActivity.onNewIntent, well before this
+    // synchronously-later bindToService call in a duplicate-instance reopen) can check
+    // whether the Service already has a live session for the requested anime/episode -
+    // see needsInit() below for why that matters.
+    private var mediaHolder: PlayerMediaHolder? = null
+    // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
+
     /** Called once PlayerActivity's Service connection delivers a live PlayerMediaHolder. */
     fun bindToService(holder: PlayerMediaHolder) {
+        mediaHolder = holder
         val resolvedPlayer = holder.adopt(player)
         if (resolvedPlayer !== player) {
             // This instance built its own player, but the Service already had one
@@ -377,8 +386,22 @@ class PlayerViewModel @JvmOverloads constructor(
             logcat { "PlayerViewModel.bindToService: holder adopted this player ($player)" }
         }
         wirePlayerFlows()
+        syncHolderSessionState()
         _playerReady.value = true
     }
+
+    // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
+    // Publishes this instance's current anime/episode onto the holder so a LATER
+    // duplicate instance's needsInit() call can recognize "this exact session is
+    // already live" instead of reloading. Called both here (once the holder is known)
+    // and from init() (once the anime/episode are known) - whichever finishes second
+    // ends up with complete info, since the two happen in an unspecified order.
+    private fun syncHolderSessionState() {
+        val anime = stateData.value.currentAnime ?: return
+        val episode = stateData.value.currentEpisode ?: return
+        mediaHolder?.updateState { it.copy(animeId = anime.id, episodeId = episode.id) }
+    }
+    // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
 
     /**
      * Wires every reactive subscription that reads from `player`/`mpv`. Deliberately NOT run
@@ -844,9 +867,25 @@ class PlayerViewModel @JvmOverloads constructor(
     var forceResumeFromLastPosition = false
 
     fun needsInit(animeId: Long, episodeId: Long): Boolean {
-        return stateData.value.let {
-            it.currentAnime?.id != animeId || it.currentEpisode?.id != episodeId
+        val local = stateData.value
+        if (local.currentAnime?.id == animeId && local.currentEpisode?.id == episodeId) {
+            return false
         }
+        // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
+        // This instance has no local state for the requested anime/episode - but if the
+        // Service's holder already reports a live session for that exact pair, this is a
+        // duplicate PlayerActivity/ViewModel reopened from the notification (its forced
+        // FLAG_ACTIVITY_NEW_TASK spins up a fresh instance - see bindToService()), not a
+        // genuinely new one. Without this, needsInit() returns true, init() reloads the
+        // episode from scratch, and - if it's already marked seen - the "already watched,
+        // start at 0" rule in setVideo() restarts playback from the beginning even though
+        // the actual (canonical, still-adopted) player was mid-episode the whole time.
+        val holderState = mediaHolder?.state?.value
+        if (holderState?.animeId == animeId && holderState.episodeId == episodeId) {
+            return false
+        }
+        // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
+        return true
     }
 
     data class InitResult(
@@ -898,6 +937,9 @@ class PlayerViewModel @JvmOverloads constructor(
                 val episode = stateData.value.currentPlaylist.firstOrNull { it.id == episodeId }
                     ?: throw ExceptionWithStringResource("No episode loaded", AYMR.strings.no_episode_loaded)
                 setupEpisode(episode)
+                // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
+                syncHolderSessionState()
+                // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
 
                 val skipIntroLength = getAnimeSkipIntroLength()
                 updateCastUiData { it.copy(skipIntroLength = skipIntroLength.toLong()) }
