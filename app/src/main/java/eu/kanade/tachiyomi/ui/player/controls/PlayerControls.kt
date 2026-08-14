@@ -334,7 +334,7 @@ fun PlayerControls(
                     fadeOut(playerControlsExitAnimationSpec())
                 },
                 modifier = Modifier.constrainAs(seekbar) {
-                    bottom.linkTo(bottomControls.top)
+                    bottom.linkTo(parent.bottom, MaterialTheme.padding.medium)
                 },
             ) {
                 SeekbarWithTimers(
