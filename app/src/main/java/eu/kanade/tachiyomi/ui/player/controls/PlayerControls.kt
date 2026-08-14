@@ -432,7 +432,7 @@ fun PlayerControls(
                     fadeOut(playerControlsExitAnimationSpec())
                 },
                 modifier = Modifier.constrainAs(skipButton) {
-                    end.linkTo(seekbar.end, MaterialTheme.padding.small)
+                    end.linkTo(seekbar.end, MaterialTheme.padding.extraSmall)
                     bottom.linkTo(bottomControls.top, MaterialTheme.padding.large)
                 },
             ) {

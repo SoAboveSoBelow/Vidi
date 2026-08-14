@@ -260,5 +260,8 @@ enum class BottomPlayerButton(val stringRes: StringResource) {
     PictureInPicture(AYMR.strings.pref_bottom_button_pip),
     AspectRatio(AYMR.strings.pref_bottom_button_aspect_ratio),
     Screenshot(AYMR.strings.pref_bottom_button_screenshot),
+    // AM (CAST) -->
+    Cast(AMMR.strings.pref_cast),
+    // <-- AM (CAST)
 }
 // <-- AM (BOTTOM_PLAYER_BUTTONS)

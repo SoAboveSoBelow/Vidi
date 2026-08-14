@@ -46,8 +46,7 @@ import tachiyomi.presentation.core.i18n.stringResource
  * list of bottom-row positions, split into a left half (positions 1..half) and a right half
  * (the rest). Each half packs its buttons tightly together; any slack from empty positions
  * or unused width collects as a single gap between the two halves instead of being spread
- * out as extra spacing between every icon. The cast button, when available, is always shown
- * at the end of the right half rather than being one of the configurable slots.
+ * out as extra spacing between every icon.
  */
 @Composable
 fun BottomPlayerControls(
@@ -82,6 +81,9 @@ fun BottomPlayerControls(
             currentChapter = currentChapter,
             showChapterIndicator = showChapterIndicator,
             isPipAvailable = isPipAvailable,
+            castEnabled = castEnabled,
+            castLoading = castLoading,
+            castError = castError,
             onLockControls = onLockControls,
             onCycleRotation = onCycleRotation,
             onPlaybackSpeedChange = onPlaybackSpeedChange,
@@ -89,31 +91,22 @@ fun BottomPlayerControls(
             onPipClick = onPipClick,
             onAspectClick = onAspectClick,
         )
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
-        ) {
-            if (castIncluded && castEnabled) {
-                CastButton(
-                    loading = castLoading,
-                    error = castError,
-                    verticalSpacing = MaterialTheme.padding.small,
-                )
-            }
-            ButtonGroup(
-                buttons = rightButtons,
-                playbackSpeed = playbackSpeed,
-                currentChapter = currentChapter,
-                showChapterIndicator = showChapterIndicator,
-                isPipAvailable = isPipAvailable,
-                onLockControls = onLockControls,
-                onCycleRotation = onCycleRotation,
-                onPlaybackSpeedChange = onPlaybackSpeedChange,
-                onOpenSheet = onOpenSheet,
-                onPipClick = onPipClick,
-                onAspectClick = onAspectClick,
-            )
-        }
+        ButtonGroup(
+            buttons = rightButtons,
+            playbackSpeed = playbackSpeed,
+            currentChapter = currentChapter,
+            showChapterIndicator = showChapterIndicator,
+            isPipAvailable = isPipAvailable,
+            castEnabled = castEnabled,
+            castLoading = castLoading,
+            castError = castError,
+            onLockControls = onLockControls,
+            onCycleRotation = onCycleRotation,
+            onPlaybackSpeedChange = onPlaybackSpeedChange,
+            onOpenSheet = onOpenSheet,
+            onPipClick = onPipClick,
+            onAspectClick = onAspectClick,
+        )
     }
 }
 
@@ -124,6 +117,9 @@ private fun ButtonGroup(
     currentChapter: Segment?,
     showChapterIndicator: Boolean,
     isPipAvailable: Boolean,
+    castEnabled: Boolean,
+    castLoading: Boolean,
+    castError: Boolean,
     onLockControls: () -> Unit,
     onCycleRotation: () -> Unit,
     onPlaybackSpeedChange: (Float) -> Unit,
@@ -169,6 +165,15 @@ private fun ButtonGroup(
                     Icons.Default.PhotoCamera,
                     onClick = { onOpenSheet(Sheets.Screenshot) },
                 )
+                // AM (CAST) -->
+                BottomPlayerButton.Cast -> if (castIncluded && castEnabled) {
+                    CastButton(
+                        loading = castLoading,
+                        error = castError,
+                        verticalSpacing = MaterialTheme.padding.small,
+                    )
+                }
+                // <-- AM (CAST)
             }
         }
     }
