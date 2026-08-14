@@ -13,9 +13,13 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Lock
@@ -39,6 +43,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
 import androidx.constraintlayout.compose.ConstraintLayout
 import androidx.constraintlayout.compose.Dimension
 import animiru.domain.player.model.SingleActionGesture
@@ -123,6 +128,24 @@ fun PlayerControls(
         true
     }
     // <-- AM (MEDIA_CONTROLS)
+
+    // AM (SYSTEM_BAR_CONTROLS_INSET) -->
+    // When "show system status bar with controls" is on, PlayerControls' edge-to-edge
+    // ConstraintLayout otherwise draws the top settings row and bottom seekbar right
+    // underneath the (now-visible) status/navigation bars. Only add the extra offset
+    // while those bars are actually being shown alongside controls - the normal
+    // immersive/hidden state shouldn't get any extra padding.
+    val statusBarTopPadding = if (uiData.statusBarShown) {
+        WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    } else {
+        0.dp
+    }
+    val navigationBarBottomPadding = if (uiData.statusBarShown) {
+        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    } else {
+        0.dp
+    }
+    // <-- AM (SYSTEM_BAR_CONTROLS_INSET)
 
     CompositionLocalProvider(
         LocalLayoutDirection provides LayoutDirection.Ltr,
@@ -334,7 +357,7 @@ fun PlayerControls(
                     fadeOut(playerControlsExitAnimationSpec())
                 },
                 modifier = Modifier.constrainAs(seekbar) {
-                    bottom.linkTo(parent.bottom, MaterialTheme.padding.medium)
+                    bottom.linkTo(parent.bottom, MaterialTheme.padding.medium + navigationBarBottomPadding)
                 },
             ) {
                 SeekbarWithTimers(
@@ -369,7 +392,7 @@ fun PlayerControls(
                     fadeOut(playerControlsExitAnimationSpec())
                 },
                 modifier = Modifier.constrainAs(topLeftControls) {
-                    top.linkTo(parent.top, MaterialTheme.padding.medium)
+                    top.linkTo(parent.top, MaterialTheme.padding.medium + statusBarTopPadding)
                     start.linkTo(parent.start)
                     width = Dimension.fillToConstraints
                     end.linkTo(topRightControls.start)
@@ -398,7 +421,7 @@ fun PlayerControls(
                     fadeOut(playerControlsExitAnimationSpec())
                 },
                 modifier = Modifier.constrainAs(topRightControls) {
-                    top.linkTo(parent.top, MaterialTheme.padding.medium)
+                    top.linkTo(parent.top, MaterialTheme.padding.medium + statusBarTopPadding)
                     end.linkTo(parent.end)
                 },
             ) {
