@@ -36,6 +36,7 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import cafe.adriel.voyager.navigator.tab.LocalTabNavigator
 import cafe.adriel.voyager.navigator.tab.TabNavigator
 import eu.kanade.domain.source.service.SourcePreferences
+import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.util.Screen
 import eu.kanade.presentation.util.isTabletUi
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
@@ -51,6 +52,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import soup.compose.material.motion.animation.materialFadeThroughIn
 import soup.compose.material.motion.animation.materialFadeThroughOut
+import tachiyomi.core.common.Constants
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.NavigationRail
@@ -85,10 +87,27 @@ object HomeScreen : Screen() {
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
+        // AM (LAST_LOCATION) -->
+        // Start on the last-visited tab instead of always LibraryTab. Previously,
+        // reopening on Recents/Browse/More required an extra animated tab-switch
+        // transition after the initial LibraryTab frame (on top of the AnimeScreen push
+        // transition below) - visible as a "jump through" every intermediate screen when
+        // reconstructing state after a lost back stack. Matching the initial tab up front
+        // means the subsequent openTabEvent (fired from handleIntentAction) reassigns the
+        // same tab object and triggers no extra transition.
+        val initialTab = remember {
+            when (Injekt.get<UiPreferences>().lastVisitedTabAction.get()) {
+                Constants.SHORTCUT_UPDATES, Constants.SHORTCUT_HISTORY -> RecentsTab
+                Constants.SHORTCUT_SOURCES, Constants.SHORTCUT_EXTENSIONS -> BrowseTab
+                Constants.SHORTCUT_MORE -> MoreTab
+                else -> LibraryTab
+            }
+        }
         TabNavigator(
-            tab = LibraryTab,
+            tab = initialTab,
             key = TabNavigatorKey,
         ) { tabNavigator ->
+            // <-- AM (LAST_LOCATION)
             // AM (NAVIGATION_PILL) -->
             // Provide usable navigator to content screen
             CompositionLocalProvider(LocalNavigator provides navigator) {
@@ -103,6 +122,24 @@ object HomeScreen : Screen() {
                 LaunchedEffect(currentTabIndex) {
                     oldIndex = currentTabIndex
                 }
+
+                // AM (LAST_LOCATION) -->
+                // Persist which top-level tab is active so the notification reopen/
+                // back-fallback deep link (Constants.SHORTCUT_ANIME handling in
+                // MainActivity) can restore it instead of always defaulting to Library.
+                // Only fires while HomeScreen itself is the composed top screen, so it
+                // naturally reflects the last tab the user was actually looking at rather
+                // than being overwritten while e.g. AnimeScreen is pushed on top.
+                LaunchedEffect(tabNavigator.current) {
+                    val action = when (tabNavigator.current) {
+                        RecentsTab -> Constants.SHORTCUT_UPDATES
+                        BrowseTab -> Constants.SHORTCUT_SOURCES
+                        MoreTab -> Constants.SHORTCUT_MORE
+                        else -> Constants.SHORTCUT_LIBRARY
+                    }
+                    Injekt.get<UiPreferences>().lastVisitedTabAction.set(action)
+                }
+                // <-- AM (LAST_LOCATION)
 
                 Scaffold(
                     startBar = {
@@ -183,9 +220,21 @@ object HomeScreen : Screen() {
                             is Tab.More -> MoreTab
                         }
 
-                        if (it is Tab.Library && it.animeIdToOpen != null) {
-                            navigator.push(AnimeScreen(it.animeIdToOpen))
+                        // AM (LAST_LOCATION) -->
+                        // Generalized from the old Tab.Library-only check so the
+                        // notification reopen/back-fallback deep link can land the anime
+                        // screen on top of whichever tab was actually last visited, not
+                        // just Library.
+                        val animeIdToOpen = when (it) {
+                            is Tab.Library -> it.animeIdToOpen
+                            is Tab.Recents -> it.animeIdToOpen
+                            is Tab.Browse -> it.animeIdToOpen
+                            is Tab.More -> it.animeIdToOpen
                         }
+                        if (animeIdToOpen != null) {
+                            navigator.push(AnimeScreen(animeIdToOpen))
+                        }
+                        // <-- AM (LAST_LOCATION)
                         if (it is Tab.More && it.toDownloads) {
                             navigator.push(DownloadQueueScreen)
                         }
@@ -296,10 +345,10 @@ object HomeScreen : Screen() {
         data class Library(val animeIdToOpen: Long? = null) : Tab
 
         // AM (RECENTS) -->
-        data class Recents(val toHistory: Boolean) : Tab
+        data class Recents(val toHistory: Boolean, val animeIdToOpen: Long? = null) : Tab
 
         // <-- AM (RECENTS)
-        data class Browse(val toExtensions: Boolean = false) : Tab
-        data class More(val toDownloads: Boolean) : Tab
+        data class Browse(val toExtensions: Boolean = false, val animeIdToOpen: Long? = null) : Tab
+        data class More(val toDownloads: Boolean, val animeIdToOpen: Long? = null) : Tab
     }
 }

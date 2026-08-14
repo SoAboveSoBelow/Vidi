@@ -212,6 +212,19 @@ class MainActivity : BaseActivity() {
                         .collectLatest { incognito = it }
                 }
 
+                // AM (LAST_LOCATION) -->
+                // Mirror of HomeScreen's tab tracking, but for the outer navigator: records
+                // whether an anime detail (playlist) screen is currently on top so the
+                // notification reopen/back-fallback deep link knows to restore it - and
+                // clears back to "none" as soon as the user navigates away from it, so a
+                // stale anime doesn't get resurrected under an unrelated tab later.
+                LaunchedEffect(navigator.lastItem) {
+                    uiPreferences.lastVisitedAnimeId.set(
+                        (navigator.lastItem as? AnimeScreen)?.animeId ?: -1L,
+                    )
+                }
+                // <-- AM (LAST_LOCATION)
+
                 val scaffoldInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal)
                 Scaffold(
                     topBar = {
@@ -458,7 +471,25 @@ class MainActivity : BaseActivity() {
             Constants.SHORTCUT_ANIME -> {
                 val idToOpen = intent.extras?.getLong(Constants.ANIME_EXTRA) ?: return false
                 navigator.popUntilRoot()
-                HomeScreen.Tab.Library(idToOpen)
+                // AM (LAST_LOCATION) -->
+                // This fires both for the app's own "open anime" shortcut and - more
+                // importantly - for the background-playback notification's reopen/
+                // back-fallback deep link once the original task/back stack is gone. It
+                // used to always drop the tab underneath to Library, so backing out of
+                // the anime landed there no matter where the user actually was before
+                // opening it. Restore whichever tab was last visited instead, carrying
+                // the anime id through that tab's animeIdToOpen so HomeScreen pushes it
+                // only after the tab switch has actually been applied (see the
+                // openTabEvent collector) rather than racing it.
+                when (uiPreferences.lastVisitedTabAction.get()) {
+                    Constants.SHORTCUT_UPDATES -> HomeScreen.Tab.Recents(toHistory = false, animeIdToOpen = idToOpen)
+                    Constants.SHORTCUT_HISTORY -> HomeScreen.Tab.Recents(toHistory = true, animeIdToOpen = idToOpen)
+                    Constants.SHORTCUT_SOURCES -> HomeScreen.Tab.Browse(false, animeIdToOpen = idToOpen)
+                    Constants.SHORTCUT_EXTENSIONS -> HomeScreen.Tab.Browse(true, animeIdToOpen = idToOpen)
+                    Constants.SHORTCUT_MORE -> HomeScreen.Tab.More(toDownloads = false, animeIdToOpen = idToOpen)
+                    else -> HomeScreen.Tab.Library(idToOpen)
+                }
+                // <-- AM (LAST_LOCATION)
             }
             // AM (RECENTS) -->
             Constants.SHORTCUT_UPDATES -> HomeScreen.Tab.Recents(toHistory = false)
@@ -466,6 +497,9 @@ class MainActivity : BaseActivity() {
             // <-- AM (RECENTS)
             Constants.SHORTCUT_SOURCES -> HomeScreen.Tab.Browse(false)
             Constants.SHORTCUT_EXTENSIONS -> HomeScreen.Tab.Browse(true)
+            // AM (LAST_LOCATION) -->
+            Constants.SHORTCUT_MORE -> HomeScreen.Tab.More(toDownloads = false)
+            // <-- AM (LAST_LOCATION)
             Constants.SHORTCUT_DOWNLOADS -> {
                 navigator.popUntilRoot()
                 HomeScreen.Tab.More(toDownloads = true)

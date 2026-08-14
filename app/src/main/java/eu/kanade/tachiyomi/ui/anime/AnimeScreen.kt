@@ -81,7 +81,12 @@ import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.LoadingScreen
 
 class AnimeScreen(
-    private val animeId: Long,
+    // AM (LAST_LOCATION) -->
+    // No longer private - MainActivity reads this off navigator.lastItem to persist
+    // "which anime screen is currently on top" for the notification reopen/back-fallback
+    // deep link. See UiPreferences.lastVisitedAnimeId.
+    val animeId: Long,
+    // <-- AM (LAST_LOCATION)
     val fromSource: Boolean = false,
 ) : Screen(), AssistContentScreen {
 

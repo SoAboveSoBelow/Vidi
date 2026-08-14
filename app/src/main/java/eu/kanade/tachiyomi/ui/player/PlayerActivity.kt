@@ -118,6 +118,21 @@ class PlayerActivity : BaseActivity() {
     // so onPictureInPictureModeChanged doesn't treat it as the user swiping PIP away.
     private var isIntentionalBackgroundTransition = false
 
+    // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+    // Set right before finish() at every call site that represents a genuine "the user
+    // is done with this session" exit (notification Stop, back-out without PIP/background,
+    // crashes, load failures, PIP swiped away). onDestroy() below used to gate its full
+    // teardown (stopBackgroundPlayback/player.release/mediaHolder.release/stopService)
+    // purely on isFinishing() - but Android also sets isFinishing() to true when the
+    // *whole task* gets removed from Recents (a swipe, or "clear all"), which is exactly
+    // the scenario the synthetic-back-stack notification-reopen architecture exists to
+    // survive. Without this flag, that swipe wrongly tore down the still-live session -
+    // including the app-lock exemption and the Service/player/notification the reopen
+    // was supposed to find waiting - which is why reopening afterward could prompt for
+    // unlock or reload/restart the episode even though playback never actually stopped.
+    private var intentionalStop = false
+    // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
+
     // AM (SERVICE_OWNED_PLAYER) -->
     // Bound for the whole playback session (established in onCreate, torn down in
     // onDestroy) rather than only while backgrounded - keeps PlayerMediaHolder alive
@@ -167,9 +182,11 @@ class PlayerActivity : BaseActivity() {
                         // Tapping "stop" now ends the whole session (there's no more
                         // "hide the notification but keep the player alive" state to
                         // fall back to, since the notification is meant to track
-                        // playback existing at all) - matches onDestroy's isFinishing
-                        // teardown path.
+                        // playback existing at all) - matches onDestroy's teardown path.
                         viewModel.pause()
+                        // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+                        intentionalStop = true
+                        // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
                         stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
                         finish()
                     },
@@ -264,7 +281,17 @@ class PlayerActivity : BaseActivity() {
         val hostList = intent.extras?.getString("hostList") ?: ""
         val hostIndex = intent.extras?.getInt("hostIndex") ?: -1
         val vidIndex = intent.extras?.getInt("vidIndex") ?: -1
+        // AM (REOPEN_RACE_DIAGNOSTICS) -->
+        logcat {
+            "onNewIntent: animeId=$animeId, episodeId=$episodeId, " +
+                "instanceHash=${System.identityHashCode(this)}, " +
+                "viewModelHash=${System.identityHashCode(viewModel)}"
+        }
+        // <-- AM (REOPEN_RACE_DIAGNOSTICS)
         if (animeId == -1L || episodeId == -1L) {
+            // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+            intentionalStop = true
+            // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
             finish()
             return
         }
@@ -275,25 +302,50 @@ class PlayerActivity : BaseActivity() {
         )
 
         if (!viewModel.needsInit(animeId, episodeId)) {
-            // Already playing this exact episode (e.g. reopened from the background-
-            // playback notification) - avoid restarting the whole file-open pipeline.
+            // Already playing this exact episode in THIS instance (e.g. a redundant
+            // re-intent) - its own state is already correct, nothing to do.
             setIntent(intent)
             return
         }
 
+        // AM (LAYERED_REATTACH_FIX) -->
+        // This instance has no local state for animeId/episodeId (needsInit() above was
+        // true) - but that doesn't necessarily mean the actual player needs to load
+        // anything. If the canonical player already has this exact file loaded (e.g. a
+        // fresh instance spun up by the notification's forced FLAG_ACTIVITY_NEW_TASK
+        // while the original task's back stack was lost), this instance still needs its
+        // own metadata (anime/episode/hoster list/PIP flag - all populated by init()
+        // below regardless), but must NOT re-run the network/hoster-resolution/
+        // mpv-loadfile pipeline against a file that's already loaded and playing.
+        val alreadyLiveInPlayer = viewModel.isSessionAlreadyLiveInPlayer(animeId, episodeId)
+        // AM (REOPEN_RACE_DIAGNOSTICS) -->
+        logcat { "onNewIntent: alreadyLiveInPlayer=$alreadyLiveInPlayer for ($animeId, $episodeId)" }
+        // <-- AM (REOPEN_RACE_DIAGNOSTICS)
+        if (alreadyLiveInPlayer) {
+            // AM (LIVE_HOLDER_PLAYBACK_STATE) -->
+            // Seed the correct paused state immediately rather than waiting on this
+            // fresh instance's own reactive player-flow wiring to catch up.
+            viewModel.syncPlaybackStateFromHolder()
+            // <-- AM (LIVE_HOLDER_PLAYBACK_STATE)
+        }
+        // <-- AM (LAYERED_REATTACH_FIX)
+
         viewModel.saveCurrentEpisodeWatchingProgress()
 
         lifecycleScope.launchNonCancellable {
-            viewModel.updateIsLoadingEpisode(true)
-            viewModel.updateIsLoadingHosters(true)
+            viewModel.updateIsLoadingEpisode(!alreadyLiveInPlayer)
+            viewModel.updateIsLoadingHosters(!alreadyLiveInPlayer)
             viewModel.updateHasPip(
                 packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
                     playerPreferences.enablePip.get(),
             )
-            // In-memory state was lost (e.g. process killed while backgrounded) and this
-            // is a genuine re-init, not a fresh open - resume from the position just
-            // saved above instead of the normal "already watched -> start at 0" rule.
-            viewModel.forceResumeFromLastPosition = true
+            if (!alreadyLiveInPlayer) {
+                // In-memory state was lost (e.g. process killed while backgrounded) and
+                // this is a genuine re-init, not a fresh open - resume from the position
+                // just saved above instead of the normal "already watched -> start at 0"
+                // rule.
+                viewModel.forceResumeFromLastPosition = true
+            }
 
             val initResult = viewModel.init(animeId, episodeId, hostList, hostIndex, vidIndex)
             if (!initResult.second.getOrDefault(false)) {
@@ -307,12 +359,18 @@ class PlayerActivity : BaseActivity() {
 
             viewModel.updateIsLoadingHosters(false)
 
-            lifecycleScope.launch {
-                viewModel.loadHosters(
-                    hosterList = initResult.first.hosterList ?: emptyList(),
-                    hosterIndex = initResult.first.videoIndex.first,
-                    videoIndex = initResult.first.videoIndex.second,
-                )
+            // AM (LAYERED_REATTACH_FIX) -->
+            if (alreadyLiveInPlayer) {
+                viewModel.syncHosterUiStateWithoutReload(initResult.first)
+            } else {
+                // <-- AM (LAYERED_REATTACH_FIX)
+                lifecycleScope.launch {
+                    viewModel.loadHosters(
+                        hosterList = initResult.first.hosterList ?: emptyList(),
+                        hosterIndex = initResult.first.videoIndex.first,
+                        videoIndex = initResult.first.videoIndex.second,
+                    )
+                }
             }
         }
 
@@ -356,6 +414,9 @@ class PlayerActivity : BaseActivity() {
                 toast(throwable.message)
             }
             logcat(LogPriority.ERROR, throwable)
+            // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+            intentionalStop = true
+            // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
             finish()
         }
 
@@ -369,6 +430,9 @@ class PlayerActivity : BaseActivity() {
                         // No-op: used to toast "<anime> - <episode>" on change; not wanted.
                     }
                     PlayerViewModel.Event.Finish -> {
+                        // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+                        intentionalStop = true
+                        // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
                         finish()
                     }
                     is PlayerViewModel.Event.InitialEpisodeError -> {
@@ -535,6 +599,9 @@ class PlayerActivity : BaseActivity() {
                                 }
                             }
                             // <-- AM (BACK_FALLBACK_TO_ANIME)
+                            // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+                            intentionalStop = true
+                            // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
                             finish()
                         }
                     },
@@ -564,15 +631,34 @@ class PlayerActivity : BaseActivity() {
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
 
         // AM (SERVICE_OWNED_PLAYER) -->
-        // Step 3: onDestroy fires both when this session genuinely ends (isFinishing)
-        // and when the OS destroys an invisible backgrounded Activity to reclaim
-        // memory while playback is meant to continue - those need very different
-        // teardown. Previously every line below ran unconditionally, which meant an
-        // ordinary background eviction would kill the notification/foreground state
-        // and, shortly after, playback itself - likely a real contributor to the
-        // lifecycle-order-dependent bugs this refactor exists to fix.
-        if (isFinishing) {
+        // Step 3: onDestroy fires both when this session genuinely ends and when the OS
+        // (or a Recents task removal) destroys this Activity while playback is meant to
+        // continue - those need very different teardown. Previously every line below ran
+        // whenever isFinishing() was true, which meant an ordinary background eviction
+        // would kill the notification/foreground state and, shortly after, playback
+        // itself - likely a real contributor to the lifecycle-order-dependent bugs this
+        // refactor exists to fix.
+        // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+        // isFinishing() alone isn't a reliable "genuinely done" signal: Android also sets
+        // it to true when the *whole task* is removed from Recents, which is exactly the
+        // scenario the synthetic-back-stack notification-reopen architecture exists to
+        // survive. Gate on the explicit intentionalStop flag (set at every real "user is
+        // done" finish() call site) instead, falling back to isFinishing only when
+        // nothing marked it as intentional AND playback wasn't actively continuing in the
+        // background anyway - covering any finish() path this flag doesn't yet cover
+        // without resurrecting the task-swipe bug for the paths it does.
+        // AM (REOPEN_RACE_DIAGNOSTICS) -->
+        logcat {
+            "onDestroy: intentionalStop=$intentionalStop, isFinishing=$isFinishing, " +
+                "isBackgroundPlaybackActive=${SecureActivityDelegate.isBackgroundPlaybackActive}, " +
+                "animeId=${viewModel.stateData.value.currentAnime?.id}, " +
+                "episodeId=${viewModel.stateData.value.currentEpisode?.id}"
+        }
+        // <-- AM (REOPEN_RACE_DIAGNOSTICS)
+        if (intentionalStop || (isFinishing && !SecureActivityDelegate.isBackgroundPlaybackActive)) {
+            // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
             // Genuine end of this playback session - tear everything down.
+            logcat { "onDestroy: tearing down (mediaHolder.release(), stopService)" }
             stopBackgroundPlayback()
             viewModel.player.release()
             viewModel.stopHttpServer()
@@ -593,6 +679,10 @@ class PlayerActivity : BaseActivity() {
             mediaHolder?.release()
             // <-- AM (STALE_HOLDER_STATE_FIX)
             stopService(PlayerBackgroundPlaybackService.newIntent(this))
+        } else {
+            // AM (REOPEN_RACE_DIAGNOSTICS) -->
+            logcat { "onDestroy: preserving session (Service/mediaHolder left running)" }
+            // <-- AM (REOPEN_RACE_DIAGNOSTICS)
         }
         // else: this Activity instance is being destroyed while playback is meant to
         // continue - leave the Service, its player, its notification (if active), and
@@ -644,10 +734,25 @@ class PlayerActivity : BaseActivity() {
         }
 
         viewModel.setPlayerExiting(true)
-        if (isFinishing) {
+        // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+        // isFinishing() is already true here for a Recents task removal - Android marks
+        // it before dispatching onPause(), not just by the time onDestroy() checks it -
+        // so this used to hard-stop mpv (mpvCommand("stop")) and skip
+        // startBackgroundPlayback() below entirely for a task swipe while actively
+        // playing, the exact scenario the notification-reopen architecture exists to
+        // survive. That stop is what produced the dead-air/rubber-banding notification
+        // seekbar: mpv went silent immediately, but the MediaSession's last reported
+        // state stayed "playing" until something later pushed a fresh update, so the
+        // system extrapolated the bar forward in the meantime and snapped it back once
+        // real playback resumed and reported its true position. Gate the hard stop on
+        // intentionalStop (set at every genuine "user is done" finish() call site,
+        // already true here by the time onPause() runs as part of that finish()
+        // sequence) instead, matching onDestroy()'s gate below.
+        if (intentionalStop) {
             viewModel.deletePendingEpisodes()
             viewModel.mpvCommand("stop")
         } else if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
+            // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
             // The Service/player/notification keep running regardless (they're not
             // tied to this Activity's visibility since step 4b) - this branch is only
             // about whether backgrounding should also mark the app-lock exemption and
@@ -829,6 +934,9 @@ class PlayerActivity : BaseActivity() {
                             if (lifecycle.currentState == Lifecycle.State.CREATED && !isFinishing) {
                                 SecureActivityDelegate.setPipActive(false)
                                 viewModel.player.release()
+                                // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+                                intentionalStop = true
+                                // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
                                 finish()
                             }
                         },
@@ -912,7 +1020,12 @@ class PlayerActivity : BaseActivity() {
             KeyEvent.KEYCODE_DPAD_LEFT -> viewModel.handleLeftDoubleTap()
             KeyEvent.KEYCODE_DPAD_RIGHT -> viewModel.handleRightDoubleTap()
             KeyEvent.KEYCODE_SPACE -> viewModel.pauseUnpause()
-            KeyEvent.KEYCODE_MEDIA_STOP -> finishAndRemoveTask()
+            // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+            KeyEvent.KEYCODE_MEDIA_STOP -> {
+                intentionalStop = true
+                finishAndRemoveTask()
+            }
+            // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
 
             KeyEvent.KEYCODE_MEDIA_REWIND -> viewModel.handleLeftDoubleTap()
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> viewModel.handleRightDoubleTap()
@@ -1081,6 +1194,9 @@ class PlayerActivity : BaseActivity() {
             showToast(error.message ?: "")
         }
         logcat(LogPriority.ERROR, error)
+        // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+        intentionalStop = true
+        // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
         finish()
     }
 

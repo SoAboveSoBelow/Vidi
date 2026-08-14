@@ -473,6 +473,9 @@ class PlayerViewModel @JvmOverloads constructor(
                 .filterNotNull()
                 .onEach { v ->
                     updatePlaybackData { it.copy(duration = v) }
+                    // AM (SERVICE_OWNED_POSITION_TRACKING) -->
+                    mediaHolder?.updateState { it.copy(durationMs = v * 1000) }
+                    // <-- AM (SERVICE_OWNED_POSITION_TRACKING)
                 }
                 .launchIn(viewModelScope)
 
@@ -485,6 +488,17 @@ class PlayerViewModel @JvmOverloads constructor(
                 .filterNotNull()
                 .onEach { v ->
                     updatePlaybackData { it.copy(paused = v) }
+                    // AM (LIVE_HOLDER_PLAYBACK_STATE) -->
+                    // PlayerMediaState.paused otherwise never gets written past its
+                    // constructor default (true) - nothing else here ever updates it -
+                    // so a reattaching instance reading it to seed its own UI was always
+                    // seeing a stale/default value, not the actual live pause state.
+                    // Hooking the real reactive pause-change flow (which fires for every
+                    // path that can change it: pauseUnpause()'s cycle command, explicit
+                    // pause()/unpause(), the system MediaSession callback) keeps this
+                    // genuinely live regardless of which one caused the change.
+                    mediaHolder?.updateState { it.copy(paused = v) }
+                    // <-- AM (LIVE_HOLDER_PLAYBACK_STATE)
                 }
                 .launchIn(viewModelScope)
 
@@ -868,31 +882,112 @@ class PlayerViewModel @JvmOverloads constructor(
 
     fun needsInit(animeId: Long, episodeId: Long): Boolean {
         val local = stateData.value
-        if (local.currentAnime?.id == animeId && local.currentEpisode?.id == episodeId) {
-            return false
+        val result = local.currentAnime?.id == animeId && local.currentEpisode?.id == episodeId
+        // AM (REOPEN_RACE_DIAGNOSTICS) -->
+        logcat {
+            "needsInit($animeId, $episodeId): local=(${local.currentAnime?.id}, " +
+                "${local.currentEpisode?.id}) -> needsInit=${!result}"
         }
-        // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
-        // This instance has no local state for the requested anime/episode - but if the
-        // Service's holder already reports a live session for that exact pair, this is a
-        // duplicate PlayerActivity/ViewModel reopened from the notification (its forced
-        // FLAG_ACTIVITY_NEW_TASK spins up a fresh instance - see bindToService()), not a
-        // genuinely new one. Without this, needsInit() returns true, init() reloads the
-        // episode from scratch, and - if it's already marked seen - the "already watched,
-        // start at 0" rule in setVideo() restarts playback from the beginning even though
-        // the actual (canonical, still-adopted) player was mid-episode the whole time.
+        // <-- AM (REOPEN_RACE_DIAGNOSTICS)
+        return !result
+    }
+
+    // AM (LAYERED_REATTACH_FIX) -->
+    // Deliberately separate from needsInit() above. needsInit() answers "does THIS
+    // instance need to (re)fetch its own metadata" (anime/episode/source/hoster list/
+    // PIP flag/etc, via init()'s normal body) - that's cheap, DB-only work, safe to run
+    // even when the canonical player already has the file loaded, and necessary for a
+    // freshly created instance to have any UI state at all.
+    //
+    // This function answers a narrower question: "does the actual mpv player need to
+    // (re)load a file". A fresh PlayerActivity/PlayerViewModel spun up by the
+    // notification's forced FLAG_ACTIVITY_NEW_TASK (reopening while the original task's
+    // back stack was lost) has empty local state, so needsInit() alone would say "yes,
+    // reinit" - which used to mean re-running the full network/hoster-resolution/
+    // mpv-loadfile pipeline against a file that was already loaded and playing in the
+    // Service-held canonical player the whole time. That combination is what caused
+    // both problems seen in practice: restarting from the beginning (or worse, racing
+    // the live player for control of the same mpv/surface) when this returned true too
+    // often, and a fresh instance stuck with no anime/episode/PIP state at all when an
+    // earlier attempt collapsed this check into needsInit() and skipped its entire body
+    // - including the metadata fetch - whenever a live session matched.
+    //
+    // Callers should use this (not needsInit()) to decide whether to run
+    // loadHosters()/loadVideo()/setVideo() specifically - init() itself should still run
+    // unconditionally except for the true redundant-call case needsInit() covers.
+    fun isSessionAlreadyLiveInPlayer(animeId: Long, episodeId: Long): Boolean {
+        // Covers this instance being genuinely, already attached (bindToService() ran
+        // and adopted the canonical player already) - the common case once the async
+        // Service bind has had time to complete.
         val holderState = mediaHolder?.state?.value
         if (holderState?.animeId == animeId && holderState.episodeId == episodeId) {
-            return false
+            // AM (REOPEN_RACE_DIAGNOSTICS) -->
+            logcat {
+                "isSessionAlreadyLiveInPlayer($animeId, $episodeId): matched via " +
+                    "instance-bound mediaHolder (paused=${holderState.paused})"
+            }
+            // <-- AM (REOPEN_RACE_DIAGNOSTICS)
+            return true
         }
-        // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
-        return true
+        // Fallback for the race where this check runs before that bind callback could
+        // possibly have fired (PlayerActivity.onNewIntent() runs synchronously from
+        // onCreate()) - reads the Service's own holder directly, in-process, no Binder
+        // round-trip needed.
+        val staticHolderState = PlayerBackgroundPlaybackService.activeMediaHolder?.state?.value
+        val result = staticHolderState?.animeId == animeId && staticHolderState.episodeId == episodeId
+        // AM (REOPEN_RACE_DIAGNOSTICS) -->
+        logcat {
+            "isSessionAlreadyLiveInPlayer($animeId, $episodeId): instance mediaHolder=" +
+                "${mediaHolder}, instanceHolderState=$holderState, " +
+                "staticHolder=${PlayerBackgroundPlaybackService.activeMediaHolder}, " +
+                "staticHolderState=$staticHolderState -> result=$result"
+        }
+        // <-- AM (REOPEN_RACE_DIAGNOSTICS)
+        return result
     }
+    // <-- AM (LAYERED_REATTACH_FIX)
+
+    // AM (LIVE_HOLDER_PLAYBACK_STATE) -->
+    // Seeds this fresh instance's own local paused state from the holder immediately,
+    // for the isSessionAlreadyLiveInPlayer() path - rather than waiting on this
+    // instance's own wirePlayerFlows()/propFlow("pause") subscription (wired once
+    // bindToService() completes, async) to eventually reflect it. Without this, the UI
+    // could render an unpaused player as paused for a beat right after reopening, or -
+    // if propFlow's underlying StateFlow only starts an initial null before the actual
+    // mpv observer fires and the real value happens to not change again for a while -
+    // stay stuck on the local default indefinitely.
+    fun syncPlaybackStateFromHolder() {
+        val holderState = mediaHolder?.state?.value
+            ?: PlayerBackgroundPlaybackService.activeMediaHolder?.state?.value
+            ?: return
+        updatePlaybackData { it.copy(paused = holderState.paused) }
+    }
+    // <-- AM (LIVE_HOLDER_PLAYBACK_STATE)
 
     data class InitResult(
         val hosterList: List<Hoster>?,
         val videoIndex: Pair<Int, Int>,
         val position: Long?,
     )
+
+    // AM (LAYERED_REATTACH_FIX) -->
+    // Lightweight counterpart to loadHosters() for the isSessionAlreadyLiveInPlayer()
+    // path: populates just enough of the hoster-selection UI state (the list itself and
+    // which one is "selected") to not look broken if the user opens that panel, without
+    // hitting the network or touching mpv - the resolved-video-list per hoster is left
+    // idle/unresolved and only fetched on demand (same as any other hoster the user
+    // hasn't expanded yet), rather than eagerly re-resolving everything on every reopen.
+    fun syncHosterUiStateWithoutReload(initResult: InitResult) {
+        val hosterList = initResult.hosterList ?: return
+        updateStateData {
+            it.copy(
+                hosterList = hosterList,
+                hosterState = hosterList.map { hoster -> HosterState.Idle(hoster.hosterName) },
+            )
+        }
+        updateUiData { it.copy(selectedHosterVideoIndex = initResult.videoIndex) }
+    }
+    // <-- AM (LAYERED_REATTACH_FIX)
 
     class ExceptionWithStringResource(
         message: String,
@@ -1927,7 +2022,20 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     private fun eofReached(eofReached: Boolean) {
-        if (eofReached && uiData.value.autoPlayEnabled) {
+        if (!eofReached) return
+        // AM (RECENT_EPISODE_POSITIONS) -->
+        // Reset the session-local temp position here, on the file genuinely ending -
+        // not in updateEpisodeProgressOnComplete() (which fires much earlier, at the
+        // "mark as seen" progress threshold, purely for tracking/download-next
+        // purposes). That threshold is often well before the real end (many videos have
+        // trailing credits/black frames past it), so resetting there wiped this episode's
+        // resume point for anyone who switched away between the threshold and the actual
+        // end - even though they hadn't watched anything past their real stopping point.
+        // Unconditional (not gated on autoplay below) since the temp cache should always
+        // reflect a genuine finish, whether or not the next episode auto-advances.
+        episodePosition = 0L
+        // <-- AM (RECENT_EPISODE_POSITIONS)
+        if (uiData.value.autoPlayEnabled) {
             nextEpisode(next = true, autoplay = true)
         }
     }
@@ -3360,6 +3468,13 @@ class PlayerViewModel @JvmOverloads constructor(
         currentEpisode.total_seconds = duration.toLong() * 1000L
 
         episodePosition = position.toLong()
+        // AM (SERVICE_OWNED_POSITION_TRACKING) -->
+        // Live position for a reattaching instance to read (see
+        // syncPlaybackStateFromHolder()) and for the Service's own independent
+        // periodic DB persistence below - deliberately unconditional (not gated by the
+        // "seen" preservation rule above, which only concerns the persisted DB field).
+        mediaHolder?.updateState { it.copy(positionMs = position * 1000) }
+        // <-- AM (SERVICE_OWNED_POSITION_TRACKING)
         val shouldTrack = !stateData.value.incognitoMode || stateData.value.hasTrackers
         if (position >= duration * progress && shouldTrack) {
             viewModelScope.launchNonCancellable {
@@ -3381,11 +3496,12 @@ class PlayerViewModel @JvmOverloads constructor(
         // "seen" threshold (close to the end) for anything reading it later.
         currentEp.last_second_seen = 0L
         // AM (RECENT_EPISODE_POSITIONS) -->
-        // Also reset the session-local position, otherwise rememberRecentEpisodePosition()
-        // (called on the changeEpisode() that follows completion) caches the near-end tick
-        // and resuming this episode later replays its last second before immediately
-        // autoplaying forward again.
-        episodePosition = 0L
+        // The session-local temp position (episodePosition) is deliberately NOT reset
+        // here - this fires at the "mark as seen" progress threshold, which can be well
+        // before the file actually ends (trailing credits/black frames, or a low
+        // threshold preference). Resetting here would wipe the resume point for anyone
+        // who switched away in that gap despite not having watched anything past their
+        // real stopping point. See eofReached() for the genuine-completion reset.
         // <-- AM (RECENT_EPISODE_POSITIONS)
         updateTrackEpisodeSeen(currentEp)
         deleteEpisodeIfNeeded(currentEp)

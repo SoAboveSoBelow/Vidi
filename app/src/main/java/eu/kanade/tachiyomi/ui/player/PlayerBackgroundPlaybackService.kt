@@ -15,15 +15,28 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.app.TaskStackBuilder
 import androidx.core.content.ContextCompat
+import animiru.domain.player.service.PlayerPreferences
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.ui.main.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
+import tachiyomi.domain.episode.interactor.GetEpisode
+import tachiyomi.domain.episode.interactor.UpdateEpisode
+import tachiyomi.domain.episode.model.EpisodeUpdate
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 /**
  * Foreground service that keeps playback alive when [PlayerActivity] is backgrounded
@@ -42,11 +55,66 @@ class PlayerBackgroundPlaybackService : Service() {
     // driving playback until step 2 cuts call sites over.
     private val mediaHolderLazy = lazy {
         PlayerMediaHolder(this).also {
-            logcat { "PlayerMediaHolder constructed in PlayerBackgroundPlaybackService" }
+            logcat {
+                "PlayerMediaHolder constructed in PlayerBackgroundPlaybackService " +
+                    "(serviceHash=${System.identityHashCode(this@PlayerBackgroundPlaybackService)}, " +
+                    "holderHash=${System.identityHashCode(it)})"
+            }
+            // AM (SYNC_DUPLICATE_REINIT_FIX) -->
+            activeMediaHolder = it
+            // <-- AM (SYNC_DUPLICATE_REINIT_FIX)
+            // AM (SERVICE_OWNED_POSITION_TRACKING) -->
+            startPositionPersistLoop()
+            // <-- AM (SERVICE_OWNED_POSITION_TRACKING)
         }
     }
     val mediaHolder: PlayerMediaHolder by mediaHolderLazy
     // <-- AM (SERVICE_OWNED_PLAYER)
+
+    // AM (SERVICE_OWNED_POSITION_TRACKING) -->
+    // PlayerViewModel's own position-tracking (onSecondReached, wired to
+    // viewModelScope) is Activity-scoped - it dies the instant the owning Activity is
+    // destroyed, which Android does unconditionally on any non-config-change onDestroy
+    // regardless of PlayerActivity's own intentionalStop/isBackgroundPlaybackActive
+    // logic (that logic only controls what THIS Service does, not the framework's own
+    // ViewModelStore.clear()). Since the canonical mpv player and audio output live
+    // entirely in this Service and keep running across that gap, this created a
+    // tracking blackout: real playback continued, but nothing persisted
+    // last_second_seen and nothing noticed a genuine finish, from the moment the old
+    // Activity died until a new one eventually reattached and re-wired its flows. If a
+    // real reinit happened to be needed in that window, it resumed from a stale, frozen
+    // position - visible as a "reset" - and in-progress (not-yet-seen) episodes were
+    // where this was most noticeable, since already-seen episodes already skip live
+    // position writes entirely (see PlayerViewModel's PRESERVE_POSITION_SETTING), so
+    // there was little to lose there. This periodic saver runs on the Service's own
+    // lifecycle instead, closing that gap regardless of whether any Activity/ViewModel
+    // currently exists.
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val getEpisode: GetEpisode by lazy { Injekt.get() }
+    private val updateEpisode: UpdateEpisode by lazy { Injekt.get() }
+    private val playerPreferences: PlayerPreferences by lazy { Injekt.get() }
+
+    private fun startPositionPersistLoop() {
+        serviceScope.launch {
+            while (isActive) {
+                delay(POSITION_PERSIST_INTERVAL_MS)
+                if (!mediaHolderLazy.isInitialized()) continue
+                val state = mediaHolder.state.value
+                val episodeId = state.episodeId ?: continue
+                if (state.paused || state.positionMs <= 0) continue
+                val episode = getEpisode.await(episodeId) ?: continue
+                if (episode.seen && !playerPreferences.preserveWatchingPosition.get()) continue
+                updateEpisode.await(
+                    EpisodeUpdate(
+                        id = episodeId,
+                        lastSecondSeen = state.positionMs.toLong(),
+                        totalSeconds = state.durationMs.toLong().takeIf { it > 0 },
+                    ),
+                )
+            }
+        }
+    }
+    // <-- AM (SERVICE_OWNED_POSITION_TRACKING)
 
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -161,9 +229,19 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        // AM (REOPEN_RACE_DIAGNOSTICS) -->
+        logcat {
+            "PlayerBackgroundPlaybackService.onDestroy (serviceHash=" +
+                "${System.identityHashCode(this)}, mediaHolderLazy.isInitialized=" +
+                "${mediaHolderLazy.isInitialized()})"
+        }
+        // <-- AM (REOPEN_RACE_DIAGNOSTICS)
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
+        // AM (SERVICE_OWNED_POSITION_TRACKING) -->
+        serviceScope.cancel()
+        // <-- AM (SERVICE_OWNED_POSITION_TRACKING)
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Step 4a: no longer this Service's job - see the comment in start() above.
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
@@ -176,6 +254,11 @@ class PlayerBackgroundPlaybackService : Service() {
             mediaHolder.release()
         }
         // <-- AM (SERVICE_OWNED_PLAYER)
+        // AM (SYNC_DUPLICATE_REINIT_FIX) -->
+        // Clear the static reference so a genuinely new session later doesn't have
+        // needsInit() match against this now-dead holder.
+        activeMediaHolder = null
+        // <-- AM (SYNC_DUPLICATE_REINIT_FIX)
         super.onDestroy()
     }
 
@@ -274,6 +357,9 @@ class PlayerBackgroundPlaybackService : Service() {
 
         // Caps wake lock lifetime in case stop/onDestroy never fires.
         private const val MAX_WAKE_LOCK_DURATION_MS = 12 * 60 * 60 * 1000L
+        // AM (SERVICE_OWNED_POSITION_TRACKING) -->
+        private const val POSITION_PERSIST_INTERVAL_MS = 5_000L
+        // <-- AM (SERVICE_OWNED_POSITION_TRACKING)
         const val ACTION_TOGGLE_PLAY_PAUSE = "eu.kanade.tachiyomi.ui.player.action.TOGGLE_PLAY_PAUSE"
         const val ACTION_STOP = "eu.kanade.tachiyomi.ui.player.action.STOP"
 
@@ -284,5 +370,21 @@ class PlayerBackgroundPlaybackService : Service() {
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, newIntent(context))
         }
+
+        // AM (SYNC_DUPLICATE_REINIT_FIX) -->
+        // Set the moment this Service's PlayerMediaHolder is constructed (see
+        // mediaHolderLazy above), cleared in onDestroy(). Exists so
+        // PlayerViewModel.isSessionAlreadyLiveInPlayer() can consult the live session's
+        // animeId/episodeId synchronously - PlayerActivity.onNewIntent() runs from
+        // onCreate(), well before this Service's async bindService() callback could
+        // possibly have fired for a freshly created duplicate instance (the exact
+        // notification-reopen case this exists for), so the instance-bound
+        // PlayerViewModel.mediaHolder field isn't populated yet at that point either.
+        // Safe as a plain static: this Service never runs in a separate process (see
+        // the manifest entry - no android:process).
+        @Volatile
+        var activeMediaHolder: PlayerMediaHolder? = null
+            private set
+        // <-- AM (SYNC_DUPLICATE_REINIT_FIX)
     }
 }

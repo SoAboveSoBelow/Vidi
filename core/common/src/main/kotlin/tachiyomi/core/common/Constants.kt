@@ -16,4 +16,8 @@ object Constants {
     const val SHORTCUT_SOURCES = "eu.kanade.tachiyomi.SHOW_CATALOGUES"
     const val SHORTCUT_EXTENSIONS = "eu.kanade.tachiyomi.EXTENSIONS"
     const val SHORTCUT_DOWNLOADS = "eu.kanade.tachiyomi.SHOW_DOWNLOADS"
+
+    // AM (LAST_LOCATION) -->
+    const val SHORTCUT_MORE = "eu.kanade.tachiyomi.SHOW_MORE"
+    // <-- AM (LAST_LOCATION)
 }
