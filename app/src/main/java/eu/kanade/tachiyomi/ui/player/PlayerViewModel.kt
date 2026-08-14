@@ -1705,19 +1705,17 @@ class PlayerViewModel @JvmOverloads constructor(
                 // AM (RECENT_EPISODE_POSITIONS) -->
                 val recentPosition = episode.id?.let { recentEpisodePositions.remove(it) }
                 // <-- AM (RECENT_EPISODE_POSITIONS)
-                val resumePosition = if (forceResumeFromLastPosition) {
-                    episode.last_second_seen
-                    // AM (RECENT_EPISODE_POSITIONS) -->
-                } else if (recentPosition != null) {
-                    recentPosition.positionMs
-                    // <-- AM (RECENT_EPISODE_POSITIONS)
-                } else if (episode.seen && !preservePos) {
-                    0L
-                } else {
-                    episode.last_second_seen / 1000L
+                forceResumeFromLastPosition.let { resumeFromLast ->
+                    forceResumeFromLastPosition = false
+                    when {
+                        resumeFromLast -> episode.last_second_seen / 1000L
+                        // AM (RECENT_EPISODE_POSITIONS) -->
+                        recentPosition != null -> recentPosition.positionMs / 1000L
+                        // <-- AM (RECENT_EPISODE_POSITIONS)
+                        episode.seen && !preservePos -> 0L
+                        else -> episode.last_second_seen / 1000L
+                    }
                 }
-                forceResumeFromLastPosition = false
-                mpvCommand("set", "start", "${resumePosition / 1000F}")
             }
         } else if (castState.hasLoadedVideo) {
             castState.position
