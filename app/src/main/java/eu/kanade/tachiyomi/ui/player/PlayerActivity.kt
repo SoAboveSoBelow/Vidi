@@ -74,6 +74,7 @@ import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.ui.base.activity.BaseActivity
 import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
+import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.util.system.powerManager
 import eu.kanade.tachiyomi.util.system.toShareIntent
 import eu.kanade.tachiyomi.util.system.toast
@@ -84,6 +85,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import logcat.LogPriority
+import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchNonCancellable
 import tachiyomi.core.common.util.lang.withUIContext
@@ -496,6 +498,29 @@ class PlayerActivity : BaseActivity() {
                         ) {
                             enterPictureInPictureMode(createPipParams())
                         } else {
+                            // AM (BACK_FALLBACK_TO_ANIME) -->
+                            // If this Activity is its task's root, finish() alone drops
+                            // straight to the launcher instead of back into the app -
+                            // there's nothing else left in THIS task's back stack. Most
+                            // common cause: reopening from the background-playback
+                            // notification (a Service-originated PendingIntent, so
+                            // Android forces FLAG_ACTIVITY_NEW_TASK on it) after the
+                            // original task was swiped from Recents while playback kept
+                            // the process alive. Reuses the same SHOW_ANIME deep link
+                            // NotificationReceiver.openEntryPendingActivity() already
+                            // relies on, so MainActivity lands back on the anime being
+                            // watched instead of an empty stack.
+                            if (isTaskRoot) {
+                                viewModel.stateData.value.currentAnime?.id?.let { animeId ->
+                                    startActivity(
+                                        Intent(this, MainActivity::class.java)
+                                            .setAction(Constants.SHORTCUT_ANIME)
+                                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                                            .putExtra(Constants.ANIME_EXTRA, animeId),
+                                    )
+                                }
+                            }
+                            // <-- AM (BACK_FALLBACK_TO_ANIME)
                             finish()
                         }
                     },
