@@ -33,6 +33,11 @@ class EpisodeShufflePreferences(
             newSeed = Random.nextLong()
         }
         seed(animeId).set(newSeed)
+        // A fresh shuffle order invalidates wherever the old order had gotten to, so
+        // "Continue" should fall back to picking the first unseen episode in the new
+        // order rather than resuming from a spot that no longer means anything.
+        lastWatched(animeId).delete()
+        lastWatchedPositionMs(animeId).delete()
     }
 
     fun disableShuffle(animeId: Long) {
@@ -41,6 +46,53 @@ class EpisodeShufflePreferences(
 
     fun toggleShuffle(animeId: Long) {
         if (isShuffleEnabled(animeId)) disableShuffle(animeId) else enableShuffle(animeId)
+    }
+
+    /**
+     * The last episode watched from this anime's shuffled playlist, used so "Continue"
+     * can resume right after it instead of jumping to whatever the first unseen episode
+     * in shuffled order happens to be (which may not match what was actually last
+     * watched, if episodes weren't watched strictly top-to-bottom). A value of 0L means
+     * nothing has been recorded (or it was wiped by a reshuffle).
+     *
+     * Only meaningful while shuffle is enabled; ignored entirely otherwise.
+     */
+    fun lastWatched(animeId: Long): Preference<Long> {
+        return preferenceStore.getLong("episode_shuffle_last_watched_$animeId", 0L)
+    }
+
+    /**
+     * Live playback position (ms) within [lastWatched]'s episode. Tracked separately
+     * from the episode's own last_second_seen, which gets reset to 0 on exit for any
+     * episode that's already crossed the "seen" threshold (unless the user has opted
+     * into preserveWatchingPosition) - exactly the case Continue's shuffle resume needs
+     * to survive, since stopping partway through an episode often crosses that
+     * threshold before you actually stop watching.
+     */
+    fun lastWatchedPositionMs(animeId: Long): Preference<Long> {
+        return preferenceStore.getLong("episode_shuffle_last_watched_position_$animeId", 0L)
+    }
+
+    /**
+     * Records [episodeId] as the last watched episode for [animeId]'s shuffled playlist.
+     * No-ops if shuffle isn't enabled, or if the playlist only has a single entry (there's
+     * nothing meaningful to "continue" from in that case).
+     */
+    fun recordLastWatched(animeId: Long, episodeId: Long, playlistSize: Int) {
+        if (playlistSize <= 1) return
+        if (!isShuffleEnabled(animeId)) return
+        lastWatched(animeId).set(episodeId)
+    }
+
+    /**
+     * Updates the live position for [episodeId], but only while it's still the
+     * recorded [lastWatched] episode - avoids a stray write racing in right as a
+     * different episode is being switched to.
+     */
+    fun recordLastWatchedPosition(animeId: Long, episodeId: Long, positionMs: Long) {
+        if (!isShuffleEnabled(animeId)) return
+        if (lastWatched(animeId).get() != episodeId) return
+        lastWatchedPositionMs(animeId).set(positionMs)
     }
 }
 

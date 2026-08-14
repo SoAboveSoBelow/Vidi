@@ -986,17 +986,35 @@ class AnimeScreenModel(
      * (episodeListItems) instead of the normal persisted sort, so
      * "Continue" picks up wherever the shuffled sequence actually is.
      */
+    // AY -->
+    // Within a shuffled playlist, Continue always resumes exactly where playback
+    // last was (see EpisodeShufflePreferences.lastWatched), regardless of whether
+    // that episode happens to already be marked seen - the app marks an episode
+    // seen once a completion threshold is crossed, which can happen before you
+    // actually stop watching, so gating on seen-state would still skip past
+    // whatever you were last on. Its saved position (episode.last_second_seen)
+    // picks up automatically once it's opened, same as tapping any episode
+    // directly. Manually jumping to a different episode is fine too - the
+    // recorded pointer just follows wherever playback actually goes. Only falls
+    // back to picking the first unseen episode in shuffled order if nothing's
+    // been recorded yet (a fresh shuffle wipes the recorded episode).
     fun getNextUnseenEpisode(): Episode? {
         val successState = successState ?: return null
-        return if (successState.isShuffleEnabled) {
-            successState.episodeListItems
-                .filterIsInstance<EpisodeList.Item>()
-                .find { !it.episode.seen }
-                ?.episode
-        } else {
-            successState.episodes.getNextUnseen(successState.anime)
+        if (!successState.isShuffleEnabled) {
+            return successState.episodes.getNextUnseen(successState.anime)
         }
+
+        val shuffledItems = successState.episodeListItems.filterIsInstance<EpisodeList.Item>()
+        val lastWatchedId = episodeShufflePreferences.lastWatched(successState.anime.id).get()
+        val lastWatched = if (lastWatchedId != 0L) {
+            shuffledItems.find { it.episode.id == lastWatchedId }
+        } else {
+            null
+        }
+
+        return (lastWatched ?: shuffledItems.find { !it.episode.seen })?.episode
     }
+    // <-- AY
 
     private fun getUnseenEpisodes(): List<Episode> {
         return filteredEpisodes

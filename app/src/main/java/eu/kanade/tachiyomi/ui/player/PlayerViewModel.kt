@@ -1201,6 +1201,29 @@ class PlayerViewModel @JvmOverloads constructor(
             episode.id == it.id
         }
 
+        // AY -->
+        // Shuffle's "Continue" resumes the exact episode last watched (see
+        // EpisodeShufflePreferences.lastWatched), regardless of whether it happened to
+        // cross the "seen" threshold before playback stopped. But onCleared() resets
+        // last_second_seen to 0 on exit for any seen episode unless the user has opted
+        // into preserveWatchingPosition, which would otherwise silently defeat this
+        // feature for exactly the episodes it exists to handle. Restore the
+        // shuffle-tracked position here, before video/hoster resolution reads it, and
+        // force it to be honored for this one open.
+        currentState.currentAnime?.let { anime ->
+            if (episode.id != null &&
+                episodeShufflePreferences.isShuffleEnabled(anime.id) &&
+                episodeShufflePreferences.lastWatched(anime.id).get() == episode.id
+            ) {
+                val savedPositionMs = episodeShufflePreferences.lastWatchedPositionMs(anime.id).get()
+                if (savedPositionMs > 0L) {
+                    episode.last_second_seen = savedPositionMs
+                    forceResumeFromLastPosition = true
+                }
+            }
+        }
+        // <-- AY
+
         updateStateData {
             it.copy(
                 currentEpisode = episode,
@@ -1209,6 +1232,31 @@ class PlayerViewModel @JvmOverloads constructor(
                 hasPreviousEpisode = currentEpisodeIndex != 0,
                 hasNextEpisode = currentEpisodeIndex != currentState.currentPlaylist.size - 1,
             )
+        }
+
+        // AY -->
+        // syncHolderSessionState() was previously only called from bindToService()/init()
+        // - i.e. on the very first episode this instance loaded. Every subsequent
+        // in-player switch (changeEpisode()/nextEpisode(), which both funnel through
+        // here) left the Service-held mediaHolder's tracked animeId/episodeId stale at
+        // whatever was first loaded. isSessionAlreadyLiveInPlayer() - used to decide
+        // whether reopening from elsewhere (PIP reattach, selecting an episode from the
+        // anime screen while backgrounded) needs a real switch or just a UI sync/PIP
+        // exit - reads exactly that stale value, so once you'd switched episodes at
+        // least once in-player, any later reattach could be checked against the wrong
+        // "currently playing" episode. Re-syncing here, on every setup rather than just
+        // the first, keeps it accurate for the whole session.
+        syncHolderSessionState()
+        // <-- AY
+
+        currentState.currentAnime?.let { anime ->
+            episode.id?.let { episodeId ->
+                episodeShufflePreferences.recordLastWatched(
+                    animeId = anime.id,
+                    episodeId = episodeId,
+                    playlistSize = currentState.currentPlaylist.size,
+                )
+            }
         }
 
         updateUiData {
@@ -3466,6 +3514,20 @@ class PlayerViewModel @JvmOverloads constructor(
         }
         // <-- AM (PRESERVE_POSITION_SETTING)
         currentEpisode.total_seconds = duration.toLong() * 1000L
+
+        // AY -->
+        // Kept separate from last_second_seen above, which gets reset to 0 on exit for
+        // a seen episode unless preserveWatchingPosition is on (see onCleared()) - that
+        // reset is exactly what Continue's shuffle resume needs to survive, so this
+        // tracks live position unconditionally instead of inheriting that rule.
+        stateData.value.currentAnime?.let { anime ->
+            episodeShufflePreferences.recordLastWatchedPosition(
+                animeId = anime.id,
+                episodeId = currentEpisode.id ?: -1L,
+                positionMs = position.toLong() * 1000L,
+            )
+        }
+        // <-- AY
 
         episodePosition = position.toLong()
         // AM (SERVICE_OWNED_POSITION_TRACKING) -->
