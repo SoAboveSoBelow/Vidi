@@ -433,7 +433,7 @@ fun PlayerControls(
                 },
                 modifier = Modifier.constrainAs(skipButton) {
                     end.linkTo(seekbar.end, MaterialTheme.padding.small)
-                    bottom.linkTo(seekbar.top)
+                    bottom.linkTo(bottomControls.top, MaterialTheme.padding.large)
                 },
             ) {
                 SkipIntroControls(
