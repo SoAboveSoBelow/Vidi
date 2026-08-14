@@ -11,8 +11,25 @@ The format is a modified version of [Keep a Changelog](https://keepachangelog.co
 - `Other` - for technical stuff.
 
 ## [Unreleased]
+
+## [v0.19.9.2] - 2026-08-14
 ### Added
 - Added chromecast support ([@Secozzi](https://github.com/Secozzi)) ([#175](https://github.com/quickdesh/Animiru/pull/175))
+- Cast button is now integrated into the configurable bottom player buttons picker
+
+### Changed
+- Player and MediaSession ownership moved into the background playback service, enabling always-on playback that survives closing the player screen
+
+### Fixed
+- Fix app-lock (biometric) prompt firing incorrectly during PIP or background playback
+- Fix duplicate player instance reload triggered by the notification reopening the app
+- Fix stuck player state and task teardown issues when PIP and the notification interact
+- Fix back button dropping to the launcher when the player is the task root
+- Fix new video inheriting the previous episode's pause state on load
+- Fix settings row and seekbar overlapping system bars when controls are shown
+- Fix skip/custom seek button overlapping the bottom controls
+- Fix seekbar/bottom controls layout bug causing controls to render at the top of the screen
+- Fix resume position unit mismatch
 
 ## [v0.19.9.1] - 2026-08-12
 ### Other
