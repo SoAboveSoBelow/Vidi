@@ -870,6 +870,18 @@ class PlayerViewModel @JvmOverloads constructor(
         val defaultResult = InitResult(currentHosterList, qualityIndex, null)
         if (!needsInit(animeId, initialEpisodeId)) return Pair(defaultResult, Result.success(true))
 
+        // AM (NEW_SESSION_AUTOPLAY_FIX) -->
+        // This is a genuinely new anime/episode (needsInit passed), not a same-episode
+        // hoster/quality switch - so, like changeEpisode(), it should always play once
+        // loaded rather than inheriting previousPauseState from whatever was left over
+        // by the PREVIOUS unrelated episode's checkFileLoaded()/loadVideo() cycle.
+        // Without this, pausing the current episode and then opening a different one
+        // (same PlayerViewModel/Activity instance, singleTask) carries that paused=true
+        // into loadVideo()'s `it.previousPauseState ?: playbackData.value.paused` capture,
+        // so the new video loads and then immediately re-pauses itself.
+        updateUiData { it.copy(previousPauseState = false) }
+        // <-- AM (NEW_SESSION_AUTOPLAY_FIX)
+
         return try {
             getAnime.await(animeId)?.let { anime ->
                 sourceManager.isInitialized.first { it }
