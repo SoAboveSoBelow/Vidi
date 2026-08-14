@@ -2543,7 +2543,18 @@ class PlayerViewModel @JvmOverloads constructor(
         val chapters = node.toObject<List<ChapterNode>>(json).map {
             it.toSegment()
         }
-        updateStateData { it.copy(chapters = chapters) }
+        // AM (CHAPTER_INDICATOR_STALE) -->
+        // The "chapter" index property only fires onChapterChanged() on a value change, so an
+        // episode transition into a chapterless file can leave currentChapter holding the
+        // previous episode's stale entry indefinitely. chapter-list is always reported on
+        // load though, even as an empty array, so clear here whenever it comes back empty.
+        updateStateData {
+            it.copy(
+                chapters = chapters,
+                currentChapter = if (chapters.isEmpty()) null else it.currentChapter,
+            )
+        }
+        // <-- AM (CHAPTER_INDICATOR_STALE)
     }
 
     private data class EpisodeLoadResult(
@@ -3369,6 +3380,13 @@ class PlayerViewModel @JvmOverloads constructor(
         // Reset resume position now that it's finished, otherwise it stays near the
         // "seen" threshold (close to the end) for anything reading it later.
         currentEp.last_second_seen = 0L
+        // AM (RECENT_EPISODE_POSITIONS) -->
+        // Also reset the session-local position, otherwise rememberRecentEpisodePosition()
+        // (called on the changeEpisode() that follows completion) caches the near-end tick
+        // and resuming this episode later replays its last second before immediately
+        // autoplaying forward again.
+        episodePosition = 0L
+        // <-- AM (RECENT_EPISODE_POSITIONS)
         updateTrackEpisodeSeen(currentEp)
         deleteEpisodeIfNeeded(currentEp)
         // Persist explicitly - not guaranteed to run after onSecondReached()'s own call.
@@ -3695,6 +3713,15 @@ class PlayerViewModel @JvmOverloads constructor(
 
         val chapterList = mpv.getPropertyNode("chapter-list")?.toObject<List<ChapterNode>>(json)
             ?: emptyList()
+        // AM (CHAPTER_INDICATOR_STALE) -->
+        // -1 means "before the first chapter" for a file that has chapters - not "no
+        // chapters at all". Bail instead of synthesizing a fake 0:00 entry when there
+        // simply aren't any.
+        if (chapterIndex == -1 && chapterList.isEmpty()) {
+            updateStateData { it.copy(currentChapter = null) }
+            return
+        }
+        // <-- AM (CHAPTER_INDICATOR_STALE)
         val chapter = if (chapterIndex == -1) {
             ChapterNode(
                 time = 0.0f,

@@ -57,6 +57,12 @@ fun CurrentChapter(
     modifier: Modifier = Modifier,
     background: Color = MaterialTheme.colorScheme.background,
     onBackground: Color = MaterialTheme.colorScheme.onBackground,
+    // AM (CHAPTER_INDICATOR_WIDTH) -->
+    // The chapter name has no width bound, so leaving it on lets the pill grow or shrink
+    // with every chapter change - fine where there's a spacer to absorb it, but in a packed
+    // row of other buttons that reflows the whole row. Callers in that context pass false.
+    showName: Boolean = true,
+    // <-- AM (CHAPTER_INDICATOR_WIDTH)
     onClick: () -> Unit = {},
 ) {
     Box(
@@ -101,23 +107,27 @@ fun CurrentChapter(
                     overflow = TextOverflow.Clip,
                     color = MaterialTheme.colorScheme.tertiary,
                 )
-                Text(
-                    text = Typography.bullet.toString(),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    color = onBackground,
-                    overflow = TextOverflow.Clip,
-                )
-                Text(
-                    text = chapter.name.substringBeforeLast(ChapterUtils.ANIYOMI_CHAPTER_IDENTIFIER),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = FontWeight.Bold,
-                    color = onBackground,
-                )
+                // AM (CHAPTER_INDICATOR_WIDTH) -->
+                if (showName) {
+                    Text(
+                        text = Typography.bullet.toString(),
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        color = onBackground,
+                        overflow = TextOverflow.Clip,
+                    )
+                    Text(
+                        text = chapter.name.substringBeforeLast(ChapterUtils.ANIYOMI_CHAPTER_IDENTIFIER),
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.Bold,
+                        color = onBackground,
+                    )
+                }
+                // <-- AM (CHAPTER_INDICATOR_WIDTH)
             }
         }
     }

@@ -186,8 +186,13 @@ private fun ChapterSlot(
     onClick: () -> Unit,
 ) {
     if (!showChapterIndicator || currentChapter == null) return
+    // AM (CHAPTER_INDICATOR_WIDTH) -->
+    // Icon + timestamp only here - this pill sits packed next to other configurable buttons,
+    // so a variable-width chapter name would shove them over on every chapter change.
     CurrentChapter(
         chapter = currentChapter,
+        showName = false,
         onClick = onClick,
     )
+    // <-- AM (CHAPTER_INDICATOR_WIDTH)
 }
