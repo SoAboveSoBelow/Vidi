@@ -13,9 +13,12 @@ import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.app.TaskStackBuilder
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
+import eu.kanade.tachiyomi.ui.main.MainActivity
+import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
@@ -176,6 +179,46 @@ class PlayerBackgroundPlaybackService : Service() {
         super.onDestroy()
     }
 
+    // AM (PIP_TASK_ROOT_FIX) -->
+    // Reopening PlayerActivity straight from this notification (via a plain
+    // PendingIntent.getActivity()) made it its task's sole/root Activity - Android
+    // forces FLAG_ACTIVITY_NEW_TASK on Intents fired from a non-Activity context like
+    // this Service, and with nothing else in the back stack, PlayerActivity ends up as
+    // task root. That was observed to be involved in the system tearing the Activity
+    // down on PIP exit after a notification reopen - and critically, the teardown
+    // bypasses PlayerActivity's own onPictureInPictureModeChanged()/finish() entirely,
+    // meaning it's happening below any level the Activity's own code can intercept or
+    // log. Building a synthetic back stack instead (MainActivity showing the anime,
+    // then PlayerActivity on top - reusing the same SHOW_ANIME/SHORTCUT_ANIME deep
+    // link the onBack-fallback and NotificationReceiver paths already rely on) gives
+    // PlayerActivity a parent in its own task, so it's never task-root when reopened
+    // this way - matching how it behaves when opened normally from within the app.
+    // Falls back to the old bare-Activity PendingIntent if animeId is somehow
+    // unavailable or TaskStackBuilder can't produce one, so the notification's open
+    // action never silently breaks.
+    private fun buildReopenPendingIntent(): PendingIntent {
+        val safeAnimeId = animeId
+        if (safeAnimeId != null) {
+            val stackPendingIntent = TaskStackBuilder.create(this).run {
+                addNextIntent(
+                    Intent(this@PlayerBackgroundPlaybackService, MainActivity::class.java)
+                        .setAction(Constants.SHORTCUT_ANIME)
+                        .putExtra(Constants.ANIME_EXTRA, safeAnimeId),
+                )
+                addNextIntent(PlayerActivity.newIntent(this@PlayerBackgroundPlaybackService, animeId, episodeId))
+                getPendingIntent(REQUEST_CODE_OPEN, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            }
+            if (stackPendingIntent != null) return stackPendingIntent
+        }
+        return PendingIntent.getActivity(
+            this,
+            REQUEST_CODE_OPEN,
+            PlayerActivity.newIntent(this, animeId, episodeId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+    // <-- AM (PIP_TASK_ROOT_FIX)
+
     private fun buildNotification(): Notification {
         val togglePendingIntent = PendingIntent.getService(
             this,
@@ -189,12 +232,7 @@ class PlayerBackgroundPlaybackService : Service() {
             Intent(this, PlayerBackgroundPlaybackService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val openAppPendingIntent = PendingIntent.getActivity(
-            this,
-            REQUEST_CODE_OPEN,
-            PlayerActivity.newIntent(this, animeId, episodeId),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val openAppPendingIntent = buildReopenPendingIntent()
 
         return NotificationCompat.Builder(this, Notifications.CHANNEL_BACKGROUND_PLAYBACK)
             .setSmallIcon(R.drawable.ic_ani)

@@ -43,8 +43,13 @@ interface SecureActivityDelegate {
          * True while mpv keeps running via PIP or the background-audio (notification)
          * service with no activity visible. The app-lock timer must not arm while this
          * is true, since the user is still actively using the player.
+         *
+         * AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+         * internal (not private) so setAppLock() below can also consult it directly -
+         * see that call site for why.
+         * <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
          */
-        private val isBackgroundPlaybackActive: Boolean
+        internal val isBackgroundPlaybackActive: Boolean
             get() = isPipActive || isBackgroundServiceActive
 
         /**
@@ -190,6 +195,24 @@ class SecureActivityDelegateImpl : SecureActivityDelegate, DefaultLifecycleObser
         if (!securityPreferences.useAuthenticator.get()) return
         if (activity.isAuthenticationSupported()) {
             if (!SecureActivityDelegate.requireUnlock) return
+            // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+            // Don't prompt for unlock while PIP or background (notification) playback
+            // is actively keeping the player alive. This is the same guarantee that
+            // already stops the lock timer from arming in that state (see
+            // isBackgroundPlaybackActive above) - extended here to also cover the
+            // prompt itself, not just whether it gets armed. Needed specifically
+            // because a synthetic back-stack Activity (MainActivity, inserted ahead of
+            // PlayerActivity so PlayerActivity is never its task's bare root when
+            // reopened from the background-playback notification - see
+            // PlayerBackgroundPlaybackService.buildReopenPendingIntent()) briefly
+            // resumes as part of constructing that stack, running this same check
+            // before PlayerActivity's own onStart()/exemption bookkeeping has had a
+            // chance to run. Only ever short-circuits while playback is genuinely
+            // still active in the background - idle-timeout locking with nothing
+            // playing is untouched, since isBackgroundPlaybackActive is false there
+            // and requireUnlock is evaluated normally above.
+            if (SecureActivityDelegate.isBackgroundPlaybackActive) return
+            // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
             activity.startActivity(Intent(activity, UnlockActivity::class.java))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 activity.overrideActivityTransition(Activity.OVERRIDE_TRANSITION_OPEN, 0, 0)

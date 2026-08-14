@@ -125,6 +125,20 @@ class PlayerMediaHolder(
         mediaSession?.release()
         mediaSession = null
         _player?.isExiting = true
+        // AM (STALE_HOLDER_STATE_FIX) -->
+        // Clearing the player reference and session state here (not just marking
+        // isExiting) matters because this holder can outlive any single PlayerActivity
+        // instance and be reused by a fast reopen (e.g. tapping the always-on
+        // notification) before the Service's own onDestroy() gets around to running -
+        // stopService() from PlayerActivity.onDestroy() is asynchronous, so there's a
+        // real window where a reopen binds to this same still-alive holder before it's
+        // torn down. Without clearing _state here too, needsInit() on that reopen would
+        // see the stale animeId/episodeId still "matching" and skip reinitializing
+        // entirely, leaving playback permanently stuck against an already-released
+        // player.
+        _player = null
+        _state.value = PlayerMediaState()
+        // <-- AM (STALE_HOLDER_STATE_FIX)
     }
 
     /** Minimal state a reattaching [PlayerActivity] needs to reconstruct its UI on create/resume. */

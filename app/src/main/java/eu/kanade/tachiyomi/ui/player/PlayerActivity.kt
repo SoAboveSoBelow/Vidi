@@ -237,6 +237,20 @@ class PlayerActivity : BaseActivity() {
                 hostIndex?.let { putExtra("hostIndex", it) }
                 vidIndex?.let { putExtra("vidIndex", it) }
                 hostList?.let { putExtra("hostList", it.serialize()) }
+                // AM (PIP_REOPEN_DUPLICATE_TASK_FIX) -->
+                // Explicitly setting NEW_TASK here (rather than letting Android inject it
+                // implicitly at PendingIntent.send() time when this Intent is fired from a
+                // non-Activity context, e.g. PlayerBackgroundPlaybackService's reopen
+                // notification) gives the framework full task-affinity information up
+                // front. The implicit-injection path was observed to briefly stand up a
+                // second, genuine Task record for this singleTask Activity before
+                // reconciling back to the existing one - and the system's cleanup of that
+                // transient duplicate was tearing down the real, live task instead of an
+                // empty one. Paired with the existing CLEAR_TOP, this is the standard
+                // combo for "bring an existing singleTask instance to front via
+                // onNewIntent" recommended for PendingIntents fired from services.
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // <-- AM (PIP_REOPEN_DUPLICATE_TASK_FIX)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
         }
@@ -566,6 +580,18 @@ class PlayerActivity : BaseActivity() {
                 it.isActive = false
                 it.release()
             }
+            // AM (STALE_HOLDER_STATE_FIX) -->
+            // Clear the holder's own player reference and session state synchronously,
+            // here, rather than relying solely on stopService() below to eventually get
+            // to it - stopService() is asynchronous, so the Service (and this same
+            // PlayerMediaHolder instance) can still be alive for a window after this
+            // call returns. A fast reopen (tapping the always-on notification quickly)
+            // can bind to that still-alive holder before its own onDestroy() runs, and
+            // without clearing state here first, needsInit() on that reopen would see
+            // stale animeId/episodeId still "matching" and skip reinitializing against
+            // a player already released two lines above.
+            mediaHolder?.release()
+            // <-- AM (STALE_HOLDER_STATE_FIX)
             stopService(PlayerBackgroundPlaybackService.newIntent(this))
         }
         // else: this Activity instance is being destroyed while playback is meant to
@@ -783,14 +809,32 @@ class PlayerActivity : BaseActivity() {
                 // otherwise fall back to background playback the same way onPause() does,
                 // so the session survives and the app lock stays exempt.
                 if (powerManager.isInteractive) {
-                    SecureActivityDelegate.setPipActive(false)
+                    // AM (PIP_REOPEN_RACE_FIX) -->
+                    // Both the exemption clear and the teardown used to fire unconditionally
+                    // here - correct for a genuine swipe-away, but if a concurrent reopen
+                    // (e.g. tapping the always-on notification while this Activity is still
+                    // technically mid-PIP-exit) reclaims this same instance within the delay
+                    // window, that reopen already correctly recognizes "already playing this,
+                    // no reload needed" via needsInit() - and then this callback would release
+                    // the very player it just decided not to reinitialize, leaving playback
+                    // permanently stuck, while the immediate exemption clear below would also
+                    // cause that reopen's own lock check to fire even though playback never
+                    // stopped. Re-validating at execution time instead of trusting the state
+                    // at schedule time makes this self-correcting either way: if the reclaim
+                    // already brought this instance back to STARTED/RESUMED, currentState is
+                    // no longer CREATED and this was never actually a genuine swipe-away, so
+                    // skip both the exemption clear and the teardown entirely.
                     window.decorView.postDelayed(
                         {
-                            viewModel.player.release()
-                            finish()
+                            if (lifecycle.currentState == Lifecycle.State.CREATED && !isFinishing) {
+                                SecureActivityDelegate.setPipActive(false)
+                                viewModel.player.release()
+                                finish()
+                            }
                         },
                         100,
                     )
+                    // <-- AM (PIP_REOPEN_RACE_FIX)
                 } else if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
                     startBackgroundPlayback()
                     // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
