@@ -334,7 +334,7 @@ fun PlayerControls(
                     fadeOut(playerControlsExitAnimationSpec())
                 },
                 modifier = Modifier.constrainAs(seekbar) {
-                    bottom.linkTo(bottomLeftControls.top)
+                    bottom.linkTo(bottomControls.top)
                 },
             ) {
                 SeekbarWithTimers(
@@ -449,6 +449,12 @@ fun PlayerControls(
             AnimatedVisibility(
                 visible = uiData.controlsShown && !uiData.isControlsLocked,
                 enter = if (!uiData.reduceMotion) {
+                    slideInHorizontally(playerControlsEnterAnimationSpec()) { -it } +
+                        fadeIn(playerControlsEnterAnimationSpec())
+                } else {
+                    fadeIn(playerControlsEnterAnimationSpec())
+                },
+                exit = if (!uiData.reduceMotion) {
                     slideOutHorizontally(playerControlsExitAnimationSpec()) { -it } +
                         fadeOut(playerControlsExitAnimationSpec())
                 } else {

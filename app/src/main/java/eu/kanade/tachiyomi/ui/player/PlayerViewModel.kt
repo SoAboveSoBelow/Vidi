@@ -245,6 +245,13 @@ class PlayerViewModel @JvmOverloads constructor(
     private val leftDoubleTapGesture = gesturePreferences.leftDoubleTapGesture.get()
     private val centerDoubleTapGesture = gesturePreferences.centerDoubleTapGesture.get()
     private val rightDoubleTapGesture = gesturePreferences.rightDoubleTapGesture.get()
+    // AM (MEDIA_CONTROLS) -->
+    private val mediaPreviousGesture = gesturePreferences.mediaPreviousGesture.get()
+    private val mediaPlayPauseGesture = gesturePreferences.mediaPlayPauseGesture.get()
+    private val mediaNextGesture = gesturePreferences.mediaNextGesture.get()
+    // <-- AM (MEDIA_CONTROLS)
+    private val longPressGesture = gesturePreferences.longPressGesture.get()
+    private val bottomPlayerButtons = gesturePreferences.bottomPlayerButtons.get()
     private val doubleTapToSeekDuration = gesturePreferences.skipLengthPreference.get()
     private val showSeekBar = gesturePreferences.showSeekBar.get()
     private val pipEpisodeToasts = playerPreferences.pipEpisodeToasts.get()
@@ -279,6 +286,7 @@ class PlayerViewModel @JvmOverloads constructor(
             smoothSeeking = smoothSeeking,
             showChapterIndicator = showChapterIndicator,
             enableCast = enableCast,
+            bottomPlayerButtons = bottomPlayerButtons,
         ),
     )
     val uiData = _uiData.asStateFlow()
@@ -483,122 +491,6 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
     // <-- AM (SERVICE_OWNED_PLAYER)
-
-    // Prefs
-    private val reduceMotion = playerPreferences.reduceMotion.get()
-    private val playerTimeToDisappearMs = playerPreferences.playerTimeToDisappear.get()
-    private val swapVolumeAndBrightness = gesturePreferences.swapVolumeBrightness.get()
-    private val boostCap = audioPreferences.volumeBoostCap.get()
-    private val displayVolumeAsPercentage = playerPreferences.displayVolPer.get()
-    private val showLoadingCircle = playerPreferences.showLoadingCircle.get()
-    private val invertDuration = playerPreferences.invertDuration.get()
-    private val smoothSeeking = gesturePreferences.playerSmoothSeek.get()
-    private val showChapterIndicator = playerPreferences.showCurrentChapter.get()
-
-    private val aniSkipEnabled = playerPreferences.aniSkipEnabled.get()
-    private val disableAniSkipOnChapters = playerPreferences.disableAniSkipOnChapters.get()
-    private val introSkipEnabled = playerPreferences.enableSkipIntro.get()
-    private val autoSkip = playerPreferences.autoSkipIntro.get()
-    private val netflixStyle = playerPreferences.enableNetflixStyleIntroSkip.get()
-    private val defaultWaitingTime = playerPreferences.waitingTimeIntroSkip.get()
-    private val leftDoubleTapGesture = gesturePreferences.leftDoubleTapGesture.get()
-    private val centerDoubleTapGesture = gesturePreferences.centerDoubleTapGesture.get()
-    private val rightDoubleTapGesture = gesturePreferences.rightDoubleTapGesture.get()
-    // AM (MEDIA_CONTROLS) -->
-    private val mediaPreviousGesture = gesturePreferences.mediaPreviousGesture.get()
-    private val mediaPlayPauseGesture = gesturePreferences.mediaPlayPauseGesture.get()
-    private val mediaNextGesture = gesturePreferences.mediaNextGesture.get()
-    // <-- AM (MEDIA_CONTROLS)
-    private val longPressGesture = gesturePreferences.longPressGesture.get()
-    private val bottomPlayerButtons = gesturePreferences.bottomPlayerButtons.get()
-    private val doubleTapToSeekDuration = gesturePreferences.skipLengthPreference.get()
-    private val showSeekBar = gesturePreferences.showSeekBar.get()
-    private val pipEpisodeToasts = playerPreferences.pipEpisodeToasts.get()
-    private val showStatusBar = playerPreferences.showSystemStatusBar.get()
-    private val downloadAheadAmount = downloadPreferences.autoDownloadWhileWatching.get()
-    private val progress = playerPreferences.progressPreference.get()
-
-    private val fontExtensionRegex = Regex($$""".*\.[ot]tf$""")
-    private val maxVolume = audioManager.getMaxVolume()
-    private val screenAspectRatio: Double by lazy {
-        val metrics = context.resources.displayMetrics
-        metrics.widthPixels.toDouble() / metrics.heightPixels.toDouble()
-    }
-
-    private val _stateData = MutableStateFlow(
-        PlayerStateData(
-            maxVolume = maxVolume,
-        ),
-    )
-    val stateData = _stateData.asStateFlow()
-    private val _uiData = MutableStateFlow(
-        PlayerUiData(
-            reduceMotion = reduceMotion,
-            playerTimeToDisappearMs = playerTimeToDisappearMs,
-            swapVolumeAndBrightness = swapVolumeAndBrightness,
-            boostCap = boostCap,
-            displayVolumeAsPercentage = displayVolumeAsPercentage,
-            showLoadingCircle = showLoadingCircle,
-            invertDuration = invertDuration,
-            smoothSeeking = smoothSeeking,
-            showChapterIndicator = showChapterIndicator,
-            bottomPlayerButtons = bottomPlayerButtons,
-        ),
-    )
-    val uiData = _uiData.asStateFlow()
-    private val _playbackData = MutableStateFlow(
-        PlayerPlaybackData(
-            currentVolume = if (playerPreferences.rememberPlayerVolume.get()) {
-                playerPreferences.playerVolumeValue.get().takeUnless { it == -1 }
-                    ?: audioManager.getVolume()
-            } else {
-                audioManager.getVolume()
-            },
-            currentBrightness = if (playerPreferences.rememberPlayerBrightness.get()) {
-                playerPreferences.playerBrightnessValue.get().takeUnless { it == -1f }
-                    ?: brightnessManager.getCurrentBrightness()
-            } else {
-                brightnessManager.getCurrentBrightness()
-            },
-        ),
-    )
-    val playbackData = _playbackData.asStateFlow()
-
-    private val _aspectRatio = MutableStateFlow<Double?>(null)
-    val aspectRatio = _aspectRatio.asStateFlow()
-
-    private val _eventFlow = MutableSharedFlow<Event>()
-    val eventFlow = _eventFlow.asSharedFlow()
-
-    private var httpServer: HttpServer? = null
-    private var timerJob: Job? = null
-    private var getHosterVideoLinksJob: Job? = null
-    private var episodeToDownload: Download? = null
-    private var currentHosterList: List<Hoster>? = null
-    private var thumbnailFetchJob: Job? = null
-    private val thumbnailTileCache =
-        object : LinkedHashMap<Int, Bitmap>(4, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>?) = size > 3
-        }
-
-    init {
-        viewModelScope.launchIO {
-            getCustomButtons.subscribeAll().collectLatest { buttons ->
-                setupCustomButtons(buttons)
-            }
-        }
-
-        viewModelScope.launchIO {
-            subtitlePreferences.subtitleSystemFonts.changes().collectLatest { fonts ->
-                updateUiData { it.copy(fontList = fetchFonts(fonts)) }
-            }
-        }
-        // AM (SERVICE_OWNED_PLAYER) -->
-        // The player/mpv-reading subscriptions that used to live here moved into
-        // wirePlayerFlows(), called from bindToService() once it's known which
-        // player this instance actually ends up using. See that function's kdoc.
-        // <-- AM (SERVICE_OWNED_PLAYER)
-    }
 
     fun isPlayerExiting(): Boolean {
         return player.isExiting
