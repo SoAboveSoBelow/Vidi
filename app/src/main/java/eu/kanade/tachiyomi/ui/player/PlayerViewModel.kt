@@ -399,9 +399,11 @@ class PlayerViewModel @JvmOverloads constructor(
     // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
     // Publishes this instance's current anime/episode onto the holder so a LATER
     // duplicate instance's needsInit() call can recognize "this exact session is
-    // already live" instead of reloading. Called both here (once the holder is known)
-    // and from init() (once the anime/episode are known) - whichever finishes second
-    // ends up with complete info, since the two happen in an unspecified order.
+    // already live" instead of reloading. Called both here (once the holder is known -
+    // covers the case where binding finishes after the anime/episode are already set)
+    // and from setupEpisode() (every episode switch, not just the initial one - without
+    // that, needsInit() would keep matching whatever episode the session originally
+    // started on, long after playback has moved past it).
     private fun syncHolderSessionState() {
         val anime = stateData.value.currentAnime ?: return
         val episode = stateData.value.currentEpisode ?: return
@@ -955,9 +957,6 @@ class PlayerViewModel @JvmOverloads constructor(
                 val episode = stateData.value.currentPlaylist.firstOrNull { it.id == episodeId }
                     ?: throw ExceptionWithStringResource("No episode loaded", AYMR.strings.no_episode_loaded)
                 setupEpisode(episode)
-                // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
-                syncHolderSessionState()
-                // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
 
                 val skipIntroLength = getAnimeSkipIntroLength()
                 updateCastUiData { it.copy(skipIntroLength = skipIntroLength.toLong()) }
@@ -1139,6 +1138,16 @@ class PlayerViewModel @JvmOverloads constructor(
         }
 
         setPropertyDouble("user-data/current-anime/episode-number", episode.episode_number.toDouble())
+
+        // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
+        // setupEpisode() is the single choke point for every episode switch (both the
+        // initial init() load and every later changeEpisode()) - without re-syncing here,
+        // the holder's episodeId stays pinned to whatever episode the session originally
+        // started on. needsInit() then wrongly treats a later request for THAT original
+        // episode as "already live" and no-ops, leaving whatever's actually playing
+        // untouched instead of switching to it.
+        syncHolderSessionState()
+        // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
     }
 
     fun setupPlayerOrientation() {
