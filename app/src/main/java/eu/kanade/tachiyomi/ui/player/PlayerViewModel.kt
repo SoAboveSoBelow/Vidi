@@ -787,6 +787,18 @@ class PlayerViewModel @JvmOverloads constructor(
         val positionMs = (episodePosition ?: 0L) * 1000L
         if (positionMs <= 0L) return
 
+        // AM (RECENT_POSITION_FINISHED_CLEAR) -->
+        // A finished episode (position at or past its final second) shouldn't get cached
+        // as a resume point - that would just replay the last second forever on return.
+        // This is intentionally independent of the "mark as watched after %" setting;
+        // clear strictly at the last second regardless of where that threshold sits.
+        val durationMs = playbackData.value.duration.toLong() * 1000L
+        if (durationMs > 0L && positionMs >= durationMs) {
+            recentEpisodePositions.remove(id)
+            return
+        }
+        // <-- AM (RECENT_POSITION_FINISHED_CLEAR)
+
         recentEpisodePositions[id] = RecentPosition(positionMs, stateData.value.currentPlaylistIndex)
     }
 
