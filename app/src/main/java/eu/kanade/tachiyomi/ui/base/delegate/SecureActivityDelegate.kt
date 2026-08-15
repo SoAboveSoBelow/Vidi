@@ -97,6 +97,44 @@ interface SecureActivityDelegate {
         }
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
 
+        // AM (SYNTHETIC_STACK_LOCK_RACE_FIX) -->
+        private var suppressNextAppLockCheck = false
+
+        /**
+         * Suppresses exactly the next [SecureActivityDelegateImpl.setAppLock] check across
+         * the whole app, one-shot.
+         *
+         * Exists for MainActivity's specific role as a placeholder parent in the
+         * notification-reopen synthetic back stack (see
+         * PlayerBackgroundPlaybackService.buildReopenPendingIntent()): that stack is built
+         * as TWO activities launched together (MainActivity, then PlayerActivity on top),
+         * both resumed as part of the same launch sequence. MainActivity's own
+         * SecureActivityDelegateImpl.onResume() still fires as a normal part of that -
+         * and if requireUnlock happened to be true at that exact moment, it would call
+         * startActivity(UnlockActivity) from inside MainActivity's onResume, splicing an
+         * unplanned third activity launch into the middle of the still-in-flight
+         * TaskStackBuilder sequence. That races with (and can silently drop) the
+         * already-queued PlayerActivity launch, landing the user back on MainActivity with
+         * no player, no audio, and no error - since PlayerActivity's own launch never
+         * actually completes.
+         *
+         * MainActivity is never meant to be seen in this flow, so it has no business
+         * making its own lock decision here - PlayerActivity is the actual destination and
+         * already performs the equivalent check on its own resume (also isBackgroundPlaybackActive-
+         * guarded), which is safe since nothing else is queued behind it to race with.
+         */
+        fun suppressNextAppLockCheck() {
+            suppressNextAppLockCheck = true
+        }
+
+        /** Reads and clears [suppressNextAppLockCheck] atomically - one-shot, consumed at most once. */
+        internal fun consumeAppLockSuppression(): Boolean {
+            val suppress = suppressNextAppLockCheck
+            suppressNextAppLockCheck = false
+            return suppress
+        }
+        // <-- AM (SYNTHETIC_STACK_LOCK_RACE_FIX)
+
         fun onApplicationStopped() {
             val preferences = Injekt.get<SecurityPreferences>()
             if (!preferences.useAuthenticator.get()) return
@@ -192,7 +230,15 @@ class SecureActivityDelegateImpl : SecureActivityDelegate, DefaultLifecycleObser
     }
 
     private fun setAppLock() {
+        // AM (SYNTHETIC_STACK_LOCK_RACE_FIX) -->
+        // Consumed first, unconditionally - ahead of every other early-return in this
+        // function - so a suppressed resume always clears the flag on this call, rather
+        // than leaving it set (e.g. because useAuthenticator happened to be off right now)
+        // for some later, unrelated resume to wrongly consume instead.
+        val suppressed = SecureActivityDelegate.consumeAppLockSuppression()
+        // <-- AM (SYNTHETIC_STACK_LOCK_RACE_FIX)
         if (!securityPreferences.useAuthenticator.get()) return
+        if (suppressed) return
         if (activity.isAuthenticationSupported()) {
             if (!SecureActivityDelegate.requireUnlock) return
             // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->

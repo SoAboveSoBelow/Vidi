@@ -3,13 +3,9 @@ package eu.kanade.tachiyomi.ui.player
 // AM (SERVICE_OWNED_PLAYER) -->
 import android.content.Context
 import android.media.session.MediaSession
-import android.view.Surface
-import animiru.domain.player.service.DecoderPreferences
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 
 /**
  * Owns the single, long-lived [MPVPlayer] instance and its [MediaSession].
@@ -38,15 +34,12 @@ import uy.kohesive.injekt.api.get
  * live mpv instances backing the same session.
  *
  * De-duplicating away the second instance's now-orphaned player (i.e. actually
- * discarding/releasing it, rather than just not adopting it) is the attach/detach
- * contract's job, not this class's - see the migration plan's step 3.
+ * discarding/releasing it, rather than just not adopting it) is
+ * PlayerViewModel.bindToService()'s job, not this class's.
  */
 class PlayerMediaHolder(
     context: Context,
-    decoderPreferences: DecoderPreferences = Injekt.get(),
 ) {
-    private val videoOutput = if (decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
-
     private var _player: MPVPlayer? = null
     val player: MPVPlayer
         get() = _player ?: error("PlayerMediaHolder.player accessed before any PlayerViewModel adopted into it")
@@ -57,8 +50,6 @@ class PlayerMediaHolder(
 
     private val _state = MutableStateFlow(PlayerMediaState())
     val state = _state.asStateFlow()
-
-    private var hasAttachedSurfaceBefore = false
 
     /**
      * Registers [existing] as this holder's player if none has been adopted yet, otherwise
@@ -90,30 +81,6 @@ class PlayerMediaHolder(
             setCallback(callback)
             isActive = true
         }.also { mediaSession = it }
-    }
-
-    /**
-     * Binds an already-running player to a freshly created/recreated Surface. Mirrors the
-     * per-Composable attach logic in `MpvSurface.kt`, but against a player that isn't tied to
-     * the caller's lifecycle - safe to call from any [PlayerActivity] instance, new or old.
-     */
-    fun attachSurface(surface: Surface, width: Int, height: Int) {
-        mpv.attachSurface(surface)
-        mpv.setOptionString("force-window", "yes")
-        // Force lighter "gpu" (not gpu-next) on reattach to cut reconfig cost/audio blip;
-        // use the user's pref only on the very first attach.
-        mpv.setPropertyString("vo", if (hasAttachedSurfaceBefore) "gpu" else videoOutput)
-        hasAttachedSurfaceBefore = true
-        mpv.setOptionString("vid", "auto")
-        mpv.setPropertyString("android-surface-size", "${width}x$height")
-    }
-
-    /** Detaches the surface without stopping playback - the player keeps running headless. */
-    fun detachSurface() {
-        mpv.setOptionString("hwdec", "no")
-        mpv.setPropertyString("vo", "null")
-        mpv.setPropertyString("force-window", "no")
-        mpv.detachSurface()
     }
 
     fun updateState(transform: (PlayerMediaState) -> PlayerMediaState) {

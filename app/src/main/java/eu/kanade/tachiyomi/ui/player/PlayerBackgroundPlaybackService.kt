@@ -200,6 +200,18 @@ class PlayerBackgroundPlaybackService : Service() {
         NotificationManagerCompat.from(this).notify(Notifications.ID_BACKGROUND_PLAYBACK, buildNotification())
     }
 
+    // AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX) -->
+    /**
+     * Rebuilds and re-posts the notification purely to refresh its cached reopen
+     * PendingIntent - title/subtitle/isPlaying are unchanged. See
+     * PlayerActivity.onDestroy()'s call site for why this needs its own explicit
+     * trigger separate from updatePlaybackState()/updateEpisodeInfo() below.
+     */
+    fun refreshReopenIntent() {
+        NotificationManagerCompat.from(this).notify(Notifications.ID_BACKGROUND_PLAYBACK, buildNotification())
+    }
+    // <-- AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX)
+
     /** Keeps notification text and reopen-intent ids in sync when the episode changes mid-session. */
     fun updateEpisodeInfo(title: String, subtitle: String, animeId: Long?, episodeId: Long?) {
         this.title = title
@@ -281,18 +293,50 @@ class PlayerBackgroundPlaybackService : Service() {
     // action never silently breaks.
     private fun buildReopenPendingIntent(): PendingIntent {
         val safeAnimeId = animeId
-        if (safeAnimeId != null) {
+        // AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX) -->
+        // The synthetic stack below exists only to give PlayerActivity a parent when its
+        // real back stack is gone (Activity destroyed, Service kept playback going). If
+        // an instance is already alive - anywhere, not necessarily foreground - it
+        // already has a real task; PlayerActivity being singleTask means targeting it
+        // directly (the plain PendingIntent.getActivity() fallback further down)
+        // correctly routes to that existing instance via onNewIntent on its own.
+        // Building the synthetic stack anyway in that case still forces a second,
+        // competing MainActivity task into existence alongside the real one - singleTask
+        // reroutes PlayerActivity's hop to the existing task regardless of the intent's
+        // own flags, leaving TaskStackBuilder's freshly-built MainActivity task orphaned
+        // with no deterministic winner for which one ends up visible. That's the
+        // "opening from the notification while still inside the app" failure this
+        // condition exists to avoid, by skipping the synthetic stack (and MainActivity)
+        // altogether whenever a real target already exists to route to directly.
+        if (safeAnimeId != null && !PlayerActivity.isAnyInstanceAlive) {
+        // <-- AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX)
             val stackPendingIntent = TaskStackBuilder.create(this).run {
                 addNextIntent(
                     Intent(this@PlayerBackgroundPlaybackService, MainActivity::class.java)
                         .setAction(Constants.SHORTCUT_ANIME)
-                        .putExtra(Constants.ANIME_EXTRA, safeAnimeId),
+                        .putExtra(Constants.ANIME_EXTRA, safeAnimeId)
+                        // AM (SYNTHETIC_STACK_LOCK_RACE_FIX) -->
+                        // MainActivity is only a placeholder parent here so PlayerActivity
+                        // has a real back stack - it's never meant to actually be shown.
+                        // Its own app-lock check must not run for this specific resume;
+                        // see SecureActivityDelegate.suppressNextAppLockCheck(). Only
+                        // relevant on this branch - the direct fallback below never
+                        // launches MainActivity at all, so there's no race for it to
+                        // guard against there.
+                        .putExtra(EXTRA_SUPPRESS_APP_LOCK, true),
+                        // <-- AM (SYNTHETIC_STACK_LOCK_RACE_FIX)
                 )
                 addNextIntent(PlayerActivity.newIntent(this@PlayerBackgroundPlaybackService, animeId, episodeId))
                 getPendingIntent(REQUEST_CODE_OPEN, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             }
             if (stackPendingIntent != null) return stackPendingIntent
         }
+        // AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX) -->
+        // Reached either when no live instance exists and TaskStackBuilder couldn't
+        // produce a stack (the original fallback), or - now - whenever an instance IS
+        // already alive: PlayerActivity's own singleTask launch mode handles routing to
+        // it correctly on its own, no synthetic parent required.
+        // <-- AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX)
         return PendingIntent.getActivity(
             this,
             REQUEST_CODE_OPEN,
@@ -362,6 +406,13 @@ class PlayerBackgroundPlaybackService : Service() {
         // <-- AM (SERVICE_OWNED_POSITION_TRACKING)
         const val ACTION_TOGGLE_PLAY_PAUSE = "eu.kanade.tachiyomi.ui.player.action.TOGGLE_PLAY_PAUSE"
         const val ACTION_STOP = "eu.kanade.tachiyomi.ui.player.action.STOP"
+
+        // AM (SYNTHETIC_STACK_LOCK_RACE_FIX) -->
+        // Marks the MainActivity hop (below) as merely a transient stop on the way to
+        // PlayerActivity, not a genuine app entry - see SecureActivityDelegate's
+        // suppressNextAppLockCheck() for why this matters.
+        const val EXTRA_SUPPRESS_APP_LOCK = "eu.kanade.tachiyomi.ui.player.extra.SUPPRESS_APP_LOCK"
+        // <-- AM (SYNTHETIC_STACK_LOCK_RACE_FIX)
 
         fun newIntent(context: Context): Intent {
             return Intent(context, PlayerBackgroundPlaybackService::class.java)

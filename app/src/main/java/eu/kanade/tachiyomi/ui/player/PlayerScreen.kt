@@ -116,7 +116,18 @@ fun PlayerScreen(
 
     var hasNavigatedBack by remember { mutableStateOf(false) }
 
-    BackHandler {
+    // AM (UNIFIED_BACK_HANDLING) -->
+    // Shared by both the system back gesture/button (BackHandler below) and the
+    // on-screen back arrow in the player controls (passed down as onBack to
+    // PlayerControls further down) - they used to be two separate code paths: the
+    // on-screen button called the raw onBack lambda directly, skipping this
+    // hasNavigatedBack guard, the PIP-eligibility check, and castManager.disconnect()
+    // entirely, while only the system back gesture went through this logic. That let
+    // the two buttons behave differently from each other for what's supposed to be the
+    // same action. Routing both through this single function keeps them identical, and
+    // gives any future PIP-related fix exactly one call site instead of two that can
+    // drift apart.
+    val handleBackPress: () -> Unit = {
         if (!hasNavigatedBack) {
             hasNavigatedBack = true
             if (!stateData.isCasting && stateData.isPipAvailable && !playbackData.paused &&
@@ -132,6 +143,9 @@ fun PlayerScreen(
             }
         }
     }
+    // <-- AM (UNIFIED_BACK_HANDLING)
+
+    BackHandler { handleBackPress() }
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         OrientationOverlay(
@@ -301,7 +315,7 @@ fun PlayerScreen(
                     stateData = stateData,
                     uiData = uiData,
                     playbackData = playbackData,
-                    onBack = onBack,
+                    onBack = handleBackPress,
                     onPlayerEvent = viewModel::handlePlayerEvent,
                     mpvVolume = mpvVolume,
                     pausedForCache = pausedForCache,

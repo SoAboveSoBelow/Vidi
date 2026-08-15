@@ -383,6 +383,12 @@ class PlayerViewModel @JvmOverloads constructor(
                     "switched to holder's canonical player ($resolvedPlayer)"
             }
         } else {
+            // AM (DUPLICATE_FOCUS_PAUSE_FIX) -->
+            // Only request Android audio focus once this instance is confirmed to be the
+            // canonical player - never for one that's about to be discarded above as an
+            // orphan. See MPVPlayer.requestAudioFocus() for why.
+            player.requestAudioFocus()
+            // <-- AM (DUPLICATE_FOCUS_PAUSE_FIX)
             logcat { "PlayerViewModel.bindToService: holder adopted this player ($player)" }
         }
         wirePlayerFlows()

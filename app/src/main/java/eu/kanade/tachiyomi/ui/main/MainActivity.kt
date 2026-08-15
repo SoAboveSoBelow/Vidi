@@ -81,6 +81,7 @@ import eu.kanade.tachiyomi.data.updater.AppUpdateChecker
 import eu.kanade.tachiyomi.data.updater.RELEASE_URL
 import eu.kanade.tachiyomi.extension.api.ExtensionApi
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
+import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
 import eu.kanade.tachiyomi.ui.base.activity.BaseActivity
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceScreen
 import eu.kanade.tachiyomi.ui.browse.source.globalsearch.GlobalSearchScreen
@@ -89,6 +90,7 @@ import eu.kanade.tachiyomi.ui.home.HomeScreen
 import eu.kanade.tachiyomi.ui.more.NewUpdateScreen
 import eu.kanade.tachiyomi.ui.more.OnboardingScreen
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
+import eu.kanade.tachiyomi.ui.player.PlayerBackgroundPlaybackService
 import eu.kanade.tachiyomi.ui.player.PlayerActivity
 import eu.kanade.tachiyomi.util.system.dpToPx
 import eu.kanade.tachiyomi.util.system.isNavigationBarNeedsScrim
@@ -151,6 +153,32 @@ class MainActivity : BaseActivity() {
         registerSecureActivity(this)
     }
 
+    // AM (SYNTHETIC_STACK_LOCK_RACE_FIX) -->
+    /**
+     * Imperative, not Compose-based - the existing HandleOnNewIntent()/handleIntentAction()
+     * path (used for the actual screen-navigation side of this intent) runs through a
+     * LaunchedEffect/callbackFlow, which isn't guaranteed to be processed before this
+     * Activity's own onResume() dispatches - Compose composition/recomposition is
+     * scheduled independently of the imperative Activity lifecycle. Reading the suppress
+     * extra here instead, directly in onCreate()/onNewIntent(), guarantees it's set before
+     * SecureActivityDelegateImpl.onResume() can possibly run afterward in the same
+     * lifecycle dispatch. See SecureActivityDelegate.suppressNextAppLockCheck() for why
+     * this exists at all.
+     */
+    private fun checkSuppressAppLock(intent: Intent?) {
+        if (intent?.action == Constants.SHORTCUT_ANIME &&
+            intent.getBooleanExtra(PlayerBackgroundPlaybackService.EXTRA_SUPPRESS_APP_LOCK, false)
+        ) {
+            SecureActivityDelegate.suppressNextAppLockCheck()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        checkSuppressAppLock(intent)
+        super.onNewIntent(intent)
+    }
+    // <-- AM (SYNTHETIC_STACK_LOCK_RACE_FIX)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         val isLaunch = savedInstanceState == null
 
@@ -158,6 +186,9 @@ class MainActivity : BaseActivity() {
         val splashScreen = if (isLaunch) installSplashScreen() else null
 
         super.onCreate(savedInstanceState)
+        // AM (SYNTHETIC_STACK_LOCK_RACE_FIX) -->
+        checkSuppressAppLock(intent)
+        // <-- AM (SYNTHETIC_STACK_LOCK_RACE_FIX)
 
         val didMigration = Migrator.awaitAndRelease()
 

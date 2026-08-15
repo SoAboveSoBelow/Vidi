@@ -186,7 +186,25 @@ class MPVPlayer(
         audioPreferences.audioChannels.get().let {
             mpv.setPropertyString(it.property, it.value)
         }
+    }
 
+    // AM (DUPLICATE_FOCUS_PAUSE_FIX) -->
+    /**
+     * Requests Android audio focus for this player. Deliberately NOT called from init{}
+     * (unlike the rest of [setupAudio]) - every [MPVPlayer] is constructed eagerly by a new
+     * PlayerViewModel field initializer, including instances that turn out to be discarded
+     * duplicates from a fast reattach (see PlayerMediaHolder's adopt() docs). Requesting
+     * AUDIOFOCUS_GAIN from init{} meant a duplicate's request could steal focus from an
+     * already-adopted, currently-playing instance before PlayerViewModel.bindToService() got
+     * a chance to detect and release the duplicate - the real player would receive
+     * AUDIOFOCUS_LOSS/LOSS_TRANSIENT and genuinely pause itself via onAudioFocusChange below,
+     * completely bypassing pause()/pauseUnpause(), which is why that pause looked like it had
+     * no explicit trigger. Callers must only invoke this once an instance is confirmed to be
+     * the canonical player for its holder (bindToService's non-orphan branch) - never for one
+     * about to be released as an orphan.
+     */
+    fun requestAudioFocus() {
+        if (audioFocusRequest != null) return
         val request = AudioFocusRequestCompat.Builder(AudioManagerCompat.AUDIOFOCUS_GAIN).also {
             it.setAudioAttributes(
                 AudioAttributesCompat.Builder().setUsage(AudioAttributesCompat.USAGE_MEDIA)
@@ -199,6 +217,7 @@ class MPVPlayer(
             audioFocusRequest = request
         }
     }
+    // <-- AM (DUPLICATE_FOCUS_PAUSE_FIX)
 
     private fun setupSubtitlesOptions() {
         mpv.setOptionString("sub-delay", (subtitlePreferences.subtitlesDelay.get() / 1000.0).toString())

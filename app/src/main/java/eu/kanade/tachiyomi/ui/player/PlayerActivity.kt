@@ -240,6 +240,39 @@ class PlayerActivity : BaseActivity() {
     }
 
     companion object {
+        // AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX) -->
+        // Refcount, not a plain boolean - a boolean set in onDestroy() would be a real
+        // race: the notification-reopen transition can have a new PlayerActivity
+        // instance's onCreate() run before the old, now-finishing instance's onDestroy()
+        // gets around to running, so an unconditional "false" write in the old
+        // instance's onDestroy() could stomp a "true" the new instance already set.
+        // Increments/decrements are commutative regardless of ordering, so this stays
+        // correct no matter which instance's lifecycle callback runs first.
+        private var liveInstanceCount = 0
+
+        /**
+         * True while at least one PlayerActivity instance is alive (created, not yet
+         * destroyed) - regardless of whether it's currently resumed, paused, or fully
+         * backgrounded behind another screen in the app.
+         *
+         * PlayerBackgroundPlaybackService.buildReopenPendingIntent() uses this to decide
+         * whether the notification's reopen action needs the synthetic MainActivity ->
+         * PlayerActivity back stack at all. That synthetic stack exists to give
+         * PlayerActivity a parent when the *real* back stack is gone (Activity destroyed,
+         * Service kept playback going) - but PlayerActivity is singleTask, so if an
+         * instance already exists anywhere, Android reroutes that hop of the stack build
+         * to the existing task regardless of the Intent's own flags, while
+         * TaskStackBuilder has already committed to building a brand-new task for
+         * MainActivity as the first hop. That leaves two competing tasks momentarily in
+         * flight with no deterministic winner - the "opens from the notification while
+         * still inside the app" failure this signal exists to avoid entirely, by skipping
+         * the synthetic stack (and MainActivity) altogether whenever a real target
+         * already exists to route to directly.
+         */
+        val isAnyInstanceAlive: Boolean
+            get() = liveInstanceCount > 0
+        // <-- AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX)
+
         fun newIntent(
             context: Context,
             animeId: Long?,
@@ -269,6 +302,24 @@ class PlayerActivity : BaseActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 // <-- AM (PIP_REOPEN_DUPLICATE_TASK_FIX)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                // AM (RESUMED_INSTANCE_RECREATE_CRASH_FIX) -->
+                // CLEAR_TOP without SINGLE_TOP has a well-documented Android gotcha: if
+                // the target Activity is already the resumed/topmost instance, Android
+                // finishes and recreates it instead of routing through onNewIntent() -
+                // this combination was previously only reachable via a rarely-hit
+                // fallback path, but reopening while PlayerActivity is already alive and
+                // foreground now goes through this exact intent as the primary route.
+                // That rapid finish-then-recreate tears down and reconstructs the native
+                // mpv context back-to-back on the main thread - mpv's own internal
+                // decode/audio threads are asynchronous to that, so one still mid-callback
+                // when mpv.close() destroys the context is a real "pthread_mutex_lock on a
+                // destroyed mutex" native crash, not a routing failure. SINGLE_TOP tells
+                // Android to deliver via onNewIntent() instead of recreating when already
+                // on top, which is the correct behavior for every caller of newIntent() -
+                // there's no legitimate case where destroying and rebuilding an
+                // already-foreground PlayerActivity for the exact same launch is desired.
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                // <-- AM (RESUMED_INSTANCE_RECREATE_CRASH_FIX)
             }
         }
     }
@@ -382,6 +433,11 @@ class PlayerActivity : BaseActivity() {
         enableEdgeToEdge()
         registerSecureActivity(this)
         super.onCreate(savedInstanceState)
+        // AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX) -->
+        // Paired 1:1 with the decrement in onDestroy() - see isAnyInstanceAlive's doc
+        // comment for why this exists.
+        liveInstanceCount++
+        // <-- AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX)
 
         // AM (MEDIA_SESSION_SERVICE_OWNED) -->
         // No longer set up synchronously here - it's created/redirected via the
@@ -571,39 +627,40 @@ class PlayerActivity : BaseActivity() {
                 PlayerScreen(
                     viewModel = viewModel,
                     onBack = {
-                        if (isPipSupportedAndEnabled && !viewModel.playbackData.value.paused &&
-                            playerPreferences.pipOnExit.get() && !viewModel.stateData.value.isCasting
-                        ) {
-                            enterPictureInPictureMode(createPipParams())
-                        } else {
-                            // AM (BACK_FALLBACK_TO_ANIME) -->
-                            // If this Activity is its task's root, finish() alone drops
-                            // straight to the launcher instead of back into the app -
-                            // there's nothing else left in THIS task's back stack. Most
-                            // common cause: reopening from the background-playback
-                            // notification (a Service-originated PendingIntent, so
-                            // Android forces FLAG_ACTIVITY_NEW_TASK on it) after the
-                            // original task was swiped from Recents while playback kept
-                            // the process alive. Reuses the same SHOW_ANIME deep link
-                            // NotificationReceiver.openEntryPendingActivity() already
-                            // relies on, so MainActivity lands back on the anime being
-                            // watched instead of an empty stack.
-                            if (isTaskRoot) {
-                                viewModel.stateData.value.currentAnime?.id?.let { animeId ->
-                                    startActivity(
-                                        Intent(this, MainActivity::class.java)
-                                            .setAction(Constants.SHORTCUT_ANIME)
-                                            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                                            .putExtra(Constants.ANIME_EXTRA, animeId),
-                                    )
-                                }
+                        // AM (UNIFIED_BACK_HANDLING) -->
+                        // No PIP check here anymore - PlayerScreen's handleBackPress is
+                        // now the single place that decides PIP-vs-open-app, for both the
+                        // system back gesture and the on-screen back button alike. This
+                        // lambda only ever runs once that's already decided against PIP,
+                        // so it's purely the "actually leave the player" fallback.
+                        // <-- AM (UNIFIED_BACK_HANDLING)
+                        // AM (BACK_FALLBACK_TO_ANIME) -->
+                        // If this Activity is its task's root, finish() alone drops
+                        // straight to the launcher instead of back into the app -
+                        // there's nothing else left in THIS task's back stack. Most
+                        // common cause: reopening from the background-playback
+                        // notification (a Service-originated PendingIntent, so
+                        // Android forces FLAG_ACTIVITY_NEW_TASK on it) after the
+                        // original task was swiped from Recents while playback kept
+                        // the process alive. Reuses the same SHOW_ANIME deep link
+                        // NotificationReceiver.openEntryPendingActivity() already
+                        // relies on, so MainActivity lands back on the anime being
+                        // watched instead of an empty stack.
+                        if (isTaskRoot) {
+                            viewModel.stateData.value.currentAnime?.id?.let { animeId ->
+                                startActivity(
+                                    Intent(this, MainActivity::class.java)
+                                        .setAction(Constants.SHORTCUT_ANIME)
+                                        .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                                        .putExtra(Constants.ANIME_EXTRA, animeId),
+                                )
                             }
-                            // <-- AM (BACK_FALLBACK_TO_ANIME)
-                            // AM (TASK_SWIPE_TEARDOWN_FIX) -->
-                            intentionalStop = true
-                            // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
-                            finish()
                         }
+                        // <-- AM (BACK_FALLBACK_TO_ANIME)
+                        // AM (TASK_SWIPE_TEARDOWN_FIX) -->
+                        intentionalStop = true
+                        // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
+                        finish()
                     },
                     modifier = Modifier.fillMaxSize().onGloballyPositioned {
                         pipRect = run {
@@ -659,6 +716,12 @@ class PlayerActivity : BaseActivity() {
             // <-- AM (TASK_SWIPE_TEARDOWN_FIX)
             // Genuine end of this playback session - tear everything down.
             logcat { "onDestroy: tearing down (mediaHolder.release(), stopService)" }
+            // AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX) -->
+            // No refresh call needed here (unlike the preserving-session branch below) -
+            // stopService() a few lines down removes the notification entirely, so
+            // there's nothing left whose cached PendingIntent could go stale.
+            liveInstanceCount--
+            // <-- AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX)
             stopBackgroundPlayback()
             viewModel.player.release()
             viewModel.stopHttpServer()
@@ -683,6 +746,16 @@ class PlayerActivity : BaseActivity() {
             // AM (REOPEN_RACE_DIAGNOSTICS) -->
             logcat { "onDestroy: preserving session (Service/mediaHolder left running)" }
             // <-- AM (REOPEN_RACE_DIAGNOSTICS)
+            // AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX) -->
+            // Decrement before the refresh call below, and only on this branch: this is
+            // the one case where isAnyInstanceAlive is actually about to become false
+            // while the Service itself lives on - the notification's cached reopen
+            // PendingIntent was most recently built while an instance was still alive
+            // (skipping the synthetic stack), so it needs rebuilding now to switch back
+            // to that stack before anyone can tap it against this now-stale state.
+            liveInstanceCount--
+            backgroundPlaybackService?.refreshReopenIntent()
+            // <-- AM (SYNTHETIC_STACK_LIVE_INSTANCE_FIX)
         }
         // else: this Activity instance is being destroyed while playback is meant to
         // continue - leave the Service, its player, its notification (if active), and
