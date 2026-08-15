@@ -287,6 +287,12 @@ class PlayerViewModel @JvmOverloads constructor(
             showChapterIndicator = showChapterIndicator,
             enableCast = enableCast,
             bottomPlayerButtons = bottomPlayerButtons,
+            // AM (SYSTEM_BAR_SYNC) -->
+            // controlsShown defaults to true, so statusBarShown must be seeded from the
+            // preference here too - otherwise the system bar stays hidden on first open
+            // until the next showControls()/hideControls() toggle syncs them.
+            statusBarShown = showStatusBar,
+            // <-- AM (SYSTEM_BAR_SYNC)
         ),
     )
     val uiData = _uiData.asStateFlow()
