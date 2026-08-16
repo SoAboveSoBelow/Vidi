@@ -635,6 +635,44 @@ class PlayerActivity : BaseActivity() {
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     }
 
+    // AM (ENTER_BACKGROUND_CONSOLIDATION) -->
+    /**
+     * Single decision point for "this Activity is no longer visible - should
+     * playback keep running via the always-on notification, or pause?" This exact
+     * check (playerPreferences.backgroundPlayback + current paused state, then
+     * either startBackgroundPlayback()+clear the PIP exemption, or pause+clear it)
+     * used to be duplicated inline across three call sites - onPause(), the PIP
+     * "Background Play" action, and the screen-off sub-case of PIP being dismissed -
+     * with the PIP action's copy subtly different (it always started background
+     * playback, ignoring paused state) from the other two, undocumented as
+     * intentional. That divergence meant a fix to one call site silently didn't
+     * apply to the others - now there's exactly one place this decision is made, and
+     * the one genuine difference between call sites is an explicit, documented
+     * parameter instead of three separately-hand-written copies of the same branch.
+     * Pure deduplication - doesn't touch the genuine-swipe-away teardown branch,
+     * which is a different decision (end the session, not "should it background").
+     *
+     * @param force Skip the "only if currently playing" check. The headphones
+     * "Background Play" button is an explicit user request to keep this session
+     * alive in the background even if paused right now (so a later notification tap
+     * resumes it); passive backgrounding (leaving the app, screen off during PIP)
+     * shouldn't spontaneously start playing an already-paused video.
+     */
+    private fun enterBackground(force: Boolean = false) {
+        if (playerPreferences.backgroundPlayback.get() && (force || !viewModel.playbackData.value.paused)) {
+            startBackgroundPlayback()
+            // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+            // Use the handoff clear here, not setPipActive(false) - the service
+            // start above is async, so isBackgroundServiceActive isn't true yet.
+            SecureActivityDelegate.clearPipForBackgroundHandoff()
+            // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
+        } else {
+            viewModel.pause()
+            SecureActivityDelegate.setPipActive(false)
+        }
+    }
+    // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
+
     override fun onPause() {
         viewModel.saveCurrentEpisodeWatchingProgress()
 
@@ -647,14 +685,10 @@ class PlayerActivity : BaseActivity() {
         if (isFinishing) {
             viewModel.deletePendingEpisodes()
             viewModel.mpvCommand("stop")
-        } else if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
-            // The Service/player/notification keep running regardless (they're not
-            // tied to this Activity's visibility since step 4b) - this branch is only
-            // about whether backgrounding should also mark the app-lock exemption and
-            // leave playback running, versus falling through to an actual pause below.
-            startBackgroundPlayback()
         } else {
-            viewModel.pause()
+            // AM (ENTER_BACKGROUND_CONSOLIDATION) -->
+            enterBackground()
+            // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
         }
 
         super.onPause()
@@ -835,16 +869,10 @@ class PlayerActivity : BaseActivity() {
                         100,
                     )
                     // <-- AM (PIP_REOPEN_RACE_FIX)
-                } else if (playerPreferences.backgroundPlayback.get() && !viewModel.playbackData.value.paused) {
-                    startBackgroundPlayback()
-                    // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
-                    // Use the handoff clear here, not setPipActive(false) - the service
-                    // start above is async, so isBackgroundServiceActive isn't true yet.
-                    SecureActivityDelegate.clearPipForBackgroundHandoff()
-                    // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
                 } else {
-                    viewModel.pause()
-                    SecureActivityDelegate.setPipActive(false)
+                    // AM (ENTER_BACKGROUND_CONSOLIDATION) -->
+                    enterBackground()
+                    // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
                 }
                 // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
             } else {
@@ -877,11 +905,11 @@ class PlayerActivity : BaseActivity() {
                         PIP_BACKGROUND_PLAY -> {
                             // Manually trigger the background-audio path (onPause() skips
                             // it while still in PIP), then moveTaskToBack() to exit PIP.
-                            // Must start the service even while paused - it's an explicit
-                            // user action, and nothing else keeps the player alive here.
-                            if (playerPreferences.backgroundPlayback.get()) {
-                                startBackgroundPlayback()
-                            }
+                            // force=true: an explicit user action, so this should work
+                            // even while paused - see enterBackground()'s doc comment.
+                            // AM (ENTER_BACKGROUND_CONSOLIDATION) -->
+                            enterBackground(force = true)
+                            // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
                             isIntentionalBackgroundTransition = true
                             moveTaskToBack(true)
                         }
