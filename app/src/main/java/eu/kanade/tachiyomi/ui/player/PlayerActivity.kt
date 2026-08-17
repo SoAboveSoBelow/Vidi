@@ -37,7 +37,9 @@ import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
@@ -80,6 +82,7 @@ import eu.kanade.tachiyomi.util.system.toShareIntent
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -117,6 +120,92 @@ class PlayerActivity : BaseActivity() {
     // Set before we intentionally moveTaskToBack() (e.g. PIP "background play"),
     // so onPictureInPictureModeChanged doesn't treat it as the user swiping PIP away.
     private var isIntentionalBackgroundTransition = false
+
+    // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
+    /**
+     * Set right before finish() from the headphones "Background Play" action,
+     * checked ONLY by onDestroy()'s teardown-vs-preserve decision. Deliberately a
+     * separate flag from isIntentionalBackgroundTransition above, not a reuse of
+     * it: onPictureInPictureModeChanged(false, ...) can fire before onDestroy() in
+     * this exact sequence and CLEARS that flag as part of its own, different
+     * handling - reusing it here would risk onDestroy() checking it after it's
+     * already been cleared, incorrectly treating this as a genuine end.
+     *
+     * The whole reason this flag (and the finish() call it guards) exists:
+     * moveTaskToBack() while a task is still actively pinned (in PIP) is a
+     * genuinely unusual operation - confirmed by direct observation, this app's
+     * PIP crash never happens across two genuinely separate Activity
+     * instances/tasks, only when a single task survives across this exact
+     * transition. finish() from PIP is the standard, heavily-exercised way every
+     * PIP app closes its window (Android/Samsung's own PIP implementation is
+     * tested against this constantly) - relying on it instead deliberately
+     * produces a genuinely fresh Task on the next reopen (since
+     * LIVE_INSTANCE_REOPEN_FIX's hasLiveInstance correctly reads false once this
+     * Activity is actually destroyed, routing the reopen through the synthetic
+     * back-stack path rather than reusing anything), matching the one condition
+     * already confirmed to work.
+     */
+    private var isBackgroundPlayTransitionFinish = false
+    // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
+
+    // AM (PIP_ENTRY_CANCELLED_FIX) -->
+    // Set right before every enterPictureInPictureMode() call, cleared once
+    // onPictureInPictureModeChanged actually confirms PIP was entered. Exists to
+    // distinguish "a PIP entry attempt was just made and got cancelled by the OS
+    // mid-flight" from "an already-established PIP window was genuinely dismissed by
+    // the user" - both currently land in onPictureInPictureModeChanged's same
+    // lifecycle.currentState == CREATED branch below, but they mean opposite things.
+    // Confirmed via logcat: re-entering PIP on a reused instance (see
+    // LIVE_INSTANCE_REOPEN_FIX) can get cancelled by the system
+    // (clearWaitForEnteringPinnedMode reason=exit_pip) - without this flag, that
+    // cancelled *entry* attempt was being treated identically to a genuine
+    // swipe-away, tearing down the whole session for something the user never asked
+    // to end.
+    private var isPipEntryPending = false
+    // <-- AM (PIP_ENTRY_CANCELLED_FIX)
+
+    // AM (PIP_RECREATE_FIX) -->
+    // True once this specific Activity instance has attempted PIP entry once -
+    // reset to false for every fresh instance (unlike pendingPipEntryAfterRecreate,
+    // which is static and deliberately survives the transition). Checked by
+    // tryEnterPictureInPicture() to decide whether to proceed directly (first
+    // attempt) or recreate() first (any attempt after that) - see
+    // pendingPipEntryAfterRecreate's doc comment for the full reasoning.
+    private var hasAttemptedPipEntryThisInstance = false
+    // <-- AM (PIP_RECREATE_FIX)
+
+    // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
+    /**
+     * Set true only in onCreate(), only when liveInstanceCount shows another
+     * PlayerActivity instance is already alive, right before this one immediately
+     * finish()es itself. Confirmed directly by observation: duplicate instances of
+     * this singleTask Activity CAN coexist (e.g. PIP within the app, then
+     * backgrounding and expanding the PIP - a second, fully separate instance/task
+     * appears, capped around two + PIP; Recents can also be seen forcibly closing
+     * one while audio keeps playing via the other). That's a structural gap
+     * LIVE_INSTANCE_REOPEN_FIX doesn't cover, since it only prevents duplicates
+     * arising from the notification's own reopen PendingIntent specifically - not
+     * from other paths that can independently end up constructing a second
+     * instance. A live duplicate is a very plausible root cause for the PIP
+     * re-entry crash investigated at length elsewhere in this file: two
+     * ActivityRecords for the same component present at once is exactly the kind
+     * of state Android's own PIP/task transaction handling would struggle with,
+     * independent of any of this app's own timing.
+     *
+     * Every lifecycle callback below checks this first and returns immediately
+     * when true, before touching viewModel/mediaHolder/anything else - this
+     * instance's job is only to get out of the way as cleanly as possible, not to
+     * participate in the shared session the original, still-alive instance owns.
+     * Critically, this means viewModel is never accessed at all for a detected
+     * duplicate, so its underlying MPVPlayer is never even constructed - nothing
+     * to release, nothing to leak. onDestroy() also needs its own gate here,
+     * separate from isFinishing: without it, this instance's teardown branch
+     * would try to release/stop the Service-owned session the ORIGINAL instance
+     * still depends on, since isFinishing is true here regardless of which
+     * instance called finish() on itself.
+     */
+    private var isDuplicateInstanceSelfTerminating = false
+    // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
 
     // AM (SERVICE_OWNED_PLAYER) -->
     // Bound for the whole playback session (established in onCreate, torn down in
@@ -223,6 +312,53 @@ class PlayerActivity : BaseActivity() {
     }
 
     companion object {
+        // AM (LIVE_INSTANCE_REOPEN_FIX) -->
+        /**
+         * Tracks whether any PlayerActivity instance currently exists - incremented in
+         * onCreate(), decremented in onDestroy() unconditionally (regardless of
+         * isFinishing/session-preservation, since this tracks whether an Activity
+         * WINDOW exists right now, a different question from whether the underlying
+         * playback session is preserved). Used by
+         * PlayerBackgroundPlaybackService.buildReopenPendingIntent() to decide whether
+         * the notification's reopen intent needs the full synthetic back stack (for a
+         * genuinely fresh cold start with no parent) or can just bring an existing
+         * singleTask instance to front - see that function's doc comment for why this
+         * distinction turned out to matter a great deal.
+         */
+        @Volatile
+        private var liveInstanceCount = 0
+
+        val hasLiveInstance: Boolean get() = liveInstanceCount > 0
+        // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
+
+        // AM (PIP_RECREATE_FIX) -->
+        /**
+         * Set right before calling recreate(), read and consumed by the freshly
+         * recreated instance's own onResume(). Static/companion, not a regular field,
+         * because it deliberately needs to survive the exact onDestroy()->onCreate()
+         * transition recreate() causes - a plain instance field would just be gone
+         * along with the old instance.
+         *
+         * Confirmed by direct observation: this app's PIP crash (see
+         * isPipEntryPending and the surrounding investigation) does NOT happen while
+         * two genuinely separate PlayerActivity instances/tasks are both alive - each
+         * PIP attempt was landing on a completely fresh Activity record that had
+         * never been through PIP before. DUPLICATE_INSTANCE_SELF_TERMINATE
+         * correctly closed off that duplicate-instance path (fixing several other
+         * real bugs it caused - stale position, the notification-reopen loop), but
+         * that also means every PIP attempt now lands on the SAME long-lived record
+         * across a whole session - including the second, third, etc. attempt, which
+         * is exactly the situation this crash needs. recreate() deliberately
+         * reproduces the one condition that was accidentally protective before -a
+         * genuinely fresh Activity record for this specific PIP attempt - without
+         * reintroducing an actual duplicate task: recreate() destroys and rebuilds
+         * this Activity in place, in the same task, and (via
+         * PlayerMediaHolder.adopt()'s existing dedup logic, unchanged) the new
+         * instance transparently reconnects to the exact same underlying session.
+         */
+        private var pendingPipEntryAfterRecreate = false
+        // <-- AM (PIP_RECREATE_FIX)
+
         fun newIntent(
             context: Context,
             animeId: Long?,
@@ -274,22 +410,61 @@ class PlayerActivity : BaseActivity() {
             Notifications.ID_NEW_EPISODES,
         )
 
-        if (!viewModel.needsInit(animeId, episodeId)) {
-            // Already playing this exact episode (e.g. reopened from the background-
-            // playback notification) - avoid restarting the whole file-open pipeline.
-            setIntent(intent)
-            return
-        }
-
-        viewModel.saveCurrentEpisodeWatchingProgress()
-
+        // AM (NEEDSINIT_BIND_RACE_FIX) -->
+        // needsInit()'s "is this exact session already live in the Service" fallback
+        // check reads mediaHolder, which is only populated once bindToService()
+        // completes - asynchronously, from bindService()'s onServiceConnected
+        // callback fired back in onCreate(). onCreate() then calls this exact
+        // function directly and synchronously, before that bind has any chance to
+        // resolve - so for every freshly-created instance (precisely the case that
+        // check exists to catch), needsInit() was being asked to answer a question
+        // it structurally couldn't yet know the answer to, and always fell back to
+        // "needs init". That meant reopening onto an already-live, already-watched
+        // session reloaded it from scratch and hit the "already watched -> start at
+        // 0" rule instead of resuming - the playback position visibly resetting.
+        // Waiting for playerReady here means needsInit() always runs with complete
+        // information instead of racing ahead of it: for an already-bound instance
+        // (the common case - reusing an existing, already-resumed Activity)
+        // playerReady is already true, so this proceeds with no added delay; only a
+        // genuinely fresh instance actually waits, for exactly as long as the bind
+        // takes to resolve.
         lifecycleScope.launchNonCancellable {
-            viewModel.updateIsLoadingEpisode(true)
-            viewModel.updateIsLoadingHosters(true)
+            viewModel.playerReady.first { it }
+
+            // AM (PIP_AVAILABILITY_FASTPATH_FIX) -->
+            // Moved out of the reinit-only block below - unlike updateIsLoadingEpisode/
+            // updateIsLoadingHosters (which correctly should only run for a genuine
+            // reload, since they control loading spinners), this is a pure device/
+            // preference capability check with no dependency on session-specific data.
+            // It used to only run inside the "needs a real reinit" branch, which was
+            // fine as long as reopening a still-live session always reused the exact
+            // same Activity instance (stateData.isPipAvailable was already correctly
+            // true from before, nothing to re-establish). Confirmed by direct
+            // observation: once a reopen can land on a genuinely fresh instance again
+            // (see isBackgroundPlayTransitionFinish's doc comment on PlayerActivity),
+            // that fresh instance's own stateData starts at its default
+            // (isPipAvailable = false), and the "already playing, skip reload" fast
+            // path below never ran this at all - the PIP button silently disappearing
+            // after exactly one background/reopen cycle.
             viewModel.updateHasPip(
                 packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
                     playerPreferences.enablePip.get(),
             )
+            // <-- AM (PIP_AVAILABILITY_FASTPATH_FIX)
+
+            if (!viewModel.needsInit(animeId, episodeId)) {
+                // Already playing this exact episode (e.g. reopened from the
+                // background-playback notification) - avoid restarting the whole
+                // file-open pipeline.
+                withUIContext { setIntent(intent) }
+                return@launchNonCancellable
+            }
+
+            viewModel.saveCurrentEpisodeWatchingProgress()
+            // <-- AM (NEEDSINIT_BIND_RACE_FIX)
+
+            viewModel.updateIsLoadingEpisode(true)
+            viewModel.updateIsLoadingHosters(true)
             // In-memory state was lost (e.g. process killed while backgrounded) and this
             // is a genuine re-init, not a fresh open - resume from the position just
             // saved above instead of the normal "already watched -> start at 0" rule.
@@ -314,9 +489,9 @@ class PlayerActivity : BaseActivity() {
                     videoIndex = initResult.first.videoIndex.second,
                 )
             }
-        }
 
-        setIntent(intent)
+            withUIContext { setIntent(intent) }
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -324,6 +499,22 @@ class PlayerActivity : BaseActivity() {
         enableEdgeToEdge()
         registerSecureActivity(this)
         super.onCreate(savedInstanceState)
+
+        // AM (LIVE_INSTANCE_REOPEN_FIX) -->
+        liveInstanceCount++
+        // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
+
+        // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
+        // As early as possible, before anything below touches viewModel (which would
+        // construct its own, throwaway MPVPlayer/native mpv instance for an Activity
+        // that's about to immediately finish() anyway) or binds to the Service. See
+        // isDuplicateInstanceSelfTerminating's doc comment for why this exists at all.
+        if (liveInstanceCount > 1) {
+            isDuplicateInstanceSelfTerminating = true
+            finish()
+            return
+        }
+        // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
 
         // AM (MEDIA_SESSION_SERVICE_OWNED) -->
         // No longer set up synchronously here - it's created/redirected via the
@@ -363,7 +554,29 @@ class PlayerActivity : BaseActivity() {
             .onEach { event ->
                 when (event) {
                     PlayerViewModel.Event.EnterPip -> {
-                        enterPictureInPictureMode(createPipParams())
+                        // AM (PIP_REENTRY_CRASH_FIX) -->
+                        // Confirmed via logcat: entering PIP a second time on a reused
+                        // instance (see LIVE_INSTANCE_REOPEN_FIX) can hit a genuine Android
+                        // framework race - "java.lang.RuntimeException: Performing pause of
+                        // activity that is not resumed", thrown from inside
+                        // ActivityThread.performPauseActivity() as part of the PIP-entry
+                        // transition itself. That's the framework's own internal lifecycle
+                        // bookkeeping getting out of sync with reality, not something our
+                        // app's own uncaught-exception handler catches (it's thrown from a
+                        // system-dispatched lifecycle callback, not our code) - it can bring
+                        // the whole process down with no toast, no crash dialog, no visible
+                        // PIP transition. isInPictureInPictureMode alone (an earlier, wrong
+                        // guess at this fix) doesn't catch it, since the Activity can
+                        // genuinely not be in PIP yet while also not being fully RESUMED -
+                        // exactly the state this exception fires from. Checking the actual
+                        // lifecycle state directly is the correct guard: only ever request
+                        // PIP entry from an Activity the framework itself agrees is resumed.
+                        if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.RESUMED) {
+                            // AM (PIP_RECREATE_FIX) -->
+                            tryEnterPictureInPicture(createPipParams())
+                            // <-- AM (PIP_RECREATE_FIX)
+                        }
+                        // <-- AM (PIP_REENTRY_CRASH_FIX)
                     }
                     is PlayerViewModel.Event.EpisodeTitle -> {
                         // No-op: used to toast "<anime> - <episode>" on change; not wanted.
@@ -507,10 +720,13 @@ class PlayerActivity : BaseActivity() {
                 PlayerScreen(
                     viewModel = viewModel,
                     onBack = {
-                        if (isPipSupportedAndEnabled && !viewModel.playbackData.value.paused &&
+                        if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.RESUMED &&
+                            isPipSupportedAndEnabled && !viewModel.playbackData.value.paused &&
                             playerPreferences.pipOnExit.get() && !viewModel.stateData.value.isCasting
                         ) {
-                            enterPictureInPictureMode(createPipParams())
+                            // AM (PIP_RECREATE_FIX) -->
+                            tryEnterPictureInPicture(createPipParams())
+                            // <-- AM (PIP_RECREATE_FIX)
                         } else {
                             // AM (BACK_FALLBACK_TO_ANIME) -->
                             // If this Activity is its task's root, finish() alone drops
@@ -563,45 +779,64 @@ class PlayerActivity : BaseActivity() {
         SecureActivityDelegate.setPipActive(false)
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
 
-        // AM (SERVICE_OWNED_PLAYER) -->
-        // Step 3: onDestroy fires both when this session genuinely ends (isFinishing)
-        // and when the OS destroys an invisible backgrounded Activity to reclaim
-        // memory while playback is meant to continue - those need very different
-        // teardown. Previously every line below ran unconditionally, which meant an
-        // ordinary background eviction would kill the notification/foreground state
-        // and, shortly after, playback itself - likely a real contributor to the
-        // lifecycle-order-dependent bugs this refactor exists to fix.
-        if (isFinishing) {
-            // Genuine end of this playback session - tear everything down.
-            stopBackgroundPlayback()
-            viewModel.player.release()
-            viewModel.stopHttpServer()
-            mediaSession?.let {
-                it.isActive = false
-                it.release()
+        // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
+        // A duplicate instance never touches viewModel/mediaHolder (see that flag's
+        // doc comment), so none of the SERVICE_OWNED_PLAYER teardown below applies -
+        // isFinishing is true here too (this instance called finish() on itself),
+        // but running that block would try to release/stop the Service-owned
+        // session the ORIGINAL, still-alive instance depends on. unbindService()
+        // specifically would also throw outright: this instance's own bindService()
+        // call never happened, since onCreate() returned before reaching it.
+        if (!isDuplicateInstanceSelfTerminating) {
+            // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
+            // AM (SERVICE_OWNED_PLAYER) -->
+            // Step 3: onDestroy fires both when this session genuinely ends (isFinishing)
+            // and when the OS destroys an invisible backgrounded Activity to reclaim
+            // memory while playback is meant to continue - those need very different
+            // teardown. Previously every line below ran unconditionally, which meant an
+            // ordinary background eviction would kill the notification/foreground state
+            // and, shortly after, playback itself - likely a real contributor to the
+            // lifecycle-order-dependent bugs this refactor exists to fix.
+            // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
+            // isBackgroundPlayTransitionFinish excluded here too, same reasoning as
+            // isDuplicateInstanceSelfTerminating just above: isFinishing is true for
+            // this finish() call, but it represents backgrounding (see that flag's
+            // doc comment), not a genuine end - the underlying player/Service must
+            // survive it exactly as they already do for the OS-reclaim case below.
+            if (isFinishing && !isBackgroundPlayTransitionFinish) {
+                // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
+                // Genuine end of this playback session - tear everything down.
+                stopBackgroundPlayback()
+                viewModel.player.release()
+                viewModel.stopHttpServer()
+                mediaSession?.let {
+                    it.isActive = false
+                    it.release()
+                }
+                // AM (STALE_HOLDER_STATE_FIX) -->
+                // Clear the holder's own player reference and session state synchronously,
+                // here, rather than relying solely on stopService() below to eventually get
+                // to it - stopService() is asynchronous, so the Service (and this same
+                // PlayerMediaHolder instance) can still be alive for a window after this
+                // call returns. A fast reopen (tapping the always-on notification quickly)
+                // can bind to that still-alive holder before its own onDestroy() runs, and
+                // without clearing state here first, needsInit() on that reopen would see
+                // stale animeId/episodeId still "matching" and skip reinitializing against
+                // a player already released two lines above.
+                mediaHolder?.release()
+                // <-- AM (STALE_HOLDER_STATE_FIX)
+                stopService(PlayerBackgroundPlaybackService.newIntent(this))
             }
-            // AM (STALE_HOLDER_STATE_FIX) -->
-            // Clear the holder's own player reference and session state synchronously,
-            // here, rather than relying solely on stopService() below to eventually get
-            // to it - stopService() is asynchronous, so the Service (and this same
-            // PlayerMediaHolder instance) can still be alive for a window after this
-            // call returns. A fast reopen (tapping the always-on notification quickly)
-            // can bind to that still-alive holder before its own onDestroy() runs, and
-            // without clearing state here first, needsInit() on that reopen would see
-            // stale animeId/episodeId still "matching" and skip reinitializing against
-            // a player already released two lines above.
-            mediaHolder?.release()
-            // <-- AM (STALE_HOLDER_STATE_FIX)
-            stopService(PlayerBackgroundPlaybackService.newIntent(this))
-        }
-        // else: this Activity instance is being destroyed while playback is meant to
-        // continue - leave the Service, its player, its notification (if active), and
-        // the MediaSession running. A future reattach adopts the same player via
-        // PlayerMediaHolder.adopt() instead of these being torn down out from under it.
+            // else: this Activity instance is being destroyed while playback is meant to
+            // continue - leave the Service, its player, its notification (if active), and
+            // the MediaSession running. A future reattach adopts the same player via
+            // PlayerMediaHolder.adopt() instead of these being torn down out from under it.
 
-        unbindService(mediaHolderConnection)
-        mediaHolder = null
-        // <-- AM (SERVICE_OWNED_PLAYER)
+            unbindService(mediaHolderConnection)
+            mediaHolder = null
+            // <-- AM (SERVICE_OWNED_PLAYER)
+        }
+        // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
 
         if (noisyReceiver.initialized) {
             unregisterReceiver(noisyReceiver)
@@ -612,6 +847,25 @@ class PlayerActivity : BaseActivity() {
             unregisterReceiver(screenStateReceiver)
             screenStateReceiver.initialized = false
         }
+
+        // AM (PIP_RECEIVER_STALE_ACTIVITY_FIX) -->
+        // Safety net: normally unregistered as part of onPictureInPictureModeChanged's
+        // own cleanup, but that's not guaranteed to have already run by the time
+        // onDestroy() gets here - matters more now that finish() (not just
+        // moveTaskToBack()) can genuinely destroy this Activity from within an active
+        // PIP session. See onReceive()'s isFinishing/isDestroyed guard above for the
+        // other half of this fix.
+        pipReceiver?.let {
+            unregisterReceiver(it)
+            pipReceiver = null
+        }
+        // <-- AM (PIP_RECEIVER_STALE_ACTIVITY_FIX)
+
+        // AM (LIVE_INSTANCE_REOPEN_FIX) -->
+        // Unconditional, regardless of isFinishing - this tracks whether an Activity
+        // window exists right now, not whether the underlying session is preserved.
+        liveInstanceCount--
+        // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
 
         super.onDestroy()
     }
@@ -674,15 +928,51 @@ class PlayerActivity : BaseActivity() {
     // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
 
     override fun onPause() {
+        // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
+        // Checked before the very first viewModel access below - see that flag's
+        // doc comment on why this instance must never touch viewModel at all.
+        if (isDuplicateInstanceSelfTerminating) {
+            super.onPause()
+            return
+        }
+        // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
+
         viewModel.saveCurrentEpisodeWatchingProgress()
 
+        // AM (NO_IDLE_WINDOW_FIX) -->
+        // isPipEntryPending used to also gate this whole block, on the theory that
+        // onPause() could race the in-flight PIP transaction. That theory turned out
+        // to be wrong: confirmed via logcat, the actual framework exception
+        // ("Performing pause of activity that is not resumed") is thrown from inside
+        // ActivityThread.performPauseActivity() itself, before this onPause() Kotlin
+        // method is ever called - so nothing this method does could have been racing
+        // it either way. Meanwhile, gating enterBackground() behind
+        // isPipEntryPending was actively harmful: enterBackground() only sets flags
+        // and talks to the Service (no Activity-transition APIs), so skipping it
+        // left a real gap - right at the moment a PIP-entry attempt might get
+        // cancelled by the OS - where nothing promptly told Samsung's own power/task
+        // management "this app is still legitimately active." isInPictureInPictureMode
+        // is the only check that's actually meaningful here: PIP being genuinely,
+        // confirmedly active is the one case where re-establishing background
+        // exemption is redundant, not just pending-and-uncertain.
         if (isInPictureInPictureMode) {
+            // <-- AM (NO_IDLE_WINDOW_FIX)
             super.onPause()
             return
         }
 
         viewModel.setPlayerExiting(true)
-        if (isFinishing) {
+        // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
+        // Defensive: isInPictureInPictureMode might already read false by the time
+        // this runs (finish() itself is what causes PIP to exit, and the exact
+        // ordering of that against onPause() isn't something to rely on) - without
+        // this exclusion, that would fall through to isFinishing below and hard-stop
+        // playback via mpvCommand("stop") for a transition meant to preserve it. The
+        // headphones handler already explicitly calls enterBackground() itself
+        // before finish(), so there's nothing this branch needs to do for that case
+        // either way.
+        if (isFinishing && !isBackgroundPlayTransitionFinish) {
+            // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
             viewModel.deletePendingEpisodes()
             viewModel.mpvCommand("stop")
         } else {
@@ -695,6 +985,13 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onStop() {
+        // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
+        if (isDuplicateInstanceSelfTerminating) {
+            super.onStop()
+            return
+        }
+        // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
+
         if (isInPictureInPictureMode && powerManager.isInteractive) {
             viewModel.deletePendingEpisodes()
         }
@@ -703,18 +1000,70 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onUserLeaveHint() {
-        if (isPipSupportedAndEnabled && !viewModel.playbackData.value.paused && playerPreferences.pipOnExit.get()) {
-            enterPictureInPictureMode()
+        // AM (AUTO_PIP_LOOP_FIX) -->
+        // moveTaskToBack() (called by the headphones "Background Play" action,
+        // right after isIntentionalBackgroundTransition is set true) is itself one
+        // of the standard triggers for onUserLeaveHint() - same as pressing Home.
+        // This check used to run regardless of *why* the app was leaving, so it was
+        // immediately re-entering PIP right on top of that explicit background-play
+        // transition, completely undoing it - entering PIP is exactly what that
+        // button is trying to avoid.
+        //
+        // Checking isIntentionalBackgroundTransition alone (an earlier attempt at
+        // this exact fix) wasn't enough: it's a per-Activity-instance field, but
+        // the reopen loop this causes involves a brand new PlayerActivity instance
+        // each cycle (confirmed via logcat - a fresh Android Task ID every time) -
+        // a fresh instance's own copy of that field starts false regardless of the
+        // original session's intent, so it protected only the very first
+        // moveTaskToBack() call and nothing after. isBackgroundPlaybackActive is
+        // the same static, cross-instance flag createPipParams() already relies on
+        // for the same reason - it stays true across every instance boundary in
+        // this exact window, until the deferred stopBackgroundPlayback() posted in
+        // onStart() (see RESUME_LOCK_RACE_FIX) actually runs.
+        if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.RESUMED &&
+            !isIntentionalBackgroundTransition &&
+            !SecureActivityDelegate.isBackgroundPlaybackActive &&
+            isPipSupportedAndEnabled && !viewModel.playbackData.value.paused && playerPreferences.pipOnExit.get()
+        ) {
+            // AM (PIP_RECREATE_FIX) -->
+            tryEnterPictureInPicture(null)
+            // <-- AM (PIP_RECREATE_FIX)
         }
+        // <-- AM (AUTO_PIP_LOOP_FIX)
         super.onUserLeaveHint()
     }
 
     override fun onStart() {
         super.onStart()
-        // Foreground again - the app-lock "user is away while playback continues"
-        // exemption no longer applies. The notification itself is untouched here -
-        // it stays up regardless of foreground/background state since step 4b.
-        stopBackgroundPlayback()
+        // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
+        // onStart() fires before onResume() in the finish()-during-onCreate()
+        // sequence - createPipParams() below (via setPictureInPictureParams) heavily
+        // accesses viewModel, so this needs the same guard as every other lifecycle
+        // callback here.
+        if (isDuplicateInstanceSelfTerminating) {
+            return
+        }
+        // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
+        // AM (RESUME_LOCK_RACE_FIX) -->
+        // Deferred via post(), not called inline. onStart() always fully completes
+        // before onResume() runs, and SecureActivityDelegateImpl's onResume observer
+        // (the app-lock check) fires only after THIS Activity's own onResume() has
+        // fully returned too - AppCompatActivity's lifecycle dispatch is driven by a
+        // ReportFragment that resumes after its host Activity, not nested inside it.
+        // Clearing the exemption here inline meant it was already gone by the time
+        // that check ran, on every single resume from genuine background playback -
+        // not a notification/back-stack-specific issue, just this ordering. Posting
+        // defers the clear until after the current lifecycle dispatch (onStart,
+        // onResume, and the observer's onResume) has settled, mirroring
+        // SecureActivityDelegate.deferredApplicationStoppedCheck()'s identical fix for
+        // the same class of problem on the other side of this same exemption.
+        Handler(Looper.getMainLooper()).post {
+            // Foreground again - the app-lock "user is away while playback continues"
+            // exemption no longer applies. The notification itself is untouched here -
+            // it stays up regardless of foreground/background state since step 4b.
+            stopBackgroundPlayback()
+        }
+        // <-- AM (RESUME_LOCK_RACE_FIX)
         setPictureInPictureParams(createPipParams())
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setFlags(
@@ -741,19 +1090,39 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onResume() {
-        if (!viewModel.isPlayerExiting()) {
+        // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
+        // Android still calls onResume() even for an Activity that finish()ed during
+        // onCreate() - checked before the first viewModel access below, same as
+        // every other lifecycle callback this flag guards.
+        if (isDuplicateInstanceSelfTerminating) {
             super.onResume()
             return
         }
+        // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
 
-        viewModel.setPlayerExiting(false)
-        super.onResume()
+        // AM (PIP_RECREATE_FIX) -->
+        // Restructured from two early-returns into if/else specifically so both
+        // paths fall through to the pending-PIP check at the bottom, guaranteed to
+        // run after super.onResume() either way - see
+        // pendingPipEntryAfterRecreate's doc comment for why this exists.
+        if (!viewModel.isPlayerExiting()) {
+            super.onResume()
+        } else {
+            viewModel.setPlayerExiting(false)
+            super.onResume()
 
-        viewModel.setVolumeTo(
-            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).also {
-                if (it < viewModel.stateData.value.maxVolume) viewModel.changeMPVVolumeTo(100)
-            },
-        )
+            viewModel.setVolumeTo(
+                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).also {
+                    if (it < viewModel.stateData.value.maxVolume) viewModel.changeMPVVolumeTo(100)
+                },
+            )
+        }
+
+        if (pendingPipEntryAfterRecreate) {
+            pendingPipEntryAfterRecreate = false
+            tryEnterPictureInPicture(createPipParams())
+        }
+        // <-- AM (PIP_RECREATE_FIX)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -775,7 +1144,38 @@ class PlayerActivity : BaseActivity() {
         runOnUiThread { toast(message) }
     }
 
-    fun createPipParams(): PictureInPictureParams {
+    // AM (PIP_RECREATE_FIX) -->
+    /**
+     * Wraps every PIP-entry attempt. First attempt on this Activity instance:
+     * proceeds directly, exactly as before. Any later attempt on the same
+     * instance: triggers a full recreate() instead of calling
+     * enterPictureInPictureMode() directly, deferring the actual entry to the
+     * freshly recreated instance's own onResume() - see
+     * pendingPipEntryAfterRecreate's doc comment for the full reasoning.
+     *
+     * [params] null means "use whatever PictureInPictureParams are already
+     * registered" (matching onUserLeaveHint()'s original plain
+     * enterPictureInPictureMode() call); non-null explicitly supplies params
+     * (matching the other two call sites, which always passed createPipParams()
+     * directly).
+     */
+    private fun tryEnterPictureInPicture(params: PictureInPictureParams?) {
+        if (hasAttemptedPipEntryThisInstance) {
+            pendingPipEntryAfterRecreate = true
+            recreate()
+            return
+        }
+        hasAttemptedPipEntryThisInstance = true
+        isPipEntryPending = true
+        if (params != null) {
+            enterPictureInPictureMode(params)
+        } else {
+            enterPictureInPictureMode()
+        }
+    }
+    // <-- AM (PIP_RECREATE_FIX)
+
+    fun createPipParams(forceDisableAutoEnter: Boolean = false): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val anime = viewModel.stateData.value.currentAnime
@@ -787,8 +1187,31 @@ class PlayerActivity : BaseActivity() {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val autoEnter = playerPreferences.pipOnExit.get()
-            builder.setAutoEnterEnabled(!viewModel.playbackData.value.paused && autoEnter)
-            builder.setSeamlessResizeEnabled(!viewModel.playbackData.value.paused && autoEnter)
+            // AM (AUTO_PIP_LOOP_FIX) -->
+            // forceDisableAutoEnter covers exactly one caller: the headphones
+            // "Background Play" action, right before its own moveTaskToBack().
+            // SecureActivityDelegate.isBackgroundPlaybackActive covers the much
+            // more general case that turned out to actually be causing the loop:
+            // a fresh PlayerActivity instance reopened from the notification calls
+            // setPictureInPictureParams(createPipParams()) immediately in its own
+            // onStart(), synchronously - before the deferred stopBackgroundPlayback()
+            // posted there (see RESUME_LOCK_RACE_FIX) has run. Without this check,
+            // that immediate call would re-register auto-enter=true on this brand
+            // new instance, and the OS would auto-re-enter PIP on it the moment
+            // anything (even a transient shade/overlay interaction from tapping the
+            // notification itself) looks like "leaving" - which is exactly what the
+            // logcat capture showed happening, repeatedly, with a fresh Android Task
+            // each cycle. isBackgroundPlaybackActive is still true at that exact
+            // moment specifically because the deferred clear hasn't run yet - a
+            // fresh instance reopening from a genuine background-play session
+            // correctly suppresses auto-enter until that clear actually happens.
+            val shouldAutoEnter = !forceDisableAutoEnter &&
+                !SecureActivityDelegate.isBackgroundPlaybackActive &&
+                !viewModel.playbackData.value.paused &&
+                autoEnter
+            builder.setAutoEnterEnabled(shouldAutoEnter)
+            builder.setSeamlessResizeEnabled(shouldAutoEnter)
+            // <-- AM (AUTO_PIP_LOOP_FIX)
         }
         builder.setActions(
             createPipActions(
@@ -823,6 +1246,9 @@ class PlayerActivity : BaseActivity() {
         // wrongly consume the exemption.
         if (isInPictureInPictureMode) {
             SecureActivityDelegate.setPipActive(true)
+            // AM (PIP_ENTRY_CANCELLED_FIX) -->
+            isPipEntryPending = false
+            // <-- AM (PIP_ENTRY_CANCELLED_FIX)
         }
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
 
@@ -836,13 +1262,32 @@ class PlayerActivity : BaseActivity() {
                 isIntentionalBackgroundTransition = false
                 SecureActivityDelegate.setPipActive(false)
             } else if (lifecycle.currentState == Lifecycle.State.CREATED) {
-                // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
-                // The system also fires this when the screen turns off during PIP (tearing
-                // down the PIP surface for the lock screen), not just on a genuine user
-                // swipe-away. Only treat it as dismissal when the screen is actually on -
-                // otherwise fall back to background playback the same way onPause() does,
-                // so the session survives and the app lock stays exempt.
-                if (powerManager.isInteractive) {
+                // AM (PIP_ENTRY_CANCELLED_FIX) -->
+                // If a PIP entry attempt was just made (isPipEntryPending, set right
+                // before each enterPictureInPictureMode() call) and we land here instead
+                // of a confirmed entry, the OS cancelled that attempt mid-flight - this is
+                // NOT the user dismissing an already-established PIP window, even though
+                // it lands in the exact same lifecycle.currentState == CREATED branch.
+                // Confirmed via logcat: re-entering PIP on a reused instance (see
+                // LIVE_INSTANCE_REOPEN_FIX) can get cancelled by the system
+                // (clearWaitForEnteringPinnedMode reason=exit_pip), and treating that
+                // identically to a genuine swipe-away was tearing down sessions the user
+                // never asked to end. Fall back to background playback instead, same as
+                // a normal pause - the safe, non-destructive response to "PIP didn't work
+                // out," regardless of why the OS declined it.
+                if (isPipEntryPending) {
+                    isPipEntryPending = false
+                    enterBackground()
+                    // <-- AM (PIP_ENTRY_CANCELLED_FIX)
+                } else if (powerManager.isInteractive) {
+                    // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
+                    // The system also fires this when the screen turns off during PIP
+                    // (tearing down the PIP surface for the lock screen), not just on a
+                    // genuine user swipe-away. Only treat it as dismissal when the screen
+                    // is actually on - otherwise fall back to background playback the same
+                    // way onPause() does, so the session survives and the app lock stays
+                    // exempt.
+                    // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
                     // AM (PIP_REOPEN_RACE_FIX) -->
                     // Both the exemption clear and the teardown used to fire unconditionally
                     // here - correct for a genuine swipe-away, but if a concurrent reopen
@@ -874,7 +1319,6 @@ class PlayerActivity : BaseActivity() {
                     enterBackground()
                     // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
                 }
-                // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
             } else {
                 // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
                 SecureActivityDelegate.setPipActive(false)
@@ -896,6 +1340,23 @@ class PlayerActivity : BaseActivity() {
             pipReceiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     if (intent == null || intent.action != PIP_INTENTS_FILTER) return
+                    // AM (PIP_RECEIVER_STALE_ACTIVITY_FIX) -->
+                    // Confirmed via logcat: a real, caught crash -
+                    // "IllegalStateException: setPictureInPictureParams: Can't find
+                    // activity for token=..." - thrown when this receiver's trailing
+                    // setPictureInPictureParams() call below runs against an Activity
+                    // the system has already destroyed. Previously impossible: the
+                    // headphones "Background Play" action used to moveTaskToBack()
+                    // rather than finish(), so this Activity never actually got
+                    // destroyed while still in PIP. Now that it can genuinely finish()
+                    // itself (see isBackgroundPlayTransitionFinish), a late-arriving
+                    // broadcast - another PIP button tap, or one already queued before
+                    // this receiver got a chance to unregister - can reach onReceive()
+                    // after destruction. isFinishing/isDestroyed are the correct,
+                    // direct signals to check here, not receiver
+                    // registration/unregistration timing.
+                    if (isFinishing || isDestroyed) return
+                    // <-- AM (PIP_RECEIVER_STALE_ACTIVITY_FIX)
                     when (intent.getIntExtra(PIP_INTENT_ACTION, 0)) {
                         PIP_PAUSE -> viewModel.pause()
                         PIP_PLAY -> viewModel.unpause()
@@ -904,14 +1365,44 @@ class PlayerActivity : BaseActivity() {
                         PIP_SKIP -> viewModel.seekBy(10)
                         PIP_BACKGROUND_PLAY -> {
                             // Manually trigger the background-audio path (onPause() skips
-                            // it while still in PIP), then moveTaskToBack() to exit PIP.
+                            // it while still in PIP), then finish() to exit PIP and this
+                            // session's session-preservation architecture (see
+                            // isBackgroundPlayTransitionFinish's doc comment) keeps the
+                            // underlying player/Service alive exactly as moveTaskToBack()
+                            // used to, but via finish() instead - a real Activity/Task
+                            // destruction, not backgrounding a still-pinned task.
                             // force=true: an explicit user action, so this should work
                             // even while paused - see enterBackground()'s doc comment.
                             // AM (ENTER_BACKGROUND_CONSOLIDATION) -->
                             enterBackground(force = true)
                             // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
                             isIntentionalBackgroundTransition = true
-                            moveTaskToBack(true)
+                            // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
+                            isBackgroundPlayTransitionFinish = true
+                            // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
+                            // AM (AUTO_PIP_LOOP_FIX) -->
+                            // Disable auto-enter-PIP before finishing, and return
+                            // immediately after - skipping the unconditional
+                            // setPictureInPictureParams() call below entirely for this
+                            // action. Likely no longer strictly necessary now that this
+                            // finishes rather than moveTaskToBack()s (finish() doesn't
+                            // trigger onUserLeaveHint(), which is what the auto-PIP loop
+                            // this originally guarded against was rooted in) - left in
+                            // place as a harmless safety net rather than removed outright.
+                            setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
+                            // AM (PIP_MOVETASKTOBACK_RACE_FIX) -->
+                            // Deferred via post(), not called inline, for the same reason
+                            // this was originally deferred for moveTaskToBack(): the system
+                            // is still processing this button tap's own broadcast dispatch
+                            // at the moment this runs, and asking it to also finish() the
+                            // Activity inline risks colliding with that in-flight work.
+                            // Posting it instead lets the current dispatch settle first.
+                            Handler(Looper.getMainLooper()).post {
+                                finish()
+                            }
+                            // <-- AM (PIP_MOVETASKTOBACK_RACE_FIX)
+                            return
+                            // <-- AM (AUTO_PIP_LOOP_FIX)
                         }
                     }
                     setPictureInPictureParams(createPipParams())
@@ -971,12 +1462,6 @@ class PlayerActivity : BaseActivity() {
         val previousAction = gesturePreferences.mediaPreviousGesture.get()
         val playAction = gesturePreferences.mediaPlayPauseGesture.get()
         val nextAction = gesturePreferences.mediaNextGesture.get()
-
-        // Declared before the callback below so onStop() can reference the session
-        // it's attached to - the callback object is built before ensureMediaSession()
-        // returns it, so it can't be captured any other way. Safe: onStop() only ever
-        // runs later, once session is definitely assigned.
-        lateinit var session: MediaSession
 
         val callback = object : MediaSession.Callback() {
             override fun onPlay() {
@@ -1051,12 +1536,27 @@ class PlayerActivity : BaseActivity() {
 
             override fun onStop() {
                 super.onStop()
-                session.isActive = false
-                this@PlayerActivity.onStop()
+                // AM (MEDIASESSION_STOP_SAFETY_FIX) -->
+                // Used to be session.isActive = false followed by manually calling
+                // this@PlayerActivity.onStop() directly - invoking an Activity's own
+                // lifecycle method outside the real system dispatch is never actually
+                // safe, since it runs our lifecycle-tracking code at a moment that
+                // doesn't correspond to the Activity's real state, exactly the kind of
+                // thing that could corrupt lifecycle bookkeeping the framework itself
+                // relies on. An external "stop" transport command (Bluetooth/AVRCP, a
+                // system media widget, etc.) reaching this callback is meant to behave
+                // like the notification's own Stop button - reusing that exact same,
+                // already-correct pattern (pause, stop the Service, then a real
+                // finish() dispatched through the normal Android API) instead of
+                // inventing an unsafe shortcut.
+                viewModel.pause()
+                stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
+                finish()
+                // <-- AM (MEDIASESSION_STOP_SAFETY_FIX)
             }
         }
 
-        session = holder.ensureMediaSession(this, callback).apply {
+        val session = holder.ensureMediaSession(this, callback).apply {
             setPlaybackState(
                 PlaybackState.Builder()
                     .setActions(

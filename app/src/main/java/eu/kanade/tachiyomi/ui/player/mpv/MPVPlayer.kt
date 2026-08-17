@@ -2,12 +2,16 @@ package eu.kanade.tachiyomi.ui.player.mpv
 
 import android.content.Context
 import android.content.Context.AUDIO_SERVICE
+import android.graphics.ImageFormat
 import android.media.AudioManager
+import android.media.ImageReader
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
+import android.os.HandlerThread
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
+import android.view.Surface
 import androidx.media.AudioAttributesCompat
 import androidx.media.AudioFocusRequestCompat
 import androidx.media.AudioManagerCompat
@@ -57,6 +61,85 @@ class MPVPlayer(
     @Volatile
     var isExiting = false
     private var httpError: String? = null
+
+    // AM (HWDEC_REATTACH_FIX) -->
+    /**
+     * Tracks whether a real UI Surface has ever been attached to this MPVPlayer
+     * instance, across every MpvSurface Composable that's ever wrapped it - not
+     * scoped to any single Composable/Activity instance. This used to live as a
+     * local var inside MpvSurface's factory closure, which meant it reset to false
+     * whenever a fresh Composable/AndroidView got created for the same underlying
+     * player (e.g. during the notification-reopen flow), even though the actual
+     * decode session was continuing, not starting fresh. That falsely-first-attach
+     * state caused hwdec to get re-set on what was really just a reattach - forcing
+     * MediaCodec to tear down and reinitialize its decoder mid-stream, which can get
+     * stuck waiting for a keyframe that never arrives ("buffers indefinitely").
+     * Living here instead, on the object that actually persists across all of that,
+     * fixes it regardless of how many Composable/Activity instances come and go.
+     */
+    var hasAttachedSurfaceBefore = false
+    // <-- AM (HWDEC_REATTACH_FIX)
+
+    // AM (HOT_VIDEO_BACKGROUND) -->
+    /**
+     * Off-screen Surface (backed by an ImageReader that immediately discards every
+     * frame it receives) that mpv gets swapped onto instead of having its video
+     * output nulled out. Backgrounding a video that's actively mid-playback (not
+     * mid-load) by setting vo="null" and fully detaching the Surface is an abrupt
+     * stop of the whole video pipeline mid-stream - a plausible way for mpv's
+     * internal video state to end up wedged in a way that doesn't cleanly resume
+     * once a real Surface comes back, even though audio (unaffected by vo) keeps
+     * playing the entire time, making the break invisible until the video is shown
+     * again ("buffers indefinitely" on reopen, with no warning while backgrounded,
+     * since there's nothing visible to notice it on). Swapping onto this dummy
+     * surface instead means vo/hwdec/vid are never touched on background/detach at
+     * all - the pipeline keeps running exactly as before, just with nowhere
+     * visible to render to; MpvSurface.kt's surfaceCreated() swaps the real
+     * Surface back in later exactly the same way it always has (unaffected by
+     * this - reattach logic is untouched).
+     *
+     * AM (DUMMY_SURFACE_SIZE_FIX) -->
+     * Sized generously (1920x1080), not 2x2. Confirmed via logcat: a fresh
+     * hardware decoder session established while attached to this surface (e.g.
+     * loading a new episode while hidden, or any other path that needs a real
+     * decoder init rather than a simple render-target swap on an
+     * already-decoding stream) needs to negotiate an output buffer large enough
+     * for actual video frames - ImageReader's buffer queue is dimension-locked
+     * at creation time, unlike a SurfaceView, which resizes dynamically. A 2x2
+     * target caused that negotiation to fail outright ("Unsupported output
+     * color format for c2d" / "Setting color format failed" from the Qualcomm
+     * OMX decoder), which is a very plausible route to mpv/the whole pipeline
+     * ending up in a broken state. 1920x1080 comfortably covers real-world
+     * video resolutions without needing to dynamically resize this reader to
+     * match whatever's currently playing.
+     * <-- AM (DUMMY_SURFACE_SIZE_FIX)
+     */
+    private var dummyImageReader: ImageReader? = null
+    private var dummyThread: HandlerThread? = null
+
+    fun ensureDummySurface(): Surface {
+        dummyImageReader?.let { return it.surface }
+        val thread = HandlerThread("MPVPlayer-DummySurface").apply { start() }
+        dummyThread = thread
+        // AM (DUMMY_SURFACE_FORMAT_FIX) -->
+        // ImageFormat.PRIVATE, not an explicit RGB PixelFormat. Confirmed via logcat:
+        // a fresh hardware decoder session attached to this surface (via mpv's
+        // "aimagereader" hwdec interop path) produces opaque, GPU-native buffers -
+        // not CPU-readable RGB pixels. Requesting an explicit RGB format from
+        // ImageReader asks the decoder to actually convert into that format, which
+        // this specific hwdec path doesn't support ("Unsupported output color format
+        // for c2d" / "Setting color format failed" from the Qualcomm OMX decoder).
+        // PRIVATE is the correct, documented contract for "receive hardware buffers
+        // without reading pixels" - exactly this dummy surface's actual use case,
+        // since every frame gets discarded immediately regardless of format.
+        val reader = ImageReader.newInstance(1920, 1080, ImageFormat.PRIVATE, 2).apply {
+            // <-- AM (DUMMY_SURFACE_FORMAT_FIX)
+            setOnImageAvailableListener({ ir -> ir.acquireLatestImage()?.close() }, Handler(thread.looper))
+        }
+        dummyImageReader = reader
+        return reader.surface
+    }
+    // <-- AM (HOT_VIDEO_BACKGROUND)
 
     private val _eventFlow = MutableSharedFlow<Event>(
         extraBufferCapacity = 16,
@@ -186,7 +269,32 @@ class MPVPlayer(
         audioPreferences.audioChannels.get().let {
             mpv.setPropertyString(it.property, it.value)
         }
+    }
 
+    // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
+    /**
+     * Deliberately NOT called automatically from init{} (unlike the rest of
+     * setupAudio() above, which is - those are just mpv option config, harmless
+     * even for a player that turns out to be an immediately-discarded orphan).
+     * Requesting audio focus is different: it's a live, OS-visible claim, and
+     * every MPVPlayer construction used to make one unconditionally at
+     * construction time - including for a player that PlayerMediaHolder.adopt()
+     * is about to determine is an orphan (a duplicate ViewModel's own player,
+     * discarded in favor of an already-adopted canonical one). The Service's own
+     * bind is asynchronous, so there's a real gap between "orphan is constructed
+     * and requests focus" and "orphan is identified and released" - during which
+     * the actually-playing canonical player receives a live AUDIOFOCUS_LOSS
+     * notification from the OS (since it's this same app requesting focus again),
+     * forcing onAudioFocusChange() to pause it. A plausible match for reported
+     * audio "flickering in and out" right around a PIP re-entry attempt, since
+     * that's exactly the kind of moment a fresh ViewModel/player construction can
+     * occur. PlayerViewModel.bindToService() calls this explicitly now, only once
+     * it's confirmed (via PlayerMediaHolder.hasAdoptedPlayer, checked before
+     * calling adopt()) that this is a genuinely first-ever adoption - an
+     * already-canonical player from a prior session already holds focus from when
+     * it was originally constructed and never needs to re-request it.
+     */
+    fun requestAudioFocus() {
         val request = AudioFocusRequestCompat.Builder(AudioManagerCompat.AUDIOFOCUS_GAIN).also {
             it.setAudioAttributes(
                 AudioAttributesCompat.Builder().setUsage(AudioAttributesCompat.USAGE_MEDIA)
@@ -199,6 +307,7 @@ class MPVPlayer(
             audioFocusRequest = request
         }
     }
+    // <-- AM (AUDIO_FOCUS_ORPHAN_FIX)
 
     private fun setupSubtitlesOptions() {
         mpv.setOptionString("sub-delay", (subtitlePreferences.subtitlesDelay.get() / 1000.0).toString())
@@ -398,7 +507,32 @@ class MPVPlayer(
         handler.removeCallbacksAndMessages(null)
         mpv.removeObserver(this)
         mpv.removeLogObserver(this)
+        // AM (RELEASE_SURFACE_DETACH_FIX) -->
+        // Explicitly detach before close(), not left to whatever surfaceDestroyed()
+        // callback may or may not still be pending. This matters most for the
+        // orphan-dedup path in PlayerViewModel.bindToService(): the orphaned
+        // player's mpv can still have a real, live Android Surface attached to it
+        // from MpvSurface's first, pre-bind Compose composition - that Surface only
+        // gets properly torn down later, reactively, once playerReady flips and
+        // Compose rebuilds away from this player, which happens strictly after
+        // release() already ran here. Without this, close() tears down the native
+        // mpv/EGL context while a real hardware Surface is still attached to it -
+        // an abrupt teardown, not a clean one, and a plausible source of a wedged
+        // GPU/decoder driver state that can affect the very next Surface attached
+        // moments later (the canonical player's own reattach) - matching a
+        // permanent "buffers indefinitely" stall on reopen that a fresh episode
+        // load (which gets a fresh decoder session) sidesteps. Safe to call
+        // unconditionally: detaching an already-detached/never-attached surface is
+        // the same no-op MpvSurface's own surfaceDestroyed() already relies on.
+        mpv.detachSurface()
+        // <-- AM (RELEASE_SURFACE_DETACH_FIX)
         mpv.close()
+        // AM (HOT_VIDEO_BACKGROUND) -->
+        dummyImageReader?.close()
+        dummyImageReader = null
+        dummyThread?.quitSafely()
+        dummyThread = null
+        // <-- AM (HOT_VIDEO_BACKGROUND)
     }
 
     sealed interface Event {

@@ -7,7 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import animiru.domain.player.service.DecoderPreferences
-import `is`.xyz.mpv.MPV
+import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 
@@ -15,19 +15,18 @@ import uy.kohesive.injekt.api.get
 @Composable
 fun MpvSurface(
     modifier: Modifier = Modifier,
-    mpv: MPV,
+    player: MPVPlayer,
     videoOutput: String,
     // AM (AUDIO_BLIP_FIX) -->
     onSurfaceAttachedChanged: (Boolean) -> Unit = {},
     // <-- AM (AUDIO_BLIP_FIX)
 ) {
     val decoderPreferences: DecoderPreferences = Injekt.get()
+    val mpv = player.mpv
 
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { context ->
-            var hasAttachedSurfaceBefore = false
-
             SurfaceView(context).apply {
                 holder.addCallback(
                     object : SurfaceHolder.Callback {
@@ -47,14 +46,33 @@ fun MpvSurface(
                             // reconfig cost/audio blip; use user's pref on first start.
                             mpv.setPropertyString(
                                 "vo",
-                                if (hasAttachedSurfaceBefore) "gpu" else videoOutput,
+                                if (player.hasAttachedSurfaceBefore) "gpu" else videoOutput,
                             )
-                            hasAttachedSurfaceBefore = true
                             mpv.setOptionString("vid", "auto")
-                            mpv.setOptionString(
-                                "hwdec",
-                                if (decoderPreferences.tryHWDecoding.get()) "mediacodec,mediacodec-copy" else "no",
-                            )
+                            // AM (HWDEC_REATTACH_FIX) -->
+                            // Only set on the very first attach, not on every reattach.
+                            // Setting "hwdec" isn't a no-op even when the value is
+                            // unchanged - it forces MediaCodec to tear down and
+                            // reinitialize its decoder session, which needs a fresh
+                            // keyframe to resume cleanly. Without one, playback can get
+                            // stuck waiting for frames that never arrive - "buffers
+                            // indefinitely" after a reattach (e.g. returning from the
+                            // app-lock biometric prompt, including via notification
+                            // reopen). The AUDIO_BLIP_FIX comment below already
+                            // recognized hwdec-toggling as disruptive enough to avoid
+                            // touching on detach; this was the same problem on the
+                            // reattach side, just missed. player.hasAttachedSurfaceBefore
+                            // (not a local var here) is what makes this correct even
+                            // across a fresh Composable/Activity instance for the same
+                            // underlying player - see its doc comment on MPVPlayer.
+                            if (!player.hasAttachedSurfaceBefore) {
+                                mpv.setOptionString(
+                                    "hwdec",
+                                    if (decoderPreferences.tryHWDecoding.get()) "mediacodec,mediacodec-copy" else "no",
+                                )
+                            }
+                            // <-- AM (HWDEC_REATTACH_FIX)
+                            player.hasAttachedSurfaceBefore = true
                             // Audio track re-selection after this reconfig is handled
                             // reactively in PlayerViewModel.onAudioTrackSelectChange.
                             // AM (AUDIO_BLIP_FIX) -->
@@ -77,14 +95,19 @@ fun MpvSurface(
                             // the background no longer touches hwdec at all.
                             onSurfaceAttachedChanged(false)
                             // <-- AM (AUDIO_BLIP_FIX)
-                            // Do NOT set vid="no": mpv runs a near-synchronous "anything
-                            // selected?" check on file open, and only vid="auto" satisfies
-                            // it in time (confirmed via logcat - root cause of "No video
-                            // or audio streams selected" on new loads). vo="null" alone
-                            // already blocks real rendering/GPU work, which is the goal.
-                            mpv.setPropertyString("vo", "null")
-                            mpv.setPropertyString("force-window", "no")
-                            mpv.detachSurface()
+                            // AM (HOT_VIDEO_BACKGROUND) -->
+                            // Swap onto the always-present dummy surface instead of nulling vo
+                            // and fully detaching - see MPVPlayer.ensureDummySurface()'s doc
+                            // comment for why: doing that while a video is actively mid-playback
+                            // (not mid-load) is an abrupt stop of the whole pipeline mid-stream,
+                            // and a plausible source of it never cleanly resuming. vo, hwdec, and
+                            // vid are deliberately left completely untouched here now - the whole
+                            // point is that backgrounding no longer touches any of them, only
+                            // where the frames land. force-window also stays "yes" permanently
+                            // after the first attach, for the same reason: a window/surface
+                            // always conceptually exists now, real or dummy.
+                            mpv.attachSurface(player.ensureDummySurface())
+                            // <-- AM (HOT_VIDEO_BACKGROUND)
                         }
                     },
                 )

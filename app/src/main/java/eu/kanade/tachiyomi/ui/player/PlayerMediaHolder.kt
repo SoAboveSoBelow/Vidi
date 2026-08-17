@@ -3,13 +3,16 @@ package eu.kanade.tachiyomi.ui.player
 // AM (SERVICE_OWNED_PLAYER) -->
 import android.content.Context
 import android.media.session.MediaSession
-import android.view.Surface
-import animiru.domain.player.service.DecoderPreferences
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 
 /**
  * Owns the single, long-lived [MPVPlayer] instance and its [MediaSession].
@@ -43,14 +46,24 @@ import uy.kohesive.injekt.api.get
  */
 class PlayerMediaHolder(
     context: Context,
-    decoderPreferences: DecoderPreferences = Injekt.get(),
 ) {
-    private val videoOutput = if (decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
-
     private var _player: MPVPlayer? = null
     val player: MPVPlayer
         get() = _player ?: error("PlayerMediaHolder.player accessed before any PlayerViewModel adopted into it")
     val mpv get() = player.mpv
+
+    // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
+    /**
+     * Must be checked by callers BEFORE calling adopt(), not after - adopt()
+     * itself may mutate _player as a side effect of the very call being checked
+     * against. PlayerViewModel.bindToService() uses this to know whether its own
+     * adopt() call is resolving a genuinely first-ever adoption (audio focus
+     * needs requesting) versus returning an already-established canonical player
+     * from a prior session (which already holds focus from back when it was
+     * originally constructed, and must not request it again).
+     */
+    val hasAdoptedPlayer: Boolean get() = _player != null
+    // <-- AM (AUDIO_FOCUS_ORPHAN_FIX)
 
     var mediaSession: MediaSession? = null
         private set
@@ -58,7 +71,29 @@ class PlayerMediaHolder(
     private val _state = MutableStateFlow(PlayerMediaState())
     val state = _state.asStateFlow()
 
-    private var hasAttachedSurfaceBefore = false
+    // AM (LIVE_POSITION_TRACKING) -->
+    // Scoped to this holder, not any PlayerViewModel - cancelled in release() and
+    // replaced with a fresh one on the next real adopt(). PlayerViewModel's own
+    // position tracking (the per-second DB write in onSecondReached()) is launched
+    // in viewModelScope, which gets cancelled the instant that ViewModel is
+    // cleared - routine while this architecture is specifically designed to let
+    // playback itself continue afterward via this Service-owned canonical player.
+    // Any playback that happens after the old ViewModel dies but before a new one
+    // attaches was going completely unobserved: never reflected here, and - since
+    // the DB write lived in that same dead flow - never persisted either, leaving
+    // episode.last_second_seen stale by however long the gap lasted. This observer
+    // has zero business-logic dependencies (no DB, no repositories, no sync/tracker
+    // logic) - it only keeps state.positionMs/durationMs current in memory, cheaply,
+    // for as long as the player is alive, completely independent of any ViewModel.
+    // PlayerViewModel.setVideo() prefers this over the DB value when resuming a
+    // reattached live session - see its forceResumeFromLastPosition handling.
+    // A var, not a val: release() can run on this same holder instance while it's
+    // still alive and about to be reused by a fast reopen (see STALE_HOLDER_STATE_FIX
+    // below) - reusing an already-cancelled scope there would silently no-op every
+    // launchIn() in the next adopt() instead of throwing, so a fresh scope each real
+    // adoption is what makes that reuse actually work rather than fail invisibly.
+    private var holderScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // <-- AM (LIVE_POSITION_TRACKING)
 
     /**
      * Registers [existing] as this holder's player if none has been adopted yet, otherwise
@@ -69,6 +104,20 @@ class PlayerMediaHolder(
     fun adopt(existing: MPVPlayer): MPVPlayer {
         if (_player == null) {
             _player = existing
+            // AM (LIVE_POSITION_TRACKING) -->
+            // Started only on the very first, real adoption - never for a later
+            // duplicate instance's call, which just returns the already-adopted
+            // player unchanged and shouldn't start a second observer against it.
+            // Fresh scope in case a prior release() on this same holder instance
+            // already cancelled the old one (see that var's doc comment).
+            holderScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            existing.mpv.propFlow<Int>("time-pos").filterNotNull()
+                .onEach { seconds -> updateState { it.copy(positionMs = seconds * 1000) } }
+                .launchIn(holderScope)
+            existing.mpv.propFlow<Int>("duration").filterNotNull()
+                .onEach { seconds -> updateState { it.copy(durationMs = seconds * 1000) } }
+                .launchIn(holderScope)
+            // <-- AM (LIVE_POSITION_TRACKING)
         }
         return _player!!
     }
@@ -90,30 +139,6 @@ class PlayerMediaHolder(
             setCallback(callback)
             isActive = true
         }.also { mediaSession = it }
-    }
-
-    /**
-     * Binds an already-running player to a freshly created/recreated Surface. Mirrors the
-     * per-Composable attach logic in `MpvSurface.kt`, but against a player that isn't tied to
-     * the caller's lifecycle - safe to call from any [PlayerActivity] instance, new or old.
-     */
-    fun attachSurface(surface: Surface, width: Int, height: Int) {
-        mpv.attachSurface(surface)
-        mpv.setOptionString("force-window", "yes")
-        // Force lighter "gpu" (not gpu-next) on reattach to cut reconfig cost/audio blip;
-        // use the user's pref only on the very first attach.
-        mpv.setPropertyString("vo", if (hasAttachedSurfaceBefore) "gpu" else videoOutput)
-        hasAttachedSurfaceBefore = true
-        mpv.setOptionString("vid", "auto")
-        mpv.setPropertyString("android-surface-size", "${width}x$height")
-    }
-
-    /** Detaches the surface without stopping playback - the player keeps running headless. */
-    fun detachSurface() {
-        mpv.setOptionString("hwdec", "no")
-        mpv.setPropertyString("vo", "null")
-        mpv.setPropertyString("force-window", "no")
-        mpv.detachSurface()
     }
 
     fun updateState(transform: (PlayerMediaState) -> PlayerMediaState) {
@@ -139,6 +164,9 @@ class PlayerMediaHolder(
         _player = null
         _state.value = PlayerMediaState()
         // <-- AM (STALE_HOLDER_STATE_FIX)
+        // AM (LIVE_POSITION_TRACKING) -->
+        holderScope.cancel()
+        // <-- AM (LIVE_POSITION_TRACKING)
     }
 
     /** Minimal state a reattaching [PlayerActivity] needs to reconstruct its UI on create/resume. */

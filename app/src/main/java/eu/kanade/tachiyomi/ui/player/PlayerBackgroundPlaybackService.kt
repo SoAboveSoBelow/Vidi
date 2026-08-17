@@ -197,6 +197,37 @@ class PlayerBackgroundPlaybackService : Service() {
     // unavailable or TaskStackBuilder can't produce one, so the notification's open
     // action never silently breaks.
     private fun buildReopenPendingIntent(): PendingIntent {
+        // AM (LIVE_INSTANCE_REOPEN_FIX) -->
+        // Only build the full synthetic back stack (MainActivity -> PlayerActivity)
+        // below when no PlayerActivity instance is currently alive. That stack exists
+        // specifically to give a genuinely fresh, cold-started PlayerActivity a real
+        // parent so it isn't a bare task root (see PIP_TASK_ROOT_FIX) - but building it
+        // unconditionally, even when a live singleTask instance already exists
+        // elsewhere, doesn't correctly consolidate into that existing task. Firing a
+        // TaskStackBuilder PendingIntent goes through startActivities(), which
+        // constructs a brand new task regardless of singleTask, every single time.
+        // That meant every single reopen - even of an already-playing session - was
+        // silently constructing a whole new PlayerActivity/ViewModel/MPVPlayer/
+        // MediaSession from scratch (confirmed via logcat: a full mpv init banner on
+        // every reopen, a fresh Android Task ID every time), leaving a stale duplicate
+        // instance/task behind each cycle and re-registering PIP auto-enter fresh on
+        // each new one - very likely the actual root cause of both the original
+        // permanent-buffer bug and a PIP reopen loop chased across many earlier,
+        // narrower attempts at both. When a live instance already exists, a plain,
+        // direct PendingIntent - using PlayerActivity.newIntent(), which already
+        // carries the correct FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TOP combo
+        // for this exact purpose (see PIP_REOPEN_DUPLICATE_TASK_FIX on that function) -
+        // correctly lets singleTask do its actual job: bring the existing task forward
+        // and deliver the new intent via onNewIntent(), not construct a new one.
+        if (PlayerActivity.hasLiveInstance) {
+            return PendingIntent.getActivity(
+                this,
+                REQUEST_CODE_OPEN,
+                PlayerActivity.newIntent(this, animeId, episodeId),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        }
+        // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
         val safeAnimeId = animeId
         if (safeAnimeId != null) {
             val stackPendingIntent = TaskStackBuilder.create(this).run {

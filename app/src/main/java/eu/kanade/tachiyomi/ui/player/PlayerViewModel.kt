@@ -373,6 +373,11 @@ class PlayerViewModel @JvmOverloads constructor(
     /** Called once PlayerActivity's Service connection delivers a live PlayerMediaHolder. */
     fun bindToService(holder: PlayerMediaHolder) {
         mediaHolder = holder
+        // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
+        // Checked BEFORE adopt() - see PlayerMediaHolder.hasAdoptedPlayer's doc
+        // comment for why the ordering matters here.
+        val isFirstEverAdoption = !holder.hasAdoptedPlayer
+        // <-- AM (AUDIO_FOCUS_ORPHAN_FIX)
         val resolvedPlayer = holder.adopt(player)
         if (resolvedPlayer !== player) {
             // This instance built its own player, but the Service already had one
@@ -390,6 +395,17 @@ class PlayerViewModel @JvmOverloads constructor(
             }
         } else {
             logcat { "PlayerViewModel.bindToService: holder adopted this player ($player)" }
+            // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
+            // Only request audio focus for a genuinely first-ever adoption - see
+            // MPVPlayer.requestAudioFocus()'s doc comment for the full reasoning. An
+            // already-canonical player being reconfirmed here (isFirstEverAdoption
+            // false, but still resolvedPlayer === player because there was nothing
+            // to discard) already holds focus from when it was originally
+            // constructed and must not request it again.
+            if (isFirstEverAdoption) {
+                player.requestAudioFocus()
+            }
+            // <-- AM (AUDIO_FOCUS_ORPHAN_FIX)
         }
         wirePlayerFlows()
         syncHolderSessionState()
@@ -1786,9 +1802,27 @@ class PlayerViewModel @JvmOverloads constructor(
                 // AM (RECENT_EPISODE_POSITIONS) -->
                 val recentPosition = episode.id?.let { recentEpisodePositions.remove(it) }
                 // <-- AM (RECENT_EPISODE_POSITIONS)
+                val liveHolderState = mediaHolder?.state?.value
                 forceResumeFromLastPosition.let { resumeFromLast ->
                     forceResumeFromLastPosition = false
                     when {
+                        // AM (LIVE_POSITION_TRACKING) -->
+                        // Prefer the holder's live, Service-tracked position (kept
+                        // current by PlayerMediaHolder regardless of any ViewModel's
+                        // lifecycle) over episode.last_second_seen here - that DB
+                        // value only gets written by this ViewModel's own
+                        // viewModelScope-bound per-second save, which stops the
+                        // instant a ViewModel is cleared. Any playback that
+                        // continued via the Service-owned canonical player after an
+                        // old ViewModel died but before this one attached would
+                        // otherwise resume from a stale, pre-gap position. Guarded
+                        // to the exact same episode with a real recorded position -
+                        // never trust it for a different episode or a
+                        // never-actually-tracked 0.
+                        resumeFromLast && liveHolderState != null &&
+                            liveHolderState.episodeId == episode.id && liveHolderState.positionMs > 0 ->
+                            liveHolderState.positionMs / 1000L
+                        // <-- AM (LIVE_POSITION_TRACKING)
                         resumeFromLast -> episode.last_second_seen / 1000L
                         // AM (RECENT_EPISODE_POSITIONS) -->
                         recentPosition != null -> recentPosition.positionMs / 1000L

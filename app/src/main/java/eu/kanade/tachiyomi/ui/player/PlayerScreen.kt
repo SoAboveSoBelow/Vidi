@@ -247,7 +247,7 @@ fun PlayerScreen(
             key(viewModel.mpv, playerReady) {
                 MpvSurface(
                     modifier = Modifier.fillMaxSize(),
-                    mpv = viewModel.mpv,
+                    player = viewModel.player,
                     videoOutput = viewModel.videoOutput,
                     onSurfaceAttachedChanged = { attached -> viewModel.isSurfaceAttached = attached },
                 )
