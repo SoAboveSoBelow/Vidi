@@ -162,17 +162,23 @@ class PlayerActivity : BaseActivity() {
     // swipe-away, tearing down the whole session for something the user never asked
     // to end.
     private var isPipEntryPending = false
+
+    // AM (LIVE_REDELIVERY_TRUST_FIX) -->
+    // False until onNewIntent() completes its first call - which onCreate() always
+    // triggers internally, synchronously, for every fresh launch (see the bottom of
+    // onCreate()). Any LATER onNewIntent() call only ever happens because the
+    // system redelivered a new Intent onto this already-alive instance (the
+    // SINGLE_TOP win case - e.g. tapping the reopen notification while still in
+    // the app) - see onNewIntent()'s own doc comment for why that case is handled
+    // completely differently from the initial one.
+    private var hasProcessedInitialOnNewIntent = false
+    // <-- AM (LIVE_REDELIVERY_TRUST_FIX)
     // <-- AM (PIP_ENTRY_CANCELLED_FIX)
 
-    // AM (PIP_RECREATE_FIX) -->
-    // True once this specific Activity instance has attempted PIP entry once -
-    // reset to false for every fresh instance (unlike pendingPipEntryAfterRecreate,
-    // which is static and deliberately survives the transition). Checked by
-    // tryEnterPictureInPicture() to decide whether to proceed directly (first
-    // attempt) or recreate() first (any attempt after that) - see
-    // pendingPipEntryAfterRecreate's doc comment for the full reasoning.
-    private var hasAttemptedPipEntryThisInstance = false
-    // <-- AM (PIP_RECREATE_FIX)
+    // AM (PIP_RECREATE_FIX_REMOVED) -->
+    // hasAttemptedPipEntryThisInstance removed along with the recreate()-based
+    // workaround in tryEnterPictureInPicture() - see that function's doc comment.
+    // <-- AM (PIP_RECREATE_FIX_REMOVED)
 
     // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
     /**
@@ -230,6 +236,19 @@ class PlayerActivity : BaseActivity() {
             // media-button presses route to the current ViewModel, not a dead one.
             setupMediaSessionCallback(bound)
             // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
+
+            // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
+            // Reconcile paused state now: mpv is the only source of truth for whether
+            // playback is paused across a gap where control may have come from the
+            // fallback callback rather than viewModel.pause()/unpause(). Deliberately
+            // NOT consuming any pending skip here yet - this fresh instance's
+            // stateData.currentPlaylist is still empty at this point (only populated
+            // once onNewIntent()'s viewModel.init() completes, which hasn't run yet),
+            // so nextEpisode() would silently no-op. See onNewIntent() for where the
+            // pending skip actually gets applied, once a real playlist exists to apply
+            // it against.
+            viewModel.reconcilePausedFromPlayer()
+            // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
 
             // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
             // Step 4b: the notification now posts as soon as the Service is bound -
@@ -331,33 +350,11 @@ class PlayerActivity : BaseActivity() {
         val hasLiveInstance: Boolean get() = liveInstanceCount > 0
         // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
 
-        // AM (PIP_RECREATE_FIX) -->
-        /**
-         * Set right before calling recreate(), read and consumed by the freshly
-         * recreated instance's own onResume(). Static/companion, not a regular field,
-         * because it deliberately needs to survive the exact onDestroy()->onCreate()
-         * transition recreate() causes - a plain instance field would just be gone
-         * along with the old instance.
-         *
-         * Confirmed by direct observation: this app's PIP crash (see
-         * isPipEntryPending and the surrounding investigation) does NOT happen while
-         * two genuinely separate PlayerActivity instances/tasks are both alive - each
-         * PIP attempt was landing on a completely fresh Activity record that had
-         * never been through PIP before. DUPLICATE_INSTANCE_SELF_TERMINATE
-         * correctly closed off that duplicate-instance path (fixing several other
-         * real bugs it caused - stale position, the notification-reopen loop), but
-         * that also means every PIP attempt now lands on the SAME long-lived record
-         * across a whole session - including the second, third, etc. attempt, which
-         * is exactly the situation this crash needs. recreate() deliberately
-         * reproduces the one condition that was accidentally protective before -a
-         * genuinely fresh Activity record for this specific PIP attempt - without
-         * reintroducing an actual duplicate task: recreate() destroys and rebuilds
-         * this Activity in place, in the same task, and (via
-         * PlayerMediaHolder.adopt()'s existing dedup logic, unchanged) the new
-         * instance transparently reconnects to the exact same underlying session.
-         */
-        private var pendingPipEntryAfterRecreate = false
-        // <-- AM (PIP_RECREATE_FIX)
+        // AM (PIP_RECREATE_FIX_REMOVED) -->
+        // pendingPipEntryAfterRecreate removed along with the recreate()-based
+        // workaround in tryEnterPictureInPicture() - see that function's doc
+        // comment.
+        // <-- AM (PIP_RECREATE_FIX_REMOVED)
 
         fun newIntent(
             context: Context,
@@ -388,6 +385,27 @@ class PlayerActivity : BaseActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 // <-- AM (PIP_REOPEN_DUPLICATE_TASK_FIX)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                // AM (SINGLE_TOP_RECREATE_RACE_FIX) -->
+                // CLEAR_TOP alone, even on a singleTask Activity, does not guarantee
+                // redelivery via onNewIntent() when the target is already the sole/
+                // topmost Activity in its task - a well-documented Android quirk where
+                // the system can instead finish and recreate the existing instance from
+                // scratch to "clear down to and relaunch" the target, rather than
+                // recognizing there was nothing above it to clear. That's exactly the
+                // "opening from the notification while already in the app" case: this
+                // reopen Intent targets PlayerActivity while it's already resumed and
+                // alone at the top of its own task. Without SINGLE_TOP, that can tear
+                // down and reconstruct this Activity/ViewModel while the Service-held
+                // PlayerMediaHolder's player is still alive and adopted elsewhere,
+                // racing a fresh MPVPlayer construction against the live one - the same
+                // class of native mpv/JNI race documented at length in
+                // BRANCH_NOTES.md's `pip-finish-based-wip` postmortem. SINGLE_TOP tells
+                // the system explicitly: if this exact Activity is already resumed at
+                // the top of its task, never finish/recreate it - just deliver the new
+                // Intent via onNewIntent() on the live instance, exactly the behavior
+                // this whole reopen path already assumes.
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                // <-- AM (SINGLE_TOP_RECREATE_RACE_FIX)
             }
         }
     }
@@ -409,6 +427,59 @@ class PlayerActivity : BaseActivity() {
             animeId.hashCode(),
             Notifications.ID_NEW_EPISODES,
         )
+
+        // AM (LIVE_REDELIVERY_TRUST_FIX) -->
+        // For any onNewIntent() call past the first, this Activity is already
+        // alive with an already-adopted canonical player - no fresh MPVPlayer
+        // construction is involved here (unlike a cold reopen, which is what the
+        // native-crash-prone reinit pipeline below was actually built to guard
+        // against). What redelivers here falls into three cases:
+        //  1. Exactly what's already playing - the background-playback reopen
+        //     notification's common case, whose payload is subject to a real, if
+        //     narrow, staleness window relative to what's actually playing right
+        //     now (REOPEN_TARGET_STALENESS_FIX narrowed it, coroutine dispatch
+        //     timing means it can't be fully eliminated). Comparing against it via
+        //     needsInit() was the root of every remaining intermittent failure on
+        //     this specific path - so for this case, skip that comparison
+        //     entirely and just trust the already-correct session.
+        //  2. A genuinely different episode of the SAME anime, requested while
+        //     this instance is already alive - e.g. tapping another entry in an
+        //     episode list/queue while PIP is active. This is real, legitimate
+        //     work that must actually happen, not a stale-payload false alarm -
+        //     route it through the existing, already-safe in-app episode-switch
+        //     pipeline (changeEpisode()) directly, since it operates on the
+        //     already-adopted player with none of the construction/adoption
+        //     races the full reinit pipeline exists to guard against.
+        //  3. A different anime entirely - a genuine "load new content" request,
+        //     not a redundant reload. This instance's player/ViewModel are
+        //     already alive and adopted (no fresh MPVPlayer construction
+        //     involved, unlike the cold-reopen case), so falling through to the
+        //     normal reinit pipeline below is legitimate and safe here.
+        if (hasProcessedInitialOnNewIntent) {
+            lifecycleScope.launchNonCancellable {
+                viewModel.playerReady.first { it }
+                val current = viewModel.stateData.value
+                when {
+                    current.currentAnime?.id == animeId && current.currentEpisode?.id == episodeId -> {
+                        mediaHolder?.consumePendingSkip()?.let { next -> viewModel.nextEpisode(next = next) }
+                        withUIContext { setIntent(intent) }
+                    }
+                    current.currentAnime?.id == animeId -> {
+                        viewModel.changeEpisode(episodeId)
+                        withUIContext { setIntent(intent) }
+                    }
+                    else -> {
+                        // Different anime - let the normal reinit pipeline below
+                        // handle it for real, same as the very first call would.
+                        hasProcessedInitialOnNewIntent = false
+                        withUIContext { onNewIntent(intent) }
+                    }
+                }
+            }
+            return
+        }
+        hasProcessedInitialOnNewIntent = true
+        // <-- AM (LIVE_REDELIVERY_TRUST_FIX)
 
         // AM (NEEDSINIT_BIND_RACE_FIX) -->
         // needsInit()'s "is this exact session already live in the Service" fallback
@@ -456,12 +527,74 @@ class PlayerActivity : BaseActivity() {
                 // Already playing this exact episode (e.g. reopened from the
                 // background-playback notification) - avoid restarting the whole
                 // file-open pipeline.
+                // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
+                mediaHolder?.consumePendingSkip()?.let { next -> viewModel.nextEpisode(next = next) }
+                // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
                 withUIContext { setIntent(intent) }
                 return@launchNonCancellable
             }
 
+            // AM (REUSED_PLAYER_SYNC_FIX) -->
+            // needsInit() above correctly said this fresh ViewModel's own local
+            // bookkeeping (currentPlaylist etc.) needs populating - that's true
+            // regardless of whether the underlying player object was reused. But
+            // if it WAS reused (see PlayerViewModel.wasPlayerReusedFromLiveHolder /
+            // SYNCHRONOUS_HOLDER_LOOKUP_FIX) from a holder that already reports
+            // this exact target, the actual video content is already correct and
+            // playing - falling through to the full reinit pipeline below would
+            // still call loadfile() on it, a genuine, audible reload for zero
+            // benefit. Sync only the DB-derived bookkeeping in that case, skipping
+            // mpv entirely; fall through to the normal pipeline if that sync
+            // fails for any reason (nothing lost - same behavior as before this
+            // fix existed).
+            val holderState = mediaHolder?.state?.value
+            val canSyncWithoutReload = viewModel.wasPlayerReusedFromLiveHolder &&
+                holderState?.animeId == animeId &&
+                holderState.episodeId == episodeId
+            if (canSyncWithoutReload && viewModel.syncSessionStateFromDb(animeId, episodeId)) {
+                mediaHolder?.consumePendingSkip()?.let { next -> viewModel.nextEpisode(next = next) }
+                withUIContext { setIntent(intent) }
+                return@launchNonCancellable
+            }
+            // <-- AM (REUSED_PLAYER_SYNC_FIX)
+
+            // AM (CONCURRENT_REINIT_RACE_FIX) -->
+            // A genuine reinit is needed by the check above, but if a load is
+            // ALREADY in flight (e.g. an in-app episode switch the user just
+            // triggered, or an earlier reopen's own reinit that hasn't settled yet)
+            // starting a second, concurrent one races two loads against the same
+            // live mpv instance and ViewModel state - source of exactly the kind of
+            // intermittent (sometimes fine, sometimes not) failure this reopen path
+            // has been showing. Defer entirely to whichever load is already running
+            // rather than piling a competing one on top of it; that in-flight load
+            // will settle on its own, and the intent is still updated so a future
+            // needsInit() check (once things are quiet) sees accurate state.
+            if (viewModel.uiData.value.isLoadingEpisode || viewModel.uiData.value.isLoadingHosters) {
+                withUIContext { setIntent(intent) }
+                return@launchNonCancellable
+            }
+            // <-- AM (CONCURRENT_REINIT_RACE_FIX)
+
             viewModel.saveCurrentEpisodeWatchingProgress()
             // <-- AM (NEEDSINIT_BIND_RACE_FIX)
+
+            // AM (REOPEN_LOAD_FAILURE_PRESERVE_SESSION_FIX) -->
+            // Captured before init() runs: whether this reopen is reinitializing on top
+            // of an already-valid, already-playing session, versus a genuinely fresh
+            // open with nothing behind it yet. setInitialEpisodeError() unconditionally
+            // finish()es on any load failure - correct for the fresh-open case (nothing
+            // to fall back to), but destructive here: a reopen triggered while already
+            // alive and playing (e.g. tapping the notification with the app still open)
+            // can hit needsInit() == true and attempt a redundant reload of the same or
+            // an adjacent episode, which can then genuinely fail (see the still-open
+            // GetAnime/getAnimeById database race documented in BRANCH_NOTES.md) even
+            // though the actual, already-working session underneath was completely
+            // fine. Finishing the whole Activity over a failed redundant reload
+            // destroys a good session for no reason - the failure should be reported,
+            // not fatal, whenever there's something valid to fall back to.
+            val hadValidSessionBeforeReinit = viewModel.stateData.value.currentAnime != null &&
+                viewModel.stateData.value.currentEpisode != null
+            // <-- AM (REOPEN_LOAD_FAILURE_PRESERVE_SESSION_FIX)
 
             viewModel.updateIsLoadingEpisode(true)
             viewModel.updateIsLoadingHosters(true)
@@ -475,20 +608,43 @@ class PlayerActivity : BaseActivity() {
                 val exception = initResult.second.exceptionOrNull() ?: IllegalStateException(
                     "Unknown error",
                 )
-                withUIContext {
-                    setInitialEpisodeError(exception)
+                // AM (REOPEN_LOAD_FAILURE_PRESERVE_SESSION_FIX) -->
+                if (hadValidSessionBeforeReinit) {
+                    withUIContext {
+                        showToast(exception.message ?: "")
+                    }
+                    logcat(LogPriority.ERROR, exception)
+                } else {
+                    withUIContext {
+                        setInitialEpisodeError(exception)
+                    }
                 }
+                // <-- AM (REOPEN_LOAD_FAILURE_PRESERVE_SESSION_FIX)
             }
 
             viewModel.updateIsLoadingHosters(false)
 
-            lifecycleScope.launch {
-                viewModel.loadHosters(
-                    hosterList = initResult.first.hosterList ?: emptyList(),
-                    hosterIndex = initResult.first.videoIndex.first,
-                    videoIndex = initResult.first.videoIndex.second,
-                )
+            // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
+            // Apply any skip queued via the fallback MediaSession callback while this
+            // session was backgrounded with no ViewModel attached (see
+            // PlayerMediaHolder.requestSkip) - init() above has now populated a real
+            // currentPlaylist for this fresh instance, so nextEpisode() can resolve and
+            // load the actually-desired episode instead of the one this reopen intent
+            // happened to carry. Supersedes the hoster load below for the just-reopened
+            // episode, which is fine - the user has already moved past it.
+            val pendingSkip = mediaHolder?.consumePendingSkip()
+            if (pendingSkip != null) {
+                viewModel.nextEpisode(next = pendingSkip)
+            } else {
+                lifecycleScope.launch {
+                    viewModel.loadHosters(
+                        hosterList = initResult.first.hosterList ?: emptyList(),
+                        hosterIndex = initResult.first.videoIndex.first,
+                        videoIndex = initResult.first.videoIndex.second,
+                    )
+                }
             }
+            // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
 
             withUIContext { setIntent(intent) }
         }
@@ -673,6 +829,51 @@ class PlayerActivity : BaseActivity() {
             }
             .launchIn(lifecycleScope)
 
+        // AM (REOPEN_TARGET_STALENESS_FIX) -->
+        // Split out from the artwork/metadata flow below: this one exists purely to
+        // keep the Service's animeId/episodeId (and therefore the notification's
+        // reopen PendingIntent target) in sync with the actually-current episode, as
+        // fast as possible - keyed only on the anime/episode pair itself, with no
+        // dependency on duration, thumbnailGenerated, or a live network artwork fetch.
+        // The combined flow below was gating this exact update behind all three of
+        // those - meaning for however long thumbnail generation plus an image load
+        // took after switching episodes, the notification's reopen target still
+        // pointed at the PREVIOUS episode even though playback had already moved on.
+        // Tapping the notification during that window (e.g. right after an in-app
+        // episode skip) made needsInit() correctly detect the mismatch and trigger a
+        // reinit attempt against an episode already left behind - replacing source
+        // state on an already-live, already-playing mpv session rather than an idle
+        // one, a fundamentally riskier operation than a genuine cold reopen.
+        viewModel.stateData
+            .map { it.currentAnime to it.currentEpisode }
+            .distinctUntilChanged()
+            .onEach { (anime, episode) ->
+                if (anime == null || episode == null) return@onEach
+                backgroundPlaybackService?.updateEpisodeInfo(
+                    title = anime.title,
+                    subtitle = episode.name,
+                    animeId = anime.id,
+                    episodeId = episode.id,
+                )
+            }
+            .launchIn(lifecycleScope)
+        // <-- AM (REOPEN_TARGET_STALENESS_FIX)
+
+        // AM (BACKGROUND_SKIP_FIX) -->
+        // Mirrors the already-correctly-sorted/filtered playlist (see
+        // PlayerViewModel.setupEpisodeList()) into the holder as a flat ordered list
+        // of episode ids - PlayerMediaHolder.skipToAdjacentEpisode() needs this to
+        // resolve "next"/"previous" without re-deriving sort/filter logic itself,
+        // which would risk landing on the wrong episode if that logic ever depends on
+        // a user preference this observer can't see. Reusing the ViewModel's own,
+        // already-correct computation here is the safe way to keep both in sync.
+        viewModel.stateData
+            .map { it.currentPlaylist.mapNotNull { episode -> episode.id } }
+            .distinctUntilChanged()
+            .onEach { episodeIds -> mediaHolder?.updatePlaylist(episodeIds) }
+            .launchIn(lifecycleScope)
+        // <-- AM (BACKGROUND_SKIP_FIX)
+
         // Duration/seek-bar/thumbnail in the media notification come from MediaMetadata,
         // not PlaybackState - without this they show blank despite PlaybackState working.
         combine(
@@ -704,14 +905,12 @@ class PlayerActivity : BaseActivity() {
                         }
                         .build(),
                 )
-                // Metadata alone won't redraw an already-posted background-playback
-                // notification - keep the service's title/subtitle/reopen-intent in sync too.
-                backgroundPlaybackService?.updateEpisodeInfo(
-                    title = anime.title,
-                    subtitle = episode.name,
-                    animeId = anime.id,
-                    episodeId = episode.id,
-                )
+                // AM (REOPEN_TARGET_STALENESS_FIX) -->
+                // updateEpisodeInfo() moved to its own immediate observer above - this
+                // flow now only refreshes MediaSession's rich metadata (artwork,
+                // duration), which is fine to lag behind a slow thumbnail/image fetch
+                // since it doesn't affect reopen routing.
+                // <-- AM (REOPEN_TARGET_STALENESS_FIX)
             }
             .launchIn(lifecycleScope)
 
@@ -826,11 +1025,46 @@ class PlayerActivity : BaseActivity() {
                 mediaHolder?.release()
                 // <-- AM (STALE_HOLDER_STATE_FIX)
                 stopService(PlayerBackgroundPlaybackService.newIntent(this))
+            } else {
+                // This Activity instance is being destroyed while playback is meant to
+                // continue - leave the Service, its player, its notification (if active), and
+                // the MediaSession running. A future reattach adopts the same player via
+                // PlayerMediaHolder.adopt() instead of these being torn down out from under it.
+
+                // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
+                // Hand the MediaSession's callback back to the Service-owned fallback
+                // before this instance's ViewModel is cleared - the mirror image of
+                // setupMediaSessionCallback()'s redirect-to-the-reattaching-instance
+                // behavior. Without this, the callback stays pointed at this instance's
+                // (about to be dead) ViewModel until some future reattach overwrites it.
+                mediaHolder?.restoreFallbackCallback()
+                // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
+
+                // AM (BACKGROUND_HANDOFF_NOTIFY_FIX) -->
+                // The periodic timer in PlayerMediaHolder (BACKGROUND_SEEKBAR_TICK_FIX)
+                // pushes correct PlaybackState/MediaMetadata to the MediaSession the
+                // moment hasLiveInstance goes false, even with nothing having actually
+                // changed yet - but the lock screen's rich media widget was still
+                // showing blank until the next thing that happened to trigger an
+                // actual NotificationManagerCompat.notify() call (a skip, since that's
+                // gated on a title change). Explicitly forcing one here, using this
+                // still-alive instance's own last-known-correct values, gives the lock
+                // screen a fresh post to render from at the exact moment control hands
+                // off - not waiting for something else to eventually cause one.
+                viewModel.stateData.value.let { data ->
+                    val anime = data.currentAnime
+                    val episode = data.currentEpisode
+                    if (anime != null && episode != null) {
+                        backgroundPlaybackService?.updateEpisodeInfo(
+                            title = anime.title,
+                            subtitle = episode.name,
+                            animeId = anime.id,
+                            episodeId = episode.id,
+                        )
+                    }
+                }
+                // <-- AM (BACKGROUND_HANDOFF_NOTIFY_FIX)
             }
-            // else: this Activity instance is being destroyed while playback is meant to
-            // continue - leave the Service, its player, its notification (if active), and
-            // the MediaSession running. A future reattach adopts the same player via
-            // PlayerMediaHolder.adopt() instead of these being torn down out from under it.
 
             unbindService(mediaHolderConnection)
             mediaHolder = null
@@ -1100,11 +1334,9 @@ class PlayerActivity : BaseActivity() {
         }
         // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
 
-        // AM (PIP_RECREATE_FIX) -->
-        // Restructured from two early-returns into if/else specifically so both
-        // paths fall through to the pending-PIP check at the bottom, guaranteed to
-        // run after super.onResume() either way - see
-        // pendingPipEntryAfterRecreate's doc comment for why this exists.
+        // Restructured from two early-returns into if/else so both paths fall
+        // through consistently (no longer gated on a pending-PIP check here - see
+        // PIP_RECREATE_FIX_REMOVED below).
         if (!viewModel.isPlayerExiting()) {
             super.onResume()
         } else {
@@ -1118,11 +1350,11 @@ class PlayerActivity : BaseActivity() {
             )
         }
 
-        if (pendingPipEntryAfterRecreate) {
-            pendingPipEntryAfterRecreate = false
-            tryEnterPictureInPicture(createPipParams())
-        }
-        // <-- AM (PIP_RECREATE_FIX)
+        // AM (PIP_RECREATE_FIX_REMOVED) -->
+        // pendingPipEntryAfterRecreate consumption removed along with the
+        // recreate()-based workaround - see tryEnterPictureInPicture()'s doc
+        // comment.
+        // <-- AM (PIP_RECREATE_FIX_REMOVED)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -1144,14 +1376,8 @@ class PlayerActivity : BaseActivity() {
         runOnUiThread { toast(message) }
     }
 
-    // AM (PIP_RECREATE_FIX) -->
     /**
-     * Wraps every PIP-entry attempt. First attempt on this Activity instance:
-     * proceeds directly, exactly as before. Any later attempt on the same
-     * instance: triggers a full recreate() instead of calling
-     * enterPictureInPictureMode() directly, deferring the actual entry to the
-     * freshly recreated instance's own onResume() - see
-     * pendingPipEntryAfterRecreate's doc comment for the full reasoning.
+     * Wraps every PIP-entry attempt.
      *
      * [params] null means "use whatever PictureInPictureParams are already
      * registered" (matching onUserLeaveHint()'s original plain
@@ -1159,13 +1385,26 @@ class PlayerActivity : BaseActivity() {
      * (matching the other two call sites, which always passed createPipParams()
      * directly).
      */
+    // AM (PIP_RECREATE_FIX_REMOVED) -->
+    // recreate() previously ran here on every second-or-later PIP-entry attempt on
+    // this Activity instance, to dodge a framework race confirmed only on a reused
+    // instance's repeat PIP entry. PIP_REENTRY_CRASH_FIX later added a direct
+    // lifecycle.currentState == RESUMED guard at every real call site below,
+    // targeting that exact same "second entry on a reused instance" scenario -
+    // recreate() had become a second, more disruptive workaround for a problem the
+    // RESUMED check may already fully cover. recreate() tearing down and rebuilding
+    // this Activity's entire UI/window (including the Surface mpv renders into) on
+    // every repeat PIP entry was the source of an audible pause/resume blip on PIP
+    // open/close, and of exactly the kind of timing-sensitive re-run of onCreate()/
+    // bindService()/onServiceConnected() that made repeat notification-reopen-then-
+    // PIP races intermittent rather than reliable. All three real call sites
+    // already gate on isInPictureInPictureMode and RESUMED before calling this, so
+    // entering directly here, every time, is consistent with what already runs on
+    // a first attempt - if the original crash resurfaces on a genuine reused-
+    // instance repeat entry, that means the RESUMED guard alone isn't sufficient
+    // and recreate() (or some other fresh mitigation) needs reinstating.
+    // <-- AM (PIP_RECREATE_FIX_REMOVED)
     private fun tryEnterPictureInPicture(params: PictureInPictureParams?) {
-        if (hasAttemptedPipEntryThisInstance) {
-            pendingPipEntryAfterRecreate = true
-            recreate()
-            return
-        }
-        hasAttemptedPipEntryThisInstance = true
         isPipEntryPending = true
         if (params != null) {
             enterPictureInPictureMode(params)
@@ -1173,7 +1412,6 @@ class PlayerActivity : BaseActivity() {
             enterPictureInPictureMode()
         }
     }
-    // <-- AM (PIP_RECREATE_FIX)
 
     fun createPipParams(forceDisableAutoEnter: Boolean = false): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()

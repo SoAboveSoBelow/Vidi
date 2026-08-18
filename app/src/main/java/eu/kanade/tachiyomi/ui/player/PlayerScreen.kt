@@ -244,7 +244,24 @@ fun PlayerScreen(
             // PlayerViewModel.bindToService(), specifically. Without this, the surface
             // would stay permanently attached to whatever player was live at first
             // composition, even after the ViewModel switched to a different one.
-            key(viewModel.mpv, playerReady) {
+            //
+            // AM (REDUNDANT_SURFACE_REBUILD_FIX) -->
+            // playerReady dropped from the key. SYNCHRONOUS_HOLDER_LOOKUP_FIX changed
+            // when _player's identity is resolved: it's now decided synchronously at
+            // ViewModel construction (reusing an already-adopted player when one exists,
+            // rather than always starting with a throwaway later swapped out once
+            // bindToService() resolved). viewModel.player is already the final, correct
+            // object at the very first composition - playerReady flipping false->true
+            // shortly after no longer corresponds to any actual identity change, so
+            // keying on it too was forcing a completely redundant extra Surface teardown
+            // and rebuild on every single reopen: a visible loading flash and a genuine,
+            // audible mpv vo reconfiguration for a player that never actually changed.
+            // viewModel.mpv alone remains the correct key for the rare remaining case an
+            // identity change genuinely does happen (e.g. two ViewModels racing to
+            // construct at the same instant, one losing PlayerMediaHolder.adopt()'s
+            // first-wins race).
+            // <-- AM (REDUNDANT_SURFACE_REBUILD_FIX)
+            key(viewModel.mpv) {
                 MpvSurface(
                     modifier = Modifier.fillMaxSize(),
                     player = viewModel.player,

@@ -220,7 +220,29 @@ class PlayerViewModel @JvmOverloads constructor(
 ) : AndroidViewModel(context) {
     val videoOutput = if (decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
 
-    private var _player = MPVPlayer(context, videoOutput)
+    // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
+    // Check the same-process holder synchronously before constructing a new
+    // MPVPlayer at all - see PlayerMediaHolder's class doc comment for the full
+    // reasoning. If a live holder already has an adopted (canonical) player, this
+    // reuses that exact object instead of building a brand-new native mpv context
+    // that bindToService()'s adopt() call would just discard as an orphan moments
+    // later. Falls back to constructing a genuinely new MPVPlayer, exactly as
+    // before, whenever no live holder/adopted player exists yet - a true fresh
+    // session, where there's nothing to reuse.
+    private val reusableHolder = PlayerMediaHolder.current?.takeIf { it.hasAdoptedPlayer }
+    private var _player = reusableHolder?.player ?: MPVPlayer(context, videoOutput)
+    // AM (REUSED_PLAYER_SYNC_FIX) -->
+    // Exposed for PlayerActivity.onNewIntent() to check: this fresh ViewModel's
+    // own local bookkeeping (currentPlaylist, etc.) starts empty regardless of
+    // whether the underlying player object was reused - needsInit() still
+    // correctly says "this ViewModel needs initializing" in that case. But if the
+    // reused player's own holder already reports the same target anime/episode,
+    // the actual video content is already correct and playing - only the DB-
+    // derived bookkeeping needs syncing, not a full mpv reload. See
+    // syncSessionStateFromDb().
+    val wasPlayerReusedFromLiveHolder = reusableHolder != null
+    // <-- AM (REUSED_PLAYER_SYNC_FIX)
+    // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
     val player get() = _player
     val mpv get() = _player.mpv
 
@@ -916,13 +938,95 @@ class PlayerViewModel @JvmOverloads constructor(
         // episode from scratch, and - if it's already marked seen - the "already watched,
         // start at 0" rule in setVideo() restarts playback from the beginning even though
         // the actual (canonical, still-adopted) player was mid-episode the whole time.
+        //
+        // AM (NEEDSINIT_STALE_HOLDER_FIX) -->
+        // That reasoning assumed the ORIGINAL, still-alive instance's ViewModel was the
+        // one actually holding real playlist/episode data, with this being a redundant
+        // second instance safe to leave uninitialized. That stopped holding once
+        // backgrounding started genuinely destroying the Activity (see
+        // isBackgroundPlayTransitionFinish) - holder.state's animeId/episodeId (written
+        // by syncHolderSessionState(), never cleared except in release()) now survives
+        // completely unchanged across that destruction, and the notification's reopen
+        // intent is built from that same pair (see
+        // PlayerBackgroundPlaybackService.animeId/episodeId). So on the now-common case -
+        // a single, genuinely fresh instance reattaching after the old one was fully
+        // destroyed - this branch was matching every single time and returning "no init
+        // needed" for a ViewModel that had never actually loaded anything: currentPlaylist
+        // stayed permanently empty, hosters never loaded, and playback state fell back to
+        // stale defaults. Requiring this instance to already have a non-empty playlist
+        // restricts the fast path back to its original, genuine intent - skipping
+        // redundant reinit only when THIS ViewModel instance has real, already-loaded data
+        // to skip reloading - while a truly empty, freshly constructed instance always
+        // falls through to a real init(), regardless of what the holder separately
+        // remembers from a prior instance's session.
         val holderState = mediaHolder?.state?.value
-        if (holderState?.animeId == animeId && holderState.episodeId == episodeId) {
+        if (holderState?.animeId == animeId &&
+            holderState.episodeId == episodeId &&
+            local.currentPlaylist.isNotEmpty()
+        ) {
             return false
         }
+        // <-- AM (NEEDSINIT_STALE_HOLDER_FIX)
         // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
         return true
     }
+
+    // AM (REUSED_PLAYER_SYNC_FIX) -->
+    /**
+     * Populates local playlist/episode bookkeeping from the DB without touching
+     * mpv's loaded file at all - for the case where the underlying player was
+     * already reused from a live [PlayerMediaHolder] (see
+     * [wasPlayerReusedFromLiveHolder] / SYNCHRONOUS_HOLDER_LOOKUP_FIX) and already
+     * has the correct content loaded and playing. Running the full [init]/
+     * loadFile() pipeline in that case would needlessly reload an already-correct
+     * file from scratch - a genuine `loadfile` mpv command, not a no-op, causing
+     * an audible interruption on every reopen after backgrounding even though
+     * nothing about the actual video content needed to change.
+     *
+     * Deliberately duplicates [init]'s DB-bookkeeping steps rather than
+     * refactoring that function to share code with this one - [init] is an
+     * existing, carefully-hardened function with a lot of accumulated
+     * correctness fixes; this avoids any risk of regressing it for the cases it
+     * already handles correctly, at the cost of a little duplication.
+     *
+     * Returns false (safe to fall back to the full [init] pipeline) if anything
+     * about the DB state doesn't resolve cleanly - never partially applies state.
+     */
+    suspend fun syncSessionStateFromDb(animeId: Long, targetEpisodeId: Long): Boolean {
+        return try {
+            val anime = getAnime.await(animeId) ?: return false
+            sourceManager.isInitialized.first { it }
+            val source = sourceManager.getOrStub(anime.source)
+            val incognito = getIncognitoState.await(anime.source)
+
+            updateStateData { it.copy(currentAnime = anime, currentSource = source, incognitoMode = incognito) }
+            updateUiData { it.copy(animeTitle = anime.title) }
+            episodeId = targetEpisodeId
+
+            setupTrackers(anime.id)
+            setupEpisodeList(anime)
+
+            val episode = stateData.value.currentPlaylist.firstOrNull { it.id == episodeId } ?: return false
+            setupEpisode(episode)
+
+            val skipIntroLength = getAnimeSkipIntroLength()
+            updateCastUiData { it.copy(skipIntroLength = skipIntroLength.toLong()) }
+
+            val parentTitle = anime.parentId?.let { getAnime.await(it)?.title } ?: ""
+            setPropertyString("user-data/current-anime/anime-title", anime.title)
+            setPropertyString("user-data/current-anime/parent-title", parentTitle)
+            setPropertyInt("user-data/current-anime/intro-length", skipIntroLength)
+            setPropertyString(
+                "user-data/current-anime/category",
+                getCategories.await(anime.id).joinToString { it.name },
+            )
+            true
+        } catch (e: Throwable) {
+            logcat(LogPriority.ERROR, e)
+            false
+        }
+    }
+    // <-- AM (REUSED_PLAYER_SYNC_FIX)
 
     data class InitResult(
         val hosterList: List<Hoster>?,
@@ -2747,6 +2851,22 @@ class PlayerViewModel @JvmOverloads constructor(
         setPropertyBoolean("pause", false)
         updatePlaybackData { it.copy(paused = false) }
     }
+
+    // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
+    /**
+     * Re-syncs [playbackData]'s paused flag from mpv's actual property. Called once from
+     * PlayerActivity.onServiceConnected() right after (re)binding to the Service-owned
+     * player - mpv is the only reliable source of truth at that point, since play/pause
+     * may have been driven by PlayerMediaHolder's fallback MediaSession callback (see
+     * PlayerMediaHolder.setPaused) while this Activity/ViewModel didn't exist to keep its
+     * own playbackData in sync. Without this, a freshly constructed ViewModel's default
+     * paused state could silently disagree with what mpv is actually doing.
+     */
+    fun reconcilePausedFromPlayer() {
+        val actuallyPaused = mpv.getPropertyBoolean("pause") ?: return
+        updatePlaybackData { it.copy(paused = actuallyPaused) }
+    }
+    // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
 
     fun showControls() {
         val currentUi = uiData.value

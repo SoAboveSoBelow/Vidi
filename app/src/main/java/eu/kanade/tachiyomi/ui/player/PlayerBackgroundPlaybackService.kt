@@ -18,6 +18,16 @@ import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.ui.main.MainActivity
+// AM (BACKGROUND_SKIP_FIX) -->
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+// <-- AM (BACKGROUND_SKIP_FIX)
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
@@ -41,12 +51,45 @@ class PlayerBackgroundPlaybackService : Service() {
     // ViewModel-owned player (PlayerViewModel.player) remains the one actually
     // driving playback until step 2 cuts call sites over.
     private val mediaHolderLazy = lazy {
-        PlayerMediaHolder(this).also {
+        PlayerMediaHolder(this).also { holder ->
             logcat { "PlayerMediaHolder constructed in PlayerBackgroundPlaybackService" }
+            // AM (BACKGROUND_SKIP_FIX) -->
+            // Drives the notification directly off the holder's own state, rather
+            // than relying solely on PlayerActivity's REOPEN_TARGET_STALENESS_FIX
+            // observer pushing updates via updateEpisodeInfo() - that observer only
+            // runs while a live Activity exists. Without this, a successful
+            // background skip (see PlayerMediaHolder.skipToAdjacentEpisode())
+            // updated the holder's own bookkeeping correctly but the visible
+            // notification never refreshed to match, since nothing was watching
+            // for that change with no Activity around to notice it.
+            holder.state
+                .map { it.animeTitle to it.episodeTitle to (it.animeId to it.episodeId) }
+                .distinctUntilChanged()
+                .onEach { (titles, ids) ->
+                    // AM (BACKGROUND_MEDIASESSION_DOUBLE_WRITER_FIX) -->
+                    // Redundant with PlayerActivity's own REOPEN_TARGET_STALENESS_FIX
+                    // observer whenever an Activity is alive - both would compute the
+                    // same correct values here, but calling updateEpisodeInfo() (and
+                    // therefore NotificationManagerCompat.notify()) twice for every
+                    // single episode change is still wasted, unnecessary work. Defer
+                    // entirely to the Activity's own observer whenever one exists.
+                    if (PlayerActivity.hasLiveInstance) return@onEach
+                    // <-- AM (BACKGROUND_MEDIASESSION_DOUBLE_WRITER_FIX)
+                    val (animeTitle, episodeTitle) = titles
+                    val (animeId, episodeId) = ids
+                    if (animeTitle.isEmpty() && episodeTitle.isEmpty()) return@onEach
+                    updateEpisodeInfo(animeTitle, episodeTitle, animeId, episodeId)
+                }
+                .launchIn(serviceScope)
+            // <-- AM (BACKGROUND_SKIP_FIX)
         }
     }
     val mediaHolder: PlayerMediaHolder by mediaHolderLazy
     // <-- AM (SERVICE_OWNED_PLAYER)
+
+    // AM (BACKGROUND_SKIP_FIX) -->
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // <-- AM (BACKGROUND_SKIP_FIX)
 
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -164,6 +207,9 @@ class PlayerBackgroundPlaybackService : Service() {
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
+        // AM (BACKGROUND_SKIP_FIX) -->
+        serviceScope.cancel()
+        // <-- AM (BACKGROUND_SKIP_FIX)
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Step 4a: no longer this Service's job - see the comment in start() above.
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
