@@ -63,21 +63,41 @@ class PlayerBackgroundPlaybackService : Service() {
             // notification never refreshed to match, since nothing was watching
             // for that change with no Activity around to notice it.
             holder.state
-                .map { it.animeTitle to it.episodeTitle to (it.animeId to it.episodeId) }
+                .map { Triple(it.animeTitle to it.episodeTitle, it.animeId to it.episodeId, it.resolvedEpisodeKey) }
                 .distinctUntilChanged()
-                .onEach { (titles, ids) ->
-                    // AM (BACKGROUND_MEDIASESSION_DOUBLE_WRITER_FIX) -->
-                    // Redundant with PlayerActivity's own REOPEN_TARGET_STALENESS_FIX
-                    // observer whenever an Activity is alive - both would compute the
-                    // same correct values here, but calling updateEpisodeInfo() (and
-                    // therefore NotificationManagerCompat.notify()) twice for every
-                    // single episode change is still wasted, unnecessary work. Defer
-                    // entirely to the Activity's own observer whenever one exists.
-                    if (PlayerActivity.hasLiveInstance) return@onEach
-                    // <-- AM (BACKGROUND_MEDIASESSION_DOUBLE_WRITER_FIX)
+                .onEach { (titles, ids, resolvedKey) ->
+                    // AM (MEDIASESSION_SINGLE_WRITER_FIX) -->
+                    // Previously deferred entirely to PlayerActivity's own
+                    // REOPEN_TARGET_STALENESS_FIX observer whenever an Activity was alive,
+                    // to avoid calling updateEpisodeInfo()/notify() twice for the same
+                    // change. That Activity-side observer is gone now (see PlayerActivity's
+                    // own MEDIASESSION_SINGLE_WRITER_FIX removal notes) - this is the sole
+                    // writer of the notification's title/subtitle/reopen-target, live
+                    // Activity or not. Reacts off the holder's own state, which
+                    // syncHolderSessionState() keeps current the instant any switch
+                    // happens (see PlayerViewModel), so this is just as fast as the
+                    // Activity-side observer it replaces.
+                    // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
                     val (animeTitle, episodeTitle) = titles
                     val (animeId, episodeId) = ids
                     if (animeTitle.isEmpty() && episodeTitle.isEmpty()) return@onEach
+                    // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+                    // Gated on the SAME resolution-finished signal
+                    // pushLiveMediaState() uses (see PlayerMediaState's own doc comment
+                    // on resolvedEpisodeKey) - without this, the notification's visible
+                    // title/subtitle updated instantly on every switch while its
+                    // artwork (a completely separate Android API surface -
+                    // MediaSession's metadata, not this Notification's own text) waited
+                    // on resolution, which looked exactly like an incremental,
+                    // partial-then-corrected render to anyone just looking at the
+                    // notification. This intentionally also delays the reopen-intent's
+                    // animeId/episodeId by the same amount - accepting that trade-off
+                    // (a stale reopen target for however long resolution takes, capped
+                    // at 2 minutes) in favor of a genuinely atomic notification update,
+                    // rather than splitting "text can wait" from "ids can't" and ending
+                    // up back at a partially-incremental render either way.
+                    // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+                    if (resolvedKey != ids) return@onEach
                     updateEpisodeInfo(animeTitle, episodeTitle, animeId, episodeId)
                 }
                 .launchIn(serviceScope)
@@ -115,22 +135,38 @@ class PlayerBackgroundPlaybackService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
-    /** Begins foreground playback. Call once when backgrounding starts. */
+    // AM (NOTIFICATION_CREATION_STALE_SNAPSHOT_FIX) -->
+    // start() used to also take title/subtitle/animeId/episodeId and write them
+    // directly here, sourced from a one-off snapshot of viewModel.uiData/stateData
+    // taken at the call site (PlayerActivity's onServiceConnected). That snapshot is
+    // provably unreliable at that exact moment - onServiceConnected fires as soon as
+    // the Service binds, which is not ordered against onNewIntent()'s episode load
+    // completing, so the anime/episode title/ids were frequently still blank/default
+    // the instant this ran. The ORIGINAL notification the OS/lock-screen widgets
+    // first observe was therefore built from that blank snapshot - not from "no data
+    // yet" (which would at least be an honest, obviously-loading state) but from an
+    // empty title/subtitle that visually looks like a fully-loaded, empty-metadata
+    // notification. That first bad post is exactly what upstream system consumers
+    // (Samsung's FaceWidget media card, confirmed via logcat) latched onto and were
+    // slow or inconsistent about ever refreshing away from, independent of anything
+    // downstream correcting this.title/this.subtitle a moment later.
+    //
+    // Now start() only ever begins the foreground service state and posts a neutral,
+    // honestly-empty holder notification - it never writes title/subtitle/animeId/
+    // episodeId itself. PlayerBackgroundPlaybackService's own reactive holder.state
+    // observer (now unconditional - see MEDIASESSION_SINGLE_WRITER_FIX) is the ONLY
+    // writer of those fields, firing the instant PlayerViewModel.syncHolderSessionState()
+    // populates real data (itself called from setupEpisode(), the single choke point
+    // for the very first episode load same as every later switch). One writer, one
+    // moment real data appears, instead of a racy snapshot needing a later correction.
+    // <-- AM (NOTIFICATION_CREATION_STALE_SNAPSHOT_FIX)
     fun start(
-        title: String,
-        subtitle: String,
         isPlaying: Boolean,
-        animeId: Long?,
-        episodeId: Long?,
         mediaSessionToken: MediaSession.Token?,
         onTogglePlayPause: () -> Unit,
         onStopRequested: () -> Unit,
     ) {
-        this.title = title
-        this.subtitle = subtitle
         this.isPlaying = isPlaying
-        this.animeId = animeId
-        this.episodeId = episodeId
         this.mediaSessionToken = mediaSessionToken
         this.onTogglePlayPause = onTogglePlayPause
         this.onStopRequested = onStopRequested

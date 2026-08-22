@@ -233,6 +233,12 @@ class MPVPlayer(
 
         mapOf(
             "eof-reached" to MPV.mpvFormat.MPV_FORMAT_FLAG,
+            // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
+            // Added so pause/resume becomes a genuine, immediate mpv event
+            // (Event.PauseChanged below) instead of something callers had to poll
+            // for or infer from their own state copies.
+            "pause" to MPV.mpvFormat.MPV_FORMAT_FLAG,
+            // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
 
             "user-data/aniyomi/show_text" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/toggle_ui" to MPV.mpvFormat.MPV_FORMAT_STRING,
@@ -362,6 +368,17 @@ class MPVPlayer(
             if (isExiting) return@post
             when (property) {
                 "eof-reached" -> _eventFlow.tryEmit(Event.EOF(value))
+                // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
+                // A genuine mpv property-change event, not a copy of some other
+                // component's own state - fires exactly once per real pause/resume
+                // toggle, whatever the source (UI tap, MediaSession callback, an
+                // internal freeze-pause around an episode switch). Consumers that
+                // only care about genuine user-facing pause/resume (as opposed to
+                // internal transitional pauses) can filter on their own context if
+                // that distinction matters to them - this event just reports what
+                // mpv itself actually did, honestly.
+                // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
+                "pause" -> _eventFlow.tryEmit(Event.PauseChanged(value))
             }
         }
     }
@@ -392,7 +409,22 @@ class MPVPlayer(
             if (isExiting) return@post
             when (eventId) {
                 MPV.mpvEvent.MPV_EVENT_FILE_LOADED -> _eventFlow.tryEmit(Event.FileLoaded)
-                MPV.mpvEvent.MPV_EVENT_PLAYBACK_RESTART -> isExiting = false
+                MPV.mpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
+                    isExiting = false
+                    // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
+                    // mpv fires this on every playback discontinuity - overwhelmingly
+                    // a user seek, also after unpausing in some cases. This was
+                    // already being received (for the isExiting reset above) but
+                    // silently discarded otherwise - nothing downstream could react
+                    // to a seek actually happening. PlaybackState's speed+timestamp
+                    // lets the OS interpolate the seek bar during ordinary steady
+                    // playback, but a seek is exactly the one case interpolation
+                    // can't predict - the position just jumped. This is the signal
+                    // to push a corrected position immediately instead of waiting
+                    // for a periodic backstop to eventually catch up.
+                    // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
+                    _eventFlow.tryEmit(Event.PlaybackRestart)
+                }
                 MPV.mpvEvent.MPV_EVENT_END_FILE -> _eventFlow.tryEmit(Event.EndFile(data))
             }
         }
@@ -541,6 +573,10 @@ class MPVPlayer(
         data class TrackLoadFailure(val url: String) : Event
         data class EndFile(val node: MPVNode) : Event
         data class LuaEvent(val property: String, val value: String) : Event
+        // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
+        data class PauseChanged(val paused: Boolean) : Event
+        data object PlaybackRestart : Event
+        // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
     }
 
     companion object {

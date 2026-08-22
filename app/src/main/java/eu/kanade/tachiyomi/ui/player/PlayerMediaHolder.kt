@@ -2,6 +2,8 @@ package eu.kanade.tachiyomi.ui.player
 
 // AM (SERVICE_OWNED_PLAYER) -->
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -17,9 +19,12 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 // <-- AM (SERVICE_OWNED_PLAYER)
 // AM (BACKGROUND_SKIP_FIX) -->
 import androidx.core.graphics.drawable.toBitmap
@@ -37,8 +42,12 @@ import kotlinx.coroutines.launch
 import logcat.LogPriority
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.interactor.GetAnime
+import tachiyomi.domain.anime.model.asAnimeCover
 import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.source.service.SourceManager
+import tachiyomi.source.local.image.LocalCoverManager
+import tachiyomi.source.local.image.LocalEpisodeThumbnailManager
+import tachiyomi.source.local.isLocal
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 // <-- AM (BACKGROUND_SKIP_FIX)
@@ -90,6 +99,8 @@ class PlayerMediaHolder(
     private val getEpisode: GetEpisode = Injekt.get(),
     private val sourceManager: SourceManager = Injekt.get(),
     private val playerPreferences: PlayerPreferences = Injekt.get(),
+    private val coverManager: LocalCoverManager = Injekt.get(),
+    private val episodeThumbnailManager: LocalEpisodeThumbnailManager = Injekt.get(),
     // <-- AM (BACKGROUND_SKIP_FIX)
 ) {
     // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
@@ -419,6 +430,8 @@ class PlayerMediaHolder(
                     animeId = animeId,
                     episodeId = targetEpisodeId,
                     episodeTitle = episode.name,
+                    animeThumbnailUrl = anime.thumbnailUrl,
+                    episodePreviewUrl = episode.previewUrl,
                     positionMs = resumePositionMs.toInt(),
                     // AM (BACKGROUND_SKIP_DURATION_FIX) -->
                     // Reverted: resetting this to 0 here was meant to avoid ever
@@ -452,6 +465,26 @@ class PlayerMediaHolder(
         return pendingSkipDirection.also { pendingSkipDirection = null }
     }
     // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
+
+    // AM (ARTWORK_WIPE_FIX) -->
+    // See pushLiveMediaState()'s own doc comment - these track the last artwork the
+    // artwork flow successfully resolved so other metadata pushes can preserve it
+    // instead of silently wiping it back out.
+    //
+    // AM (ARTWORK_VISIBILITY_FIX) -->
+    // @Volatile added: these are written by the artwork flow and read by
+    // pushLiveMediaState(), which run as separate coroutines on holderScope's
+    // Dispatchers.Default - a thread POOL, not a single thread. Without this, a
+    // write on one thread isn't guaranteed to be visible to a read on another
+    // thread promptly - a classic memory-visibility gap, not a scheduling race,
+    // which matches the reported symptom precisely: mostly fails, occasionally
+    // succeeds, no consistent timing pattern to it.
+    // <-- AM (ARTWORK_VISIBILITY_FIX)
+    @Volatile
+    private var lastArtwork: Bitmap? = null
+    @Volatile
+    private var lastArtworkKey: Pair<Long?, Long?>? = null
+    // <-- AM (ARTWORK_WIPE_FIX)
 
     private val _state = MutableStateFlow(PlayerMediaState())
     val state = _state.asStateFlow()
@@ -599,40 +632,139 @@ class PlayerMediaHolder(
             // them atomic - there's no longer a window where one has updated and the
             // other hasn't.
             // <-- AM (BACKGROUND_METADATA_DURATION_SYNC_FIX)
-            holderScope.launch {
-                while (true) {
-                    delay(1000)
-                    val positionMs = (player.mpv.getPropertyInt("time-pos") ?: continue) * 1000
-                    val durationMs = (player.mpv.getPropertyInt("duration") ?: continue) * 1000
-                    val paused = player.mpv.getPropertyBoolean("pause") ?: false
-                    val current = state.value
-                    updateState { it.copy(positionMs = positionMs, durationMs = durationMs) }
-                    if (PlayerActivity.hasLiveInstance) continue
-                    mediaSession?.setPlaybackState(
-                        PlaybackState.Builder()
-                            .setActions(
-                                PlaybackState.ACTION_PLAY or
-                                    PlaybackState.ACTION_PAUSE or
-                                    PlaybackState.ACTION_STOP or
-                                    PlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                                    PlaybackState.ACTION_SKIP_TO_NEXT,
-                            )
-                            .setState(
-                                if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
-                                positionMs.toLong(),
-                                1f,
-                            )
+            // AM (MEDIASESSION_SINGLE_WRITER_FIX) -->
+            // Previously gated behind !PlayerActivity.hasLiveInstance, deferring to
+            // PlayerActivity's own separate PlaybackState/MediaMetadata-pushing observers
+            // whenever an Activity existed. That left THREE independent, uncoordinated
+            // setMetadata()/setPlaybackState() callers alive simultaneously during ordinary
+            // foreground playback (this timer, this holder's own artwork flow below, and
+            // PlayerActivity's combine()-based metadata push) - since both calls fully
+            // replace the previous object, whichever fired last won, regardless of which
+            // had the freshest data. That's what produced metadata/notification data
+            // appearing to lag behind by a full episode switch. This timer (plus the
+            // artwork flow below) is now the SOLE writer of MediaSession state, live
+            // Activity or not - PlayerActivity no longer pushes any of this itself (see its
+            // own MEDIASESSION_SINGLE_WRITER_FIX removal notes). Title/artist come from
+            // syncHolderSessionState(), called the instant any switch happens regardless of
+            // Activity liveness.
+            // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
+            // AM (COLD_START_METADATA_DELAY_FIX) -->
+            // This used to be a delay(1000)-gated loop only - meaning duration (and
+            // PlaybackState) genuinely didn't get pushed at all for up to a full second
+            // after cold start or any switch, not "wrong", just not sent yet. Whether
+            // that first second's worth of blank duration/artwork was visible depended
+            // entirely on how quickly something checked the lock screen after opening -
+            // exactly the "sometimes shows up, sometimes doesn't" inconsistency reported.
+            // Factored the push itself out into pushLiveMediaState() so it can be called
+            // both by this timer (ongoing, every 1s, for position tracking - unchanged)
+            // AND immediately whenever animeId/episodeId change (below) - the same
+            // distinctUntilChanged() trigger the artwork flow already uses, so this fires
+            // exactly once per switch, not continuously, and can't develop the same
+            // double-writer race BACKGROUND_SEEKBAR_FIGHT_FIX already ruled out for a
+            // continuously-reactive position/pause push. Duration specifically still
+            // isn't observed as an mpv property-change event (see
+            // BACKGROUND_DURATION_DESYNC_FIX above for why that's unreliable) - this
+            // reads it directly, same as the timer always has, just also on switch
+            // instead of only on the next tick.
+            // AM (ARTWORK_WIPE_FIX) -->
+            // Tracks the last artwork the artwork flow below successfully resolved,
+            // keyed to which episode it belongs to. pushLiveMediaState() used to build
+            // its own MediaMetadata with only TITLE/ARTIST/DURATION - never artwork -
+            // and since setMetadata() fully replaces the previous object, any call to
+            // pushLiveMediaState() AFTER the artwork flow had already successfully
+            // pushed a bitmap (from the 15s backstop timer, or a PauseChanged/
+            // PlaybackRestart event, both of which call this function) silently wiped
+            // the artwork back out with nothing to indicate it happened or to redraw
+            // afterward. That's what made artwork look like it "only loads on the
+            // second pass" - the first pass's artwork push was real and correct, it
+            // just kept getting overwritten by the very next unrelated metadata push.
+            // Keyed to (animeId, episodeId) rather than just caching the Bitmap alone
+            // so a stale image from a previous episode can never leak into a push for
+            // a different one if this races against a switch.
+            // <-- AM (ARTWORK_WIPE_FIX)
+            suspend fun pushLiveMediaState() {
+                val current = state.value
+                // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+                // Refuse to push anything at all - PlaybackState included, not just
+                // MediaMetadata - until artwork resolution has genuinely finished for
+                // the CURRENT episode (see resolvedEpisodeKey's own doc comment).
+                // This is what actually enforces "wait for complete data" for every
+                // caller of this function (the periodic timer, PauseChanged/
+                // PlaybackRestart events), not just the artwork flow's own call site -
+                // without this, any of those firing mid-resolution (even well under
+                // 2 seconds in) could still render an incomplete state regardless of
+                // how carefully the artwork flow itself waits before ITS OWN push.
+                // Whatever was last fully pushed (the previous episode's complete
+                // state) simply keeps showing, untouched, until this matches.
+                // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+                if (current.resolvedEpisodeKey != (current.animeId to current.episodeId)) return
+                val positionMs = (player.mpv.getPropertyInt("time-pos") ?: return) * 1000
+                val durationMs = (player.mpv.getPropertyInt("duration") ?: return) * 1000
+                val paused = player.mpv.getPropertyBoolean("pause") ?: false
+                updateState { it.copy(positionMs = positionMs, durationMs = durationMs) }
+                mediaSession?.setPlaybackState(
+                    PlaybackState.Builder()
+                        .setActions(
+                            PlaybackState.ACTION_PLAY or
+                                PlaybackState.ACTION_PAUSE or
+                                PlaybackState.ACTION_STOP or
+                                PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                                PlaybackState.ACTION_SKIP_TO_NEXT,
+                        )
+                        .setState(
+                            if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
+                            positionMs.toLong(),
+                            1f,
+                        )
+                        .build(),
+                )
+                if (current.animeTitle.isNotEmpty() || current.episodeTitle.isNotEmpty()) {
+                    val artworkForCurrentEpisode = lastArtwork
+                        .takeIf { lastArtworkKey == (current.animeId to current.episodeId) }
+                    mediaSession?.setMetadata(
+                        MediaMetadata.Builder()
+                            .putString(MediaMetadata.METADATA_KEY_TITLE, current.episodeTitle)
+                            .putString(MediaMetadata.METADATA_KEY_ARTIST, current.animeTitle)
+                            .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs.toLong())
+                            .apply {
+                                if (artworkForCurrentEpisode != null) {
+                                    putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artworkForCurrentEpisode)
+                                }
+                            }
                             .build(),
                     )
-                    if (current.animeTitle.isNotEmpty() || current.episodeTitle.isNotEmpty()) {
-                        mediaSession?.setMetadata(
-                            MediaMetadata.Builder()
-                                .putString(MediaMetadata.METADATA_KEY_TITLE, current.episodeTitle)
-                                .putString(MediaMetadata.METADATA_KEY_ARTIST, current.animeTitle)
-                                .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs.toLong())
-                                .build(),
-                        )
-                    }
+                }
+            }
+
+            // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+            // Removed: this was a separate, unconditional "push whatever we have right
+            // now" trigger, firing the instant animeId/episodeId changed - before
+            // artwork had any chance to resolve. Since setMetadata() fully replaces,
+            // this is what created the whole class of bugs this session kept finding:
+            // an incomplete (title-only) push landing, then getting silently wiped or
+            // raced against once artwork resolved moments later. The merged flow below
+            // (see WAIT_FOR_COMPLETE_DATA_FIX there) now owns every switch entirely -
+            // it waits for artwork to resolve (bounded, so a genuinely slow/missing
+            // cover can't hang a switch forever) and pushes everything together,
+            // atomically, exactly once. The previous episode's complete state stays
+            // showing the whole time a switch is in flight, instead of being replaced
+            // by an incomplete new one and then patched up later.
+            // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+
+            existing.eventFlow
+                .filterIsInstance<MPVPlayer.Event.PauseChanged>()
+                .onEach { pushLiveMediaState() }
+                .launchIn(holderScope)
+
+            existing.eventFlow
+                .filterIsInstance<MPVPlayer.Event.PlaybackRestart>()
+                .onEach { pushLiveMediaState() }
+                .launchIn(holderScope)
+
+            holderScope.launch {
+                while (true) {
+                    delay(15_000)
+                    pushLiveMediaState()
                 }
             }
             // <-- AM (BACKGROUND_SEEKBAR_TICK_FIX)
@@ -678,35 +810,272 @@ class PlayerMediaHolder(
             // started, since setMetadata() fully replaces the previous metadata
             // object - a stale closure here would silently revert a title/duration
             // update that happened while the fetch was in flight.
+            // AM (MEDIASESSION_SINGLE_WRITER_FIX) -->
+            // Previously gated behind !PlayerActivity.hasLiveInstance - see the timer's own
+            // note above for the full reasoning. This is now the sole artwork/rich-metadata
+            // writer, live Activity or not, replacing PlayerActivity's own equivalent
+            // combine()-based flow (which used to duplicate this exact fetch-and-push logic
+            // and race against it).
+            // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
+            // AM (ARTWORK_SOURCE_OF_TRUTH_FIX) -->
+            // This used to call getAnime.await(animeId) itself, an independent DB read
+            // separate from whatever already-working anime object the rest of the app
+            // (playlist, episode list) resolved successfully. For local sources,
+            // thumbnail_url is resolved dynamically via coverManager.find() whenever an
+            // anime is fetched THROUGH the source's own pipeline (see
+            // LocalSource.getSAnime()/getOldAnimeDetails()) - it isn't guaranteed to be
+            // sitting on a raw AnimeRepository.getAnimeById() row, which is all this
+            // independent read was doing. That's why the exact same episode could fail
+            // once and then succeed on a later revisit with nothing else changing: two
+            // independent reads of the same id have no reason to agree on a value
+            // that isn't reliably persisted in the first place.
+            //
+            // Now uses state.animeThumbnailUrl/episodePreviewUrl directly - the same
+            // already-resolved values syncHolderSessionState() populates from the same
+            // anime/episode objects that make the title correct (see PlayerViewModel).
+            // <-- AM (ARTWORK_SOURCE_OF_TRUTH_FIX)
+            // AM (ARTWORK_REACTIVE_WAIT_FIX) -->
+            // On cold start with a large playlist, episode-thumbnail generation can be
+            // actively scanning/writing many local files at the same moment the anime's
+            // own thumbnail_url gets resolved and persisted (confirmed via logcat:
+            // repeated MediaProvider opens against .thumbnails/*.jpg right around cold
+            // start) - so state.animeThumbnailUrl can genuinely still be blank the
+            // first time this fires, not because anything is broken, just because that
+            // write hasn't landed yet. A short bounded retry (previous version of this
+            // fix) guessed at how long that takes and was wrong for a large playlist.
+            // Instead of guessing, subscribe to the DB row directly via
+            // getAnime.subscribe() and react to it actually changing - correct
+            // regardless of how long the background job takes, bounded only by an
+            // overall timeout so this can't wait forever if the anime genuinely has no
+            // cover at all.
+            // <-- AM (ARTWORK_REACTIVE_WAIT_FIX)
             state
                 .map { it.animeId to it.episodeId }
                 .distinctUntilChanged()
                 .onEach { (animeId, episodeId) ->
-                    if (PlayerActivity.hasLiveInstance) return@onEach
                     if (animeId == null || episodeId == null) return@onEach
-                    val anime = getAnime.await(animeId) ?: return@onEach
-                    val episode = getEpisode.await(episodeId) ?: return@onEach
-                    val artwork = try {
-                        val request = ImageRequest.Builder(context)
-                            .data(episode.previewUrl?.takeIf { it.isNotBlank() } ?: anime)
-                            .size(Size.ORIGINAL)
-                            .build()
-                        context.imageLoader.execute(request).image
-                            ?.asDrawable(context.resources)
-                            ?.toBitmap()
-                    } catch (e: Throwable) {
-                        null
-                    } ?: return@onEach
-
                     val current = state.value
-                    mediaSession?.setMetadata(
-                        MediaMetadata.Builder()
-                            .putString(MediaMetadata.METADATA_KEY_TITLE, current.episodeTitle)
-                            .putString(MediaMetadata.METADATA_KEY_ARTIST, current.animeTitle)
-                            .putLong(MediaMetadata.METADATA_KEY_DURATION, current.durationMs.toLong())
-                            .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
-                            .build(),
-                    )
+
+                    // AM (RESOLUTION_EXCEPTION_FIX) -->
+                    // The whole body is now wrapped in try/catch, not just the two
+                    // specific file-check calls known to be risky - any uncaught
+                    // exception ANYWHERE in this Flow's collector body previously
+                    // killed the collector permanently (Flow collection simply stops
+                    // on an exception, silently, for the rest of the session), meaning
+                    // nothing would ever resolve for ANY later episode either, not
+                    // "eventually" - never. This is what "just doesn't load, at all"
+                    // actually was: not a timing problem, a crashed collector. Logging
+                    // on catch instead of silently swallowing, since a genuinely broken
+                    // resolution path should be visible, not just quietly give up.
+                    // <-- AM (RESOLUTION_EXCEPTION_FIX)
+                    try {
+
+                    // episode.preview_url (when present) is safe to pass as a raw string -
+                    // that's how this already worked before any of these fixes, unchanged
+                    // here. anime.thumbnailUrl needs the AnimeCover/AnimeImageFetcher/
+                    // UniFile path below instead - see ARTWORK_UNIFILE_ROUTING_FIX.
+                    val previewUrl = current.episodePreviewUrl?.takeIf { it.isNotBlank() }
+
+                    // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+                    // No push happens until this entire resolution finishes - not a
+                    // bounded "fast attempt with a text-only fallback" (an earlier
+                    // version of this fix did that, and it was still wrong: pushing
+                    // title-only after a timeout is exactly the "render an incomplete
+                    // state" behavior this fix exists to eliminate). The previous
+                    // episode's complete state (title, duration, artwork) simply keeps
+                    // showing on the lock screen for however long resolution takes -
+                    // fast in the common case (files already exist on disk - see this
+                    // whole thread's earlier findings), or up to the patient reactive
+                    // wait below in the rare case a cover doesn't exist yet at all.
+                    // Either way, exactly one push happens, once, with everything
+                    // together - never a partial render in between.
+                    // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+                    val preDecodedArtwork: Bitmap?
+                    val coverData: Any? = if (previewUrl != null) {
+                        preDecodedArtwork = null
+                        previewUrl
+                    } else {
+                        val anime = getAnime.await(animeId) ?: return@onEach
+
+                        // AM (EPISODE_THUMBNAIL_MISSING_FIX) -->
+                        // episodeThumbnailManager was injected but never actually called
+                        // anywhere in this file - a genuine dead-code gap, not a timing
+                        // bug. Without this, EVERY episode of the same anime fell through
+                        // to the anime-level cover below, which resolves to the SAME
+                        // image (the anime's own cover.jpg) regardless of which episode
+                        // is playing - looking exactly like "stuck on the previous
+                        // episode's image" on every single switch, since it never
+                        // changes at all between episodes of the same anime. This checks
+                        // the episode's own thumbnail file directly - the same file this
+                        // app's own thumbnail-generation feature creates per-episode -
+                        // before ever falling back to the anime's generic cover. No
+                        // dedicated Coil fetcher is registered for episode-level
+                        // thumbnails (only Fetcher.Factory<Anime>/<AnimeCover> exist),
+                        // so this decodes the UniFile directly instead of routing
+                        // through Coil at all for this specific case - preDecodedArtwork
+                        // carries the result past this block; coverData stays null here
+                        // since there's nothing left for Coil to fetch when this succeeds.
+                        // <-- AM (EPISODE_THUMBNAIL_MISSING_FIX)
+                        preDecodedArtwork = if (anime.isLocal()) {
+                            // AM (RESOLUTION_EXCEPTION_FIX) -->
+                            // Uncaught here previously - any exception from find() or
+                            // openInputStream() (a permission hiccup, a file mid-write,
+                            // any I/O failure) would propagate out of this Flow's
+                            // collector entirely. Flow collection on an exception simply
+                            // stops - permanently, for the rest of the session, not just
+                            // for this one episode - meaning nothing would ever resolve
+                            // again afterward, not "eventually", never. This wasn't a
+                            // timing problem masquerading as one; it needed to not crash
+                            // in the first place, not a longer wait or another retry.
+                            // <-- AM (RESOLUTION_EXCEPTION_FIX)
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    episodeThumbnailManager.find(anime.url, "${current.episodeTitle}-thumbnail")
+                                        ?.openInputStream()?.use { BitmapFactory.decodeStream(it) }
+                                }
+                            } catch (e: Throwable) {
+                                null
+                            }
+                        } else {
+                            null
+                        }
+
+                        if (preDecodedArtwork != null) {
+                            null
+                        } else {
+                        // AM (ARTWORK_DIRECT_RESOLVE_FIX) -->
+                        // Previously waited (bounded by a 15s timeout) for the anime's
+                        // thumbnail_url to eventually appear in the DB, written by some
+                        // OTHER, unrelated background job (this app's own episode-
+                        // thumbnail generation, or a library refresh) - passive, and
+                        // wrong on a cold start with a large playlist: that background
+                        // work can genuinely take longer than 15s, and since this only
+                        // fires once per episode, a timed-out attempt never retried
+                        // until leaving and returning re-triggered it (confirmed: that's
+                        // exactly the reported symptom - works on return, not on first
+                        // open).
+                        //
+                        // For local sources specifically, the actual cover resolution
+                        // (LocalCoverManager.find()) is a cheap, synchronous file-system
+                        // scan for a "cover.*" file in the anime's own folder - it has no
+                        // dependency on any background job at all. Calling it directly,
+                        // right here, resolves the cover the instant it's needed instead
+                        // of passively waiting for someone else to have already done so.
+                        // <-- AM (ARTWORK_DIRECT_RESOLVE_FIX)
+                        val resolvedUrl = current.animeThumbnailUrl?.takeIf { it.isNotBlank() }
+                            ?: anime.thumbnailUrl?.takeIf { it.isNotBlank() }
+                            ?: if (anime.isLocal()) {
+                                // AM (ARTWORK_RESOLVE_WAIT_FIX) -->
+                                // Tries the direct file-system check first (instant, covers
+                                // the common case where a cover already exists). If that
+                                // comes up empty, the anime genuinely has no cover yet - this
+                                // waits for the real completion signal instead of guessing at
+                                // a retry schedule. UpdateAnimeFromRemote.awaitUpdateFromSource()
+                                // persists a freshly-generated cover straight to the anime's
+                                // DB row the moment extraction finishes (confirmed by reading
+                                // that code directly) - subscribing to that row and waiting
+                                // for thumbnailUrl to actually appear reacts to the real
+                                // event, however long it takes, rather than polling on a
+                                // fixed interval. The generous 2-minute ceiling is a genuine
+                                // safety valve only (e.g. a broken/corrupt video that can
+                                // never extract a frame), not a guess at the typical case.
+                                // <-- AM (ARTWORK_RESOLVE_WAIT_FIX)
+                                // AM (RESOLUTION_EXCEPTION_FIX) -->
+                                // Same fix as the episode-level check above - uncaught,
+                                // this could kill the whole Flow's collector permanently
+                                // on any I/O exception, not just fail this one attempt.
+                                // <-- AM (RESOLUTION_EXCEPTION_FIX)
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        coverManager.find(anime.url)?.uri?.toString()
+                                    }
+                                } catch (e: Throwable) {
+                                    null
+                                } ?: withTimeoutOrNull(120_000) {
+                                    getAnime.subscribe(animeId)
+                                        .map { it.thumbnailUrl }
+                                        .filter { !it.isNullOrBlank() }
+                                        .first()
+                                }
+                            } else {
+                                null
+                            }
+                        // AM (ARTWORK_UNIFILE_ROUTING_FIX) -->
+                        // anime.thumbnailUrl for local sources is a SAF tree content://
+                        // URI (confirmed via logcat:
+                        // "content://com.android.externalstorage.documents/tree/...");
+                        // AnimeImageFetcher.fileUriLoader() reads that specifically via
+                        // UniFile.fromUri(), which handles SAF tree-URI resolution
+                        // properly - Coil's own generic content-URI handling does not
+                        // reliably resolve this URI shape the same way (confirmed:
+                        // passing the raw string directly bypassed AnimeImageFetcher/
+                        // UniFile entirely and silently failed to load). Still need an
+                        // Anime object to route through the correct, UniFile-aware
+                        // fetcher (Fetcher.Factory<AnimeCover> is registered for
+                        // AnimeCover, not a bare String) - but overriding its cover url
+                        // with the resolvedUrl above (instead of trusting whatever
+                        // getAnime.await() itself returns) keeps the actual fix: this
+                        // independent read is only for the anime object's OTHER
+                        // required fields (sourceId/favorite/lastModified), not for the
+                        // URL value itself.
+                        // <-- AM (ARTWORK_UNIFILE_ROUTING_FIX)
+                        resolvedUrl?.let { anime.asAnimeCover().copy(url = it) }
+                        }
+                    }
+
+                    var artwork: Bitmap? = preDecodedArtwork
+                    if (artwork == null && coverData != null) {
+                        for (attempt in 0 until 2) {
+                            if (attempt > 0) delay(300)
+                            artwork = try {
+                                val request = ImageRequest.Builder(context)
+                                    .data(coverData)
+                                    .size(Size.ORIGINAL)
+                                    .build()
+                                context.imageLoader.execute(request).image
+                                    ?.asDrawable(context.resources)
+                                    ?.toBitmap()
+                            } catch (e: Throwable) {
+                                null
+                            }
+                            if (artwork != null) break
+                        }
+                    }
+
+                    // Guard against the episode having moved on during the (up to
+                    // 2-minute) wait above - without this, artwork resolved for the
+                    // episode this onEach started on could get pushed alongside a
+                    // DIFFERENT, newer episode's title/duration if the user switched
+                    // again in the meantime, since Flow's onEach here doesn't cancel
+                    // in-flight work when a new value arrives, only queues it for
+                    // after this returns.
+                    val latest = state.value
+                    if (latest.animeId != animeId || latest.episodeId != episodeId) return@onEach
+                    // AM (ARTWORK_WIPE_FIX) -->
+                    // Cache this before pushing - see pushLiveMediaState()'s doc comment
+                    // for why other pushes need this to avoid wiping the artwork back out.
+                    if (artwork != null) {
+                        lastArtwork = artwork
+                        lastArtworkKey = animeId to episodeId
+                    }
+                    // <-- AM (ARTWORK_WIPE_FIX)
+                    // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+                    // Marks resolution as genuinely finished for this episode - with or
+                    // without artwork, either way this is the decision, not "still
+                    // pending" - which is what unblocks pushLiveMediaState() for every
+                    // caller (see its own doc comment), not just this call right below.
+                    // Now part of shared state (not a holder-private var) so
+                    // PlayerBackgroundPlaybackService's separate notification-text
+                    // writer can gate on the same signal - see PlayerMediaState's own
+                    // doc comment on this field for why that matters.
+                    // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+                    updateState { it.copy(resolvedEpisodeKey = animeId to episodeId) }
+                    pushLiveMediaState()
+                    } catch (e: Throwable) {
+                        logcat(LogPriority.ERROR, e) {
+                            "Artwork resolution threw for animeId=$animeId episodeId=$episodeId"
+                        }
+                    }
                 }
                 .launchIn(holderScope)
             // <-- AM (BACKGROUND_ARTWORK_FIX)
@@ -783,6 +1152,37 @@ class PlayerMediaHolder(
         val durationMs: Int = 0,
         val animeTitle: String = "",
         val episodeTitle: String = "",
+        // AM (ARTWORK_SOURCE_OF_TRUTH_FIX) -->
+        // Populated from the SAME already-resolved anime/episode objects
+        // syncHolderSessionState() uses for the titles above (see PlayerViewModel),
+        // not from a second, independent DB read. The artwork flow below used to call
+        // getAnime.await(animeId)/getEpisode.await(episodeId) itself, which for local
+        // sources can race against LocalSource's own dynamic thumbnail_url resolution
+        // (see LocalSource.getSAnime()/getOldAnimeDetails() - thumbnail_url is found
+        // via coverManager.find() when an anime is fetched THROUGH the source, not
+        // guaranteed present on a raw AnimeRepository.getAnimeById() row) - the exact
+        // path that already works correctly everywhere else in the app (playlist,
+        // episode list) resolves it once and holds onto that reference; a second,
+        // independent read has no reason to see the same result. Reusing the
+        // already-correct value here instead of re-deriving it removes that
+        // discrepancy entirely rather than papering over it with a retry.
+        // <-- AM (ARTWORK_SOURCE_OF_TRUTH_FIX)
+        val animeThumbnailUrl: String? = null,
+        val episodePreviewUrl: String? = null,
+        // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+        // Moved from a PlayerMediaHolder-private var into the shared state itself so
+        // PlayerBackgroundPlaybackService's own notification-text writer
+        // (updateEpisodeInfo(), a completely separate Android API surface from
+        // MediaSession - the actual posted Notification's title/subtitle, not
+        // MediaSession's metadata) can gate on the exact same "has resolution
+        // genuinely finished for this episode" signal pushLiveMediaState() already
+        // does. Without this, the notification's visible TEXT updated instantly on
+        // every switch while its artwork waited - technically two different Android
+        // systems, but perceived by anyone looking at the notification as one thing
+        // updating incrementally, which is exactly the behavior this whole fix
+        // exists to eliminate everywhere, not just within MediaSession's own fields.
+        // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+        val resolvedEpisodeKey: Pair<Long?, Long?>? = null,
     )
 }
 // <-- AM (SERVICE_OWNED_PLAYER)

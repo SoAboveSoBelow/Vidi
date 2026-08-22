@@ -253,19 +253,18 @@ class PlayerActivity : BaseActivity() {
             // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
             // Step 4b: the notification now posts as soon as the Service is bound -
             // i.e. as soon as playback exists at all, not only once backgrounded -
-            // per the YouTube-style always-on-notification decision. Whatever
-            // title/subtitle is available right now (possibly still blank, since
-            // this fires before onNewIntent's episode load in some orderings) gets
-            // corrected shortly after by the existing reactive updateEpisodeInfo()
-            // collector further down in onCreate - that collector already runs
-            // unconditionally and doesn't care when the Service connected.
+            // per the YouTube-style always-on-notification decision.
+            //
+            // AM (NOTIFICATION_CREATION_STALE_SNAPSHOT_FIX) -->
+            // No longer passes a title/subtitle/animeId/episodeId snapshot here - see
+            // start()'s own doc comment for why that snapshot was unreliable at this
+            // exact point in the ordering. The holder's own reactive state observer
+            // (unconditional now) is the sole writer of that data, firing as soon as
+            // syncHolderSessionState() has something real to give it.
+            // <-- AM (NOTIFICATION_CREATION_STALE_SNAPSHOT_FIX)
             backgroundPlaybackService = binder.getService().also { svc ->
                 svc.start(
-                    title = viewModel.uiData.value.animeTitle,
-                    subtitle = viewModel.uiData.value.mediaTitle,
                     isPlaying = !viewModel.playbackData.value.paused,
-                    animeId = viewModel.stateData.value.currentAnime?.id,
-                    episodeId = viewModel.stateData.value.currentEpisode?.id,
                     mediaSessionToken = mediaSession?.sessionToken,
                     onTogglePlayPause = {
                         if (viewModel.playbackData.value.paused) viewModel.unpause() else viewModel.pause()
@@ -804,60 +803,22 @@ class PlayerActivity : BaseActivity() {
             // <-- AM (PIP_NEXT_PAUSE_ICON)
         }
 
-        // Keep PlaybackState genuinely current - OEM battery managers look for real
-        // STATE_PLAYING/position to exempt media apps from background restrictions.
-        viewModel.playbackData
-            .map { it.paused to it.position }
-            .distinctUntilChanged()
-            .onEach { (paused, position) ->
-                mediaSession?.setPlaybackState(
-                    PlaybackState.Builder()
-                        .setActions(
-                            PlaybackState.ACTION_PLAY or
-                                PlaybackState.ACTION_PAUSE or
-                                PlaybackState.ACTION_STOP or
-                                PlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                                PlaybackState.ACTION_SKIP_TO_NEXT,
-                        )
-                        .setState(
-                            if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
-                            position * 1000L,
-                            1f,
-                        )
-                        .build(),
-                )
-            }
-            .launchIn(lifecycleScope)
-
-        // AM (REOPEN_TARGET_STALENESS_FIX) -->
-        // Split out from the artwork/metadata flow below: this one exists purely to
-        // keep the Service's animeId/episodeId (and therefore the notification's
-        // reopen PendingIntent target) in sync with the actually-current episode, as
-        // fast as possible - keyed only on the anime/episode pair itself, with no
-        // dependency on duration, thumbnailGenerated, or a live network artwork fetch.
-        // The combined flow below was gating this exact update behind all three of
-        // those - meaning for however long thumbnail generation plus an image load
-        // took after switching episodes, the notification's reopen target still
-        // pointed at the PREVIOUS episode even though playback had already moved on.
-        // Tapping the notification during that window (e.g. right after an in-app
-        // episode skip) made needsInit() correctly detect the mismatch and trigger a
-        // reinit attempt against an episode already left behind - replacing source
-        // state on an already-live, already-playing mpv session rather than an idle
-        // one, a fundamentally riskier operation than a genuine cold reopen.
-        viewModel.stateData
-            .map { it.currentAnime to it.currentEpisode }
-            .distinctUntilChanged()
-            .onEach { (anime, episode) ->
-                if (anime == null || episode == null) return@onEach
-                backgroundPlaybackService?.updateEpisodeInfo(
-                    title = anime.title,
-                    subtitle = episode.name,
-                    animeId = anime.id,
-                    episodeId = episode.id,
-                )
-            }
-            .launchIn(lifecycleScope)
-        // <-- AM (REOPEN_TARGET_STALENESS_FIX)
+        // AM (MEDIASESSION_SINGLE_WRITER_FIX) -->
+        // Three separate pushes used to live here: a reactive PlaybackState push, the
+        // REOPEN_TARGET_STALENESS_FIX notification-text push, and the metadata/artwork
+        // combine() flow below. All three duplicated logic PlayerMediaHolder already had
+        // (its periodic timer, and its own artwork flow) - and since both
+        // setMetadata()/setPlaybackState() fully replace the previous object, having both
+        // the Activity and the holder push independently meant whichever fired last won,
+        // regardless of which had the freshest data. That's what caused MediaSession/
+        // notification data to appear to lag a full episode switch behind. PlayerMediaHolder
+        // is now the sole writer for all of this, live Activity or not - see its own
+        // MEDIASESSION_SINGLE_WRITER_FIX notes, and PlayerViewModel.syncHolderSessionState()
+        // for how it stays fed with fresh titles the instant a switch happens. PlaybackState
+        // updates now lag up to ~1s behind pause/resume (the holder's timer cadence) even in
+        // the foreground - the same trade-off this codebase already accepted for background
+        // playback (BACKGROUND_SEEKBAR_FIGHT_FIX), now applied uniformly.
+        // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
 
         // AM (BACKGROUND_SKIP_FIX) -->
         // Mirrors the already-correctly-sorted/filtered playlist (see
@@ -874,45 +835,10 @@ class PlayerActivity : BaseActivity() {
             .launchIn(lifecycleScope)
         // <-- AM (BACKGROUND_SKIP_FIX)
 
-        // Duration/seek-bar/thumbnail in the media notification come from MediaMetadata,
-        // not PlaybackState - without this they show blank despite PlaybackState working.
-        combine(
-            viewModel.stateData.map { it.currentAnime to it.currentEpisode }.distinctUntilChanged(),
-            viewModel.playbackData.map { it.duration }.distinctUntilChanged(),
-            viewModel.thumbnailGenerated,
-        ) { (anime, episode), duration, _ -> Triple(anime, episode, duration) }
-            .onEach { (anime, episode, duration) ->
-                if (anime == null || episode == null) return@onEach
-                val artwork = runCatching {
-                    val request = ImageRequest.Builder(this@PlayerActivity)
-                        .data(episode.preview_url?.takeIf { it.isNotBlank() } ?: anime)
-                        .size(Size.ORIGINAL)
-                        .build()
-                    imageLoader.execute(request).image
-                        ?.asDrawable(resources)
-                        ?.toBitmap()
-                }.getOrNull()
-
-                mediaSession?.setMetadata(
-                    MediaMetadata.Builder()
-                        .putString(MediaMetadata.METADATA_KEY_TITLE, episode.name)
-                        .putString(MediaMetadata.METADATA_KEY_ARTIST, anime.title)
-                        .putLong(MediaMetadata.METADATA_KEY_DURATION, duration * 1000L)
-                        .apply {
-                            if (artwork != null) {
-                                putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
-                            }
-                        }
-                        .build(),
-                )
-                // AM (REOPEN_TARGET_STALENESS_FIX) -->
-                // updateEpisodeInfo() moved to its own immediate observer above - this
-                // flow now only refreshes MediaSession's rich metadata (artwork,
-                // duration), which is fine to lag behind a slow thumbnail/image fetch
-                // since it doesn't affect reopen routing.
-                // <-- AM (REOPEN_TARGET_STALENESS_FIX)
-            }
-            .launchIn(lifecycleScope)
+        // Metadata/artwork/duration in the media notification are now pushed solely by
+        // PlayerMediaHolder (its periodic timer + its own artwork flow) - see the
+        // MEDIASESSION_SINGLE_WRITER_FIX note above for why the equivalent flow that used
+        // to live here was removed.
 
         setContent {
             TachiyomiTheme {

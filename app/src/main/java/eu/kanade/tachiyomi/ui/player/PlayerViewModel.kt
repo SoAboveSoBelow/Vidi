@@ -442,11 +442,31 @@ class PlayerViewModel @JvmOverloads constructor(
     // and from setupEpisode() (every episode switch, not just the initial one - without
     // that, needsInit() would keep matching whatever episode the session originally
     // started on, long after playback has moved past it).
+    //
+    // AM (MEDIASESSION_SINGLE_WRITER_FIX) -->
+    // Also publishes animeTitle/episodeTitle now, not just the ids - this is THE single
+    // choke point for every episode switch, live-Activity or not, so it's the correct
+    // (and only) place to keep the holder's title fields current. PlayerMediaHolder's own
+    // periodic timer and artwork flow are now the sole writers of MediaSession
+    // metadata/notification text (see their own MEDIASESSION_SINGLE_WRITER_FIX comments) -
+    // this function feeding them fresh titles the instant a switch happens, regardless of
+    // whether an Activity exists to notice, is what replaces the several separate
+    // Activity-side pushes that used to race against them.
     private fun syncHolderSessionState() {
         val anime = stateData.value.currentAnime ?: return
         val episode = stateData.value.currentEpisode ?: return
-        mediaHolder?.updateState { it.copy(animeId = anime.id, episodeId = episode.id) }
+        mediaHolder?.updateState {
+            it.copy(
+                animeId = anime.id,
+                episodeId = episode.id,
+                animeTitle = anime.title,
+                episodeTitle = episode.name,
+                animeThumbnailUrl = anime.thumbnailUrl,
+                episodePreviewUrl = episode.preview_url,
+            )
+        }
     }
+    // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
     // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
 
     /**
@@ -723,6 +743,14 @@ class PlayerViewModel @JvmOverloads constructor(
             MPVPlayer.Event.FileLoaded -> fileLoaded()
             is MPVPlayer.Event.LuaEvent -> handleLuaInvocation(event.property, event.value)
             is MPVPlayer.Event.TrackLoadFailure -> onTrackLoadedFailure(event.url)
+            // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
+            // No-ops here deliberately - PlayerMediaHolder collects these two
+            // directly off the same eventFlow itself (see its own
+            // MEDIASESSION_EVENT_DRIVEN_FIX) to drive MediaSession pushes. This
+            // ViewModel-level dispatcher has no reason to also react to them.
+            // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
+            is MPVPlayer.Event.PauseChanged -> {}
+            MPVPlayer.Event.PlaybackRestart -> {}
         }
     }
 
