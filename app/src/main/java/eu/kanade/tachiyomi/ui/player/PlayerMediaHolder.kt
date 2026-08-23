@@ -8,8 +8,11 @@ import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
+import eu.kanade.tachiyomi.ui.player.mpv.loadFileWithHwdecGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -166,6 +169,21 @@ class PlayerMediaHolder(
      * real once a live Activity/ViewModel reattaches, through the full pipeline - see
      * PlayerActivity's onNewIntent().
      */
+    // AM (BACKGROUND_SKIP_RACE_FIX) -->
+    // Rapid repeated skip presses (lock-screen/Bluetooth next/next/next quickly)
+    // used to each launch their own, fully independent performBackgroundSkipLoad()
+    // coroutine with nothing coordinating between them. Since each one waits on
+    // mpv's own FileLoaded event (BACKGROUND_SKIP_LOAD_CONFIRM_FIX) - a generic
+    // event that doesn't say WHICH load it's confirming - an earlier, slower call
+    // could still have its wait resolve (matching a LATER load that had already
+    // replaced its own) and go on to commit ITS episode's info as if it were the
+    // one actually playing. Tracking and cancelling any still-in-flight skip
+    // before starting a new one means only the most recently requested skip is
+    // ever allowed to reach the point of committing anything - matching mpv's own
+    // "replace" load semantics, where the latest request is what actually wins.
+    // <-- AM (BACKGROUND_SKIP_RACE_FIX)
+    private var currentSkipJob: Job? = null
+
     private val fallbackCallback = object : MediaSession.Callback() {
         override fun onPlay() {
             setPaused(false)
@@ -183,7 +201,8 @@ class PlayerMediaHolder(
         // nothing regresses versus the pre-existing behavior in that case.
         override fun onSkipToNext() {
             logcat(LogPriority.DEBUG) { "fallbackCallback.onSkipToNext fired" }
-            holderScope.launch {
+            currentSkipJob?.cancel()
+            currentSkipJob = holderScope.launch {
                 if (!skipToAdjacentEpisode(next = true)) {
                     requestSkip(next = true)
                 }
@@ -192,7 +211,8 @@ class PlayerMediaHolder(
 
         override fun onSkipToPrevious() {
             logcat(LogPriority.DEBUG) { "fallbackCallback.onSkipToPrevious fired" }
-            holderScope.launch {
+            currentSkipJob?.cancel()
+            currentSkipJob = holderScope.launch {
                 if (!skipToAdjacentEpisode(next = false)) {
                     requestSkip(next = false)
                 }
@@ -297,6 +317,26 @@ class PlayerMediaHolder(
         }
         val targetEpisodeId = playlist[newIndex]
 
+        // AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX) -->
+        // Mirrors PlayerViewModel.changeEpisode()'s own pause() call, made at the
+        // same point - once a skip is confirmed valid, before any of the (possibly
+        // slow) resolution work begins, not at the very top where an ultimately
+        // invalid/no-op skip attempt would needlessly interrupt playback for
+        // nothing. The foreground path's pause-then-resume around a switch was
+        // originally just PIP visual polish (freezing the frame during the async
+        // load) - but it has a second effect this path was missing entirely: it's
+        // what makes Event.PauseChanged actually fire during a foreground switch.
+        // This path only ever called setPaused(false) after loading, which is a
+        // no-op (no event fires at all) if mpv was already unpaused going in - the
+        // ordinary case for a background skip. That's not a cosmetic difference;
+        // it meant a background skip's notification update depended entirely on
+        // the artwork flow's own completion with no earlier nudge, while a
+        // foreground switch got one for free - the same underlying update
+        // eventually happens either way, but there's no reason for the two paths
+        // to genuinely behave differently when they don't have to.
+        // <-- AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
+        setPaused(true)
+
         // AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX) -->
         // Remember where this episode was left, so flipping back to it later in the
         // same backgrounded session resumes correctly instead of restarting at 0 -
@@ -317,7 +357,46 @@ class PlayerMediaHolder(
         pruneRecentPositions(newIndex)
         // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
 
-        return try {
+        val succeeded = try {
+            performBackgroundSkipLoad(animeId, targetEpisodeId)
+        } catch (e: CancellationException) {
+            // AM (BACKGROUND_SKIP_RACE_FIX) -->
+            // Must rethrow, not treat as a normal failure - this specifically
+            // means a NEWER skip request superseded this one (see
+            // currentSkipJob's own doc comment) and cancelled it deliberately.
+            // Broadly catching Throwable below would otherwise also catch this,
+            // and this now-stale job would go on to run its own failure handling
+            // (restore pause, fall back to requestSkip) - actively interfering
+            // with the newer job that's already taken over, undoing its progress
+            // out from under it. Rethrowing lets cancellation propagate normally
+            // and does nothing else at all.
+            // <-- AM (BACKGROUND_SKIP_RACE_FIX)
+            throw e
+        } catch (e: Throwable) {
+            logcat(LogPriority.DEBUG, e) { "skipToAdjacentEpisode: threw" }
+            false
+        }
+
+        // AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX) -->
+        // Restore playback if the skip ultimately failed - setPaused(true) above
+        // ran before any of this resolution work, so a failed attempt (bad
+        // hoster, unsupported source, any exception) must not leave the ORIGINAL,
+        // still-valid episode stuck paused for no reason. A failed skip should
+        // look like nothing happened, not like playback silently stopped.
+        // <-- AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
+        if (!succeeded) {
+            setPaused(false)
+        }
+        return succeeded
+    }
+
+    /**
+     * Does the actual resolution + mpv load for [skipToAdjacentEpisode] - split out
+     * so its own early-return-on-failure points only exit THIS function, letting
+     * the caller reliably restore pause state (see BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
+     * on any failure path without needing to handle each one individually.
+     */
+    private suspend fun performBackgroundSkipLoad(animeId: Long, targetEpisodeId: Long): Boolean {
             val anime = getAnime.await(animeId) ?: run {
                 logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: getAnime($animeId) returned null" }
                 return false
@@ -402,15 +481,84 @@ class PlayerMediaHolder(
             }
             // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
 
-            // AM (AUDIO_BLIP_FIX) -->
-            // Mirrors PlayerViewModel.loadFile()'s exact pattern: MediaCodec hwdec
-            // needs an attached Surface to initialize a decoder session. Unlike that
-            // function, this is never conditional here - background skip by
-            // definition only ever runs with no live Activity/Surface at all, so
-            // there's nothing to check.
-            player.mpv.setOptionString("hwdec", "no")
-            // <-- AM (AUDIO_BLIP_FIX)
-            player.mpv.command("loadfile", resolvedUrl, "replace", "0", videoOptions)
+            // AM (SHARED_LOAD_FILE_FIX) -->
+            // Mirrors PlayerViewModel.loadFile()'s exact pattern - previously
+            // duplicated inline here; now both call the same shared function (see
+            // its own doc comment for why). Always passes hasAttachedSurface=false:
+            // background skip by definition only ever runs with no live
+            // Activity/Surface at all, so there's nothing to check.
+            // <-- AM (SHARED_LOAD_FILE_FIX)
+            player.mpv.loadFileWithHwdecGuard(resolvedUrl, videoOptions, hasAttachedSurface = false)
+
+            // AM (BACKGROUND_SKIP_LOAD_CONFIRM_FIX) -->
+            // BACKGROUND_SKIP_STATE_ORDER_FIX moved syncSessionState() to run before
+            // this load, to close a metadata-mismatch window - but that assumed the
+            // load would basically always succeed once resolution had already
+            // succeeded, which isn't actually guaranteed: mpv.command("loadfile",...)
+            // only ISSUES the load, it doesn't confirm the resolved URL is actually
+            // playable. If it isn't (an expired/bad URL from this specific hoster),
+            // playback would genuinely fail to start while the notification had
+            // already committed to showing the new episode as if it had - exactly
+            // "title/thumbnail changed, but nothing plays" with no fallback,
+            // because this function still reported success. Waiting here for mpv's
+            // own confirmation that the file is actually loaded - not just assuming
+            // it after issuing the command - is what makes committing to the new
+            // episode's info actually conditional on the switch having genuinely
+            // worked, the same way it already effectively is for the foreground
+            // path (which reacts to this same event through handlePlayerFlow()).
+            // <-- AM (BACKGROUND_SKIP_LOAD_CONFIRM_FIX)
+            val loadConfirmed = withTimeoutOrNull(10_000) {
+                player.eventFlow.filterIsInstance<MPVPlayer.Event.FileLoaded>().first()
+            } != null
+            if (!loadConfirmed) {
+                logcat(LogPriority.DEBUG) {
+                    "skipToAdjacentEpisode: mpv never confirmed the file loaded, treating as failed"
+                }
+                return false
+            }
+
+            // AM (BACKGROUND_SKIP_STATE_ORDER_FIX) -->
+            // Called here, now confirmed AFTER a genuine load success (see
+            // BACKGROUND_SKIP_LOAD_CONFIRM_FIX above) but still BEFORE the resume
+            // below - this used to run AFTER loadFileWithHwdecGuard()+
+            // setPaused(false) entirely, meaning the resume's own PauseChanged-
+            // triggered push could fire while state still held the OLD episode's
+            // values, but mpv had ALREADY loaded the new file - so that push
+            // paired the new episode's real position/duration with the old
+            // episode's title/artist, and the resolvedEpisodeKey gate couldn't
+            // catch it (animeId/episodeId hadn't changed yet at that point, so the
+            // check was trivially comparing old-to-old). Doing this before resume
+            // also gives the artwork-resolution flow (which reacts to this exact
+            // animeId/episodeId change) a head start before playback actually
+            // resumes, instead of starting only once loading was already complete.
+            // <-- AM (BACKGROUND_SKIP_STATE_ORDER_FIX)
+            // AM (SHARED_SESSION_SYNC_FIX) -->
+            // Previously duplicated inline here - now calls the same shared
+            // function PlayerViewModel's foreground path also calls (see its own
+            // doc comment for why). Duration is deliberately left out of both -
+            // see BACKGROUND_SKIP_DURATION_FIX below for why resetting it here
+            // specifically caused its own problem; it's left to update through the
+            // normal propFlow/timer path instead, same as the foreground path.
+            // <-- AM (SHARED_SESSION_SYNC_FIX)
+            syncSessionState(
+                animeId = animeId,
+                episodeId = targetEpisodeId,
+                animeTitle = anime.title,
+                episodeTitle = episode.name,
+                animeThumbnailUrl = anime.thumbnailUrl,
+                episodePreviewUrl = episode.previewUrl,
+                positionMs = resumePositionMs.toInt(),
+            )
+            // AM (BACKGROUND_SKIP_DURATION_FIX) -->
+            // Reverted: resetting this to 0 here was meant to avoid ever showing a
+            // stale wrong duration, but instead made the lock-screen's seek bar
+            // disappear entirely rather than just show stale data - Android's
+            // media widget appears to treat duration=0 as "no seekable content"
+            // and hides the whole progress UI, worse than the staleness this was
+            // meant to fix. Left untouched (previous episode's value persists)
+            // until the real new duration arrives via the propFlow observer below -
+            // see its own logging for why that isn't happening reliably.
+            // <-- AM (BACKGROUND_SKIP_DURATION_FIX)
 
             // AM (BACKGROUND_SKIP_LOAD_STUCK_FIX) -->
             // The ViewModel's own equivalent path relies on live reactive event-flow
@@ -425,33 +573,8 @@ class PlayerMediaHolder(
             }
             // <-- AM (BACKGROUND_SKIP_LOAD_STUCK_FIX)
 
-            updateState {
-                it.copy(
-                    animeId = animeId,
-                    episodeId = targetEpisodeId,
-                    episodeTitle = episode.name,
-                    animeThumbnailUrl = anime.thumbnailUrl,
-                    episodePreviewUrl = episode.previewUrl,
-                    positionMs = resumePositionMs.toInt(),
-                    // AM (BACKGROUND_SKIP_DURATION_FIX) -->
-                    // Reverted: resetting this to 0 here was meant to avoid ever
-                    // showing a stale wrong duration, but instead made the
-                    // lock-screen's seek bar disappear entirely rather than just
-                    // show stale data - Android's media widget appears to treat
-                    // duration=0 as "no seekable content" and hides the whole
-                    // progress UI, worse than the staleness this was meant to fix.
-                    // Left untouched (previous episode's value persists) until the
-                    // real new duration arrives via the propFlow observer below -
-                    // see its own logging for why that isn't happening reliably.
-                    // <-- AM (BACKGROUND_SKIP_DURATION_FIX)
-                )
-            }
             logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: loaded episode $targetEpisodeId directly" }
-            true
-        } catch (e: Throwable) {
-            logcat(LogPriority.DEBUG, e) { "skipToAdjacentEpisode: threw" }
-            false
-        }
+            return true
     }
     // <-- AM (BACKGROUND_SKIP_FIX)
 
@@ -684,24 +807,23 @@ class PlayerMediaHolder(
             // <-- AM (ARTWORK_WIPE_FIX)
             suspend fun pushLiveMediaState() {
                 val current = state.value
-                // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
-                // Refuse to push anything at all - PlaybackState included, not just
-                // MediaMetadata - until artwork resolution has genuinely finished for
-                // the CURRENT episode (see resolvedEpisodeKey's own doc comment).
-                // This is what actually enforces "wait for complete data" for every
-                // caller of this function (the periodic timer, PauseChanged/
-                // PlaybackRestart events), not just the artwork flow's own call site -
-                // without this, any of those firing mid-resolution (even well under
-                // 2 seconds in) could still render an incomplete state regardless of
-                // how carefully the artwork flow itself waits before ITS OWN push.
-                // Whatever was last fully pushed (the previous episode's complete
-                // state) simply keeps showing, untouched, until this matches.
-                // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
-                if (current.resolvedEpisodeKey != (current.animeId to current.episodeId)) return
                 val positionMs = (player.mpv.getPropertyInt("time-pos") ?: return) * 1000
                 val durationMs = (player.mpv.getPropertyInt("duration") ?: return) * 1000
                 val paused = player.mpv.getPropertyBoolean("pause") ?: false
                 updateState { it.copy(positionMs = positionMs, durationMs = durationMs) }
+                // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+                // PlaybackState (position/pause) is deliberately NOT gated by
+                // resolvedEpisodeKey - unlike metadata below, showing the live,
+                // correct position/pause for whatever is ACTUALLY playing right now
+                // is always safe regardless of whether title/artwork resolution for
+                // a pending switch has finished. Gating this too (an earlier version
+                // of this fix did) meant the progress bar simply stopped updating
+                // for however long resolution took, then jumped to catch up all at
+                // once the moment the gate opened - visually indistinguishable from
+                // the double-writer rubber-banding this codebase already fixed once
+                // (BACKGROUND_SEEKBAR_FIGHT_FIX), just from freeze-then-snap instead
+                // of two writers disagreeing.
+                // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
                 mediaSession?.setPlaybackState(
                     PlaybackState.Builder()
                         .setActions(
@@ -718,6 +840,18 @@ class PlayerMediaHolder(
                         )
                         .build(),
                 )
+                // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
+                // Metadata (title/artist/duration/art) IS still gated here - this is
+                // the part that actually needs to wait, since it's the combination
+                // of these specific fields that must never show a mismatched
+                // pairing (new episode's duration next to the old episode's title,
+                // etc.). Refuses to push anything at all until artwork resolution
+                // has genuinely finished for the CURRENT episode (see
+                // resolvedEpisodeKey's own doc comment) - whatever metadata was
+                // last fully pushed (the previous episode's complete state) simply
+                // keeps showing, untouched, until this matches.
+                // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+                if (current.resolvedEpisodeKey != (current.animeId to current.episodeId)) return
                 if (current.animeTitle.isNotEmpty() || current.episodeTitle.isNotEmpty()) {
                     val artworkForCurrentEpisode = lastArtwork
                         .takeIf { lastArtworkKey == (current.animeId to current.episodeId) }
@@ -753,7 +887,25 @@ class PlayerMediaHolder(
 
             existing.eventFlow
                 .filterIsInstance<MPVPlayer.Event.PauseChanged>()
-                .onEach { pushLiveMediaState() }
+                .onEach { event ->
+                    // AM (HOLDER_PAUSE_STATE_SYNC_FIX) -->
+                    // state.paused used to only ever get written by setPaused()
+                    // (the fallback/no-Activity MediaSession callback path) -
+                    // meaning any OTHER way pause could change (PlayerViewModel's
+                    // own pause()/unpause(), the sleep timer, MPVPlayer's own
+                    // audio-focus-loss handling, and any future caller not yet
+                    // written) left this holder's copy stale and wrong,
+                    // regardless of what was actually happening. This event
+                    // already carries mpv's own real, live pause value directly
+                    // from its property-change notification - using it here
+                    // makes state.paused correct for every possible cause of a
+                    // pause change, not just the ones this file happens to call
+                    // directly, without needing to hunt down and individually
+                    // patch every current and future call site.
+                    // <-- AM (HOLDER_PAUSE_STATE_SYNC_FIX)
+                    updateState { it.copy(paused = event.paused) }
+                    pushLiveMediaState()
+                }
                 .launchIn(holderScope)
 
             existing.eventFlow
@@ -928,14 +1080,34 @@ class PlayerMediaHolder(
                             // timing problem masquerading as one; it needed to not crash
                             // in the first place, not a longer wait or another retry.
                             // <-- AM (RESOLUTION_EXCEPTION_FIX)
-                            try {
-                                withContext(Dispatchers.IO) {
-                                    episodeThumbnailManager.find(anime.url, "${current.episodeTitle}-thumbnail")
-                                        ?.openInputStream()?.use { BitmapFactory.decodeStream(it) }
+                            // AM (COLD_START_FILE_CHECK_RETRY_FIX) -->
+                            // The bitmap DECODE step elsewhere in this same flow
+                            // already retries (2 attempts, 300ms apart) for
+                            // transient failures - this file-EXISTENCE check never
+                            // did, despite being just as vulnerable to the same
+                            // kind of brief unreadiness (SAF/DocumentsProvider not
+                            // immediately able to enumerate files the instant the
+                            // app's process starts, on cold start specifically).
+                            // A single failed attempt fell straight through to the
+                            // much slower reactive-wait fallback below instead of
+                            // just trying again a moment later - not genuinely
+                            // waiting for something that was normally already
+                            // there, just briefly not-yet-ready.
+                            // <-- AM (COLD_START_FILE_CHECK_RETRY_FIX)
+                            var episodeArtwork: Bitmap? = null
+                            for (attempt in 0 until 2) {
+                                if (attempt > 0) delay(300)
+                                episodeArtwork = try {
+                                    withContext(Dispatchers.IO) {
+                                        episodeThumbnailManager.find(anime.url, "${current.episodeTitle}-thumbnail")
+                                            ?.openInputStream()?.use { BitmapFactory.decodeStream(it) }
+                                    }
+                                } catch (e: Throwable) {
+                                    null
                                 }
-                            } catch (e: Throwable) {
-                                null
+                                if (episodeArtwork != null) break
                             }
+                            episodeArtwork
                         } else {
                             null
                         }
@@ -985,13 +1157,26 @@ class PlayerMediaHolder(
                                 // this could kill the whole Flow's collector permanently
                                 // on any I/O exception, not just fail this one attempt.
                                 // <-- AM (RESOLUTION_EXCEPTION_FIX)
-                                try {
-                                    withContext(Dispatchers.IO) {
-                                        coverManager.find(anime.url)?.uri?.toString()
+                                // AM (COLD_START_FILE_CHECK_RETRY_FIX) -->
+                                // See the episode-level check above for the full
+                                // reasoning - same fix, same reason: a single
+                                // failed attempt shouldn't fall all the way through
+                                // to the 2-minute reactive-wait fallback below
+                                // without first just trying again a moment later.
+                                // <-- AM (COLD_START_FILE_CHECK_RETRY_FIX)
+                                var coverFileUrl: String? = null
+                                for (attempt in 0 until 2) {
+                                    if (attempt > 0) delay(300)
+                                    coverFileUrl = try {
+                                        withContext(Dispatchers.IO) {
+                                            coverManager.find(anime.url)?.uri?.toString()
+                                        }
+                                    } catch (e: Throwable) {
+                                        null
                                     }
-                                } catch (e: Throwable) {
-                                    null
-                                } ?: withTimeoutOrNull(120_000) {
+                                    if (coverFileUrl != null) break
+                                }
+                                coverFileUrl ?: withTimeoutOrNull(120_000) {
                                     getAnime.subscribe(animeId)
                                         .map { it.thumbnailUrl }
                                         .filter { !it.isNullOrBlank() }
@@ -1104,6 +1289,54 @@ class PlayerMediaHolder(
 
     fun updateState(transform: (PlayerMediaState) -> PlayerMediaState) {
         _state.value = transform(_state.value)
+    }
+
+    // AM (SHARED_SESSION_SYNC_FIX) -->
+    // Replaces two separately-written copies of this exact update -
+    // PlayerViewModel.syncHolderSessionState() (foreground) and this holder's own
+    // performBackgroundSkipLoad() (background skip, no live Activity) each built
+    // their own it.copy(...) call against the same PlayerMediaState fields. That's
+    // exactly how the two silently drifted apart once already this session -
+    // performBackgroundSkipLoad() simply never included animeTitle in its copy(),
+    // an omission that went unnoticed for a long time specifically because nothing
+    // structurally prevented it. One shared function both callers go through means
+    // that class of bug isn't something to catch by comparison anymore - there's
+    // only one place these fields get written together at all.
+    //
+    // Takes primitive values rather than whole Anime/Episode objects because the
+    // two callers don't share an Episode type: PlayerViewModel's currentEpisode is
+    // the legacy eu.kanade.tachiyomi.data.database.models.Episode
+    // (preview_url, underscore), while the background path's getEpisode.await()
+    // returns the domain tachiyomi.domain.episode.model.Episode (previewUrl,
+    // camelCase) - unifying THAT would be its own, separate refactor. Each caller
+    // extracts its own fields using whichever accessor its own type actually has;
+    // this function only owns what happens once those values exist.
+    //
+    // positionMs is optional and defaults to leaving the existing value alone -
+    // only the background path needs to seed a fresh resume position as part of
+    // this same update; the foreground path has its own separate, continuous
+    // position-tracking timer and was never touching this field here at all.
+    // <-- AM (SHARED_SESSION_SYNC_FIX)
+    fun syncSessionState(
+        animeId: Long,
+        episodeId: Long,
+        animeTitle: String,
+        episodeTitle: String,
+        animeThumbnailUrl: String?,
+        episodePreviewUrl: String?,
+        positionMs: Int? = null,
+    ) {
+        updateState {
+            it.copy(
+                animeId = animeId,
+                episodeId = episodeId,
+                animeTitle = animeTitle,
+                episodeTitle = episodeTitle,
+                animeThumbnailUrl = animeThumbnailUrl,
+                episodePreviewUrl = episodePreviewUrl,
+                positionMs = positionMs ?: it.positionMs,
+            )
+        }
     }
 
     /** Tears down the player and MediaSession. Only called when playback genuinely ends. */

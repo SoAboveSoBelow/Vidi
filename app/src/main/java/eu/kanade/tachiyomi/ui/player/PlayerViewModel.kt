@@ -82,6 +82,7 @@ import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import eu.kanade.tachiyomi.ui.player.mpv.MpvVideoTrack
 import eu.kanade.tachiyomi.ui.player.mpv.TrackNode
 import eu.kanade.tachiyomi.ui.player.mpv.TrackState
+import eu.kanade.tachiyomi.ui.player.mpv.loadFileWithHwdecGuard
 import eu.kanade.tachiyomi.ui.player.utils.AniSkipApi
 import eu.kanade.tachiyomi.ui.player.utils.ChapterUtils
 import eu.kanade.tachiyomi.ui.player.utils.ChapterUtils.Companion.getStringRes
@@ -455,16 +456,29 @@ class PlayerViewModel @JvmOverloads constructor(
     private fun syncHolderSessionState() {
         val anime = stateData.value.currentAnime ?: return
         val episode = stateData.value.currentEpisode ?: return
-        mediaHolder?.updateState {
-            it.copy(
-                animeId = anime.id,
-                episodeId = episode.id,
-                animeTitle = anime.title,
-                episodeTitle = episode.name,
-                animeThumbnailUrl = anime.thumbnailUrl,
-                episodePreviewUrl = episode.preview_url,
-            )
-        }
+        // AM (SHARED_SESSION_SYNC_FIX) -->
+        // Was its own separate mediaHolder?.updateState { it.copy(...) } call, built
+        // independently from - and once genuinely out of sync with - the equivalent
+        // call in PlayerMediaHolder's own performBackgroundSkipLoad(). Both now go
+        // through PlayerMediaHolder.syncSessionState() (see its own doc comment) -
+        // one place both paths write these fields from, not two.
+        //
+        // episode.id is nullable here specifically because currentEpisode is the
+        // legacy eu.kanade.tachiyomi.data.database.models.Episode type (a
+        // pre-insertion DB entity can genuinely lack an id) - the domain Episode
+        // type the background path uses doesn't have this nullability at all. A
+        // real, currently-playing episode should always have one; bailing out
+        // rather than force-unwrapping if it somehow doesn't.
+        // <-- AM (SHARED_SESSION_SYNC_FIX)
+        val episodeId = episode.id ?: return
+        mediaHolder?.syncSessionState(
+            animeId = anime.id,
+            episodeId = episodeId,
+            animeTitle = anime.title,
+            episodeTitle = episode.name,
+            animeThumbnailUrl = anime.thumbnailUrl,
+            episodePreviewUrl = episode.preview_url,
+        )
     }
     // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
     // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
@@ -654,10 +668,12 @@ class PlayerViewModel @JvmOverloads constructor(
      * the background" case never touches hwdec at all.
      */
     private fun loadFile(url: String, options: String) {
-        if (!isSurfaceAttached) {
-            mpv.setOptionString("hwdec", "no")
-        }
-        mpvCommand("loadfile", url, "replace", "0", options)
+        // AM (SHARED_LOAD_FILE_FIX) -->
+        // See loadFileWithHwdecGuard's own doc comment - this used to duplicate that
+        // exact logic inline; now both this and PlayerMediaHolder's background-skip
+        // equivalent call the same shared function.
+        // <-- AM (SHARED_LOAD_FILE_FIX)
+        mpv.loadFileWithHwdecGuard(url, options, hasAttachedSurface = isSurfaceAttached)
     }
     // <-- AM (AUDIO_BLIP_FIX)
 

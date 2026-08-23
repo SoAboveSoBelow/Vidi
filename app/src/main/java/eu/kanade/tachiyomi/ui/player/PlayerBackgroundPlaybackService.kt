@@ -23,14 +23,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 // <-- AM (BACKGROUND_SKIP_FIX)
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
+import logcat.LogPriority
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -102,6 +105,56 @@ class PlayerBackgroundPlaybackService : Service() {
                 }
                 .launchIn(serviceScope)
             // <-- AM (BACKGROUND_SKIP_FIX)
+
+            // AM (NOTIFICATION_RESUME_RESTORE_FIX) -->
+            // Handles the pause-then-resume case: fallbackCallback.onPlay() (the
+            // resume path used with no live Activity, e.g. resuming from Bluetooth
+            // controls after the notification was dismissed while paused) only
+            // ever flipped mpv's own pause state - nothing called back into this
+            // Service to re-establish the notification. updatePlaybackState()
+            // already calls startForeground() (see NOTIFICATION_REPOST_FIX), which
+            // is exactly what's needed here too.
+            // <-- AM (NOTIFICATION_RESUME_RESTORE_FIX)
+            holder.state
+                .map { it.paused }
+                .distinctUntilChanged()
+                .onEach { paused -> if (!paused) updatePlaybackState(isPlaying = true) }
+                .launchIn(serviceScope)
+
+            // AM (NOTIFICATION_LIVENESS_WATCHDOG_FIX) -->
+            // Confirmed directly (screenshots): the notification can disappear
+            // while genuinely still playing, not only via a pause-then-swipe -
+            // most likely Samsung's own "Check background activity" management
+            // removing it regardless of play state, not a user gesture at all. The
+            // pause-then-resume fix above only ever fires on an actual pause->play
+            // transition, so it can't catch a notification vanishing while nothing
+            // about play state changed. This is scoped narrowly, unlike the
+            // earlier, reverted version of this same idea: it only ever restores
+            // while state.paused is genuinely false (actively playing) right now -
+            // a real pause-then-dismiss (paused stays true) is left alone and
+            // respected, exactly as before. This isn't "poll and always restore" -
+            // it's "poll, but only act if playback is supposed to be visible and
+            // isn't."
+            // <-- AM (NOTIFICATION_LIVENESS_WATCHDOG_FIX)
+            serviceScope.launch {
+                while (true) {
+                    delay(10_000)
+                    if (holder.state.value.paused) continue
+                    val notificationStillActive = try {
+                        NotificationManagerCompat.from(this@PlayerBackgroundPlaybackService)
+                            .getActiveNotifications()
+                            .any { it.id == Notifications.ID_BACKGROUND_PLAYBACK }
+                    } catch (e: Throwable) {
+                        true
+                    }
+                    if (!notificationStillActive) {
+                        logcat(LogPriority.DEBUG) {
+                            "Notification liveness watchdog: gone while actively playing, restoring"
+                        }
+                        updatePlaybackState(isPlaying = true)
+                    }
+                }
+            }
         }
     }
     val mediaHolder: PlayerMediaHolder by mediaHolderLazy
@@ -208,7 +261,23 @@ class PlayerBackgroundPlaybackService : Service() {
     /** Reflects the current pause state in the notification. */
     fun updatePlaybackState(isPlaying: Boolean) {
         this.isPlaying = isPlaying
-        NotificationManagerCompat.from(this).notify(Notifications.ID_BACKGROUND_PLAYBACK, buildNotification())
+        // AM (NOTIFICATION_REPOST_FIX) -->
+        // Was a bare NotificationManagerCompat.notify() call, which assumes the
+        // foreground-service/notification association is already intact - if the
+        // notification was ever dismissed (confirmed: possible independently of
+        // the Service itself stopping, e.g. via Samsung's own "Check background
+        // activity" UI), a bare notify() with the same id does not reliably bring
+        // it back. startForeground() is the call that actually (re-)establishes
+        // that association in the first place, so calling it again here is what
+        // genuinely guarantees a notification exists whenever content updates,
+        // rather than assuming one already does.
+        // <-- AM (NOTIFICATION_REPOST_FIX)
+        ServiceCompat.startForeground(
+            this,
+            Notifications.ID_BACKGROUND_PLAYBACK,
+            buildNotification(),
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+        )
     }
 
     /** Keeps notification text and reopen-intent ids in sync when the episode changes mid-session. */
@@ -217,7 +286,15 @@ class PlayerBackgroundPlaybackService : Service() {
         this.subtitle = subtitle
         this.animeId = animeId
         this.episodeId = episodeId
-        NotificationManagerCompat.from(this).notify(Notifications.ID_BACKGROUND_PLAYBACK, buildNotification())
+        // AM (NOTIFICATION_REPOST_FIX) -->
+        // See updatePlaybackState()'s own doc comment above - same fix, same reason.
+        // <-- AM (NOTIFICATION_REPOST_FIX)
+        ServiceCompat.startForeground(
+            this,
+            Notifications.ID_BACKGROUND_PLAYBACK,
+            buildNotification(),
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+        )
     }
 
     fun stopBackgroundPlayback() {
