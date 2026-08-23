@@ -233,6 +233,10 @@ class PlayerMediaHolder(
 
     /** Directly pauses/resumes mpv, independent of any ViewModel. Safe to call with no Activity attached. */
     fun setPaused(paused: Boolean) {
+        // AM (AUDIO_BLIP_SOURCE_LOG_FIX) -->
+        // See MPVPlayer.onAudioFocusChange()'s own doc comment - same reason.
+        // <-- AM (AUDIO_BLIP_SOURCE_LOG_FIX)
+        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerMediaHolder.setPaused($paused) called" }
         _player?.mpv?.setPropertyBoolean("pause", paused)
         updateState { it.copy(paused = paused) }
     }
@@ -484,11 +488,25 @@ class PlayerMediaHolder(
             // AM (SHARED_LOAD_FILE_FIX) -->
             // Mirrors PlayerViewModel.loadFile()'s exact pattern - previously
             // duplicated inline here; now both call the same shared function (see
-            // its own doc comment for why). Always passes hasAttachedSurface=false:
-            // background skip by definition only ever runs with no live
-            // Activity/Surface at all, so there's nothing to check.
+            // its own doc comment for why).
             // <-- AM (SHARED_LOAD_FILE_FIX)
-            player.mpv.loadFileWithHwdecGuard(resolvedUrl, videoOptions, hasAttachedSurface = false)
+            // AM (AUDIO_BLIP_FIX_2) -->
+            // Was unconditionally false, reasoning "background skip by definition
+            // only ever runs with no live Activity/Surface, so there's nothing to
+            // check" - true for the REAL surface, but this holder shares the same
+            // MPVPlayer instance that was alive before the Activity was destroyed
+            // (the whole point of the Service-owned-player architecture), and that
+            // instance's dummy surface (see MpvSurface.kt's surfaceDestroyed) is
+            // still attached from the last time it backgrounded. If the real
+            // surface was ever attached at all this session,
+            // player.hasAttachedSurfaceBefore is still true here too - same fix,
+            // same reasoning as PlayerViewModel.loadFile()'s own doc comment.
+            // <-- AM (AUDIO_BLIP_FIX_2)
+            player.mpv.loadFileWithHwdecGuard(
+                resolvedUrl,
+                videoOptions,
+                hasAttachedSurface = player.hasAttachedSurfaceBefore,
+            )
 
             // AM (BACKGROUND_SKIP_LOAD_CONFIRM_FIX) -->
             // BACKGROUND_SKIP_STATE_ORDER_FIX moved syncSessionState() to run before

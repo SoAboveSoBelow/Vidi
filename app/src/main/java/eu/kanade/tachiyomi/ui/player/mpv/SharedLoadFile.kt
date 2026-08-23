@@ -17,9 +17,15 @@ import `is`.xyz.mpv.MPV
  * maintained copies of "the same operation" silently disagreeing over time, each one
  * needing to be found and fixed separately rather than being fixed once, here.
  *
- * hasAttachedSurface should be `false` unconditionally for any caller that never has a
- * Surface at all (background skip); for a caller that may or may not have one
- * (foreground), it should reflect the real, current state.
+ * hasAttachedSurface means "does a valid Surface (real or the always-present dummy
+ * one from MPVPlayer.ensureDummySurface()) currently exist to decode into" - both
+ * current callers pass player.hasAttachedSurfaceBefore (a one-way flag: true once
+ * the real Surface has ever attached, never reset) rather than checking the real
+ * Surface's current attachment specifically, since the dummy surface (confirmed via
+ * logcat to correctly support a fresh hardware decoder session - see
+ * DUMMY_SURFACE_FORMAT_FIX) keeps a valid target continuously available from that
+ * point on, foreground or backgrounded either way. See AUDIO_BLIP_FIX_2 at each call
+ * site for the full reasoning.
  * <-- AM (SHARED_LOAD_FILE_FIX)
  */
 fun MPV.loadFileWithHwdecGuard(url: String, options: String, hasAttachedSurface: Boolean) {

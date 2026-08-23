@@ -279,8 +279,10 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
         val pipEpisodeToasts = playerPreferences.pipEpisodeToasts
         val pipOnExit = playerPreferences.pipOnExit
         val pipFirstButtonAction = playerPreferences.pipFirstButtonAction
+        val pipBackgroundPlayReducesBatteryDrain = playerPreferences.pipBackgroundPlayReducesBatteryDrain
 
         val isPipEnabled by enablePip.collectAsState()
+        val firstButtonAction by pipFirstButtonAction.collectAsState()
 
         return Preference.PreferenceGroup(
             title = stringResource(AYMR.strings.pref_category_pip),
@@ -308,6 +310,17 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                         2 to stringResource(AMMR.strings.pip_first_button_action_background_play),
                     ),
                     enabled = isPipEnabled,
+                ),
+                // AM (PIP_BACKGROUND_PLAY_MODE_FIX) -->
+                // Only meaningful when the "Background Play" first-button-action is
+                // actually selected (option 2 above) - enabled reflects that, same
+                // pattern as the other entries here being gated on isPipEnabled.
+                // <-- AM (PIP_BACKGROUND_PLAY_MODE_FIX)
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = pipBackgroundPlayReducesBatteryDrain,
+                    title = "Reduce battery drain",
+                    subtitle = "PIP will cut audio temporarily on transitions",
+                    enabled = isPipEnabled && firstButtonAction == 2,
                 ),
             ),
         )

@@ -411,6 +411,12 @@ class PlayerActivity : BaseActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // AM (VIEW_RECREATION_DIAGNOSTIC_FIX) -->
+        // See onCreate()'s own doc comment - same identityHashCode printed here
+        // lets a log capture confirm whether this fired on the SAME instance
+        // onCreate already logged, or a different one.
+        // <-- AM (VIEW_RECREATION_DIAGNOSTIC_FIX)
+        android.util.Log.d("PlayerActivity", "PVDESYNC onNewIntent: hashCode=${System.identityHashCode(this)}")
 
         val animeId = intent.extras?.getLong("animeId") ?: -1
         val episodeId = intent.extras?.getLong("episodeId") ?: -1
@@ -651,6 +657,17 @@ class PlayerActivity : BaseActivity() {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
+        // AM (VIEW_RECREATION_DIAGNOSTIC_FIX) -->
+        // Confirmed via full_repro.log: MpvSurface's factory (creating a fresh
+        // TextureView/SurfaceView from scratch) fired twice across a repro
+        // involving only backgrounding/reopening, not an explicit close. This
+        // logs whether that correlates with a genuinely fresh Activity instance
+        // (onCreate) or an existing one just receiving a new Intent
+        // (onNewIntent, which shouldn't recreate any Compose content at all) -
+        // needed to know which of those it actually is before chasing a fix at
+        // the wrong level again.
+        // <-- AM (VIEW_RECREATION_DIAGNOSTIC_FIX)
+        android.util.Log.d("PlayerActivity", "PVDESYNC onCreate: hashCode=${System.identityHashCode(this)}")
         enableEdgeToEdge()
         registerSecureActivity(this)
         super.onCreate(savedInstanceState)
@@ -1402,6 +1419,15 @@ class PlayerActivity : BaseActivity() {
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        // AM (VIEW_RECREATION_DIAGNOSTIC_FIX) -->
+        // See onCreate()'s own doc comment - same purpose, checking whether this
+        // specific transition correlates with a fresh MpvSurface factory call.
+        // <-- AM (VIEW_RECREATION_DIAGNOSTIC_FIX)
+        android.util.Log.d(
+            "PlayerActivity",
+            "PVDESYNC onPictureInPictureModeChanged: isInPip=$isInPictureInPictureMode " +
+                "hashCode=${System.identityHashCode(this)}",
+        )
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Entering PIP is safe to mark immediately. Clearing it on exit is deferred into
         // each branch below so startBackgroundPlayback() (when it runs) can set
@@ -1529,44 +1555,68 @@ class PlayerActivity : BaseActivity() {
                         PIP_SKIP -> viewModel.seekBy(10)
                         PIP_BACKGROUND_PLAY -> {
                             // Manually trigger the background-audio path (onPause() skips
-                            // it while still in PIP), then finish() to exit PIP and this
-                            // session's session-preservation architecture (see
-                            // isBackgroundPlayTransitionFinish's doc comment) keeps the
-                            // underlying player/Service alive exactly as moveTaskToBack()
-                            // used to, but via finish() instead - a real Activity/Task
-                            // destruction, not backgrounding a still-pinned task.
-                            // force=true: an explicit user action, so this should work
-                            // even while paused - see enterBackground()'s doc comment.
+                            // it while still in PIP).
                             // AM (ENTER_BACKGROUND_CONSOLIDATION) -->
                             enterBackground(force = true)
                             // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
                             isIntentionalBackgroundTransition = true
-                            // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
-                            isBackgroundPlayTransitionFinish = true
-                            // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
-                            // AM (AUTO_PIP_LOOP_FIX) -->
-                            // Disable auto-enter-PIP before finishing, and return
-                            // immediately after - skipping the unconditional
-                            // setPictureInPictureParams() call below entirely for this
-                            // action. Likely no longer strictly necessary now that this
-                            // finishes rather than moveTaskToBack()s (finish() doesn't
-                            // trigger onUserLeaveHint(), which is what the auto-PIP loop
-                            // this originally guarded against was rooted in) - left in
-                            // place as a harmless safety net rather than removed outright.
-                            setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
-                            // AM (PIP_MOVETASKTOBACK_RACE_FIX) -->
-                            // Deferred via post(), not called inline, for the same reason
-                            // this was originally deferred for moveTaskToBack(): the system
-                            // is still processing this button tap's own broadcast dispatch
-                            // at the moment this runs, and asking it to also finish() the
-                            // Activity inline risks colliding with that in-flight work.
-                            // Posting it instead lets the current dispatch settle first.
-                            Handler(Looper.getMainLooper()).post {
-                                finish()
+
+                            // AM (PIP_BACKGROUND_PLAY_MODE_FIX) -->
+                            // See pipBackgroundPlayReducesBatteryDrain's own doc comment
+                            // for the full reasoning on why moveTaskToBack() (keeping this
+                            // Activity/Task alive, just hidden) is the default branch here
+                            // despite BRANCH_NOTES.md's own prior finding attributing a
+                            // real crash to it - and why finish() remains available as an
+                            // explicit opt-in for users who'd rather not keep an Activity
+                            // alive during audio-only playback.
+                            // <-- AM (PIP_BACKGROUND_PLAY_MODE_FIX)
+                            if (playerPreferences.pipBackgroundPlayReducesBatteryDrain.get()) {
+                                // finish() to exit PIP and this session's session-
+                                // preservation architecture (see isBackgroundPlayTransitionFinish's
+                                // doc comment) keeps the underlying player/Service alive exactly
+                                // as moveTaskToBack() used to, but via finish() instead - a real
+                                // Activity/Task destruction, not backgrounding a still-pinned
+                                // task. force=true: an explicit user action, so this should work
+                                // even while paused - see enterBackground()'s doc comment.
+                                // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
+                                isBackgroundPlayTransitionFinish = true
+                                // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
+                                // AM (AUTO_PIP_LOOP_FIX) -->
+                                // Disable auto-enter-PIP before finishing, and return
+                                // immediately after - skipping the unconditional
+                                // setPictureInPictureParams() call below entirely for this
+                                // action. Likely no longer strictly necessary now that this
+                                // finishes rather than moveTaskToBack()s (finish() doesn't
+                                // trigger onUserLeaveHint(), which is what the auto-PIP loop
+                                // this originally guarded against was rooted in) - left in
+                                // place as a harmless safety net rather than removed outright.
+                                setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
+                                // AM (PIP_MOVETASKTOBACK_RACE_FIX) -->
+                                // Deferred via post(), not called inline, for the same reason
+                                // this was originally deferred for moveTaskToBack(): the system
+                                // is still processing this button tap's own broadcast dispatch
+                                // at the moment this runs, and asking it to also finish() the
+                                // Activity inline risks colliding with that in-flight work.
+                                // Posting it instead lets the current dispatch settle first.
+                                Handler(Looper.getMainLooper()).post {
+                                    finish()
+                                }
+                                // <-- AM (PIP_MOVETASKTOBACK_RACE_FIX)
+                                // <-- AM (AUTO_PIP_LOOP_FIX)
+                            } else {
+                                // Same disable-auto-enter-PIP reasoning as the finish()
+                                // branch above - this is exactly the "leaving" signal
+                                // AUTO_PIP_LOOP_FIX guards against re-triggering.
+                                setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
+                                // Deferred via post() for the same reason noted in finding
+                                // #7 of BRANCH_NOTES.md: moveTaskToBack() on a still-pinned
+                                // task, called from inside this broadcast dispatch itself,
+                                // is safer posted than called inline.
+                                Handler(Looper.getMainLooper()).post {
+                                    moveTaskToBack(true)
+                                }
                             }
-                            // <-- AM (PIP_MOVETASKTOBACK_RACE_FIX)
                             return
-                            // <-- AM (AUTO_PIP_LOOP_FIX)
                         }
                     }
                     setPictureInPictureParams(createPipParams())

@@ -80,6 +80,21 @@ class MPVPlayer(
     var hasAttachedSurfaceBefore = false
     // <-- AM (HWDEC_REATTACH_FIX)
 
+    // AM (VO_REATTACH_FIX) -->
+    // Same reasoning as hasAttachedSurfaceBefore just above, for the same reason:
+    // lives on this persistent object, not a local var that would reset on every
+    // fresh Composable/Activity instance. Tracks specifically "has vo already been
+    // downgraded to the lighter 'gpu' at least once" - distinct from
+    // hasAttachedSurfaceBefore itself, since that only answers "is this a reattach
+    // at all", not "has the one-time downgrade already happened". Needed so the
+    // downgrade genuinely only happens once: setting vo to "gpu" again on a THIRD,
+    // fourth, etc. reattach - even though the value wouldn't be changing - risked
+    // being just as disruptive as the redundant hwdec-touching HWDEC_REATTACH_FIX
+    // already found and fixed above, while still needing to happen at least once
+    // for users whose actual preference isn't already "gpu".
+    // <-- AM (VO_REATTACH_FIX)
+    var hasSetLighterVoOnReattach = false
+
     // AM (HOT_VIDEO_BACKGROUND) -->
     /**
      * Off-screen Surface (backed by an ImageReader that immediately discards every
@@ -449,10 +464,21 @@ class MPVPlayer(
     }
 
     override fun onAudioFocusChange(focusChange: Int) {
+        // AM (AUDIO_BLIP_SOURCE_LOG_FIX) -->
+        // Confirmed via full_repro.log: a "Set property: pause -> 1" precedes each
+        // reported audio blip, but that line alone doesn't say which of the several
+        // callers issued it (PlayerViewModel.pause()/unpause(), the sleep timer,
+        // PlayerMediaHolder.setPaused(), or here) - this logs specifically which
+        // one, to confirm or rule this out directly rather than guessing further.
+        // <-- AM (AUDIO_BLIP_SOURCE_LOG_FIX)
+        logcat(LogPriority.DEBUG) { "PVDESYNC onAudioFocusChange fired: focusChange=$focusChange" }
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 val oldRestore = restoreAudioFocus
                 val wasPlayerPaused = mpv.getPropertyBoolean("pause") ?: true
+                logcat(LogPriority.DEBUG) {
+                    "PVDESYNC onAudioFocusChange: pausing (wasPlayerPaused=$wasPlayerPaused)"
+                }
                 mpv.setPropertyBoolean("pause", true)
                 restoreAudioFocus = {
                     oldRestore()

@@ -666,6 +666,26 @@ class PlayerViewModel @JvmOverloads constructor(
      * already backgrounded. Doing it here, right before the one operation that
      * actually needs it, means the common "just keep playing the same episode in
      * the background" case never touches hwdec at all.
+     *
+     * AM (AUDIO_BLIP_FIX_2) -->
+     * hasAttachedSurface now checks player.hasAttachedSurfaceBefore, not just
+     * isSurfaceAttached - MPVPlayer.ensureDummySurface() (see MpvSurface.kt's
+     * surfaceDestroyed) swaps onto an always-present dummy Surface the instant the
+     * real one detaches, rather than fully detaching. That dummy surface was
+     * itself specifically confirmed (via logcat - see DUMMY_SURFACE_FORMAT_FIX) to
+     * correctly support a fresh hardware decoder session attaching to it. So
+     * isSurfaceAttached alone was the wrong signal by the time this code ran: it
+     * answers "is the REAL surface attached right now", but the actual question
+     * that matters for hwdec init is "does ANY valid surface exist" - which,
+     * thanks to the dummy, is true continuously from the first real attach onward,
+     * even while backgrounded. hasAttachedSurfaceBefore (a one-way flag, set once
+     * and never unset) is that signal. This means loading a new episode while
+     * already backgrounded no longer needs to disable hwdec at all, except in the
+     * genuinely narrow window before the surface has ever been attached even once
+     * (very early cold start, before Compose has rendered the SurfaceView for the
+     * first time) - there's no dummy surface yet to fall back on at that point
+     * either, so hwdec still needs to stay off then.
+     * <-- AM (AUDIO_BLIP_FIX_2)
      */
     private fun loadFile(url: String, options: String) {
         // AM (SHARED_LOAD_FILE_FIX) -->
@@ -673,7 +693,11 @@ class PlayerViewModel @JvmOverloads constructor(
         // exact logic inline; now both this and PlayerMediaHolder's background-skip
         // equivalent call the same shared function.
         // <-- AM (SHARED_LOAD_FILE_FIX)
-        mpv.loadFileWithHwdecGuard(url, options, hasAttachedSurface = isSurfaceAttached)
+        mpv.loadFileWithHwdecGuard(
+            url,
+            options,
+            hasAttachedSurface = isSurfaceAttached || player.hasAttachedSurfaceBefore,
+        )
     }
     // <-- AM (AUDIO_BLIP_FIX)
 
@@ -2884,14 +2908,22 @@ class PlayerViewModel @JvmOverloads constructor(
         updateStateData { it.copy(isPipAvailable = value) }
     }
 
-    fun pauseUnpause() = mpvCommand("cycle", "pause")
+    fun pauseUnpause() {
+        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerViewModel.pauseUnpause() called" }
+        mpvCommand("cycle", "pause")
+    }
     fun pause() {
+        // AM (AUDIO_BLIP_SOURCE_LOG_FIX) -->
+        // See MPVPlayer.onAudioFocusChange()'s own doc comment - same reason.
+        // <-- AM (AUDIO_BLIP_SOURCE_LOG_FIX)
+        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerViewModel.pause() called" }
         setPropertyBoolean("pause", true)
 
         // PiP needs the state immediately
         updatePlaybackData { it.copy(paused = true) }
     }
     fun unpause() {
+        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerViewModel.unpause() called" }
         setPropertyBoolean("pause", false)
         updatePlaybackData { it.copy(paused = false) }
     }
