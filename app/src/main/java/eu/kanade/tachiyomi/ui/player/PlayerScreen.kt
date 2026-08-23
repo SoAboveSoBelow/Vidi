@@ -116,6 +116,28 @@ fun PlayerScreen(
 
     var hasNavigatedBack by remember { mutableStateOf(false) }
 
+    // AM (BACK_HANDLER_STALE_GUARD_FIX) -->
+    // hasNavigatedBack exists to prevent a rapid double-tap of back from firing
+    // this handler's body twice in quick succession (redundant EnterPip/onBack()
+    // calls mid-transition) - a real, worth-keeping protection. But it never
+    // reset back to false on its own, which was invisible for as long as this
+    // Composable was destroyed and rebuilt on every PIP-hide/reopen cycle (a
+    // fresh remember{} each time). Now that the Activity (and this Composable)
+    // can genuinely survive many such cycles in a row (see
+    // PIP_BACKGROUND_PLAY_MODE_FIX), the first back-press-to-enter-PIP of a long
+    // session permanently set this true - every later back press, including a
+    // genuine "leave the player" one, silently did nothing from then on.
+    // Resetting it after a short debounce window preserves the original
+    // rapid-double-tap protection while not permanently blocking every
+    // subsequent, genuinely separate back press for the rest of the session.
+    LaunchedEffect(hasNavigatedBack) {
+        if (hasNavigatedBack) {
+            delay(500)
+            hasNavigatedBack = false
+        }
+    }
+    // <-- AM (BACK_HANDLER_STALE_GUARD_FIX)
+
     BackHandler {
         if (!hasNavigatedBack) {
             hasNavigatedBack = true

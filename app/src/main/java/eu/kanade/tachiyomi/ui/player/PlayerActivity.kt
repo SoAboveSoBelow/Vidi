@@ -278,6 +278,7 @@ class PlayerActivity : BaseActivity() {
                         // teardown path.
                         viewModel.pause()
                         stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
+                        android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #1 (explicit stop, line ~281)")
                         finish()
                     },
                 )
@@ -424,6 +425,7 @@ class PlayerActivity : BaseActivity() {
         val hostIndex = intent.extras?.getInt("hostIndex") ?: -1
         val vidIndex = intent.extras?.getInt("vidIndex") ?: -1
         if (animeId == -1L || episodeId == -1L) {
+            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #2 (invalid onNewIntent data, line ~427)")
             finish()
             return
         }
@@ -683,6 +685,7 @@ class PlayerActivity : BaseActivity() {
         // isDuplicateInstanceSelfTerminating's doc comment for why this exists at all.
         if (liveInstanceCount > 1) {
             isDuplicateInstanceSelfTerminating = true
+            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #3 (duplicate instance self-terminate, line ~686)")
             finish()
             return
         }
@@ -719,6 +722,7 @@ class PlayerActivity : BaseActivity() {
                 toast(throwable.message)
             }
             logcat(LogPriority.ERROR, throwable)
+            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #4 (init throwable, line ~722)")
             finish()
         }
 
@@ -754,6 +758,7 @@ class PlayerActivity : BaseActivity() {
                         // No-op: used to toast "<anime> - <episode>" on change; not wanted.
                     }
                     PlayerViewModel.Event.Finish -> {
+                        android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #5 (Event.Finish, line ~757)")
                         finish()
                     }
                     is PlayerViewModel.Event.InitialEpisodeError -> {
@@ -893,6 +898,7 @@ class PlayerActivity : BaseActivity() {
                                 }
                             }
                             // <-- AM (BACK_FALLBACK_TO_ANIME)
+                            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #6 (back fallback to anime, line ~896)")
                             finish()
                         }
                     },
@@ -915,6 +921,18 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onDestroy() {
+        // AM (PVDESYNC_ONDESTROY_LOG_FIX) -->
+        // Logs isFinishing/isChangingConfigurations to distinguish our own
+        // finish() calls (isFinishing=true) from the OS destroying this Activity
+        // for an unrelated reason (isFinishing=false) - see the numbered
+        // finish() site logs throughout this file for identifying which specific
+        // call site, if any, actually fired before this.
+        // <-- AM (PVDESYNC_ONDESTROY_LOG_FIX)
+        android.util.Log.d(
+            "PlayerActivity",
+            "PVDESYNC onDestroy: hashCode=${System.identityHashCode(this)} " +
+                "isFinishing=$isFinishing isChangingConfigurations=$isChangingConfigurations",
+        )
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Safety net: onPictureInPictureModeChanged(false, ...) normally clears this, but
         // isn't guaranteed to fire if the activity is destroyed directly out of PIP.
@@ -1349,6 +1367,25 @@ class PlayerActivity : BaseActivity() {
     // <-- AM (PIP_RECREATE_FIX_REMOVED)
     private fun tryEnterPictureInPicture(params: PictureInPictureParams?) {
         isPipEntryPending = true
+        // AM (PIP_LOCK_RACE_FIX) -->
+        // Confirmed via a full, unfiltered logcat capture with exact timestamps:
+        // entering PIP resumes MainActivity (the synthetic back-stack entry ahead
+        // of PlayerActivity - see setAppLock()'s own doc comment) as part of the
+        // framework's own PIP-entry transition, and that resume's app-lock check
+        // fired a mere 26ms later - 411ms BEFORE this Activity's own
+        // onPictureInPictureModeChanged(true, ...) callback (which is what used
+        // to be the only place setPipActive(true) got called) ever ran. The
+        // isBackgroundPlaybackActive guard in setAppLock() was correct in
+        // principle; it was just checking a flag this code hadn't set yet,
+        // consistently and by a wide margin, not as a rare race. Setting it here
+        // - synchronously, before enterPictureInPictureMode() is even called, so
+        // there's no window for the OS to resume MainActivity ahead of it -
+        // closes that gap instead of trying to win a callback race that was
+        // never close enough to win. Safe to also still be set again later in
+        // onPictureInPictureModeChanged() - setPipActive() is idempotent for the
+        // same value.
+        // <-- AM (PIP_LOCK_RACE_FIX)
+        SecureActivityDelegate.setPipActive(true)
         if (params != null) {
             enterPictureInPictureMode(params)
         } else {
@@ -1496,9 +1533,63 @@ class PlayerActivity : BaseActivity() {
                     window.decorView.postDelayed(
                         {
                             if (lifecycle.currentState == Lifecycle.State.CREATED && !isFinishing) {
-                                SecureActivityDelegate.setPipActive(false)
-                                viewModel.player.release()
-                                finish()
+                                // AM (PIP_DISMISS_RELEASE_CRASH_FIX) -->
+                                // Confirmed via a full, unfiltered logcat capture: this
+                                // branch used to unconditionally call
+                                // viewModel.player.release() (a full, permanent native
+                                // mpv.close()) - regardless of whether background
+                                // playback should be continuing. That directly
+                                // contradicts the entire Service-owned-player
+                                // architecture: PlayerMediaHolder/the Service holds
+                                // this SAME MPVPlayer instance and depends on it
+                                // staying alive for background playback to work at
+                                // all. If background playback had already started (or
+                                // was about to, via the SAME transition this branch is
+                                // reacting to), releasing the shared player out from
+                                // under it left the Service holding a closed, invalid
+                                // native handle - confirmed by the log: "libmpv is not
+                                // initialized" and an EGL context leak warning
+                                // appeared within milliseconds of this firing, then
+                                // the whole process died. This wasn't a rare edge case
+                                // - it directly reproduced the reported "app crashed
+                                // when I removed the PIP".
+                                //
+                                // Mirrors enterBackground()'s own, already-correct
+                                // decision instead of ignoring it: if background
+                                // playback should continue, do exactly that (and stay
+                                // alive, matching PIP_BACKGROUND_PLAY_MODE_FIX's own
+                                // reasoning for why finish() isn't the right response
+                                // to "stop showing video" when the player itself
+                                // should keep going) - only genuinely release and
+                                // finish when background playback is actually
+                                // disabled, which is the one case where nothing should
+                                // keep this session alive.
+                                // <-- AM (PIP_DISMISS_RELEASE_CRASH_FIX)
+                                if (playerPreferences.backgroundPlayback.get()) {
+                                    // AM (PIP_DISMISS_PAUSE_FIX) -->
+                                    // Explicitly pause before backgrounding here,
+                                    // unlike the headphones "Background Play" button's
+                                    // own enterBackground(force = true) call, which
+                                    // deliberately keeps playing - that's a distinct,
+                                    // explicit "keep listening" action, while
+                                    // dismissing the PIP window itself is more
+                                    // ambiguous and closer to "I'm done with this
+                                    // for now." Still starts background playback
+                                    // (via enterBackground's own force=true) so the
+                                    // session/notification survives and can be
+                                    // resumed - just not actively playing audio the
+                                    // user didn't ask to keep hearing.
+                                    // <-- AM (PIP_DISMISS_PAUSE_FIX)
+                                    viewModel.pause()
+                                    isIntentionalBackgroundTransition = true
+                                    enterBackground(force = true)
+                                    moveTaskToBack(true)
+                                } else {
+                                    SecureActivityDelegate.setPipActive(false)
+                                    viewModel.player.release()
+                                    android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #7 (PIP dismissal 100ms check, line ~1501)")
+                                    finish()
+                                }
                             }
                         },
                         100,
@@ -1599,6 +1690,7 @@ class PlayerActivity : BaseActivity() {
                                 // Activity inline risks colliding with that in-flight work.
                                 // Posting it instead lets the current dispatch settle first.
                                 Handler(Looper.getMainLooper()).post {
+                                    android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #8 (Background Play button, line ~1602)")
                                     finish()
                                 }
                                 // <-- AM (PIP_MOVETASKTOBACK_RACE_FIX)
@@ -1765,6 +1857,7 @@ class PlayerActivity : BaseActivity() {
                 // inventing an unsafe shortcut.
                 viewModel.pause()
                 stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
+                android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #9 (explicit stop, line ~1768)")
                 finish()
                 // <-- AM (MEDIASESSION_STOP_SAFETY_FIX)
             }
@@ -1823,6 +1916,7 @@ class PlayerActivity : BaseActivity() {
             showToast(error.message ?: "")
         }
         logcat(LogPriority.ERROR, error)
+        android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #10 (error handler, line ~1826)")
         finish()
     }
 
