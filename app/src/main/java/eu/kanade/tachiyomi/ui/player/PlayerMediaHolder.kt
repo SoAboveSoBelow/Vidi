@@ -233,10 +233,6 @@ class PlayerMediaHolder(
 
     /** Directly pauses/resumes mpv, independent of any ViewModel. Safe to call with no Activity attached. */
     fun setPaused(paused: Boolean) {
-        // AM (AUDIO_BLIP_SOURCE_LOG_FIX) -->
-        // See MPVPlayer.onAudioFocusChange()'s own doc comment - same reason.
-        // <-- AM (AUDIO_BLIP_SOURCE_LOG_FIX)
-        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerMediaHolder.setPaused($paused) called" }
         _player?.mpv?.setPropertyBoolean("pause", paused)
         updateState { it.copy(paused = paused) }
     }

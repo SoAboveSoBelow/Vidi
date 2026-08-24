@@ -668,23 +668,19 @@ class PlayerViewModel @JvmOverloads constructor(
      * the background" case never touches hwdec at all.
      *
      * AM (AUDIO_BLIP_FIX_2) -->
-     * hasAttachedSurface now checks player.hasAttachedSurfaceBefore, not just
-     * isSurfaceAttached - MPVPlayer.ensureDummySurface() (see MpvSurface.kt's
-     * surfaceDestroyed) swaps onto an always-present dummy Surface the instant the
-     * real one detaches, rather than fully detaching. That dummy surface was
-     * itself specifically confirmed (via logcat - see DUMMY_SURFACE_FORMAT_FIX) to
-     * correctly support a fresh hardware decoder session attaching to it. So
-     * isSurfaceAttached alone was the wrong signal by the time this code ran: it
-     * answers "is the REAL surface attached right now", but the actual question
-     * that matters for hwdec init is "does ANY valid surface exist" - which,
-     * thanks to the dummy, is true continuously from the first real attach onward,
-     * even while backgrounded. hasAttachedSurfaceBefore (a one-way flag, set once
-     * and never unset) is that signal. This means loading a new episode while
-     * already backgrounded no longer needs to disable hwdec at all, except in the
-     * genuinely narrow window before the surface has ever been attached even once
-     * (very early cold start, before Compose has rendered the SurfaceView for the
-     * first time) - there's no dummy surface yet to fall back on at that point
-     * either, so hwdec still needs to stay off then.
+     * hasAttachedSurface checks player.hasAttachedSurfaceBefore, not just
+     * isSurfaceAttached - the player's SurfaceTexture is created once and
+     * persists for its whole lifetime (see MPVPlayer.persistentSurfaceTexture),
+     * so once a real surface has ever attached, a valid target exists
+     * continuously from then on, foreground or backgrounded either way.
+     * isSurfaceAttached alone would answer "is a TextureView currently
+     * displaying it right now", which isn't the question that matters for
+     * hwdec init - hasAttachedSurfaceBefore (a one-way flag, set once and
+     * never unset) is. This means loading a new episode while already
+     * backgrounded doesn't need to disable hwdec at all, except in the
+     * genuinely narrow window before the surface has ever been attached even
+     * once (very early cold start, before Compose has rendered the TextureView
+     * for the first time).
      * <-- AM (AUDIO_BLIP_FIX_2)
      */
     private fun loadFile(url: String, options: String) {
@@ -2722,15 +2718,33 @@ class PlayerViewModel @JvmOverloads constructor(
     // self-heals reactively from this value instead of timing a one-shot reapply.
     private var lastKnownAudioTrackId: Int? = null
 
+    // Tracks the pending, debounced restore below - cancelled whenever a genuine
+    // value change arrives, so a real track switch is never delayed by this.
+    private var pendingAudioTrackRestoreJob: Job? = null
+
     private fun onAudioTrackSelectChange() {
         val id = mpv.getPropertyInt("aid")
         if (id != null && id > 0) {
             lastKnownAudioTrackId = id
+            pendingAudioTrackRestoreJob?.cancel()
         } else if (!uiData.value.isLoadingEpisode) {
             // Guarded by isLoadingEpisode so this doesn't fight genuine "no track
             // selected yet" states during an actual new episode load.
-            lastKnownAudioTrackId?.let { savedId ->
-                if (savedId > 0) setPropertyInt("aid", savedId)
+            //
+            // Debounced past mpv's own documented ~100-200ms clear window (see
+            // lastKnownAudioTrackId's doc comment above), and re-checks aid is
+            // STILL cleared before restoring, rather than acting on the very
+            // first flow emission - avoids fighting mpv's own in-flight
+            // reconfigure while it's still settling.
+            pendingAudioTrackRestoreJob?.cancel()
+            pendingAudioTrackRestoreJob = viewModelScope.launch {
+                delay(300)
+                val stillCleared = (mpv.getPropertyInt("aid") ?: 0) <= 0
+                if (stillCleared) {
+                    lastKnownAudioTrackId?.let { savedId ->
+                        if (savedId > 0) setPropertyInt("aid", savedId)
+                    }
+                }
             }
         }
 
@@ -2909,21 +2923,15 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     fun pauseUnpause() {
-        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerViewModel.pauseUnpause() called" }
         mpvCommand("cycle", "pause")
     }
     fun pause() {
-        // AM (AUDIO_BLIP_SOURCE_LOG_FIX) -->
-        // See MPVPlayer.onAudioFocusChange()'s own doc comment - same reason.
-        // <-- AM (AUDIO_BLIP_SOURCE_LOG_FIX)
-        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerViewModel.pause() called" }
         setPropertyBoolean("pause", true)
 
         // PiP needs the state immediately
         updatePlaybackData { it.copy(paused = true) }
     }
     fun unpause() {
-        logcat(LogPriority.DEBUG) { "PVDESYNC PlayerViewModel.unpause() called" }
         setPropertyBoolean("pause", false)
         updatePlaybackData { it.copy(paused = false) }
     }

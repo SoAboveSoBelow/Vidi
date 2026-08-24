@@ -14,37 +14,14 @@ import uy.kohesive.injekt.api.get
 
 // Reference: https://github.com/MakD/AFinity/blob/master/app/src/main/java/com/makd/afinity/ui/player/components/MpvSurface.kt
 // AM (SURFACE_TO_TEXTURE_VIEW_FIX) -->
-// Switched from SurfaceView to TextureView. First attempted, then reverted, when
-// this session mistakenly attributed the reattach blip to SurfaceView alone - a
-// log at the time showed "creating a new TextureView" firing twice, which
-// actually meant the whole Activity was being destroyed and recreated (a
-// separate bug, since fixed - see PIP_BACKGROUND_PLAY_MODE_FIX), confounding
-// that test entirely. Once the Activity-recreation bug was fixed and the same
-// repro was re-run against plain SurfaceView, the blip still occurred - "Probing
-// for best GPU context" and an audio underrun still fired on every PIP-hide/
-// reopen, on the SAME, confirmed-surviving Activity instance (verified via
-// identityHashCode logging staying constant across the whole repro). That
-// isolates the real, remaining cause correctly this time: SurfaceView's surface
-// itself is torn down and recreated on every visibility change, independent of
-// whether the Activity survives - exactly why ensureDummySurface()'s dummy-
-// surface-swap architecture exists in the first place, to have something to
-// fall back to once the real one is gone. TextureView's surface is part of the
-// normal View hierarchy's own rendering rather than a separate compositor
-// window, so it generally is NOT torn down just for a visibility change -
-// attachSurface() should only need to run once, for real, this time.
-// The dummy-surface fallback (ensureDummySurface()) is kept as a safety net for
-// onSurfaceTextureDestroyed, since it CAN still fire for a genuine Activity
-// destruction even if it doesn't fire for ordinary backgrounding.
-//
-// The real, honest tradeoff: TextureView is composited through the normal GPU
-// pipeline each frame rather than being hardware-overlaid directly the way
-// SurfaceView is - a real, permanent per-frame cost, not a rounding error, even
-// though it's usually imperceptible for video playback on modern hardware. This
-// still needs actual device testing to confirm both that it fixes the blip now
-// that the confounding Activity-recreation bug is gone, and that it doesn't
-// introduce a different, worse regression - not something to trust as correct
-// on the strength of this reasoning alone, especially given this exact change
-// was tried and looked inconclusive once already this session.
+// Uses TextureView rather than SurfaceView: TextureView's surface is part of
+// the normal View hierarchy's own rendering rather than a separate compositor
+// window, so it isn't torn down just for a visibility change the way
+// SurfaceView's is - attachSurface() only needs to run once, for real. The
+// real, honest tradeoff: TextureView is composited through the normal GPU
+// pipeline each frame rather than being hardware-overlaid directly, a real,
+// permanent per-frame cost, though usually imperceptible for video playback
+// on modern hardware.
 // <-- AM (SURFACE_TO_TEXTURE_VIEW_FIX)
 @Composable
 fun MpvSurface(
@@ -68,50 +45,37 @@ fun MpvSurface(
                         width: Int,
                         height: Int,
                     ) {
+                        // AM (PERSISTENT_SURFACE_ARCHITECTURE) -->
+                        // Deliberately handled here, not in factory{}'s apply{}
+                        // block - calling setSurfaceTexture() before this View is
+                        // attached to a window doesn't prevent this callback from
+                        // firing with a brand new default texture anyway. Instead:
+                        // let this always-throwaway default texture get created as
+                        // normal (Android silently releases it without even
+                        // calling onSurfaceTextureDestroyed, per its own
+                        // documented setSurfaceTexture() contract - harmless
+                        // churn, mpv is never told about it), and swap to the real
+                        // persistent one immediately, before doing anything else.
+                        // Only reached on a genuinely fresh player - the very
+                        // first, whole-player-lifetime attach - does this NOT find
+                        // an existing persistent texture and go on to claim this
+                        // one as the permanent one instead.
+                        player.persistentSurfaceTexture?.let { existing ->
+                            setSurfaceTexture(existing)
+                            onSurfaceAttachedChanged(true)
+                            return
+                        }
+                        player.persistentSurfaceTexture = surfaceTexture
+                        // <-- AM (PERSISTENT_SURFACE_ARCHITECTURE)
                         mpv.attachSurface(Surface(surfaceTexture))
                         mpv.setPropertyString("android-surface-size", "${width}x$height")
                         mpv.setOptionString("force-window", "yes")
-                        // AM (VO_REATTACH_FIX) -->
-                        // Mirrors HWDEC_REATTACH_FIX's own finding just below:
-                        // setting an mpv property isn't a no-op just because the
-                        // value happens to be unchanged, it can still force a
-                        // reconfigure. Kept even after the TextureView switch as a
-                        // second layer of protection - this callback is expected to
-                        // fire only once per genuine session now, but if it's ever
-                        // called again for any reason, this still avoids a redundant
-                        // vo re-set rather than assuming it can't happen.
-                        // <-- AM (VO_REATTACH_FIX)
-                        when {
-                            !player.hasAttachedSurfaceBefore -> {
-                                mpv.setPropertyString("vo", videoOutput)
-                            }
-                            !player.hasSetLighterVoOnReattach -> {
-                                mpv.setPropertyString("vo", "gpu")
-                                player.hasSetLighterVoOnReattach = true
-                            }
-                        }
-                        // AM (VID_REATTACH_FIX) -->
-                        // Same reasoning as vo above - kept as a second layer of
-                        // protection even though this should now only run once.
-                        // <-- AM (VID_REATTACH_FIX)
-                        if (!player.hasAttachedSurfaceBefore) {
-                            mpv.setOptionString("vid", "auto")
-                        }
-                        // AM (HWDEC_REATTACH_FIX) -->
-                        // Only set on the very first attach, not on every reattach.
-                        // Setting "hwdec" isn't a no-op even when the value is
-                        // unchanged - it forces MediaCodec to tear down and
-                        // reinitialize its decoder session, which needs a fresh
-                        // keyframe to resume cleanly. Kept as a second layer of
-                        // protection past the TextureView switch, same reasoning as
-                        // vo/vid above.
-                        // <-- AM (HWDEC_REATTACH_FIX)
-                        if (!player.hasAttachedSurfaceBefore) {
-                            mpv.setOptionString(
-                                "hwdec",
-                                if (decoderPreferences.tryHWDecoding.get()) "mediacodec,mediacodec-copy" else "no",
-                            )
-                        }
+                        mpv.setPropertyString("vo", videoOutput)
+                        mpv.setOptionString("vid", "auto")
+                        mpv.setOptionString(
+                            "hwdec",
+                            if (decoderPreferences.tryHWDecoding.get()) "mediacodec" else "no",
+                        )
                         player.hasAttachedSurfaceBefore = true
                         // Audio track re-selection after this reconfig is handled
                         // reactively in PlayerViewModel.onAudioTrackSelectChange.
@@ -130,29 +94,28 @@ fun MpvSurface(
 
                     override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
                         // AM (AUDIO_BLIP_FIX) -->
-                        // See SURFACE_TO_TEXTURE_VIEW_FIX's own doc comment above -
-                        // expected to be the rare exception now (a genuine Activity
-                        // destruction), not the routine background/PIP-hide path it
-                        // used to be with SurfaceView.
                         onSurfaceAttachedChanged(false)
                         // <-- AM (AUDIO_BLIP_FIX)
-                        // AM (HOT_VIDEO_BACKGROUND) -->
-                        // Swap onto the always-present dummy surface instead of nulling vo
-                        // and fully detaching - see MPVPlayer.ensureDummySurface()'s doc
-                        // comment for why: doing that while a video is actively mid-playback
-                        // (not mid-load) is an abrupt stop of the whole pipeline mid-stream,
-                        // and a plausible source of it never cleanly resuming. vo, hwdec, and
-                        // vid are deliberately left completely untouched here now - the whole
-                        // point is that backgrounding no longer touches any of them, only
-                        // where the frames land. force-window also stays "yes" permanently
-                        // after the first attach, for the same reason: a window/surface
-                        // always conceptually exists now, real or dummy.
-                        mpv.attachSurface(player.ensureDummySurface())
-                        // <-- AM (HOT_VIDEO_BACKGROUND)
-                        // Returning true hands ownership of releasing this SurfaceTexture
-                        // to the TextureView itself, the standard/expected contract - mpv
-                        // has already switched away to the dummy surface by this point.
-                        return true
+                        // AM (PERSISTENT_SURFACE_ARCHITECTURE) -->
+                        // This TextureView (a purely temporary, Activity-scoped
+                        // display) is going away, but the SurfaceTexture itself is
+                        // owned by the player (Service-scoped), not this View, and
+                        // must survive this. Per Android's own documented contract
+                        // for this callback's return value (confirmed against the
+                        // actual framework source, not just the javadoc, since the
+                        // two are worded ambiguously relative to each other):
+                        // returning true means the TextureView releases/destroys
+                        // it; returning false means the client keeps ownership and
+                        // is responsible for eventually calling release() itself -
+                        // this is the exact, official pattern AOSP's own "Grafika
+                        // Double Decode" sample uses to keep a SurfaceTexture alive
+                        // across Activity recreation. No mpv interaction here at
+                        // all - that's the entire point: nothing about
+                        // vo/wid/hwdec/vid ever needs to change again for the rest
+                        // of this player's life, regardless of how many times this
+                        // fires.
+                        return false
+                        // <-- AM (PERSISTENT_SURFACE_ARCHITECTURE)
                     }
 
                     override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {
@@ -160,6 +123,19 @@ fun MpvSurface(
                     }
                 }
             }
+        },
+        update = { textureView ->
+            // AM (PERSISTENT_SURFACE_ARCHITECTURE) -->
+            // Compose may reuse this exact TextureView instance across
+            // recompositions rather than always calling factory again - re-affirm
+            // the shared binding defensively if a persistent texture exists and
+            // this View isn't already showing it.
+            player.persistentSurfaceTexture?.let { existing ->
+                if (textureView.getSurfaceTexture() !== existing) {
+                    textureView.setSurfaceTexture(existing)
+                }
+            }
+            // <-- AM (PERSISTENT_SURFACE_ARCHITECTURE)
         },
     )
 }

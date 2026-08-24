@@ -117,8 +117,10 @@ class PlayerActivity : BaseActivity() {
 
     private var backgroundPlaybackService: PlayerBackgroundPlaybackService? = null
 
-    // Set before we intentionally moveTaskToBack() (e.g. PIP "background play"),
-    // so onPictureInPictureModeChanged doesn't treat it as the user swiping PIP away.
+    // Set before an intentional backgrounding transition we triggered ourselves -
+    // either the swipe-dismiss path's moveTaskToBack() or the headphones
+    // "Background Play" action's finish() - so onPictureInPictureModeChanged
+    // doesn't treat it as the user swiping PIP away unexpectedly.
     private var isIntentionalBackgroundTransition = false
 
     // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
@@ -278,7 +280,6 @@ class PlayerActivity : BaseActivity() {
                         // teardown path.
                         viewModel.pause()
                         stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
-                        android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #1 (explicit stop, line ~281)")
                         finish()
                     },
                 )
@@ -412,12 +413,6 @@ class PlayerActivity : BaseActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // AM (VIEW_RECREATION_DIAGNOSTIC_FIX) -->
-        // See onCreate()'s own doc comment - same identityHashCode printed here
-        // lets a log capture confirm whether this fired on the SAME instance
-        // onCreate already logged, or a different one.
-        // <-- AM (VIEW_RECREATION_DIAGNOSTIC_FIX)
-        android.util.Log.d("PlayerActivity", "PVDESYNC onNewIntent: hashCode=${System.identityHashCode(this)}")
 
         val animeId = intent.extras?.getLong("animeId") ?: -1
         val episodeId = intent.extras?.getLong("episodeId") ?: -1
@@ -425,7 +420,6 @@ class PlayerActivity : BaseActivity() {
         val hostIndex = intent.extras?.getInt("hostIndex") ?: -1
         val vidIndex = intent.extras?.getInt("vidIndex") ?: -1
         if (animeId == -1L || episodeId == -1L) {
-            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #2 (invalid onNewIntent data, line ~427)")
             finish()
             return
         }
@@ -659,17 +653,6 @@ class PlayerActivity : BaseActivity() {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
-        // AM (VIEW_RECREATION_DIAGNOSTIC_FIX) -->
-        // Confirmed via full_repro.log: MpvSurface's factory (creating a fresh
-        // TextureView/SurfaceView from scratch) fired twice across a repro
-        // involving only backgrounding/reopening, not an explicit close. This
-        // logs whether that correlates with a genuinely fresh Activity instance
-        // (onCreate) or an existing one just receiving a new Intent
-        // (onNewIntent, which shouldn't recreate any Compose content at all) -
-        // needed to know which of those it actually is before chasing a fix at
-        // the wrong level again.
-        // <-- AM (VIEW_RECREATION_DIAGNOSTIC_FIX)
-        android.util.Log.d("PlayerActivity", "PVDESYNC onCreate: hashCode=${System.identityHashCode(this)}")
         enableEdgeToEdge()
         registerSecureActivity(this)
         super.onCreate(savedInstanceState)
@@ -685,7 +668,6 @@ class PlayerActivity : BaseActivity() {
         // isDuplicateInstanceSelfTerminating's doc comment for why this exists at all.
         if (liveInstanceCount > 1) {
             isDuplicateInstanceSelfTerminating = true
-            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #3 (duplicate instance self-terminate, line ~686)")
             finish()
             return
         }
@@ -722,7 +704,6 @@ class PlayerActivity : BaseActivity() {
                 toast(throwable.message)
             }
             logcat(LogPriority.ERROR, throwable)
-            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #4 (init throwable, line ~722)")
             finish()
         }
 
@@ -758,7 +739,6 @@ class PlayerActivity : BaseActivity() {
                         // No-op: used to toast "<anime> - <episode>" on change; not wanted.
                     }
                     PlayerViewModel.Event.Finish -> {
-                        android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #5 (Event.Finish, line ~757)")
                         finish()
                     }
                     is PlayerViewModel.Event.InitialEpisodeError -> {
@@ -898,7 +878,6 @@ class PlayerActivity : BaseActivity() {
                                 }
                             }
                             // <-- AM (BACK_FALLBACK_TO_ANIME)
-                            android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #6 (back fallback to anime, line ~896)")
                             finish()
                         }
                     },
@@ -921,18 +900,6 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onDestroy() {
-        // AM (PVDESYNC_ONDESTROY_LOG_FIX) -->
-        // Logs isFinishing/isChangingConfigurations to distinguish our own
-        // finish() calls (isFinishing=true) from the OS destroying this Activity
-        // for an unrelated reason (isFinishing=false) - see the numbered
-        // finish() site logs throughout this file for identifying which specific
-        // call site, if any, actually fired before this.
-        // <-- AM (PVDESYNC_ONDESTROY_LOG_FIX)
-        android.util.Log.d(
-            "PlayerActivity",
-            "PVDESYNC onDestroy: hashCode=${System.identityHashCode(this)} " +
-                "isFinishing=$isFinishing isChangingConfigurations=$isChangingConfigurations",
-        )
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Safety net: onPictureInPictureModeChanged(false, ...) normally clears this, but
         // isn't guaranteed to fire if the activity is destroyed directly out of PIP.
@@ -1196,13 +1163,12 @@ class PlayerActivity : BaseActivity() {
 
     override fun onUserLeaveHint() {
         // AM (AUTO_PIP_LOOP_FIX) -->
-        // moveTaskToBack() (called by the headphones "Background Play" action,
-        // right after isIntentionalBackgroundTransition is set true) is itself one
-        // of the standard triggers for onUserLeaveHint() - same as pressing Home.
-        // This check used to run regardless of *why* the app was leaving, so it was
-        // immediately re-entering PIP right on top of that explicit background-play
-        // transition, completely undoing it - entering PIP is exactly what that
-        // button is trying to avoid.
+        // moveTaskToBack() (called by the swipe-dismiss-PIP path's own background-
+        // playback branch, right after isIntentionalBackgroundTransition is set
+        // true) is itself one of the standard triggers for onUserLeaveHint() -
+        // same as pressing Home. This check used to run regardless of *why* the
+        // app was leaving, so it was immediately re-entering PIP right on top of
+        // that explicit background-play transition, completely undoing it.
         //
         // Checking isIntentionalBackgroundTransition alone (an earlier attempt at
         // this exact fix) wasn't enough: it's a per-Activity-instance field, but
@@ -1407,7 +1373,7 @@ class PlayerActivity : BaseActivity() {
             val autoEnter = playerPreferences.pipOnExit.get()
             // AM (AUTO_PIP_LOOP_FIX) -->
             // forceDisableAutoEnter covers exactly one caller: the headphones
-            // "Background Play" action, right before its own moveTaskToBack().
+            // "Background Play" action, right before its own finish().
             // SecureActivityDelegate.isBackgroundPlaybackActive covers the much
             // more general case that turned out to actually be causing the loop:
             // a fresh PlayerActivity instance reopened from the notification calls
@@ -1456,15 +1422,6 @@ class PlayerActivity : BaseActivity() {
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
-        // AM (VIEW_RECREATION_DIAGNOSTIC_FIX) -->
-        // See onCreate()'s own doc comment - same purpose, checking whether this
-        // specific transition correlates with a fresh MpvSurface factory call.
-        // <-- AM (VIEW_RECREATION_DIAGNOSTIC_FIX)
-        android.util.Log.d(
-            "PlayerActivity",
-            "PVDESYNC onPictureInPictureModeChanged: isInPip=$isInPictureInPictureMode " +
-                "hashCode=${System.identityHashCode(this)}",
-        )
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Entering PIP is safe to mark immediately. Clearing it on exit is deferred into
         // each branch below so startBackgroundPlayback() (when it runs) can set
@@ -1587,7 +1544,6 @@ class PlayerActivity : BaseActivity() {
                                 } else {
                                     SecureActivityDelegate.setPipActive(false)
                                     viewModel.player.release()
-                                    android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #7 (PIP dismissal 100ms check, line ~1501)")
                                     finish()
                                 }
                             }
@@ -1652,62 +1608,42 @@ class PlayerActivity : BaseActivity() {
                             // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
                             isIntentionalBackgroundTransition = true
 
-                            // AM (PIP_BACKGROUND_PLAY_MODE_FIX) -->
-                            // See pipBackgroundPlayReducesBatteryDrain's own doc comment
-                            // for the full reasoning on why moveTaskToBack() (keeping this
-                            // Activity/Task alive, just hidden) is the default branch here
-                            // despite BRANCH_NOTES.md's own prior finding attributing a
-                            // real crash to it - and why finish() remains available as an
-                            // explicit opt-in for users who'd rather not keep an Activity
-                            // alive during audio-only playback.
-                            // <-- AM (PIP_BACKGROUND_PLAY_MODE_FIX)
-                            if (playerPreferences.pipBackgroundPlayReducesBatteryDrain.get()) {
-                                // finish() to exit PIP and this session's session-
-                                // preservation architecture (see isBackgroundPlayTransitionFinish's
-                                // doc comment) keeps the underlying player/Service alive exactly
-                                // as moveTaskToBack() used to, but via finish() instead - a real
-                                // Activity/Task destruction, not backgrounding a still-pinned
-                                // task. force=true: an explicit user action, so this should work
-                                // even while paused - see enterBackground()'s doc comment.
-                                // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
-                                isBackgroundPlayTransitionFinish = true
-                                // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
-                                // AM (AUTO_PIP_LOOP_FIX) -->
-                                // Disable auto-enter-PIP before finishing, and return
-                                // immediately after - skipping the unconditional
-                                // setPictureInPictureParams() call below entirely for this
-                                // action. Likely no longer strictly necessary now that this
-                                // finishes rather than moveTaskToBack()s (finish() doesn't
-                                // trigger onUserLeaveHint(), which is what the auto-PIP loop
-                                // this originally guarded against was rooted in) - left in
-                                // place as a harmless safety net rather than removed outright.
-                                setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
-                                // AM (PIP_MOVETASKTOBACK_RACE_FIX) -->
-                                // Deferred via post(), not called inline, for the same reason
-                                // this was originally deferred for moveTaskToBack(): the system
-                                // is still processing this button tap's own broadcast dispatch
-                                // at the moment this runs, and asking it to also finish() the
-                                // Activity inline risks colliding with that in-flight work.
-                                // Posting it instead lets the current dispatch settle first.
-                                Handler(Looper.getMainLooper()).post {
-                                    android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #8 (Background Play button, line ~1602)")
-                                    finish()
-                                }
-                                // <-- AM (PIP_MOVETASKTOBACK_RACE_FIX)
-                                // <-- AM (AUTO_PIP_LOOP_FIX)
-                            } else {
-                                // Same disable-auto-enter-PIP reasoning as the finish()
-                                // branch above - this is exactly the "leaving" signal
-                                // AUTO_PIP_LOOP_FIX guards against re-triggering.
-                                setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
-                                // Deferred via post() for the same reason noted in finding
-                                // #7 of BRANCH_NOTES.md: moveTaskToBack() on a still-pinned
-                                // task, called from inside this broadcast dispatch itself,
-                                // is safer posted than called inline.
-                                Handler(Looper.getMainLooper()).post {
-                                    moveTaskToBack(true)
-                                }
+                            // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
+                            // finish() to exit PIP - this session's session-preservation
+                            // architecture (see isBackgroundPlayTransitionFinish's doc
+                            // comment) keeps the underlying player/Service alive across
+                            // it, so audio playback continues uninterrupted. Confirmed:
+                            // moveTaskToBack() while a task is still actively pinned in
+                            // PIP corrupts the task's pinned-state bookkeeping at the OS
+                            // level - the task later silently self-destructs the next
+                            // time it genuinely attempts to auto-re-enter PIP, with no
+                            // client-side finish()/finishAndRemoveTask() call ever
+                            // firing (confirmed directly via ActivityTaskManagerService's
+                            // own ActivityRecord state and mp_option_change_callback
+                            // logging - see this branch's git history for the full
+                            // investigation). finish() sidesteps that class of bug
+                            // entirely rather than working around it. force=true: an
+                            // explicit user action, so this should work even while
+                            // paused - see enterBackground()'s doc comment.
+                            isBackgroundPlayTransitionFinish = true
+                            // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
+                            // AM (AUTO_PIP_LOOP_FIX) -->
+                            // Disable auto-enter-PIP before finishing, and return
+                            // immediately after - skipping the unconditional
+                            // setPictureInPictureParams() call below entirely for this
+                            // action.
+                            setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
+                            // AM (PIP_MOVETASKTOBACK_RACE_FIX) -->
+                            // Deferred via post(), not called inline: the system is
+                            // still processing this button tap's own broadcast dispatch
+                            // at the moment this runs, and asking it to also finish() the
+                            // Activity inline risks colliding with that in-flight work.
+                            // Posting it instead lets the current dispatch settle first.
+                            Handler(Looper.getMainLooper()).post {
+                                finish()
                             }
+                            // <-- AM (PIP_MOVETASKTOBACK_RACE_FIX)
+                            // <-- AM (AUTO_PIP_LOOP_FIX)
                             return
                         }
                     }
@@ -1857,7 +1793,6 @@ class PlayerActivity : BaseActivity() {
                 // inventing an unsafe shortcut.
                 viewModel.pause()
                 stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
-                android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #9 (explicit stop, line ~1768)")
                 finish()
                 // <-- AM (MEDIASESSION_STOP_SAFETY_FIX)
             }
@@ -1916,7 +1851,6 @@ class PlayerActivity : BaseActivity() {
             showToast(error.message ?: "")
         }
         logcat(LogPriority.ERROR, error)
-        android.util.Log.d("PlayerActivity", "PVDESYNC finish() site #10 (error handler, line ~1826)")
         finish()
     }
 

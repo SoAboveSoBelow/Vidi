@@ -91,25 +91,6 @@ class PlayerPreferences(
     val pipOnExit: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_on_exit", true)
     // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     val pipFirstButtonAction: Preference<Int> = preferenceStore.getInt("pip_first_button_action", 0)
-    // AM (PIP_BACKGROUND_PLAY_MODE_FIX) -->
-    // Default false: the headphones "Background Play" PIP action keeps the Activity
-    // alive but hidden (moveTaskToBack()) rather than genuinely finish()ing it. A
-    // prior investigation (documented in BRANCH_NOTES.md, written by an earlier AI
-    // session, not verified firsthand) attributed a real crash specifically to
-    // moveTaskToBack() while a task was still pinned in PIP, and changed this to
-    // finish() to fix it. Per direct confirmation from the person who actually
-    // debugged it: the real cause was the OS misjudging the transition and killing
-    // the app for appearing inactive - not moveTaskToBack() itself being broken -
-    // and this session's own notification-liveness/resume-restore work has since
-    // made the app significantly more reliable at signaling genuine ongoing
-    // activity to the OS, which may have been exactly what was missing at the
-    // time. Reversing which behavior is default given that firsthand correction;
-    // enabling this preference opts back into the finish()-based approach for
-    // users who'd rather trade a brief reconnect blip for not keeping an Activity
-    // alive during audio-only playback.
-    // <-- AM (PIP_BACKGROUND_PLAY_MODE_FIX)
-    val pipBackgroundPlayReducesBatteryDrain: Preference<Boolean> =
-        preferenceStore.getBoolean("pref_pip_background_play_reduces_battery_drain", false)
 
     // AM (CAST) -->
     // Cast
