@@ -175,6 +175,14 @@ class PlayerActivity : BaseActivity() {
     // completely differently from the initial one.
     private var hasProcessedInitialOnNewIntent = false
     // <-- AM (LIVE_REDELIVERY_TRUST_FIX)
+
+    // AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX) -->
+    // Set by onNewIntent()'s different-anime case, consumed at the end of
+    // onDestroy()'s genuine-teardown branch - see both doc comments for why a
+    // hot-swap in place isn't safe here and this goes through a real
+    // finish()-then-relaunch instead.
+    private var pendingFreshInstanceIntent: Intent? = null
+    // <-- AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX)
     // <-- AM (PIP_ENTRY_CANCELLED_FIX)
 
     // AM (PIP_RECREATE_FIX_REMOVED) -->
@@ -452,10 +460,18 @@ class PlayerActivity : BaseActivity() {
         //     already-adopted player with none of the construction/adoption
         //     races the full reinit pipeline exists to guard against.
         //  3. A different anime entirely - a genuine "load new content" request,
-        //     not a redundant reload. This instance's player/ViewModel are
-        //     already alive and adopted (no fresh MPVPlayer construction
-        //     involved, unlike the cold-reopen case), so falling through to the
-        //     normal reinit pipeline below is legitimate and safe here.
+        //     not a redundant reload.
+        //     AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX) -->
+        //     Falling through to the normal reinit pipeline here (as this used to)
+        //     hot-swaps a fresh MPVPlayer into this ViewModel, but
+        //     PlayerMediaHolder.adopt() only ever runs its setup once per holder -
+        //     the Service, notification, and MediaSession stay wired to the OLD,
+        //     abandoned player object while the screen shows the new one.
+        //     Confirmed: this caused both a visible flash of the previous video
+        //     and resume position bleeding between series - "reinit" was never
+        //     actually detaching from the old live session. Tear the session down
+        //     for real instead (the same path a deliberate exit takes) and launch
+        //     a fresh instance for the new content once that's finished.
         if (hasProcessedInitialOnNewIntent) {
             lifecycleScope.launchNonCancellable {
                 viewModel.playerReady.first { it }
@@ -470,15 +486,23 @@ class PlayerActivity : BaseActivity() {
                         withUIContext { setIntent(intent) }
                     }
                     else -> {
-                        // Different anime - let the normal reinit pipeline below
-                        // handle it for real, same as the very first call would.
-                        hasProcessedInitialOnNewIntent = false
-                        withUIContext { onNewIntent(intent) }
+                        pendingFreshInstanceIntent = Intent(this@PlayerActivity, PlayerActivity::class.java).apply {
+                            putExtra("animeId", animeId)
+                            putExtra("episodeId", episodeId)
+                            if (hostIndex != -1) putExtra("hostIndex", hostIndex)
+                            if (vidIndex != -1) putExtra("vidIndex", vidIndex)
+                            if (hostList.isNotBlank()) putExtra("hostList", hostList)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                        withUIContext { finish() }
                     }
                 }
             }
             return
         }
+        // <-- AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX)
         hasProcessedInitialOnNewIntent = true
         // <-- AM (LIVE_REDELIVERY_TRUST_FIX)
 
@@ -953,6 +977,15 @@ class PlayerActivity : BaseActivity() {
                 mediaHolder?.release()
                 // <-- AM (STALE_HOLDER_STATE_FIX)
                 stopService(PlayerBackgroundPlaybackService.newIntent(this))
+                // AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX) -->
+                // Only ever non-null when this finish() was triggered by
+                // onNewIntent()'s different-anime case - launched here, after the
+                // real teardown above has actually run, rather than trying to
+                // start it before/alongside finish() and racing this singleTask
+                // Activity's own finish-in-progress state.
+                pendingFreshInstanceIntent?.let { startActivity(it) }
+                pendingFreshInstanceIntent = null
+                // <-- AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX)
             } else {
                 // This Activity instance is being destroyed while playback is meant to
                 // continue - leave the Service, its player, its notification (if active), and
