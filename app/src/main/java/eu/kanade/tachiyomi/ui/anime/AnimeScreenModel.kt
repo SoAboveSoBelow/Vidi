@@ -116,6 +116,7 @@ import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.season.interactor.SetAnimeDefaultSeasonFlags
 import tachiyomi.domain.season.service.getSeasonSortComparator
 import tachiyomi.domain.season.service.seasonSortAlphabetically
+import tachiyomi.domain.source.model.StubSource
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.storage.service.StoragePreferences
 import tachiyomi.domain.track.interactor.GetTracks
@@ -396,6 +397,8 @@ class AnimeScreenModel(
     private suspend fun syncTrackers() {
         if (!trackPreferences.syncEnhancedTrackers.get()) return
         val state = successState ?: return
+        if (state.source is StubSource) return
+
         updateSuccessState { it.copy(isSyncingTrackers = true) }
 
         when (state.anime.fetchType) {
