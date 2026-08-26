@@ -289,6 +289,7 @@ class MigrationListScreenModel(
                                 .anime
                         }
                     }
+                        .let { MigrateSearchResult.Success(it) }
                 } catch (_: Exception) {
                     MigrateSearchResult.Failure(anime.fetchType)
                 }
