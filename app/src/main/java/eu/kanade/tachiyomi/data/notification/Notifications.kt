@@ -69,7 +69,21 @@ object Notifications {
      * Notification channel and ids used for http server
      */
     const val CHANNEL_HTTP_SERVER = "http_server_channel"
-    const val ID_HTTP_SERVER = -901
+    // AM (NOTIFICATION_ID_COLLISION_FIX) -->
+    // Was -901, identical to ID_BACKGROUND_PLAYBACK above. Both services can be
+    // foreground simultaneously during playback (HttpServerService is started
+    // from PlayerViewModel for sources that need it) - sharing an id meant
+    // whichever service's Notification was posted/updated most recently silently
+    // became the one actually attached to that id's row at the
+    // NotificationManagerService level, regardless of which service's own
+    // startForeground() call the OS still associated it with internally. This is
+    // very likely why PlayerBackgroundPlaybackService's setDeleteIntent()
+    // appeared not to fire on user swipe - the id could have been carrying
+    // HttpServerService's Notification (no delete intent) instead of ours at
+    // the moment of dismissal, even while our own service's foreground state
+    // still showed its own notification reference unchanged.
+    const val ID_HTTP_SERVER = -902
+    // <-- AM (NOTIFICATION_ID_COLLISION_FIX)
     // <-- AY
 
     // AM (DISCORD_RPC) -->

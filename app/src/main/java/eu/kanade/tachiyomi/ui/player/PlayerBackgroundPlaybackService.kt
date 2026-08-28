@@ -3,15 +3,16 @@ package eu.kanade.tachiyomi.ui.player
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.session.MediaSession
 import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
 import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.app.TaskStackBuilder
 import androidx.core.content.ContextCompat
@@ -23,7 +24,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
@@ -33,7 +33,6 @@ import kotlinx.coroutines.launch
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
-import logcat.LogPriority
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -120,41 +119,6 @@ class PlayerBackgroundPlaybackService : Service() {
                 .distinctUntilChanged()
                 .onEach { paused -> if (!paused) updatePlaybackState(isPlaying = true) }
                 .launchIn(serviceScope)
-
-            // AM (NOTIFICATION_LIVENESS_WATCHDOG_FIX) -->
-            // Confirmed directly (screenshots): the notification can disappear
-            // while genuinely still playing, not only via a pause-then-swipe -
-            // most likely Samsung's own "Check background activity" management
-            // removing it regardless of play state, not a user gesture at all. The
-            // pause-then-resume fix above only ever fires on an actual pause->play
-            // transition, so it can't catch a notification vanishing while nothing
-            // about play state changed. This is scoped narrowly, unlike the
-            // earlier, reverted version of this same idea: it only ever restores
-            // while state.paused is genuinely false (actively playing) right now -
-            // a real pause-then-dismiss (paused stays true) is left alone and
-            // respected, exactly as before. This isn't "poll and always restore" -
-            // it's "poll, but only act if playback is supposed to be visible and
-            // isn't."
-            // <-- AM (NOTIFICATION_LIVENESS_WATCHDOG_FIX)
-            serviceScope.launch {
-                while (true) {
-                    delay(10_000)
-                    if (holder.state.value.paused) continue
-                    val notificationStillActive = try {
-                        NotificationManagerCompat.from(this@PlayerBackgroundPlaybackService)
-                            .getActiveNotifications()
-                            .any { it.id == Notifications.ID_BACKGROUND_PLAYBACK }
-                    } catch (e: Throwable) {
-                        true
-                    }
-                    if (!notificationStillActive) {
-                        logcat(LogPriority.DEBUG) {
-                            "Notification liveness watchdog: gone while actively playing, restoring"
-                        }
-                        updatePlaybackState(isPlaying = true)
-                    }
-                }
-            }
         }
     }
     val mediaHolder: PlayerMediaHolder by mediaHolderLazy
@@ -185,6 +149,45 @@ class PlayerBackgroundPlaybackService : Service() {
         fun getMediaHolder(): PlayerMediaHolder = mediaHolder
         // <-- AM (SERVICE_OWNED_PLAYER)
     }
+
+    // AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX) -->
+    // setDeleteIntent() paired with PendingIntent.getService() is the less common
+    // form - PendingIntent.getBroadcast() to a BroadcastReceiver is the
+    // documented, standard way to observe notification deletion, so this uses
+    // that instead of assuming getService() was equivalent. Registered/
+    // unregistered with the Service's own lifecycle (not the shared, manifest-
+    // registered NotificationReceiver) to keep this change self-contained and
+    // not risk any of that class's existing action handling. RECEIVER_NOT_EXPORTED
+    // since this is purely an internal, same-process signal - nothing outside
+    // this app should ever be able to trigger it.
+    private var dismissReceiverRegistered = false
+    // AM (NOTIFICATION_DISMISS_KEEPS_ACTIVITY_FIX) -->
+    // Deliberately does NOT call onStopRequested?.invoke() - that's the "Stop"
+    // button's chain (viewModel.pause() + stopService() + finish()), which
+    // closes PlayerActivity outright. A swipe-dismiss should only tear down
+    // the background-continuation apparatus this Service owns (wake lock,
+    // foreground state, notification, the Service-owned mediaHolder) - not
+    // close the player screen if it's still open. Since the notification can
+    // only be swiped while paused (framework-enforced), there's no live
+    // playback being cut off here either way.
+    private val dismissReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            stopBackgroundPlayback()
+        }
+    }
+    // <-- AM (NOTIFICATION_DISMISS_KEEPS_ACTIVITY_FIX)
+
+    override fun onCreate() {
+        super.onCreate()
+        ContextCompat.registerReceiver(
+            this,
+            dismissReceiver,
+            IntentFilter(ACTION_NOTIFICATION_DISMISSED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        dismissReceiverRegistered = true
+    }
+    // <-- AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX)
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -320,6 +323,12 @@ class PlayerBackgroundPlaybackService : Service() {
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
+        // AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX) -->
+        if (dismissReceiverRegistered) {
+            unregisterReceiver(dismissReceiver)
+            dismissReceiverRegistered = false
+        }
+        // <-- AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX)
         // AM (BACKGROUND_SKIP_FIX) -->
         serviceScope.cancel()
         // <-- AM (BACKGROUND_SKIP_FIX)
@@ -423,15 +432,49 @@ class PlayerBackgroundPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val openAppPendingIntent = buildReopenPendingIntent()
+        // AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX) -->
+        // getBroadcast() to the dynamically-registered dismissReceiver above,
+        // not getService() - this is the standard, documented pairing for
+        // setDeleteIntent(). setPackage() makes the broadcast explicit (required
+        // since Android 8 for most implicit broadcasts anyway, and correct
+        // practice regardless) so only this app's registered receiver can ever
+        // receive it.
+        val deletePendingIntent = PendingIntent.getBroadcast(
+            this,
+            REQUEST_CODE_DISMISS,
+            Intent(ACTION_NOTIFICATION_DISMISSED).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        // <-- AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX)
 
         return NotificationCompat.Builder(this, Notifications.CHANNEL_BACKGROUND_PLAYBACK)
             .setSmallIcon(R.drawable.ic_ani)
             .setContentTitle(title)
             .setContentText(subtitle)
-            .setOngoing(true)
+            // AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX) -->
+            // Was setOngoing(true). Every dumpsys capture during this
+            // investigation showed flags=0x6a - FLAG_FOREGROUND_SERVICE (0x40) +
+            // FLAG_NO_CLEAR (0x20) + FLAG_ONLY_ALERT_ONCE (0x08) +
+            // FLAG_ONGOING_EVENT (0x02) - the latter two coming directly from
+            // this call. A real user swipe was confirmed to visually remove the
+            // notification every time, yet the Service consistently still
+            // reported isForeground=true with foregroundNoti attached afterward,
+            // and setDeleteIntent() never fired - meaning cancelNotification()
+            // was very likely never actually invoked, only a SystemUI-local hide
+            // of the row. FLAG_NO_CLEAR is the framework's explicit "don't treat
+            // this as cleared" signal; Android 13+'s policy letting users swipe
+            // FGS notifications by default is a UI-layer allowance, not a
+            // guarantee that swiping performs a real cancel when the app has
+            // separately marked the notification ongoing/no-clear. The
+            // foregroundServiceType (mediaPlayback) is what actually keeps this
+            // Service alive and undismissed from the task list regardless -
+            // setOngoing() was only ever fighting the one behavior (user
+            // dismissal) that this whole feature needs to work.
+            // <-- AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(openAppPendingIntent)
+            .setDeleteIntent(deletePendingIntent)
             .addAction(
                 if (isPlaying) R.drawable.ic_pause_24dp else R.drawable.ic_play_arrow_24dp,
                 stringResource(if (isPlaying) MR.strings.action_pause else AYMR.strings.action_play),
@@ -461,11 +504,13 @@ class PlayerBackgroundPlaybackService : Service() {
         private const val REQUEST_CODE_TOGGLE = 0
         private const val REQUEST_CODE_STOP = 1
         private const val REQUEST_CODE_OPEN = 2
+        private const val REQUEST_CODE_DISMISS = 3
 
         // Caps wake lock lifetime in case stop/onDestroy never fires.
         private const val MAX_WAKE_LOCK_DURATION_MS = 12 * 60 * 60 * 1000L
         const val ACTION_TOGGLE_PLAY_PAUSE = "eu.kanade.tachiyomi.ui.player.action.TOGGLE_PLAY_PAUSE"
         const val ACTION_STOP = "eu.kanade.tachiyomi.ui.player.action.STOP"
+        const val ACTION_NOTIFICATION_DISMISSED = "eu.kanade.tachiyomi.ui.player.action.NOTIFICATION_DISMISSED"
 
         fun newIntent(context: Context): Intent {
             return Intent(context, PlayerBackgroundPlaybackService::class.java)
