@@ -4,13 +4,16 @@ import androidx.paging.PagingState
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import logcat.LogPriority
 import mihon.domain.anime.model.toDomainAnime
 import tachiyomi.core.common.util.lang.withIOContext
+import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.interactor.NetworkToLocalAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.source.repository.SourcePagingSource
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.io.IOException
 
 class SourceSearchPagingSource(
     source: AnimeSource,
@@ -41,6 +44,11 @@ abstract class BaseSourcePagingSource(
 
     private val seenAnime = hashSetOf<String>()
 
+    // AY -->
+    // Counts consecutive pages skipped due to a source's own parser crashing (see below).
+    private var consecutiveSkippedPages = 0
+    // <-- AY
+
     abstract suspend fun requestNextPage(currentPage: Int): AnimesPage
 
     override suspend fun load(params: LoadParams<Long>): LoadResult<Long, Anime> {
@@ -53,6 +61,10 @@ abstract class BaseSourcePagingSource(
                     ?: throw NoResultsException()
             }
 
+            // AY -->
+            consecutiveSkippedPages = 0
+            // <-- AY
+
             val anime = animesPage.animes
                 .map { it.toDomainAnime(source.id) }
                 .filter { seenAnime.add(it.url) }
@@ -63,9 +75,39 @@ abstract class BaseSourcePagingSource(
                 prevKey = null,
                 nextKey = if (animesPage.hasNextPage) page + 1 else null,
             )
-        } catch (e: Exception) {
+            // AY -->
+        } catch (e: IOException) {
+            // Network-level failure (timeout, HTTP error, etc) - the same page may well
+            // succeed on retry, so surface it normally via the retry snackbar.
+            logcat(LogPriority.ERROR, e) { "SourcePagingSource.load() network failure, page=$page" }
             LoadResult.Error(e)
+        } catch (e: NoResultsException) {
+            LoadResult.Error(e)
+        } catch (e: Exception) {
+            // Anything else here is almost always a source's own parser crashing on this
+            // particular page's content (e.g. an unexpected null/missing element) - a bug
+            // in that source, not a network issue. Retrying via the snackbar would just
+            // hit the exact same crash on the exact same page every time, permanently
+            // blocking further browsing. Log it for diagnosis and skip past the broken
+            // page instead so scrolling can continue, but give up for real after a few
+            // consecutive failures rather than silently skipping forever if the source is
+            // broken from here on.
+            logcat(LogPriority.ERROR, e) {
+                "SourcePagingSource: source parser crashed on page=$page, skipping page"
+            }
+            consecutiveSkippedPages++
+            if (consecutiveSkippedPages > MAX_CONSECUTIVE_SKIPPED_PAGES) {
+                consecutiveSkippedPages = 0
+                LoadResult.Error(e)
+            } else {
+                LoadResult.Page(
+                    data = emptyList(),
+                    prevKey = null,
+                    nextKey = page + 1,
+                )
+            }
         }
+        // <-- AY
     }
 
     override fun getRefreshKey(state: PagingState<Long, Anime>): Long? {
@@ -74,6 +116,12 @@ abstract class BaseSourcePagingSource(
             anchorPage?.prevKey ?: anchorPage?.nextKey
         }
     }
+
+    // AY -->
+    private companion object {
+        const val MAX_CONSECUTIVE_SKIPPED_PAGES = 3
+    }
+    // <-- AY
 }
 
 class NoResultsException : Exception()

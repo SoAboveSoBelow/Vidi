@@ -87,6 +87,8 @@ import coil3.request.crossfade
 import com.mikepenz.markdown.model.markdownAnnotator
 import com.mikepenz.markdown.model.markdownAnnotatorConfig
 import com.mikepenz.markdown.utils.getUnescapedTextInNode
+import eu.kanade.domain.anime.model.hasCustomBackground
+import eu.kanade.domain.anime.model.hasCustomCover
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.components.DropdownMenu
 import eu.kanade.tachiyomi.R
@@ -128,27 +130,45 @@ fun AnimeInfoBox(
             Color.Transparent,
             MaterialTheme.colorScheme.background,
         )
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(anime)
-                // AY -->
-                .useBackground(true)
-                // <-- AY
-                .crossfade(true)
-                .build(),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .matchParentSize()
-                .drawWithContent {
-                    drawContent()
-                    drawRect(
-                        brush = Brush.verticalGradient(colors = backdropGradientColors),
-                    )
-                }
-                .blur(4.dp)
-                .alpha(0.2f),
-        )
+        // AY -->
+        // Only attempt to load a backdrop when the anime actually has one - a source
+        // entry with no backgroundUrl/custom background has nothing to fetch, and
+        // requesting one anyway is guaranteed to fail (AnimeImageFetcher: "No cover
+        // specified"). Also, memoize the request keyed on only the fields that
+        // actually affect the image, rather than rebuilding (and re-firing) it on
+        // every unrelated `anime` field change - anime.copy() for e.g. episodeFlags,
+        // viewerFlags, or a remote-info refresh creates a new Anime instance on every
+        // update, which without this would restart the backdrop load from scratch on
+        // each one, appearing as a backdrop that never finishes loading.
+        val hasBackdrop = remember(anime.backgroundUrl, anime.hasCustomBackground()) {
+            anime.backgroundUrl != null || anime.hasCustomBackground()
+        }
+        if (hasBackdrop) {
+            val context = LocalContext.current
+            val backdropRequest = remember(anime.id, anime.backgroundUrl, anime.backgroundLastModified) {
+                ImageRequest.Builder(context)
+                    .data(anime)
+                    .useBackground(true)
+                    .crossfade(true)
+                    .build()
+            }
+            AsyncImage(
+                model = backdropRequest,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .matchParentSize()
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(
+                            brush = Brush.verticalGradient(colors = backdropGradientColors),
+                        )
+                    }
+                    .blur(4.dp)
+                    .alpha(0.2f),
+            )
+        }
+        // <-- AY
 
         // Anime & source info
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
@@ -384,15 +404,29 @@ private fun AnimeAndSourceTitlesLarge(
             .padding(start = 16.dp, top = appBarPadding + 16.dp, end = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        AnimeCover.Book(
-            modifier = Modifier.fillMaxWidth(0.65f),
-            data = ImageRequest.Builder(LocalContext.current)
+        // AY -->
+        // Same "No cover specified" churn bug the backdrop had (see AnimeInfoBox above),
+        // but for the anime's own cover this time - anime.thumbnailUrl can genuinely be
+        // null/absent for some source entries, and building this request unmemoized from
+        // the whole anime object meant it restarted on every unrelated field change
+        // during the info-refresh cycle, never settling into the error state for those.
+        // This runs for every anime opened (not just ones missing a background), so it's
+        // a much more widely-hit instance of the same bug.
+        val context = LocalContext.current
+        val hasCover = anime.thumbnailUrl != null || anime.hasCustomCover()
+        val coverRequest = remember(anime.id, anime.thumbnailUrl, anime.coverLastModified) {
+            ImageRequest.Builder(context)
                 .data(anime)
                 .crossfade(true)
-                .build(),
+                .build()
+        }
+        AnimeCover.Book(
+            modifier = Modifier.fillMaxWidth(0.65f),
+            data = coverRequest.takeIf { hasCover },
             contentDescription = stringResource(MR.strings.manga_cover),
             onClick = onCoverClick,
         )
+        // <-- AY
         Spacer(modifier = Modifier.height(16.dp))
         AnimeContentInfo(
             title = anime.title,
@@ -423,17 +457,25 @@ private fun AnimeAndSourceTitlesSmall(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // AY -->
+        // See the matching comment/fix in AnimeAndSourceTitlesLarge above.
+        val context = LocalContext.current
+        val hasCover = anime.thumbnailUrl != null || anime.hasCustomCover()
+        val coverRequest = remember(anime.id, anime.thumbnailUrl, anime.coverLastModified) {
+            ImageRequest.Builder(context)
+                .data(anime)
+                .crossfade(true)
+                .build()
+        }
         AnimeCover.Book(
             modifier = Modifier
                 .sizeIn(maxWidth = 100.dp)
                 .align(Alignment.Top),
-            data = ImageRequest.Builder(LocalContext.current)
-                .data(anime)
-                .crossfade(true)
-                .build(),
+            data = coverRequest.takeIf { hasCover },
             contentDescription = stringResource(MR.strings.manga_cover),
             onClick = onCoverClick,
         )
+        // <-- AY
         Column(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {

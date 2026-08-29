@@ -59,20 +59,30 @@ import uy.kohesive.injekt.api.InjektRegistrar
 import uy.kohesive.injekt.api.addSingleton
 import uy.kohesive.injekt.api.addSingletonFactory
 import uy.kohesive.injekt.api.get
-import java.lang.ref.WeakReference
 
 private val lock = Any()
 
 class AppModule(val app: Application) : InjektModule {
 
-    private var sqlDriverRef: WeakReference<SqlDriver>? = null
+    // AY -->
+    // Was a WeakReference-based cache, manually re-created in registerInjectables() below
+    // if GC'd - meaning it was possible for two separate AndroidxSqliteDriver instances
+    // to end up open against the same underlying SQLite file at once, each with its own
+    // internal connection/transaction state unaware of the other. A confirmed live
+    // capture showed a database write (SetAnimeEpisodeFlags) hang indefinitely with no
+    // thread ever blocked and no lock contention from any app-level mutex - consistent
+    // with two independent driver instances colliding at the native level in a way
+    // neither one's own internal coordination could see. This is a hard singleton
+    // instead: created once, held for the entire process lifetime, never eligible for GC.
+    private var sqlDriverInstance: SqlDriver? = null
+    // <-- AY
 
     override fun InjektRegistrar.registerInjectables() {
         addSingleton(app)
 
         addSingletonFactory<SqlDriver> {
             synchronized(lock) {
-                sqlDriverRef?.get()?.let { return@synchronized it }
+                sqlDriverInstance?.let { return@synchronized it }
 
                 AndroidxSqliteDriver(
                     driver = BundledSQLiteDriver(),
@@ -82,7 +92,7 @@ class AppModule(val app: Application) : InjektModule {
                         isForeignKeyConstraintsEnabled = true,
                     ),
                 )
-                    .also { sqlDriverRef = WeakReference(it) }
+                    .also { sqlDriverInstance = it }
             }
         }
         addSingletonFactory {

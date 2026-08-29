@@ -35,17 +35,38 @@ fun Call.asObservable(): Observable<Response> {
             override fun request(n: Long) {
                 if (n == 0L || !boolean.compareAndSet(expectedValue = false, newValue = true)) return
 
-                try {
-                    val response = call.execute()
-                    if (!subscriber.isUnsubscribed) {
-                        subscriber.onNext(response)
-                        subscriber.onCompleted()
-                    }
-                } catch (e: Exception) {
-                    if (!subscriber.isUnsubscribed) {
-                        subscriber.onError(e)
-                    }
-                }
+                // AY -->
+                // Was call.execute() - a genuinely blocking, synchronous OkHttp call,
+                // running directly on whatever thread happens to be executing the
+                // coroutine at the moment this legacy fetchXXX()/asObservableSuccess()
+                // path gets invoked, despite every caller treating this as async work.
+                // This is the RxJava bridge every extension still using the older
+                // (pre-suspend) API overrides goes through - not something specific to
+                // any one extension. A hung or merely slow server response here parks a
+                // real thread for the duration, indistinguishable from a genuine
+                // framework freeze to anything sharing that thread pool. Using
+                // enqueue() instead makes this and every extension route through it
+                // genuinely non-blocking, matching what Call.await()/awaitSuccess()
+                // below already do correctly for the newer suspend-based extension API.
+                call.enqueue(
+                    object : Callback {
+                        override fun onResponse(call: Call, response: Response) {
+                            if (!subscriber.isUnsubscribed) {
+                                subscriber.onNext(response)
+                                subscriber.onCompleted()
+                            } else {
+                                response.close()
+                            }
+                        }
+
+                        override fun onFailure(call: Call, e: IOException) {
+                            if (!subscriber.isUnsubscribed) {
+                                subscriber.onError(e)
+                            }
+                        }
+                    },
+                )
+                // <-- AY
             }
 
             override fun unsubscribe() {

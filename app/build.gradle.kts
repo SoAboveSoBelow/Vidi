@@ -160,6 +160,14 @@ android {
                 "META-INF/LICENSE",
                 "META-INF/NOTICE",
                 "META-INF/README.md",
+                // AY -->
+                // Defensive/no-op currently - was needed for kotlinx-coroutines-debug,
+                // which was tried and removed (its agent-attach mechanism doesn't work
+                // on Android's ART runtime). Left in place in case anything else in the
+                // dependency graph ever introduces the same JNA conflict.
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                // <-- AY
             )
         }
     }

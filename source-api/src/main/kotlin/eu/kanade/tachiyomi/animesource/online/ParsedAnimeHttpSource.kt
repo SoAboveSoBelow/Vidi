@@ -1,14 +1,33 @@
 package eu.kanade.tachiyomi.animesource.online
 
+import android.app.Application
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.util.system.toast
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import logcat.LogPriority
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import tachiyomi.core.common.util.system.logcat
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
+
+// AY -->
+// Dedicated, process-lifetime scope for surfacing skipped-item toasts below - these are
+// short-lived, fire-and-forget notifications with no natural owner to cancel them, so a
+// small scope of their own (matching how other fire-and-forget work is scoped elsewhere
+// in this codebase, e.g. ExtensionManager's own `scope`) is more appropriate than trying
+// to thread a caller-owned scope all the way down through every source implementation.
+private val toastScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+// <-- AY
 
 /**
  * A simple implementation for sources from a website using Jsoup, an HTML parser.
@@ -19,6 +38,68 @@ import org.jsoup.nodes.Element
         "Source developers should make their own implementation according to their needs.",
 )
 abstract class ParsedAnimeHttpSource : AnimeHttpSource() {
+
+    // AY -->
+    // Parses one element, returning null instead of propagating if a source's own
+    // xxxFromElement() throws on this one entry - a missing/unexpected element on a
+    // single card shouldn't cost every other, successfully-parsed entry on the same
+    // page. Every skip is logged in full (id + reason + stack trace) via logcat
+    // regardless; skipped is additionally collected so the three parse functions below
+    // can surface one summary toast per page once the whole page is done, rather than
+    // one toast per item (which would spam the user if a page has several bad entries).
+    private fun <T> parseElementOrNull(
+        element: Element,
+        selectorName: String,
+        skipped: MutableList<SkippedItem>,
+        block: (Element) -> T,
+    ): T? {
+        return try {
+            block(element)
+        } catch (e: Exception) {
+            val id = bestEffortId(element)
+            val reason = classifyReason(e)
+            logcat(LogPriority.ERROR, e) {
+                "$name: $selectorName crashed on element (id=$id, reason=$reason), skipping just that entry"
+            }
+            skipped += SkippedItem(id, reason)
+            null
+        }
+    }
+
+    private fun bestEffortId(element: Element): String {
+        // The element never became an SAnime, so there's no url/title to report - best
+        // effort is whatever raw signal the markup itself offers, most to least useful.
+        element.selectFirst("a[href]")?.attr("href")?.takeIf { it.isNotBlank() }?.let { return it }
+        element.text().takeIf { it.isNotBlank() }?.let { return it.take(40) }
+        return "unidentified element"
+    }
+
+    private fun classifyReason(e: Exception): String {
+        return when (e) {
+            is NullPointerException, is NoSuchElementException -> "expected element not found"
+            is IndexOutOfBoundsException -> "expected element not found"
+            is NumberFormatException -> "unexpected/malformed value"
+            else -> "parsing error (${e::class.simpleName})"
+        }
+    }
+
+    private fun reportSkipped(skipped: List<SkippedItem>) {
+        if (skipped.isEmpty()) return
+        val context = Injekt.get<Application>()
+        toastScope.launch {
+            val message = if (skipped.size == 1) {
+                val item = skipped[0]
+                "$name: skipped 1 item (${item.id}): ${item.reason}"
+            } else {
+                "$name: skipped ${skipped.size} items on this page (${skipped.first().reason}, " +
+                    "others - see logs for details)"
+            }
+            context.toast(message)
+        }
+    }
+
+    private data class SkippedItem(val id: String, val reason: String)
+    // <-- AY
 
     /**
      * Parses the response from the site and returns a [AnimesPage] object.
@@ -31,9 +112,13 @@ abstract class ParsedAnimeHttpSource : AnimeHttpSource() {
     override fun popularAnimeParse(response: Response): AnimesPage {
         val document = response.asJsoup()
 
-        val animes = document.select(popularAnimeSelector()).map { element ->
-            popularAnimeFromElement(element)
+        // AY -->
+        val skipped = mutableListOf<SkippedItem>()
+        val animes = document.select(popularAnimeSelector()).mapNotNull { element ->
+            parseElementOrNull(element, "popularAnimeFromElement", skipped) { popularAnimeFromElement(it) }
         }
+        reportSkipped(skipped)
+        // <-- AY
 
         val hasNextPage = popularAnimeNextPageSelector()?.let { selector ->
             document.select(selector).first()
@@ -72,9 +157,13 @@ abstract class ParsedAnimeHttpSource : AnimeHttpSource() {
     override fun searchAnimeParse(response: Response): AnimesPage {
         val document = response.asJsoup()
 
-        val animes = document.select(searchAnimeSelector()).map { element ->
-            searchAnimeFromElement(element)
+        // AY -->
+        val skipped = mutableListOf<SkippedItem>()
+        val animes = document.select(searchAnimeSelector()).mapNotNull { element ->
+            parseElementOrNull(element, "searchAnimeFromElement", skipped) { searchAnimeFromElement(it) }
         }
+        reportSkipped(skipped)
+        // <-- AY
 
         val hasNextPage = searchAnimeNextPageSelector()?.let { selector ->
             document.select(selector).first()
@@ -113,9 +202,13 @@ abstract class ParsedAnimeHttpSource : AnimeHttpSource() {
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val document = response.asJsoup()
 
-        val animes = document.select(latestUpdatesSelector()).map { element ->
-            latestUpdatesFromElement(element)
+        // AY -->
+        val skipped = mutableListOf<SkippedItem>()
+        val animes = document.select(latestUpdatesSelector()).mapNotNull { element ->
+            parseElementOrNull(element, "latestUpdatesFromElement", skipped) { latestUpdatesFromElement(it) }
         }
+        reportSkipped(skipped)
+        // <-- AY
 
         val hasNextPage = latestUpdatesNextPageSelector()?.let { selector ->
             document.select(selector).first()

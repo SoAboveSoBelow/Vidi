@@ -2513,6 +2513,7 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     fun clearTracks() {
+        pendingNoAudioFallbackJob?.cancel()
         updateStateData {
             it.copy(
                 externalSubtitleTracks = emptyList(),
@@ -2626,13 +2627,29 @@ class PlayerViewModel @JvmOverloads constructor(
             subtitle = false,
         )
         if (preferredAudio == null) {
-            // Deliberately not marking hasLoadedAudio = true: mpv can report the track
-            // list before an embedded audio track is registered (see onTrackListChanged),
-            // and this flag lets that retry logic try again on the next update.
+            // Deliberately not marking hasLoadedAudio = true here: mpv can report the
+            // track list before an embedded audio track is registered (see
+            // onTrackListChanged), and this flag lets that retry logic try again on
+            // the next update. But if the file genuinely has no audio track at all,
+            // no further track-list-changed event will ever arrive to trigger that
+            // retry, so fall back after a short delay rather than blocking
+            // checkFileLoaded()/isLoadingEpisode forever.
+            pendingNoAudioFallbackJob?.cancel()
+            pendingNoAudioFallbackJob = viewModelScope.launch {
+                delay(1000)
+                if (!stateData.value.hasLoadedAudio) {
+                    updateStateData { it.copy(hasLoadedAudio = true) }
+                    checkFileLoaded()
+                }
+            }
         } else {
+            pendingNoAudioFallbackJob?.cancel()
             selectAudio(preferredAudio, true)
         }
     }
+
+    // Debounced fallback for genuinely audio-less files, set in onTracksLoaded() above.
+    private var pendingNoAudioFallbackJob: Job? = null
 
     private fun updateSubtitleTrackAt(index: Int, transform: (MpvVideoTrack.External) -> MpvVideoTrack.External) {
         updateStateData {

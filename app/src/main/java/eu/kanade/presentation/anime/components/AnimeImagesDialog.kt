@@ -48,6 +48,7 @@ import coil3.imageLoader
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import coil3.size.Size
+import eu.kanade.domain.anime.model.hasCustomBackground
 import eu.kanade.presentation.anime.EditCoverAction
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
@@ -219,26 +220,37 @@ fun AnimeImagesDialog(
                         },
                         update = { view ->
                             val context = view.context
-                            val request = ImageRequest.Builder(context)
-                                .data(anime)
-                                // AY -->
-                                .useBackground(page == 1)
+                            // AY -->
+                            // Same bug as AnimeInfoBox's backdrop (AnimeInfoHeader.kt): if
+                            // page 1 (background) is requested but the anime has neither a
+                            // custom background nor a source-provided backgroundUrl, there's
+                            // nothing to fetch - building the request anyway is guaranteed to
+                            // fail (AnimeImageFetcher: "No cover specified"). Skip the request
+                            // entirely rather than attempting a doomed load.
+                            val hasBackdrop = anime.backgroundUrl != null || anime.hasCustomBackground()
+                            if (page != 1 || hasBackdrop) {
                                 // <-- AY
-                                .size(Size.ORIGINAL)
-                                .memoryCachePolicy(CachePolicy.DISABLED)
-                                .target { image ->
-                                    val drawable = image.asDrawable(context.resources)
-                                    // Copy bitmap in case it came from memory cache
-                                    // Because SSIV needs to thoroughly read the image
-                                    val copy = (drawable as? BitmapDrawable)
-                                        ?.bitmap
-                                        ?.copy(Bitmap.Config.HARDWARE, false)
-                                        ?.toDrawable(view.context.resources)
-                                        ?: drawable
-                                    view.setImage(copy, ReaderPageImageView.Config(zoomDuration = 500))
-                                }
-                                .build()
-                            context.imageLoader.enqueue(request)
+                                val request = ImageRequest.Builder(context)
+                                    .data(anime)
+                                    // AY -->
+                                    .useBackground(page == 1)
+                                    // <-- AY
+                                    .size(Size.ORIGINAL)
+                                    .memoryCachePolicy(CachePolicy.DISABLED)
+                                    .target { image ->
+                                        val drawable = image.asDrawable(context.resources)
+                                        // Copy bitmap in case it came from memory cache
+                                        // Because SSIV needs to thoroughly read the image
+                                        val copy = (drawable as? BitmapDrawable)
+                                            ?.bitmap
+                                            ?.copy(Bitmap.Config.HARDWARE, false)
+                                            ?.toDrawable(view.context.resources)
+                                            ?: drawable
+                                        view.setImage(copy, ReaderPageImageView.Config(zoomDuration = 500))
+                                    }
+                                    .build()
+                                context.imageLoader.enqueue(request)
+                            }
                             view.updatePadding(top = statusBarPaddingPx, bottom = bottomPaddingPx)
                         },
                         modifier = Modifier.fillMaxSize(),
