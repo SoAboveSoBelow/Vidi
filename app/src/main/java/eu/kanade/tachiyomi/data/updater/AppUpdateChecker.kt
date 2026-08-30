@@ -39,11 +39,12 @@ class AppUpdateChecker {
 }
 
 val GITHUB_REPO: String by lazy {
-    if (isPreviewBuildType) {
-        "quickdesh/Animiru-preview"
-    } else {
-        "quickdesh/Animiru"
-    }
+    // AM (UPDATER_REPO_FIX) -->
+    // Was quickdesh/Animiru(-preview) - pointed the in-app updater at upstream's releases
+    // instead of this fork's, so it would prompt users to install an upstream Animiru APK.
+    // No SoAboveSoBelow/Vidi-preview repo exists, so both branches point at the main repo.
+    "SoAboveSoBelow/Vidi"
+    // <-- AM (UPDATER_REPO_FIX)
 }
 
 val RELEASE_TAG: String by lazy {
