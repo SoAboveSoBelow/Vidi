@@ -54,7 +54,12 @@ class PlayerBackgroundPlaybackService : Service() {
     // driving playback until step 2 cuts call sites over.
     private val mediaHolderLazy = lazy {
         PlayerMediaHolder(this).also { holder ->
-            logcat { "PlayerMediaHolder constructed in PlayerBackgroundPlaybackService" }
+            // SVC_RACE_DEBUG -->
+            logcat {
+                "SVC_RACE_DEBUG PlayerMediaHolder constructed service=${System.identityHashCode(this)} " +
+                    "holder=${System.identityHashCode(holder)} at=${android.os.SystemClock.elapsedRealtime()}"
+            }
+            // <-- SVC_RACE_DEBUG
             // AM (BACKGROUND_SKIP_FIX) -->
             // Drives the notification directly off the holder's own state, rather
             // than relying solely on PlayerActivity's REOPEN_TARGET_STALENESS_FIX
@@ -164,6 +169,12 @@ class PlayerBackgroundPlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG Service.onCreate() service=${System.identityHashCode(this)} " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         ContextCompat.registerReceiver(
             this,
             dismissReceiver,
@@ -174,7 +185,15 @@ class PlayerBackgroundPlaybackService : Service() {
     }
     // <-- AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX)
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder {
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG Service.onBind() service=${System.identityHashCode(this)} " +
+                "mediaHolderInitialized=${mediaHolderLazy.isInitialized()} at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
+        return binder
+    }
 
     // AM (NOTIFICATION_CREATION_STALE_SNAPSHOT_FIX) -->
     // start() used to also take title/subtitle/animeId/episodeId and write them
@@ -294,6 +313,12 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG Service.onStartCommand() service=${System.identityHashCode(this)} " +
+                "action=${intent?.action} startId=$startId at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         when (intent?.action) {
             ACTION_TOGGLE_PLAY_PAUSE -> onTogglePlayPause?.invoke()
             ACTION_STOP -> {
@@ -305,6 +330,14 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG Service.onDestroy() service=${System.identityHashCode(this)} " +
+                "mediaHolderInitialized=${mediaHolderLazy.isInitialized()} " +
+                "holder=${if (mediaHolderLazy.isInitialized()) System.identityHashCode(mediaHolder) else "n/a"} " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
@@ -373,6 +406,12 @@ class PlayerBackgroundPlaybackService : Service() {
         // correctly lets singleTask do its actual job: bring the existing task forward
         // and deliver the new intent via onNewIntent(), not construct a new one.
         if (PlayerActivity.hasLiveInstance) {
+            // SVC_RACE_DEBUG -->
+            logcat {
+                "SVC_RACE_DEBUG buildReopenPendingIntent() taking REUSE-EXISTING branch " +
+                    "at=${android.os.SystemClock.elapsedRealtime()}"
+            }
+            // <-- SVC_RACE_DEBUG
             return PendingIntent.getActivity(
                 this,
                 REQUEST_CODE_OPEN,
@@ -381,6 +420,12 @@ class PlayerBackgroundPlaybackService : Service() {
             )
         }
         // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG buildReopenPendingIntent() taking SYNTHETIC-BACKSTACK branch " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         val safeAnimeId = animeId
         if (safeAnimeId != null) {
             val stackPendingIntent = TaskStackBuilder.create(this).run {

@@ -182,6 +182,24 @@ class PlayerActivity : BaseActivity() {
     // <-- AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX)
     // <-- AM (PIP_ENTRY_CANCELLED_FIX)
 
+    // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+    // Deferred the same way pendingFreshInstanceIntent/pendingSkip are: onNewIntent()'s
+    // init() and mediaHolderConnection.onServiceConnected() are two independently
+    // scheduled async callbacks, both triggered from onCreate(), with no guaranteed
+    // ordering between them. reconcilePausedFromPlayer() (called from
+    // onServiceConnected(), right after binding) re-syncs playbackData.paused from
+    // mpv's actual property - whichever of that or a direct unpause() call here runs
+    // second wins. Calling unpause() directly from onNewIntent() raced that: it could
+    // land, then get silently overwritten back to paused=true moments later once
+    // onServiceConnected() finally ran and reconciled from mpv - or vice versa, in
+    // which case it worked, purely by luck of the scheduling that run. Deferring
+    // through this flag - applied from onServiceConnected() right after
+    // reconcilePausedFromPlayer(), or immediately inline if that binding has already
+    // happened by the time onNewIntent() gets here - guarantees the resume always
+    // applies after the reconcile, regardless of which callback actually runs first.
+    private var pendingForceResume = false
+    // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
+
     // AM (PIP_RECREATE_FIX_REMOVED) -->
     // hasAttemptedPipEntryThisInstance removed along with the recreate()-based
     // workaround in tryEnterPictureInPicture() - see that function's doc comment.
@@ -232,6 +250,13 @@ class PlayerActivity : BaseActivity() {
 
             val bound = binder.getMediaHolder()
             mediaHolder = bound
+            // SVC_RACE_DEBUG -->
+            logcat {
+                "SVC_RACE_DEBUG Activity.onServiceConnected() activity=${System.identityHashCode(this@PlayerActivity)} " +
+                    "service=${System.identityHashCode(binder.getService())} holder=${System.identityHashCode(bound)} " +
+                    "holderHasAdoptedPlayer=${bound.hasAdoptedPlayer} at=${android.os.SystemClock.elapsedRealtime()}"
+            }
+            // <-- SVC_RACE_DEBUG
             logcat { "PlayerActivity bound to PlayerMediaHolder: $bound (viewModel.player=${viewModel.player})" }
             viewModel.bindToService(bound)
 
@@ -256,6 +281,17 @@ class PlayerActivity : BaseActivity() {
             // it against.
             viewModel.reconcilePausedFromPlayer()
             // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
+
+            // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+            // See pendingForceResume's own doc comment. If onNewIntent()'s init()
+            // finished before this callback fired, it deferred here instead of
+            // calling unpause() directly - apply it now, guaranteed to run after
+            // the reconcile immediately above.
+            if (pendingForceResume) {
+                pendingForceResume = false
+                viewModel.unpause()
+            }
+            // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
 
             // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
             // Step 4b: the notification now posts as soon as the Service is bound -
@@ -369,13 +405,28 @@ class PlayerActivity : BaseActivity() {
             hostList: List<Hoster>? = null,
             hostIndex: Int? = null,
             vidIndex: Int? = null,
+            // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+            // See AnimeScreen.openEpisode()'s forceResume param - only the
+            // "Continue" button should pass true.
+            forceResume: Boolean = false,
+            // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
         ): Intent {
+            // SVC_RACE_DEBUG -->
+            logcat {
+                "SVC_RACE_DEBUG PlayerActivity.newIntent() called animeId=$animeId episodeId=$episodeId " +
+                    "hasLiveInstance=$hasLiveInstance liveInstanceCount=$liveInstanceCount " +
+                    "at=${android.os.SystemClock.elapsedRealtime()}"
+            }
+            // <-- SVC_RACE_DEBUG
             return Intent(context, PlayerActivity::class.java).apply {
                 putExtra("animeId", animeId)
                 putExtra("episodeId", episodeId)
                 hostIndex?.let { putExtra("hostIndex", it) }
                 vidIndex?.let { putExtra("vidIndex", it) }
                 hostList?.let { putExtra("hostList", it.serialize()) }
+                // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+                putExtra("forceResume", forceResume)
+                // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
                 // AM (PIP_REOPEN_DUPLICATE_TASK_FIX) -->
                 // Explicitly setting NEW_TASK here (rather than letting Android inject it
                 // implicitly at PendingIntent.send() time when this Intent is fired from a
@@ -388,6 +439,27 @@ class PlayerActivity : BaseActivity() {
                 // empty one. Paired with the existing CLEAR_TOP, this is the standard
                 // combo for "bring an existing singleTask instance to front via
                 // onNewIntent" recommended for PendingIntents fired from services.
+                // AM (NEW_TASK_ACTIVITY_CONTEXT_FIX_REVERTED) -->
+                // Tried making this opt-out for Activity-context callers (MainActivity,
+                // DeepLinkScreen), on the theory that NEW_TASK forced from an Activity
+                // context was what caused startActivity() to spin up a duplicate Task
+                // instead of redelivering via onNewIntent() to an already-live singleTask
+                // instance. Confirmed via logcat that theory was wrong: the exact same
+                // failure (fresh onCreate(), never onNewIntent(), immediately caught by
+                // DUPLICATE_INSTANCE_SELF_TERMINATE) reproduced identically with NEW_TASK
+                // removed. Reverted - NEW_TASK is what lets Android search other tasks for
+                // an existing singleTask instance at all; without it, startActivity() from
+                // an Activity context just pushes onto the CALLER's own current task
+                // instead (consistent with isTaskRoot=false on every doomed duplicate in
+                // both captures - something else is root of whatever task they land in).
+                // Retried once more, opt-out again, after DISTINCT_TASK_AFFINITY_FIX and
+                // BACK_FALLBACK_NEW_TASK_FIX resolved the task-affinity ambiguity this
+                // first attempt ran into - same result, same failure, confirmed not
+                // coincidental this time either. NEW_TASK is not the cause of the
+                // duplicate-instance failure under any task-affinity configuration tried
+                // so far. Reverted again - do not retry a third time without new evidence
+                // pointing specifically at this flag.
+                // <-- AM (NEW_TASK_ACTIVITY_CONTEXT_FIX_REVERTED)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 // <-- AM (PIP_REOPEN_DUPLICATE_TASK_FIX)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -424,6 +496,9 @@ class PlayerActivity : BaseActivity() {
         val hostList = intent.extras?.getString("hostList") ?: ""
         val hostIndex = intent.extras?.getInt("hostIndex") ?: -1
         val vidIndex = intent.extras?.getInt("vidIndex") ?: -1
+        // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+        val forceResume = intent.extras?.getBoolean("forceResume") ?: false
+        // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
         if (animeId == -1L || episodeId == -1L) {
             finish()
             return
@@ -637,6 +712,30 @@ class PlayerActivity : BaseActivity() {
 
             viewModel.updateIsLoadingHosters(false)
 
+            // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+            // wasPlayerReusedFromLiveHolder is checked here, after init() has
+            // finished (and REUSED_PLAYER_TARGET_MISMATCH_FIX has had its chance to
+            // correct it to false if the reused player didn't actually match this
+            // target) - the authoritative, final value for whether this reopen
+            // actually landed on an already-live session rather than a fresh one.
+            // Only force a resume when both are true: the user specifically hit
+            // "Continue" (not a notification tap or a plain episode-list selection),
+            // AND this reopen genuinely reattached to an existing, possibly-paused
+            // live session (not a fresh init, which starts playing on its own).
+            // See pendingForceResume's own doc comment for why this can't just call
+            // viewModel.unpause() directly here - mediaHolder being non-null already
+            // means onServiceConnected()'s reconcilePausedFromPlayer() has already
+            // run, so it's safe to resume immediately; otherwise, defer until it
+            // does.
+            if (forceResume && viewModel.wasPlayerReusedFromLiveHolder) {
+                if (mediaHolder != null) {
+                    viewModel.unpause()
+                } else {
+                    pendingForceResume = true
+                }
+            }
+            // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
+
             // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
             // Apply any skip queued via the fallback MediaSession callback while this
             // session was backgrounded with no ViewModel attached (see
@@ -673,6 +772,15 @@ class PlayerActivity : BaseActivity() {
         liveInstanceCount++
         // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
 
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG Activity.onCreate() liveInstanceCount=$liveInstanceCount " +
+                "activity=${System.identityHashCode(this)} isTaskRoot=$isTaskRoot " +
+                "currentHolder=${PlayerMediaHolder.current?.let { System.identityHashCode(it) }} " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
+
         // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
         // As early as possible, before anything below touches viewModel (which would
         // construct its own, throwaway MPVPlayer/native mpv instance for an Activity
@@ -680,6 +788,13 @@ class PlayerActivity : BaseActivity() {
         // isDuplicateInstanceSelfTerminating's doc comment for why this exists at all.
         if (liveInstanceCount > 1) {
             isDuplicateInstanceSelfTerminating = true
+            // SVC_RACE_DEBUG -->
+            logcat {
+                "SVC_RACE_DEBUG Activity.onCreate() SELF-TERMINATING as duplicate " +
+                    "activity=${System.identityHashCode(this)} liveInstanceCount=$liveInstanceCount " +
+                    "isTaskRoot=$isTaskRoot at=${android.os.SystemClock.elapsedRealtime()}"
+            }
+            // <-- SVC_RACE_DEBUG
             finish()
             return
         }
@@ -703,6 +818,12 @@ class PlayerActivity : BaseActivity() {
         // call startForeground() - essentially immediately after this. Using a plain
         // start() here just means the Service surviving isn't ITSELF gated on that
         // 5s deadline if binding is ever slower than expected.
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG Activity.onCreate() about to startService+bindService activity=${System.identityHashCode(this)} " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         startService(PlayerBackgroundPlaybackService.newIntent(this))
         bindService(
             PlayerBackgroundPlaybackService.newIntent(this),
@@ -859,8 +980,15 @@ class PlayerActivity : BaseActivity() {
                 PlayerScreen(
                     viewModel = viewModel,
                     onBack = {
+                        // AM (BACK_PRESERVE_PAUSED_FIX) -->
+                        // See PlayerScreen.kt's BackHandler for the matching change -
+                        // this redundant check had the same !paused gate, so keeping
+                        // this one out of sync would have reintroduced the same bug
+                        // for any caller that invokes this lambda directly rather than
+                        // through that BackHandler.
                         if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.RESUMED &&
-                            isPipSupportedAndEnabled && !viewModel.playbackData.value.paused &&
+                            isPipSupportedAndEnabled &&
+                            // <-- AM (BACK_PRESERVE_PAUSED_FIX)
                             playerPreferences.pipOnExit.get() && !viewModel.stateData.value.isCasting
                         ) {
                             // AM (PIP_RECREATE_FIX) -->
@@ -880,14 +1008,57 @@ class PlayerActivity : BaseActivity() {
                             // relies on, so MainActivity lands back on the anime being
                             // watched instead of an empty stack.
                             if (isTaskRoot) {
+                                // SVC_RACE_DEBUG -->
+                                logcat {
+                                    "SVC_RACE_DEBUG onBack() BACK_FALLBACK_TO_ANIME firing isTaskRoot=true " +
+                                        "activity=${System.identityHashCode(this@PlayerActivity)} " +
+                                        "at=${android.os.SystemClock.elapsedRealtime()}"
+                                }
+                                // <-- SVC_RACE_DEBUG
                                 viewModel.stateData.value.currentAnime?.id?.let { animeId ->
                                     startActivity(
                                         Intent(this, MainActivity::class.java)
                                             .setAction(Constants.SHORTCUT_ANIME)
                                             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                                            // AM (BACK_FALLBACK_NEW_TASK_FIX) -->
+                                            // Missing NEW_TASK here meant this Intent
+                                            // got pushed onto PlayerActivity's OWN
+                                            // current task instead of being routed to
+                                            // MainActivity's actual task by MainActivity's
+                                            // own affinity - confirmed via
+                                            // `adb shell dumpsys activity activities`:
+                                            // MainActivity kept landing inside a task
+                                            // still carrying PlayerActivity's task
+                                            // affinity (task affinity belongs to the
+                                            // task, not whichever Activity currently
+                                            // occupies it - pushing onto PlayerActivity's
+                                            // task without NEW_TASK doesn't clear or
+                                            // reassign it). That produced two
+                                            // simultaneous tasks sharing the same
+                                            // PlayerActivity-affinity tag whenever this
+                                            // fallback fired - one correctly holding a
+                                            // live PlayerActivity, one holding this
+                                            // MainActivity relaunch instead - which is
+                                            // exactly the ambiguity that was making
+                                            // subsequent singleTask reopens land on the
+                                            // wrong task and get killed by
+                                            // DUPLICATE_INSTANCE_SELF_TERMINATE. Adding
+                                            // NEW_TASK here routes this to MainActivity's
+                                            // own, separate, already-existing task by
+                                            // MainActivity's own affinity instead.
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            // <-- AM (BACK_FALLBACK_NEW_TASK_FIX)
                                             .putExtra(Constants.ANIME_EXTRA, animeId),
                                     )
                                 }
+                            } else {
+                                // SVC_RACE_DEBUG -->
+                                logcat {
+                                    "SVC_RACE_DEBUG onBack() isTaskRoot=false, plain finish() " +
+                                        "activity=${System.identityHashCode(this@PlayerActivity)} " +
+                                        "at=${android.os.SystemClock.elapsedRealtime()}"
+                                }
+                                // <-- SVC_RACE_DEBUG
                             }
                             // <-- AM (BACK_FALLBACK_TO_ANIME)
                             finish()
@@ -945,6 +1116,13 @@ class PlayerActivity : BaseActivity() {
             if (isFinishing && !isBackgroundPlayTransitionFinish) {
                 // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
                 // Genuine end of this playback session - tear everything down.
+                // SVC_RACE_DEBUG -->
+                logcat {
+                    "SVC_RACE_DEBUG Activity.onDestroy() genuine-teardown-start activity=${System.identityHashCode(this)} " +
+                        "holder=${mediaHolder?.let { System.identityHashCode(it) }} " +
+                        "player=${System.identityHashCode(viewModel.player)} at=${android.os.SystemClock.elapsedRealtime()}"
+                }
+                // <-- SVC_RACE_DEBUG
                 stopBackgroundPlayback()
                 viewModel.player.release()
                 viewModel.stopHttpServer()
@@ -964,6 +1142,12 @@ class PlayerActivity : BaseActivity() {
                 // a player already released two lines above.
                 mediaHolder?.release()
                 // <-- AM (STALE_HOLDER_STATE_FIX)
+                // SVC_RACE_DEBUG -->
+                logcat {
+                    "SVC_RACE_DEBUG Activity.onDestroy() about to stopService+unbindService " +
+                        "activity=${System.identityHashCode(this)} at=${android.os.SystemClock.elapsedRealtime()}"
+                }
+                // <-- SVC_RACE_DEBUG
                 stopService(PlayerBackgroundPlaybackService.newIntent(this))
                 // AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX) -->
                 // After teardown above
@@ -975,6 +1159,14 @@ class PlayerActivity : BaseActivity() {
                 // continue - leave the Service, its player, its notification (if active), and
                 // the MediaSession running. A future reattach adopts the same player via
                 // PlayerMediaHolder.adopt() instead of these being torn down out from under it.
+                // SVC_RACE_DEBUG -->
+                logcat {
+                    "SVC_RACE_DEBUG Activity.onDestroy() PRESERVE-session branch activity=${System.identityHashCode(this)} " +
+                        "holder=${mediaHolder?.let { System.identityHashCode(it) }} " +
+                        "isFinishing=$isFinishing isBackgroundPlayTransitionFinish=$isBackgroundPlayTransitionFinish " +
+                        "at=${android.os.SystemClock.elapsedRealtime()}"
+                }
+                // <-- SVC_RACE_DEBUG
 
                 // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
                 // Hand the MediaSession's callback back to the Service-owned fallback
@@ -1012,6 +1204,12 @@ class PlayerActivity : BaseActivity() {
             }
 
             unbindService(mediaHolderConnection)
+            // SVC_RACE_DEBUG -->
+            logcat {
+                "SVC_RACE_DEBUG Activity.onDestroy() unbindService() returned activity=${System.identityHashCode(this)} " +
+                    "at=${android.os.SystemClock.elapsedRealtime()}"
+            }
+            // <-- SVC_RACE_DEBUG
             mediaHolder = null
             // <-- AM (SERVICE_OWNED_PLAYER)
         }
@@ -1045,6 +1243,13 @@ class PlayerActivity : BaseActivity() {
         // window exists right now, not whether the underlying session is preserved.
         liveInstanceCount--
         // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG Activity.onDestroy() liveInstanceCount-- -> $liveInstanceCount " +
+                "activity=${System.identityHashCode(this)} isDuplicateInstanceSelfTerminating=$isDuplicateInstanceSelfTerminating " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
 
         super.onDestroy()
     }

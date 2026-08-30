@@ -367,6 +367,13 @@ class PlayerViewModel @JvmOverloads constructor(
         }
 
     init {
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG PlayerViewModel.init reusableHolder=${reusableHolder?.let { System.identityHashCode(it) }} " +
+                "resolvedPlayer=${System.identityHashCode(_player)} " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         viewModelScope.launchIO {
             getCustomButtons.subscribeAll().collectLatest { buttons ->
                 setupCustomButtons(buttons)

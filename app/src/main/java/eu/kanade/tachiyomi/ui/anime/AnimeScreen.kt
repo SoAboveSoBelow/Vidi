@@ -61,6 +61,7 @@ import eu.kanade.tachiyomi.ui.browse.source.globalsearch.GlobalSearchScreen
 import eu.kanade.tachiyomi.ui.category.CategoryScreen
 import eu.kanade.tachiyomi.ui.home.HomeScreen
 import eu.kanade.tachiyomi.ui.main.MainActivity
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.ui.setting.SettingsScreen
 import eu.kanade.tachiyomi.ui.webview.WebViewScreen
 import eu.kanade.tachiyomi.util.system.copyToClipboard
@@ -488,10 +489,58 @@ class AnimeScreen(
     }
 
     private suspend fun continueWatching(context: Context, unseenEpisode: Episode?, useExternalPlayer: Boolean) {
-        if (unseenEpisode != null) openEpisode(context, unseenEpisode, useExternalPlayer)
+        // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+        // forceResume = true: this is specifically the "Continue" action, not an
+        // ordinary episode-list tap - see openEpisode()'s forceResume param.
+        if (unseenEpisode != null) openEpisode(context, unseenEpisode, useExternalPlayer, forceResume = true)
+        // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
     }
 
-    private suspend fun openEpisode(context: Context, episode: Episode, useExternalPlayer: Boolean) {
+    private suspend fun openEpisode(
+        context: Context,
+        episode: Episode,
+        useExternalPlayer: Boolean,
+        // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+        // Only the "Continue" button passes true. Opening from the notification, or
+        // tapping a specific episode in the list, should leave a reattached-but-
+        // paused live session exactly as the user left it - "Continue" is the one
+        // action that specifically means "resume playing".
+        //
+        // Acting directly on PlayerMediaHolder here, at click time, rather than
+        // threading a forceResume flag through the Intent -> onCreate/onNewIntent ->
+        // ViewModel construction -> onServiceConnected chain (the original approach):
+        // confirmed via testing that the Intent-extra version didn't reliably land,
+        // even after fixing the specific ordering race between onNewIntent()'s
+        // init() and onServiceConnected()'s reconcilePausedFromPlayer() found while
+        // investigating why. That whole chain depends on this Intent successfully
+        // being redelivered via onNewIntent() to the correct, already-live
+        // PlayerActivity instance - the same redelivery this codebase has an
+        // unresolved, intermittent duplicate-instance bug around (see
+        // DUPLICATE_INSTANCE_SELF_TERMINATE / SVC_RACE_DEBUG investigation). If that
+        // redelivery fails or lands on a doomed duplicate, forceResume never reaches
+        // anything that matters. PlayerMediaHolder.current is a process-wide,
+        // Service-owned reference independent of any Activity or Intent at all -
+        // setPaused(false) here runs synchronously before startActivity() is even
+        // called, so by the time any PlayerActivity (the correct one, a duplicate,
+        // or a fresh instance) reads mpv's state via reconcilePausedFromPlayer(),
+        // the answer is already correct regardless of which Activity lifecycle path
+        // actually executes. Guarded on matching animeId AND episodeId - "Continue"
+        // should only ever resume the exact paused session it's continuing, never
+        // blindly flip whatever happens to be currently loaded.
+        forceResume: Boolean = false,
+        // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
+    ) {
+        // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+        if (forceResume) {
+            val holder = PlayerMediaHolder.current
+            val liveState = holder?.state?.value
+            if (holder != null && holder.hasAdoptedPlayer &&
+                liveState?.animeId == episode.animeId && liveState.episodeId == episode.id
+            ) {
+                holder.setPaused(false)
+            }
+        }
+        // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
         // AY -->
         withIOContext {
             MainActivity.startPlayerActivity(
@@ -499,6 +548,7 @@ class AnimeScreen(
                 episode.animeId,
                 episode.id,
                 useExternalPlayer,
+                forceResume = forceResume,
             )
         }
         // <-- AY

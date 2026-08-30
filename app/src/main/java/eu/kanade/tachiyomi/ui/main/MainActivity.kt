@@ -560,6 +560,10 @@ class MainActivity : BaseActivity() {
             hosterIndex: Int = -1,
             videoIndex: Int = -1,
             hosterList: List<Hoster>? = null,
+            // AM (CONTINUE_BUTTON_RESUME_FIX) -->
+            // See AnimeScreen.openEpisode()'s forceResume param.
+            forceResume: Boolean = false,
+            // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
         ) {
             if (extPlayer) {
                 val sourceId = sourceId ?: (Injekt.get<GetAnime>().await(animeId)?.source ?: -1L)
@@ -587,6 +591,7 @@ class MainActivity : BaseActivity() {
                         hosterList,
                         hosterIndex,
                         videoIndex,
+                        forceResume = forceResume,
                     ),
                 )
             }

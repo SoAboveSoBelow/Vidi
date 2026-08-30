@@ -141,7 +141,17 @@ fun PlayerScreen(
     BackHandler {
         if (!hasNavigatedBack) {
             hasNavigatedBack = true
-            if (!stateData.isCasting && stateData.isPipAvailable && !playbackData.paused &&
+            // AM (BACK_PRESERVE_PAUSED_FIX) -->
+            // Previously required !playbackData.paused, so backing out of a paused
+            // video always skipped PIP entry and fell to onBack()'s genuine finish()
+            // path - a full teardown, not the session-preserving background path.
+            // Confirmed by the user: this made a paused video's session get fully
+            // discarded on back, so reopening the same video reloaded it from
+            // scratch instead of resuming. Dropping the paused check lets a paused
+            // video enter PIP (and take the same preserve-session path) on back too,
+            // same as an unpaused one.
+            if (!stateData.isCasting && stateData.isPipAvailable &&
+                // <-- AM (BACK_PRESERVE_PAUSED_FIX)
                 playerPreferences.pipOnExit.get() &&
                 uiData.sheetShown == Sheets.None &&
                 uiData.panelShown == Panels.None &&

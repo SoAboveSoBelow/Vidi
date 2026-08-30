@@ -121,6 +121,12 @@ class PlayerMediaHolder(
     // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
 
     init {
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG PlayerMediaHolder.init setting current: newHolder=${System.identityHashCode(this)} " +
+                "previousCurrent=${current?.let { System.identityHashCode(it) }} at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
         current = this
         // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
@@ -635,6 +641,13 @@ class PlayerMediaHolder(
      * whether their own instance was accepted or discarded.
      */
     fun adopt(existing: MPVPlayer): MPVPlayer {
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG PlayerMediaHolder.adopt() holder=${System.identityHashCode(this)} " +
+                "incomingPlayer=${System.identityHashCode(existing)} currentPlayer=${System.identityHashCode(_player)} " +
+                "willAccept=${_player == null} at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         if (_player == null) {
             _player = existing
             // AM (LIVE_POSITION_TRACKING) -->
@@ -1333,6 +1346,13 @@ class PlayerMediaHolder(
 
     /** Tears down the player and MediaSession. Only called when playback genuinely ends. */
     fun release() {
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG PlayerMediaHolder.release() holder=${System.identityHashCode(this)} " +
+                "player=${System.identityHashCode(_player)} hasAdoptedPlayer=$hasAdoptedPlayer " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         mediaSession?.release()
         mediaSession = null
         // AM (NATIVE_PLAYER_LEAK_FIX) -->
@@ -1370,6 +1390,13 @@ class PlayerMediaHolder(
         // self-registered (an unlikely but possible ordering during rapid
         // Service restarts) must never wipe out that newer, genuinely live
         // registration.
+        // SVC_RACE_DEBUG -->
+        logcat {
+            "SVC_RACE_DEBUG PlayerMediaHolder.release() clearing current: holder=${System.identityHashCode(this)} " +
+                "current===this=${current === this} currentIs=${current?.let { System.identityHashCode(it) }} " +
+                "at=${android.os.SystemClock.elapsedRealtime()}"
+        }
+        // <-- SVC_RACE_DEBUG
         if (current === this) {
             current = null
         }

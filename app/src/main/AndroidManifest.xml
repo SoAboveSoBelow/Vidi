@@ -138,6 +138,21 @@
                 android:resource="@xml/searchable" />
         </activity>
 
+        <!-- AM (DISTINCT_TASK_AFFINITY_FIX):
+             Without its own taskAffinity, PlayerActivity defaults to the same
+             package-level affinity as MainActivity - confirmed via
+             `adb shell dumpsys activity activities` showing MainActivity's task
+             and a genuinely-live, Service-bound PlayerActivity's own separate task
+             both reporting the identical literal affinity string
+             ("10066:xyz.Quickdev.Vidi.mi.dev"). With singleTask + NEW_TASK, that
+             makes Android's cross-task affinity search for an existing
+             PlayerActivity instance ambiguous - it was landing on MainActivity's
+             task instead (nothing to redeliver onNewIntent() to there), pushing a
+             fresh PlayerActivity on top instead of finding the real live instance,
+             which DUPLICATE_INSTANCE_SELF_TERMINATE then immediately killed,
+             silently discarding the user's actual open request every time a video
+             was live in the background. Giving PlayerActivity its own affinity
+             makes the search unambiguous. -->
         <activity
             android:name=".ui.player.PlayerActivity"
             android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboardHidden|keyboard|uiMode"
@@ -145,6 +160,7 @@
             android:launchMode="singleTask"
             android:resizeableActivity="true"
             android:supportsPictureInPicture="true"
+            android:taskAffinity=":player"
             android:theme="@style/Theme.Tachiyomi">
             <intent-filter>
                 <action android:name="com.samsung.android.support.REMOTE_ACTION" />
