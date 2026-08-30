@@ -1,0 +1,49 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+index bfac28c..35f762e 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+@@ -1997,7 +1997,27 @@ class PlayerViewModel @JvmOverloads constructor(
+                 // played or already wiped).
+                 val resumeFromLast = forceResumeFromLastPosition
+                 forceResumeFromLastPosition = false
++                // AM (TEMP_MEMORY_PRIORITY_FIX) -->
++                // Checked first, unconditionally - not nested inside the resumeFromLast
++                // branches below. forceResumeFromLastPosition is set true on EVERY fresh
++                // PlayerActivity launch (onNewIntent()'s shared cold-start path), not just
++                // a genuine process-death reinit - that includes the deliberate
++                // teardown-and-relaunch a cross-series switch does (see
++                // CROSS_SERIES_TEARDOWN_RELAUNCH_FIX). With the manager consult nested
++                // under an `else` that only ran once resumeFromLast's own branches had
++                // already been checked, resumeFromLast being (near-)always true on a
++                // fresh launch meant temp memory got shadowed on essentially every
++                // cross-series reopen, even with a correct, present cache entry sitting
++                // right there. This matches the original design intent: any live/temp
++                // position wins outright, no matter what else is going on.
++                val tempFromManager = stateData.value.currentAnime?.id?.let { animeId ->
++                    episode.id?.let { episodeId ->
++                        recentEpisodePositionManager.consume(animeId, episodeId)
++                    }
++                }
+                 val tempPositionMs = when {
++                    tempFromManager != null -> tempFromManager
++                    // <-- AM (TEMP_MEMORY_PRIORITY_FIX)
+                     // AM (LIVE_POSITION_REINIT_ONLY_FIX) -->
+                     // Gated on resumeFromLast, deliberately - NOT "any time the holder's
+                     // identity happens to match, trust its position." setupEpisode() ->
+@@ -2030,15 +2050,7 @@ class PlayerViewModel @JvmOverloads constructor(
+                     // that same role here: it's a live position, not a stored one, so it
+                     // also has to bypass the seen check below.
+                     resumeFromLast -> episode.last_second_seen
+-                    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+-                    // Keyed (animeId, episodeId), not episodeId alone - see
+-                    // RecentEpisodePositionManager's own doc comment.
+-                    else -> stateData.value.currentAnime?.id?.let { animeId ->
+-                        episode.id?.let { episodeId ->
+-                            recentEpisodePositionManager.consume(animeId, episodeId)
+-                        }
+-                    }
+-                    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
++                    else -> null
+                 }
+                 (
+                     if (tempPositionMs != null && tempPositionMs > 0) {

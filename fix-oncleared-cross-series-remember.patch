@@ -1,0 +1,21 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+index 7adc76e..bfac28c 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+@@ -3644,6 +3644,16 @@ class PlayerViewModel @JvmOverloads constructor(
+             }
+         }
+ 
++        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++        // changeEpisode()'s own call to this only covers next/prev within the same
++        // series - backing out of the player entirely to go watch something else never
++        // goes through changeEpisode() at all, so without this, temp memory was never
++        // actually written on the one path that's most of what "switching series"
++        // means in practice. Same call, same guards (finished-episode clear, duration
++        // buffer) as the in-series case - this is just the other real exit point.
++        rememberRecentEpisodePosition()
++        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
++
+         super.onCleared()
+     }
+ 

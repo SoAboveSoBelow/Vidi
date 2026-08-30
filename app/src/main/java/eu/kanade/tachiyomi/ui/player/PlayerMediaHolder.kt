@@ -249,29 +249,12 @@ class PlayerMediaHolder(
         playlistEpisodeIds = episodeIds
     }
 
-    // AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX) -->
-    /**
-     * Session-local, Service-scoped equivalent of PlayerViewModel's own
-     * recentEpisodePositions - that one only exists on the ViewModel, unreachable
-     * from here, so flipping between episodes via background skip had nothing
-     * remembering where you'd left off in one you'd already visited this session,
-     * always restarting at 0 regardless.
-     *
-     * Now mirrors the ViewModel's own pruning too (see [pruneRecentPositions]) -
-     * without it this just grew unbounded across a long backgrounded session with
-     * many skips, since entries were only ever removed individually on actually
-     * being consumed for a resume.
-     */
-    private data class RecentPosition(val positionMs: Long, val playlistIndex: Int)
-    private val recentPositions = mutableMapOf<Long, RecentPosition>()
-
-    private fun pruneRecentPositions(aroundPlaylistIndex: Int) {
-        val maxSlots = playerPreferences.recentEpisodePositionSlots.get()
-        recentPositions.entries.removeAll { (_, saved) ->
-            kotlin.math.abs(saved.playlistIndex - aroundPlaylistIndex) > maxSlots
-        }
-    }
-    // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
+    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+    // Shared with PlayerViewModel - see RecentEpisodePositionManager's own doc comment
+    // for why this used to be two separate in-memory maps kept in sync by hand, and
+    // isn't anymore.
+    private val recentEpisodePositionManager: RecentEpisodePositionManager = Injekt.get()
+    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
 
     /**
      * Resolves and loads the next/previous episode directly, without needing a live
@@ -337,25 +320,19 @@ class PlayerMediaHolder(
         // <-- AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
         setPaused(true)
 
-        // AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX) -->
+        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
         // Remember where this episode was left, so flipping back to it later in the
-        // same backgrounded session resumes correctly instead of restarting at 0 -
-        // mirrors PlayerViewModel.rememberRecentEpisodePosition()'s same finished-
-        // episode guard (don't cache a position at or past the end, which would
-        // otherwise just replay the last second forever on return). Then prunes,
-        // exactly like PlayerViewModel.changeEpisode() pairs remember+prune on
-        // every switch - without this, entries only ever got removed individually
-        // on being consumed, so the cache just grew unbounded across a long
-        // backgrounded session with many skips.
-        val currentDurationMs = currentState.durationMs.toLong()
-        val currentPositionMs = currentState.positionMs.toLong()
-        if (currentPositionMs > 0L && !(currentDurationMs > 0L && currentPositionMs >= currentDurationMs)) {
-            recentPositions[currentEpisodeId] = RecentPosition(currentPositionMs, currentIndex)
-        } else {
-            recentPositions.remove(currentEpisodeId)
-        }
-        pruneRecentPositions(newIndex)
-        // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
+        // same backgrounded session (or a future cold-started one) resumes correctly
+        // instead of restarting at 0. Delegates to the same manager PlayerViewModel
+        // uses - see its own doc comment for the finished-episode guard and pruning
+        // this used to have to reimplement here by hand.
+        recentEpisodePositionManager.remember(
+            animeId = animeId,
+            episodeId = currentEpisodeId,
+            positionMs = currentState.positionMs.toLong(),
+            durationMs = currentState.durationMs.toLong(),
+        )
+        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
 
         val succeeded = try {
             performBackgroundSkipLoad(animeId, targetEpisodeId)
@@ -467,19 +444,20 @@ class PlayerMediaHolder(
             }
             val resolvedUrl = resolvedVideo.videoUrl.toUri().resolveUri(context) ?: resolvedVideo.videoUrl
 
-            // AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX) -->
+            // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
             // Resume position priority mirrors PlayerViewModel.setVideo()'s own rules,
-            // simplified: this session's own recent-positions cache first (flipping
-            // back to an episode you were just on, however briefly, is the strongest
-            // signal available), otherwise the DB-persisted last-seen position unless
-            // the episode's already marked fully watched (matching the same
-            // already-watched -> start at 0 rule the rest of the app uses).
-            val resumePositionMs = recentPositions.remove(targetEpisodeId)?.positionMs
+            // simplified: the shared recent-positions cache first (flipping back to an
+            // episode you were just on, however briefly, is the strongest signal
+            // available - and now survives a cold start too), otherwise the
+            // DB-persisted last-seen position unless the episode's already marked fully
+            // watched (matching the same already-watched -> start at 0 rule the rest of
+            // the app uses).
+            val resumePositionMs = recentEpisodePositionManager.consume(animeId, targetEpisodeId)
                 ?: if (!episode.seen) episode.lastSecondSeen else 0L
             if (resumePositionMs > 0L) {
                 player.mpv.command("set", "start", (resumePositionMs / 1000L).toString())
             }
-            // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
+            // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
 
             // AM (SHARED_LOAD_FILE_FIX) -->
             // Mirrors PlayerViewModel.loadFile()'s exact pattern - previously
@@ -1358,7 +1336,12 @@ class PlayerMediaHolder(
         mediaSession?.release()
         mediaSession = null
         // AM (NATIVE_PLAYER_LEAK_FIX) -->
-        // Was isExiting only; leaked mpv/GPU
+        // Was `_player?.isExiting = true` directly, bypassing the real release().
+        // MPVPlayer.release() guards itself with `if (isExiting) return`, so that
+        // permanently disarmed the real teardown - mpv.close()/surface release
+        // never ran, leaking the native mpv/GPU context every time. Confirmed via
+        // dumpsys meminfo: Native Heap and EGL mtrack ballooned and never
+        // recovered (not a Java-heap leak, so GC never touched it).
         _player?.release()
         // <-- AM (NATIVE_PLAYER_LEAK_FIX)
         // AM (STALE_HOLDER_STATE_FIX) -->

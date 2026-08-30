@@ -1,0 +1,13 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/notification/NotificationReceiver.kt b/app/src/main/java/eu/kanade/tachiyomi/data/notification/NotificationReceiver.kt
+index 0000000..1111111 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/notification/NotificationReceiver.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/notification/NotificationReceiver.kt
+@@ -155,7 +155,7 @@
+         launchIO {
+             val toUpdate = episodeUrls.mapNotNull { getEpisode.await(it, animeId) }
+                 .map {
+-                    val episode = it.copy(seen = true, last_second_seen = 0)
++                    val episode = it.copy(seen = true, lastSecondSeen = 0)
+                     if (downloadPreferences.removeAfterMarkedAsSeen.get()) {
+                         val anime = getAnime.await(animeId)
+                         if (anime != null) {

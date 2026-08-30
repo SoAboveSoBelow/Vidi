@@ -20,6 +20,7 @@ import eu.kanade.tachiyomi.ui.player.MX_PLAYER
 import eu.kanade.tachiyomi.ui.player.MX_PLAYER_FREE
 import eu.kanade.tachiyomi.ui.player.MX_PLAYER_PRO
 import eu.kanade.tachiyomi.ui.player.NEXT_PLAYER
+import eu.kanade.tachiyomi.ui.player.RecentEpisodePositionManager
 import eu.kanade.tachiyomi.ui.player.VLC_PLAYER
 import eu.kanade.tachiyomi.ui.player.WEB_VIDEO_CASTER
 import eu.kanade.tachiyomi.ui.player.X_PLAYER
@@ -67,13 +68,19 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 preference = playerPreferences.preserveWatchingPosition,
                 title = stringResource(AYMR.strings.pref_preserve_watching_position),
             ),
-            // AM (RECENT_EPISODE_POSITIONS) -->
+            // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
             Preference.PreferenceItem.ListPreference(
                 preference = playerPreferences.recentEpisodePositionSlots,
                 entries = (1..10).associateWith { it.toString() }.toPersistentMap(),
                 title = stringResource(AMMR.strings.player_pref_recent_episode_position_slots),
+                onValueChanged = {
+                    // Trim the persisted cache down to the new limit right away, rather
+                    // than waiting for the next write to notice it shrank.
+                    Injekt.get<RecentEpisodePositionManager>().onSlotsPreferenceChanged()
+                    true
+                },
             ),
-            // <-- AM (RECENT_EPISODE_POSITIONS)
+            // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
             Preference.PreferenceItem.SwitchPreference(
                 preference = playerPreferences.switchOnFailure,
                 title = stringResource(AMMR.strings.player_pref_switch_on_failure),

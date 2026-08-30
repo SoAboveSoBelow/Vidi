@@ -1,0 +1,42 @@
+CREATE TABLE episode_temp_positions(
+    anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    position_ms INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (anime_id, episode_id)
+);
+
+CREATE INDEX episode_temp_positions_updated_at_index ON episode_temp_positions(updated_at);
+
+getAll:
+SELECT anime_id, episode_id, position_ms, updated_at
+FROM episode_temp_positions
+ORDER BY updated_at DESC;
+
+upsert:
+INSERT INTO episode_temp_positions(anime_id, episode_id, position_ms, updated_at)
+VALUES (:animeId, :episodeId, :positionMs, :updatedAt)
+ON CONFLICT(anime_id, episode_id)
+DO UPDATE
+SET
+    position_ms = :positionMs,
+    updated_at = :updatedAt;
+
+deleteByKey:
+DELETE FROM episode_temp_positions
+WHERE anime_id = :animeId AND episode_id = :episodeId;
+
+-- Keeps only the :keepCount most-recently-updated rows, by rowid rather than a
+-- row-value tuple comparison so it doesn't depend on the composite primary key
+-- being usable in a row-value IN (...) subquery.
+pruneToMostRecent:
+DELETE FROM episode_temp_positions
+WHERE rowid NOT IN (
+    SELECT rowid
+    FROM episode_temp_positions
+    ORDER BY updated_at DESC
+    LIMIT :keepCount
+);
+
+deleteAll:
+DELETE FROM episode_temp_positions;

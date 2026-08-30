@@ -1,0 +1,100 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+index ee0d5a61f..7adc76e01 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+@@ -242,7 +242,9 @@ class PlayerViewModel @JvmOverloads constructor(
+     // derived bookkeeping needs syncing, not a full mpv reload. See
+     // syncSessionStateFromDb().
+     // AM (REUSED_PLAYER_TARGET_MISMATCH_FIX) -->
+-    // Corrected later in init()
++    // var, not val: init() below can correct this to false once the actual
++    // target anime/episode is known and turns out not to match what was reused -
++    // see that fix for why.
+     var wasPlayerReusedFromLiveHolder = reusableHolder != null
+     // <-- AM (REUSED_PLAYER_TARGET_MISMATCH_FIX)
+     // <-- AM (REUSED_PLAYER_SYNC_FIX)
+@@ -873,16 +875,16 @@ class PlayerViewModel @JvmOverloads constructor(
+         }
+ 
+     // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+-
+     /**
+      * Session-local convenience for recently-departed episodes, so an accidental
+      * next/previous click doesn't lose your place - even for an already-seen episode we
+      * otherwise don't persist rewatch position for. Doesn't cover the currently-open
+      * episode; that's already handled by the normal live-tracking/resume path.
+      *
+-     * Backed by RecentEpisodePositionManager - a single app-process-wide, DB-backed
+-     * cache shared with PlayerMediaHolder, instead of a ViewModel-local map. Persists
+-     * across process death; no more keeping two in-memory copies in sync by hand.
++     * Backed by [RecentEpisodePositionManager] - a single app-process-wide, DB-backed
++     * cache shared with PlayerMediaHolder, rather than a ViewModel-local map. See that
++     * class's own doc comment for why (persists across process death; no more keeping
++     * two independent in-memory copies in sync by hand).
+      */
+     private val recentEpisodePositionManager: RecentEpisodePositionManager = Injekt.get()
+ 
+@@ -1096,7 +1098,23 @@ class PlayerViewModel @JvmOverloads constructor(
+         if (!needsInit(animeId, initialEpisodeId)) return Pair(defaultResult, Result.success(true))
+ 
+         // AM (REUSED_PLAYER_TARGET_MISMATCH_FIX) -->
+-        // Belongs to another session; build fresh
++        // wasPlayerReusedFromLiveHolder only means "a live holder with an adopted
++        // player existed at construction time" - the actual target wasn't known
++        // yet then to check against. needsInit() passing above confirms this IS a
++        // different anime/episode, so if the player was reused, it's still the
++        // OTHER, still-playing session's real player, not a throwaway - sharing it
++        // would load new content into a native mpv context that session depends
++        // on. Build a genuinely fresh MPVPlayer instead. Must NOT .release() the
++        // discarded one - it's still in use elsewhere.
++        //
++        // This only covers a DIFFERENT ViewModel instance's construction-time
++        // reuse. The other case - THIS instance already alive and playing
++        // something when a different anime is requested via onNewIntent()
++        // redelivery - is handled separately, by a real teardown-and-relaunch in
++        // PlayerActivity.onNewIntent() rather than a hot-swap here (swapping
++        // _player in that case would leave the Service/holder still wired to the
++        // old player object, since PlayerMediaHolder.adopt() only runs its setup
++        // once per holder).
+         if (wasPlayerReusedFromLiveHolder) {
+             val liveState = PlayerMediaHolder.current?.state?.value
+             if (liveState?.animeId != animeId || liveState.episodeId != initialEpisodeId) {
+@@ -1980,15 +1998,32 @@ class PlayerViewModel @JvmOverloads constructor(
+                 val resumeFromLast = forceResumeFromLastPosition
+                 forceResumeFromLastPosition = false
+                 val tempPositionMs = when {
+-                    // Service-tracked live position for this exact (anime, episode) -
+-                    // it's genuinely still playing right now. animeId check guards a
+-                    // cross-series bleed: the holder's state stays live for whatever was
+-                    // PREVIOUSLY playing right up until a new session adopts it, and an
+-                    // episode.id collision between two unrelated series hit that window.
+-                    liveHolderState != null &&
++                    // AM (LIVE_POSITION_REINIT_ONLY_FIX) -->
++                    // Gated on resumeFromLast, deliberately - NOT "any time the holder's
++                    // identity happens to match, trust its position." setupEpisode() ->
++                    // syncHolderSessionState() updates the holder's animeId/episodeId on
++                    // EVERY episode switch, including a completely ordinary
++                    // changeEpisode() - but syncSessionState()'s positionMs param is left
++                    // null on that path on purpose (see its own doc comment: the
++                    // foreground path has its own separate, continuous position-tracking
++                    // timer and never touches this field here). That means the instant
++                    // after an ordinary switch, the holder's identity already matches the
++                    // NEW episode while positionMs is still whatever was last live-tracked
++                    // for the OLD one - so without this guard, every ordinary next-episode
++                    // click would satisfy every condition below and hand back the previous
++                    // episode's position. resumeFromLast is only true for the one case
++                    // this shortcut is actually valid for: a process died mid-playback and
++                    // this is the reinit picking that exact same episode back up, where
++                    // there's no live in-memory temp source left and the holder's position
++                    // genuinely still belongs to what's being resumed. animeId/episodeId
++                    // checks below guard a narrower cross-series bleed within that same
++                    // reinit case: the holder's state stays live for whatever was
++                    // PREVIOUSLY playing right up until a new session adopts it.
++                    resumeFromLast && liveHolderState != null &&
+                         liveHolderState.animeId == stateData.value.currentAnime?.id &&
+                         liveHolderState.episodeId == episode.id && liveHolderState.positionMs > 0 ->
+                         liveHolderState.positionMs.toLong()
++                    // <-- AM (LIVE_POSITION_REINIT_ONLY_FIX)
+                     // Process died mid-playback and this is the reinit picking the
+                     // session back up - there's no live in-memory temp source left, but
+                     // the position just persisted to the DB right before restart plays

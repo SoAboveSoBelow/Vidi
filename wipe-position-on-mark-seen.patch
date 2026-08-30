@@ -1,0 +1,13 @@
+diff --git a/app/src/main/java/eu/kanade/domain/episode/interactor/SetSeenStatus.kt b/app/src/main/java/eu/kanade/domain/episode/interactor/SetSeenStatus.kt
+index 0000000..1111111 100644
+--- a/app/src/main/java/eu/kanade/domain/episode/interactor/SetSeenStatus.kt
++++ b/app/src/main/java/eu/kanade/domain/episode/interactor/SetSeenStatus.kt
+@@ -21,7 +21,7 @@ class SetSeenStatus(
+     private val mapper = { episode: Episode, seen: Boolean ->
+         EpisodeUpdate(
+             seen = seen,
+-            lastSecondSeen = if (!seen) 0 else null,
++            lastSecondSeen = 0,
+             id = episode.id,
+         )
+     }

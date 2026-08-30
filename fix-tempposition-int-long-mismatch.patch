@@ -1,0 +1,13 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+index 0000000..1111111 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+@@ -2036,7 +2036,7 @@
+                     liveHolderState != null &&
+                         liveHolderState.animeId == stateData.value.currentAnime?.id &&
+                         liveHolderState.episodeId == episode.id && liveHolderState.positionMs > 0 ->
+-                        liveHolderState.positionMs
++                        liveHolderState.positionMs.toLong()
+                     // Process died mid-playback and this is the reinit picking the
+                     // session back up - there's no live in-memory temp source left, but
+                     // the position just persisted to the DB right before restart plays

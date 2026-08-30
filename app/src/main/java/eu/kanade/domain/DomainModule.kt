@@ -1,7 +1,9 @@
 package eu.kanade.domain
 
 import android.app.Application
+import animiru.data.player.EpisodeTempPositionRepositoryImpl
 import animiru.domain.player.interactor.TrackSelect
+import animiru.domain.player.repository.EpisodeTempPositionRepository
 import eu.kanade.domain.anime.interactor.GetExcludedScanlators
 import eu.kanade.domain.anime.interactor.SetAnimeViewerFlags
 import eu.kanade.domain.anime.interactor.SetExcludedScanlators
@@ -248,6 +250,9 @@ class DomainModule : InjektModule {
 
         addFactory { TrackSelect(get(), get()) }
         // <-- AY
+        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+        addSingletonFactory<EpisodeTempPositionRepository> { EpisodeTempPositionRepositoryImpl(get()) }
+        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
         // AM (CUSTOM_INFORMATION) -->
         addSingletonFactory<CustomAnimeRepository> { CustomAnimeRepositoryImpl(get<Application>()) }
         addFactory { GetCustomAnimeInfo(get()) }

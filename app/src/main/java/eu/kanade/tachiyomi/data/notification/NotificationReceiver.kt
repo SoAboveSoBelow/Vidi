@@ -155,7 +155,7 @@ class NotificationReceiver : BroadcastReceiver() {
         launchIO {
             val toUpdate = episodeUrls.mapNotNull { getEpisode.await(it, animeId) }
                 .map {
-                    val episode = it.copy(seen = true)
+                    val episode = it.copy(seen = true, lastSecondSeen = 0)
                     if (downloadPreferences.removeAfterMarkedAsSeen.get()) {
                         val anime = getAnime.await(animeId)
                         if (anime != null) {

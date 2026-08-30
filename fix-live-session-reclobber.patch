@@ -1,0 +1,21 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+index fa34736..1e3e137 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+@@ -3803,6 +3803,16 @@ class PlayerViewModel @JvmOverloads constructor(
+                 episode.seen = fresh.seen
+                 episode.bookmark = fresh.bookmark
+                 episode.version = fresh.version
++                // AM (WIPE_POSITION_ON_SEEN) -->
++                // If this refresh just picked up an external "marked as seen" that
++                // happened while this episode was still actively playing, don't let
++                // the position this tick already computed (from the pre-refresh,
++                // stale `seen = false`) get written back below and reclobber the
++                // wipe the external mark-as-seen action just did.
++                if (episode.seen && !playerPreferences.preserveWatchingPosition.get()) {
++                    episode.last_second_seen = 0L
++                }
++                // <-- AM (WIPE_POSITION_ON_SEEN)
+             }
+             val willChangeTrackedFields = fresh != null && (
+                 episode.seen != fresh.seen ||

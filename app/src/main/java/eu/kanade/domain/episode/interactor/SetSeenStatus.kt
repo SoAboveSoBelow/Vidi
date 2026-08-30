@@ -21,7 +21,7 @@ class SetSeenStatus(
     private val mapper = { episode: Episode, seen: Boolean ->
         EpisodeUpdate(
             seen = seen,
-            lastSecondSeen = if (!seen) 0 else null,
+            lastSecondSeen = 0,
             id = episode.id,
         )
     }

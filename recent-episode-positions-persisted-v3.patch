@@ -1,0 +1,600 @@
+diff --git a/app/src/main/java/eu/kanade/domain/DomainModule.kt b/app/src/main/java/eu/kanade/domain/DomainModule.kt
+index 3a17a78..d5a40e1 100644
+--- a/app/src/main/java/eu/kanade/domain/DomainModule.kt
++++ b/app/src/main/java/eu/kanade/domain/DomainModule.kt
+@@ -1,7 +1,9 @@
+ package eu.kanade.domain
+ 
+ import android.app.Application
++import animiru.data.player.EpisodeTempPositionRepositoryImpl
+ import animiru.domain.player.interactor.TrackSelect
++import animiru.domain.player.repository.EpisodeTempPositionRepository
+ import eu.kanade.domain.anime.interactor.GetExcludedScanlators
+ import eu.kanade.domain.anime.interactor.SetAnimeViewerFlags
+ import eu.kanade.domain.anime.interactor.SetExcludedScanlators
+@@ -248,6 +250,9 @@ class DomainModule : InjektModule {
+ 
+         addFactory { TrackSelect(get(), get()) }
+         // <-- AY
++        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++        addSingletonFactory<EpisodeTempPositionRepository> { EpisodeTempPositionRepositoryImpl(get()) }
++        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+         // AM (CUSTOM_INFORMATION) -->
+         addSingletonFactory<CustomAnimeRepository> { CustomAnimeRepositoryImpl(get<Application>()) }
+         addFactory { GetCustomAnimeInfo(get()) }
+diff --git a/app/src/main/java/eu/kanade/presentation/more/settings/screen/player/PlayerSettingsPlayerScreen.kt b/app/src/main/java/eu/kanade/presentation/more/settings/screen/player/PlayerSettingsPlayerScreen.kt
+index f7e6fb7..a6b85a6 100644
+--- a/app/src/main/java/eu/kanade/presentation/more/settings/screen/player/PlayerSettingsPlayerScreen.kt
++++ b/app/src/main/java/eu/kanade/presentation/more/settings/screen/player/PlayerSettingsPlayerScreen.kt
+@@ -20,6 +20,7 @@ import eu.kanade.tachiyomi.ui.player.MX_PLAYER
+ import eu.kanade.tachiyomi.ui.player.MX_PLAYER_FREE
+ import eu.kanade.tachiyomi.ui.player.MX_PLAYER_PRO
+ import eu.kanade.tachiyomi.ui.player.NEXT_PLAYER
++import eu.kanade.tachiyomi.ui.player.RecentEpisodePositionManager
+ import eu.kanade.tachiyomi.ui.player.VLC_PLAYER
+ import eu.kanade.tachiyomi.ui.player.WEB_VIDEO_CASTER
+ import eu.kanade.tachiyomi.ui.player.X_PLAYER
+@@ -67,13 +68,19 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
+                 preference = playerPreferences.preserveWatchingPosition,
+                 title = stringResource(AYMR.strings.pref_preserve_watching_position),
+             ),
+-            // AM (RECENT_EPISODE_POSITIONS) -->
++            // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+             Preference.PreferenceItem.ListPreference(
+                 preference = playerPreferences.recentEpisodePositionSlots,
+                 entries = (1..10).associateWith { it.toString() }.toPersistentMap(),
+                 title = stringResource(AMMR.strings.player_pref_recent_episode_position_slots),
++                onValueChanged = {
++                    // Trim the persisted cache down to the new limit right away, rather
++                    // than waiting for the next write to notice it shrank.
++                    Injekt.get<RecentEpisodePositionManager>().onSlotsPreferenceChanged()
++                    true
++                },
+             ),
+-            // <-- AM (RECENT_EPISODE_POSITIONS)
++            // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+             Preference.PreferenceItem.SwitchPreference(
+                 preference = playerPreferences.switchOnFailure,
+                 title = stringResource(AMMR.strings.player_pref_switch_on_failure),
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt b/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
+index fb08a3b..ccb9918 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
+@@ -151,6 +151,10 @@ class AppModule(val app: Application) : InjektModule {
+         addSingletonFactory { DownloadManager(app) }
+         addSingletonFactory { DownloadCache(app) }
+ 
++        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++        addSingletonFactory { RecentEpisodePositionManager(get(), get()) }
++        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
++
+         addSingletonFactory { TrackerManager() }
+         addSingletonFactory { DelayedTrackingStore(app) }
+ 
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerMediaHolder.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerMediaHolder.kt
+index 4530984..f4c97d7 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerMediaHolder.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerMediaHolder.kt
+@@ -249,29 +249,12 @@ class PlayerMediaHolder(
+         playlistEpisodeIds = episodeIds
+     }
+ 
+-    // AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX) -->
+-    /**
+-     * Session-local, Service-scoped equivalent of PlayerViewModel's own
+-     * recentEpisodePositions - that one only exists on the ViewModel, unreachable
+-     * from here, so flipping between episodes via background skip had nothing
+-     * remembering where you'd left off in one you'd already visited this session,
+-     * always restarting at 0 regardless.
+-     *
+-     * Now mirrors the ViewModel's own pruning too (see [pruneRecentPositions]) -
+-     * without it this just grew unbounded across a long backgrounded session with
+-     * many skips, since entries were only ever removed individually on actually
+-     * being consumed for a resume.
+-     */
+-    private data class RecentPosition(val positionMs: Long, val playlistIndex: Int)
+-    private val recentPositions = mutableMapOf<Long, RecentPosition>()
+-
+-    private fun pruneRecentPositions(aroundPlaylistIndex: Int) {
+-        val maxSlots = playerPreferences.recentEpisodePositionSlots.get()
+-        recentPositions.entries.removeAll { (_, saved) ->
+-            kotlin.math.abs(saved.playlistIndex - aroundPlaylistIndex) > maxSlots
+-        }
+-    }
+-    // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
++    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++    // Shared with PlayerViewModel - see RecentEpisodePositionManager's own doc comment
++    // for why this used to be two separate in-memory maps kept in sync by hand, and
++    // isn't anymore.
++    private val recentEpisodePositionManager: RecentEpisodePositionManager = Injekt.get()
++    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+ 
+     /**
+      * Resolves and loads the next/previous episode directly, without needing a live
+@@ -337,25 +320,19 @@ class PlayerMediaHolder(
+         // <-- AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
+         setPaused(true)
+ 
+-        // AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX) -->
++        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+         // Remember where this episode was left, so flipping back to it later in the
+-        // same backgrounded session resumes correctly instead of restarting at 0 -
+-        // mirrors PlayerViewModel.rememberRecentEpisodePosition()'s same finished-
+-        // episode guard (don't cache a position at or past the end, which would
+-        // otherwise just replay the last second forever on return). Then prunes,
+-        // exactly like PlayerViewModel.changeEpisode() pairs remember+prune on
+-        // every switch - without this, entries only ever got removed individually
+-        // on being consumed, so the cache just grew unbounded across a long
+-        // backgrounded session with many skips.
+-        val currentDurationMs = currentState.durationMs.toLong()
+-        val currentPositionMs = currentState.positionMs.toLong()
+-        if (currentPositionMs > 0L && !(currentDurationMs > 0L && currentPositionMs >= currentDurationMs)) {
+-            recentPositions[currentEpisodeId] = RecentPosition(currentPositionMs, currentIndex)
+-        } else {
+-            recentPositions.remove(currentEpisodeId)
+-        }
+-        pruneRecentPositions(newIndex)
+-        // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
++        // same backgrounded session (or a future cold-started one) resumes correctly
++        // instead of restarting at 0. Delegates to the same manager PlayerViewModel
++        // uses - see its own doc comment for the finished-episode guard and pruning
++        // this used to have to reimplement here by hand.
++        recentEpisodePositionManager.remember(
++            animeId = animeId,
++            episodeId = currentEpisodeId,
++            positionMs = currentState.positionMs.toLong(),
++            durationMs = currentState.durationMs.toLong(),
++        )
++        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+ 
+         val succeeded = try {
+             performBackgroundSkipLoad(animeId, targetEpisodeId)
+@@ -467,19 +444,20 @@ class PlayerMediaHolder(
+             }
+             val resolvedUrl = resolvedVideo.videoUrl.toUri().resolveUri(context) ?: resolvedVideo.videoUrl
+ 
+-            // AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX) -->
++            // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+             // Resume position priority mirrors PlayerViewModel.setVideo()'s own rules,
+-            // simplified: this session's own recent-positions cache first (flipping
+-            // back to an episode you were just on, however briefly, is the strongest
+-            // signal available), otherwise the DB-persisted last-seen position unless
+-            // the episode's already marked fully watched (matching the same
+-            // already-watched -> start at 0 rule the rest of the app uses).
+-            val resumePositionMs = recentPositions.remove(targetEpisodeId)?.positionMs
++            // simplified: the shared recent-positions cache first (flipping back to an
++            // episode you were just on, however briefly, is the strongest signal
++            // available - and now survives a cold start too), otherwise the
++            // DB-persisted last-seen position unless the episode's already marked fully
++            // watched (matching the same already-watched -> start at 0 rule the rest of
++            // the app uses).
++            val resumePositionMs = recentEpisodePositionManager.consume(animeId, targetEpisodeId)
+                 ?: if (!episode.seen) episode.lastSecondSeen else 0L
+             if (resumePositionMs > 0L) {
+                 player.mpv.command("set", "start", (resumePositionMs / 1000L).toString())
+             }
+-            // <-- AM (BACKGROUND_SKIP_POSITION_MEMORY_FIX)
++            // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+ 
+             // AM (SHARED_LOAD_FILE_FIX) -->
+             // Mirrors PlayerViewModel.loadFile()'s exact pattern - previously
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+index 7feb37c..7a217a0 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+@@ -874,59 +874,29 @@ class PlayerViewModel @JvmOverloads constructor(
+             field = value
+         }
+ 
+-    // AM (RECENT_EPISODE_POSITIONS) -->
+-
++    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+     /**
+-     * Session-local temp-position cache for recently-departed episodes, so an accidental
++     * Session-local convenience for recently-departed episodes, so an accidental
+      * next/previous click doesn't lose your place - even for an already-seen episode we
+      * otherwise don't persist rewatch position for. Doesn't cover the currently-open
+      * episode; that's already handled by the normal live-tracking/resume path.
+      *
+-     * Keyed by episode id; each entry also records the playlist index it was saved at, so
+-     * entries are pruned by distance from wherever you're currently navigating rather than
+-     * by a raw insertion count - otherwise a forward-forward-back-back click pattern would
+-     * evict an entry before you ever get back to it.
++     * Backed by [RecentEpisodePositionManager] - a single app-process-wide, DB-backed
++     * cache shared with PlayerMediaHolder, rather than a ViewModel-local map. See that
++     * class's own doc comment for why (persists across process death; no more keeping
++     * two independent in-memory copies in sync by hand).
+      */
+-    private data class RecentPosition(val positionMs: Long, val playlistIndex: Int)
+-    // AM (RECENT_POSITION_CROSS_SERIES_FIX) -->
+-    // Was keyed by episode id alone. Episode.id is nullable for a not-yet-
+-    // persisted entity, and two different series' episodes can both land on the
+-    // same not-yet-assigned id - keying by episode id alone let those collide
+-    // and silently share a cache slot, bleeding a resume position from one
+-    // series into an unrelated one. Disambiguating with animeId closes that off.
+-    private val recentEpisodePositions = mutableMapOf<Pair<Long, Long>, RecentPosition>()
+-    // <-- AM (RECENT_POSITION_CROSS_SERIES_FIX)
++    private val recentEpisodePositionManager: RecentEpisodePositionManager = Injekt.get()
+ 
+     private fun rememberRecentEpisodePosition() {
+         val anime = stateData.value.currentAnime ?: return
+         val episode = stateData.value.currentEpisode ?: return
+-        val id = episode.id ?: return
+-        val key = anime.id to id
++        val episodeId = episode.id ?: return
+         val positionMs = (episodePosition ?: 0L) * 1000L
+-        if (positionMs <= 0L) return
+-
+-        // AM (RECENT_POSITION_FINISHED_CLEAR) -->
+-        // A finished episode (position at or past its final second) shouldn't get cached
+-        // as a resume point - that would just replay the last second forever on return.
+-        // This is intentionally independent of the "mark as watched after %" setting;
+-        // clear strictly at the last second regardless of where that threshold sits.
+         val durationMs = playbackData.value.duration.toLong() * 1000L
+-        if (durationMs > 0L && positionMs >= durationMs) {
+-            recentEpisodePositions.remove(key)
+-            return
+-        }
+-        // <-- AM (RECENT_POSITION_FINISHED_CLEAR)
+-
+-        recentEpisodePositions[key] = RecentPosition(positionMs, stateData.value.currentPlaylistIndex)
++        recentEpisodePositionManager.remember(anime.id, episodeId, positionMs, durationMs)
+     }
+-
+-    private fun pruneRecentEpisodePositions(aroundPlaylistIndex: Int) {
+-        val maxSlots = playerPreferences.recentEpisodePositionSlots.get()
+-        recentEpisodePositions.entries.removeAll { (_, saved) ->
+-            kotlin.math.abs(saved.playlistIndex - aroundPlaylistIndex) > maxSlots
+-        }
+-    }
+-    // <-- AM (RECENT_EPISODE_POSITIONS)
++    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+ 
+     /** Restored on process kill. */
+     private var qualityIndex = savedState.get<Pair<Int, Int>>("quality_index") ?: Pair(-1, -1)
+@@ -2043,15 +2013,15 @@ class PlayerViewModel @JvmOverloads constructor(
+                     // that same role here: it's a live position, not a stored one, so it
+                     // also has to bypass the seen check below.
+                     resumeFromLast -> episode.last_second_seen
+-                    // AM (RECENT_EPISODE_POSITIONS) -->
++                    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+                     // Keyed (animeId, episodeId), not episodeId alone - see
+-                    // recentEpisodePositions' own doc comment.
++                    // RecentEpisodePositionManager's own doc comment.
+                     else -> stateData.value.currentAnime?.id?.let { animeId ->
+                         episode.id?.let { episodeId ->
+-                            recentEpisodePositions.remove(animeId to episodeId)?.positionMs
++                            recentEpisodePositionManager.consume(animeId, episodeId)
+                         }
+                     }
+-                    // <-- AM (RECENT_EPISODE_POSITIONS)
++                    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+                 }
+                 (
+                     if (tempPositionMs != null && tempPositionMs > 0) {
+@@ -2945,12 +2915,9 @@ class PlayerViewModel @JvmOverloads constructor(
+             clearTracks()
+         }
+ 
+-        // AM (RECENT_EPISODE_POSITIONS) -->
++        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+         rememberRecentEpisodePosition()
+-        stateData.value.currentPlaylist.indexOfFirst { it.id == episodeId }
+-            .takeIf { it != -1 }
+-            ?.let { pruneRecentEpisodePositions(it) }
+-        // <-- AM (RECENT_EPISODE_POSITIONS)
++        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+ 
+         updateStateData { it.copy(hosterList = emptyList()) }
+         updateUiData {
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/RecentEpisodePositionManager.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/RecentEpisodePositionManager.kt
+new file mode 100644
+index 0000000..bd2658b
+--- /dev/null
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/RecentEpisodePositionManager.kt
+@@ -0,0 +1,136 @@
++package eu.kanade.tachiyomi.ui.player
++
++import animiru.domain.player.repository.EpisodeTempPositionRepository
++import animiru.domain.player.service.PlayerPreferences
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import java.util.concurrent.ConcurrentHashMap
++
++// AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++/**
++ * Single app-process-wide temp-position cache, replacing what used to be two separate
++ * in-memory maps (one on PlayerViewModel, one on PlayerMediaHolder) that had to be kept
++ * in sync by hand. PlayerBackgroundPlaybackService runs in the same process as the
++ * Activity/ViewModel (no android:process split in the manifest), so a genuine singleton
++ * here - registered once via Injekt, shared by both - means there's only ever one copy
++ * of this cache, not two that can drift apart.
++ *
++ * All reads/writes are synchronous, in-memory-only - callers get the same instant
++ * behaviour the old plain map gave them. Every write also fires an async, non-blocking
++ * save to [repository] so the cache survives process death; hydration from that table
++ * back into memory starts immediately at construction (see init), racing the
++ * async work a session already does before its first real resume lookup - in practice
++ * that's enough of a head start, though it's a best-effort ordering, not a guarantee
++ * (see consume()'s doc for what happens on the rare miss).
++ *
++ * Pruning is MRU by [EpisodeTempPositionRepository]/timestamp, not the old
++ * playlist-index-distance scheme - simpler, and matches what
++ * `recentEpisodePositionSlots` describes.
++ */
++class RecentEpisodePositionManager(
++    private val repository: EpisodeTempPositionRepository,
++    private val playerPreferences: PlayerPreferences,
++) {
++
++    private data class Entry(val positionMs: Long, val updatedAt: Long)
++
++    private val cache = ConcurrentHashMap<Pair<Long, Long>, Entry>()
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++    private val hydrationMutex = Mutex()
++
++    @Volatile
++    private var hydrated = false
++
++    init {
++        // Kicked off immediately at construction (first Injekt.get() of this singleton,
++        // typically during PlayerActivity/ViewModel startup), not lazily on first
++        // consume()/remember() call - so it has as much of a head start as possible
++        // against the async video/hoster-resolution work that happens before the first
++        // real resume lookup. This is a best-effort ordering, not a hard guarantee: if a
++        // resume lookup genuinely does race ahead of this, consume() just returns null
++        // (same as "nothing cached"), falling through to the normal seen/DB-position
++        // resume path - correct, just missing the temp-cache hit that one time.
++        hydrate()
++    }
++
++    private fun hydrate() {
++        if (hydrated) return
++        scope.launch {
++            hydrationMutex.withLock {
++                if (hydrated) return@withLock
++                repository.getAll().forEach { saved ->
++                    // Don't clobber a newer in-memory entry with a stale DB row if
++                    // something was already written (e.g. two rapid switches) before
++                    // hydration finished.
++                    cache.merge(saved.animeId to saved.episodeId, Entry(saved.positionMs, saved.updatedAt)) { existing, fromDb ->
++                        if (existing.updatedAt >= fromDb.updatedAt) existing else fromDb
++                    }
++                }
++                hydrated = true
++            }
++        }
++    }
++
++    /**
++     * Removes and returns the temp position for (animeId, episodeId), if one exists -
++     * consumed once, on the assumption the caller is about to resume live playback of
++     * it, at which point live position-tracking takes over.
++     */
++    fun consume(animeId: Long, episodeId: Long): Long? {
++        val removed = cache.remove(animeId to episodeId)?.positionMs
++        if (removed != null) {
++            scope.launch { repository.delete(animeId, episodeId) }
++        }
++        return removed
++    }
++
++    /**
++     * Remembers a temp position for (animeId, episodeId), or clears any existing one if
++     * [positionMs] is at or past [durationMs] minus a one-second buffer. That buffer is
++     * deliberate: the same tick that crosses the true final second is also the one
++     * deciding whether to transition to the next episode, so wiping exactly on that
++     * boundary races the transition. Settling the wipe a second early means it's always
++     * done before a transition can even start.
++     */
++    fun remember(animeId: Long, episodeId: Long, positionMs: Long, durationMs: Long) {
++        val key = animeId to episodeId
++        if (durationMs > 0L && positionMs >= durationMs - 1000L) {
++            if (cache.remove(key) != null) {
++                scope.launch { repository.delete(animeId, episodeId) }
++            }
++            return
++        }
++        if (positionMs <= 0L) return
++
++        val updatedAt = System.currentTimeMillis()
++        cache[key] = Entry(positionMs, updatedAt)
++        scope.launch {
++            repository.upsert(animeId, episodeId, positionMs, updatedAt)
++            pruneToCurrentLimit()
++        }
++    }
++
++    private suspend fun pruneToCurrentLimit() {
++        val maxSlots = playerPreferences.recentEpisodePositionSlots.get()
++        if (cache.size > maxSlots) {
++            cache.entries
++                .sortedByDescending { it.value.updatedAt }
++                .drop(maxSlots)
++                .forEach { cache.remove(it.key) }
++        }
++        repository.pruneToMostRecent(maxSlots)
++    }
++
++    /**
++     * Called when the user changes the "temporary position memory" setting, so a
++     * reduced limit is enforced immediately rather than waiting for the next write.
++     */
++    fun onSlotsPreferenceChanged() {
++        scope.launch { pruneToCurrentLimit() }
++    }
++}
++// <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+diff --git a/data/src/main/java/animiru/data/player/EpisodeTempPositionRepositoryImpl.kt b/data/src/main/java/animiru/data/player/EpisodeTempPositionRepositoryImpl.kt
+new file mode 100644
+index 0000000..f8d134a
+--- /dev/null
++++ b/data/src/main/java/animiru/data/player/EpisodeTempPositionRepositoryImpl.kt
+@@ -0,0 +1,53 @@
++package animiru.data.player
++
++import animiru.domain.player.model.EpisodeTempPosition
++import animiru.domain.player.repository.EpisodeTempPositionRepository
++import app.cash.sqldelight.async.coroutines.awaitAsList
++import logcat.LogPriority
++import tachiyomi.core.common.util.system.logcat
++import tachiyomi.data.Database
++
++// AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++class EpisodeTempPositionRepositoryImpl(
++    private val database: Database,
++) : EpisodeTempPositionRepository {
++
++    override suspend fun getAll(): List<EpisodeTempPosition> {
++        return database.episode_temp_positionsQueries.getAll { animeId, episodeId, positionMs, updatedAt ->
++            EpisodeTempPosition(animeId, episodeId, positionMs, updatedAt)
++        }.awaitAsList()
++    }
++
++    override suspend fun upsert(animeId: Long, episodeId: Long, positionMs: Long, updatedAt: Long) {
++        try {
++            database.episode_temp_positionsQueries.upsert(animeId, episodeId, positionMs, updatedAt)
++        } catch (e: Exception) {
++            logcat(LogPriority.ERROR, throwable = e)
++        }
++    }
++
++    override suspend fun delete(animeId: Long, episodeId: Long) {
++        try {
++            database.episode_temp_positionsQueries.deleteByKey(animeId, episodeId)
++        } catch (e: Exception) {
++            logcat(LogPriority.ERROR, throwable = e)
++        }
++    }
++
++    override suspend fun pruneToMostRecent(keepCount: Int) {
++        try {
++            database.episode_temp_positionsQueries.pruneToMostRecent(keepCount.toLong())
++        } catch (e: Exception) {
++            logcat(LogPriority.ERROR, throwable = e)
++        }
++    }
++
++    override suspend fun deleteAll() {
++        try {
++            database.episode_temp_positionsQueries.deleteAll()
++        } catch (e: Exception) {
++            logcat(LogPriority.ERROR, throwable = e)
++        }
++    }
++}
++// <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+diff --git a/data/src/main/sqldelight/tachiyomi/data/episode_temp_positions.sq b/data/src/main/sqldelight/tachiyomi/data/episode_temp_positions.sq
+new file mode 100644
+index 0000000..c41fc4f
+--- /dev/null
++++ b/data/src/main/sqldelight/tachiyomi/data/episode_temp_positions.sq
+@@ -0,0 +1,42 @@
++CREATE TABLE episode_temp_positions(
++    anime_id INTEGER NOT NULL,
++    episode_id INTEGER NOT NULL,
++    position_ms INTEGER NOT NULL,
++    updated_at INTEGER NOT NULL,
++    PRIMARY KEY (anime_id, episode_id)
++);
++
++CREATE INDEX episode_temp_positions_updated_at_index ON episode_temp_positions(updated_at);
++
++getAll:
++SELECT anime_id, episode_id, position_ms, updated_at
++FROM episode_temp_positions
++ORDER BY updated_at DESC;
++
++upsert:
++INSERT INTO episode_temp_positions(anime_id, episode_id, position_ms, updated_at)
++VALUES (:animeId, :episodeId, :positionMs, :updatedAt)
++ON CONFLICT(anime_id, episode_id)
++DO UPDATE
++SET
++    position_ms = :positionMs,
++    updated_at = :updatedAt;
++
++deleteByKey:
++DELETE FROM episode_temp_positions
++WHERE anime_id = :animeId AND episode_id = :episodeId;
++
++-- Keeps only the :keepCount most-recently-updated rows, by rowid rather than a
++-- row-value tuple comparison so it doesn't depend on the composite primary key
++-- being usable in a row-value IN (...) subquery.
++pruneToMostRecent:
++DELETE FROM episode_temp_positions
++WHERE rowid NOT IN (
++    SELECT rowid
++    FROM episode_temp_positions
++    ORDER BY updated_at DESC
++    LIMIT :keepCount
++);
++
++deleteAll:
++DELETE FROM episode_temp_positions;
+diff --git a/data/src/main/sqldelight/tachiyomi/migrations/140.sqm b/data/src/main/sqldelight/tachiyomi/migrations/140.sqm
+new file mode 100644
+index 0000000..16ec602
+--- /dev/null
++++ b/data/src/main/sqldelight/tachiyomi/migrations/140.sqm
+@@ -0,0 +1,9 @@
++CREATE TABLE episode_temp_positions(
++    anime_id INTEGER NOT NULL,
++    episode_id INTEGER NOT NULL,
++    position_ms INTEGER NOT NULL,
++    updated_at INTEGER NOT NULL,
++    PRIMARY KEY (anime_id, episode_id)
++);
++
++CREATE INDEX episode_temp_positions_updated_at_index ON episode_temp_positions(updated_at);
+diff --git a/domain/src/main/java/animiru/domain/player/model/EpisodeTempPosition.kt b/domain/src/main/java/animiru/domain/player/model/EpisodeTempPosition.kt
+new file mode 100644
+index 0000000..5ac2928
+--- /dev/null
++++ b/domain/src/main/java/animiru/domain/player/model/EpisodeTempPosition.kt
+@@ -0,0 +1,16 @@
++package animiru.domain.player.model
++
++// AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++/**
++ * A single row of the persisted temp-position cache - the DB-backed counterpart to what
++ * used to be a purely in-memory map on PlayerViewModel (see
++ * RecentEpisodePositionManager). Survives process death; pruned to the N most-recently
++ * updated rows, where N is [animiru.domain.player.service.PlayerPreferences.recentEpisodePositionSlots].
++ */
++data class EpisodeTempPosition(
++    val animeId: Long,
++    val episodeId: Long,
++    val positionMs: Long,
++    val updatedAt: Long,
++)
++// <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+diff --git a/domain/src/main/java/animiru/domain/player/repository/EpisodeTempPositionRepository.kt b/domain/src/main/java/animiru/domain/player/repository/EpisodeTempPositionRepository.kt
+new file mode 100644
+index 0000000..9288fb1
+--- /dev/null
++++ b/domain/src/main/java/animiru/domain/player/repository/EpisodeTempPositionRepository.kt
+@@ -0,0 +1,19 @@
++package animiru.domain.player.repository
++
++import animiru.domain.player.model.EpisodeTempPosition
++
++// AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
++interface EpisodeTempPositionRepository {
++
++    suspend fun getAll(): List<EpisodeTempPosition>
++
++    suspend fun upsert(animeId: Long, episodeId: Long, positionMs: Long, updatedAt: Long)
++
++    suspend fun delete(animeId: Long, episodeId: Long)
++
++    /** Deletes everything except the [keepCount] most-recently-updated rows. */
++    suspend fun pruneToMostRecent(keepCount: Int)
++
++    suspend fun deleteAll()
++}
++// <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)

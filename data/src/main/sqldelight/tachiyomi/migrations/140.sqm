@@ -1,0 +1,9 @@
+CREATE TABLE episode_temp_positions(
+    anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    position_ms INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (anime_id, episode_id)
+);
+
+CREATE INDEX episode_temp_positions_updated_at_index ON episode_temp_positions(updated_at);

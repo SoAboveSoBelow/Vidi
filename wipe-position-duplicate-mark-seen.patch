@@ -1,0 +1,13 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+index 0000000..1111111 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/PlayerViewModel.kt
+@@ -3740,7 +3740,7 @@ class PlayerViewModel(
+                     episode.isRecognizedNumber &&
+                     episode.episode_number == currentEp.episode_number
+                 ) {
+-                    EpisodeUpdate(id = episode.id!!, seen = true)
++                    EpisodeUpdate(id = episode.id!!, seen = true, lastSecondSeen = 0)
+                 } else {
+                     null
+                 }

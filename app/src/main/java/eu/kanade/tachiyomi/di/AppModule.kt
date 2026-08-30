@@ -26,6 +26,7 @@ import eu.kanade.tachiyomi.network.JavaScriptEngine
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.source.AndroidSourceManager
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
+import eu.kanade.tachiyomi.ui.player.RecentEpisodePositionManager
 import eu.kanade.tachiyomi.ui.player.domain.AudioManager
 import eu.kanade.tachiyomi.ui.player.domain.BrightnessManager
 import kotlinx.serialization.json.Json
@@ -65,7 +66,15 @@ private val lock = Any()
 class AppModule(val app: Application) : InjektModule {
 
     // AY -->
-    // Hard singleton, was WeakReference
+    // Was a WeakReference-based cache, manually re-created in registerInjectables() below
+    // if GC'd - meaning it was possible for two separate AndroidxSqliteDriver instances
+    // to end up open against the same underlying SQLite file at once, each with its own
+    // internal connection/transaction state unaware of the other. A confirmed live
+    // capture showed a database write (SetAnimeEpisodeFlags) hang indefinitely with no
+    // thread ever blocked and no lock contention from any app-level mutex - consistent
+    // with two independent driver instances colliding at the native level in a way
+    // neither one's own internal coordination could see. This is a hard singleton
+    // instead: created once, held for the entire process lifetime, never eligible for GC.
     private var sqlDriverInstance: SqlDriver? = null
     // <-- AY
 
@@ -142,6 +151,10 @@ class AppModule(val app: Application) : InjektModule {
         addSingletonFactory { DownloadProvider(app) }
         addSingletonFactory { DownloadManager(app) }
         addSingletonFactory { DownloadCache(app) }
+
+        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+        addSingletonFactory { RecentEpisodePositionManager(get(), get()) }
+        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
 
         addSingletonFactory { TrackerManager() }
         addSingletonFactory { DelayedTrackingStore(app) }

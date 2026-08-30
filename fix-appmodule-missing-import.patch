@@ -1,0 +1,12 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt b/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
+index 0000000..1111111 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/di/AppModule.kt
+@@ -26,6 +26,7 @@
+ import eu.kanade.tachiyomi.network.NetworkHelper
+ import eu.kanade.tachiyomi.source.AndroidSourceManager
+ import eu.kanade.tachiyomi.ui.player.ExternalIntents
++import eu.kanade.tachiyomi.ui.player.RecentEpisodePositionManager
+ import eu.kanade.tachiyomi.ui.player.domain.AudioManager
+ import eu.kanade.tachiyomi.ui.player.domain.BrightnessManager
+ import kotlinx.serialization.json.Json

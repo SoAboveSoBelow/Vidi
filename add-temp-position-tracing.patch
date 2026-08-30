@@ -1,0 +1,51 @@
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/ui/player/RecentEpisodePositionManager.kt b/app/src/main/java/eu/kanade/tachiyomi/ui/player/RecentEpisodePositionManager.kt
+index bd2658b..23e3c96 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/ui/player/RecentEpisodePositionManager.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/ui/player/RecentEpisodePositionManager.kt
+@@ -8,6 +8,8 @@ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.sync.Mutex
+ import kotlinx.coroutines.sync.withLock
++import logcat.LogPriority
++import tachiyomi.core.common.util.system.logcat
+ import java.util.concurrent.ConcurrentHashMap
+ 
+ // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+@@ -71,6 +73,11 @@ class RecentEpisodePositionManager(
+                     }
+                 }
+                 hydrated = true
++                // DEBUG (POSITION_BLEED_TRACE) -->
++                logcat(LogPriority.INFO) {
++                    "PositionTrace: RecentEpisodePositionManager hydrate COMPLETE cacheSize=${cache.size}"
++                }
++                // <-- DEBUG (POSITION_BLEED_TRACE)
+             }
+         }
+     }
+@@ -82,6 +89,12 @@ class RecentEpisodePositionManager(
+      */
+     fun consume(animeId: Long, episodeId: Long): Long? {
+         val removed = cache.remove(animeId to episodeId)?.positionMs
++        // DEBUG (POSITION_BLEED_TRACE) -->
++        logcat(LogPriority.INFO) {
++            "PositionTrace: RecentEpisodePositionManager.consume animeId=$animeId " +
++                "episodeId=$episodeId hydrated=$hydrated cacheSize=${cache.size} result=$removed"
++        }
++        // <-- DEBUG (POSITION_BLEED_TRACE)
+         if (removed != null) {
+             scope.launch { repository.delete(animeId, episodeId) }
+         }
+@@ -98,6 +111,12 @@ class RecentEpisodePositionManager(
+      */
+     fun remember(animeId: Long, episodeId: Long, positionMs: Long, durationMs: Long) {
+         val key = animeId to episodeId
++        // DEBUG (POSITION_BLEED_TRACE) -->
++        logcat(LogPriority.INFO) {
++            "PositionTrace: RecentEpisodePositionManager.remember animeId=$animeId " +
++                "episodeId=$episodeId positionMs=$positionMs durationMs=$durationMs"
++        }
++        // <-- DEBUG (POSITION_BLEED_TRACE)
+         if (durationMs > 0L && positionMs >= durationMs - 1000L) {
+             if (cache.remove(key) != null) {
+                 scope.launch { repository.delete(animeId, episodeId) }

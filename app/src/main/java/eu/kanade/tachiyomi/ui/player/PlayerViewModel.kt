@@ -242,7 +242,9 @@ class PlayerViewModel @JvmOverloads constructor(
     // derived bookkeeping needs syncing, not a full mpv reload. See
     // syncSessionStateFromDb().
     // AM (REUSED_PLAYER_TARGET_MISMATCH_FIX) -->
-    // Corrected later in init()
+    // var, not val: init() below can correct this to false once the actual
+    // target anime/episode is known and turns out not to match what was reused -
+    // see that fix for why.
     var wasPlayerReusedFromLiveHolder = reusableHolder != null
     // <-- AM (REUSED_PLAYER_TARGET_MISMATCH_FIX)
     // <-- AM (REUSED_PLAYER_SYNC_FIX)
@@ -872,55 +874,29 @@ class PlayerViewModel @JvmOverloads constructor(
             field = value
         }
 
-    // AM (RECENT_EPISODE_POSITIONS) -->
-
+    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
     /**
-     * Session-local temp-position cache for recently-departed episodes, so an accidental
+     * Session-local convenience for recently-departed episodes, so an accidental
      * next/previous click doesn't lose your place - even for an already-seen episode we
      * otherwise don't persist rewatch position for. Doesn't cover the currently-open
      * episode; that's already handled by the normal live-tracking/resume path.
      *
-     * Keyed by episode id; each entry also records the playlist index it was saved at, so
-     * entries are pruned by distance from wherever you're currently navigating rather than
-     * by a raw insertion count - otherwise a forward-forward-back-back click pattern would
-     * evict an entry before you ever get back to it.
+     * Backed by [RecentEpisodePositionManager] - a single app-process-wide, DB-backed
+     * cache shared with PlayerMediaHolder, rather than a ViewModel-local map. See that
+     * class's own doc comment for why (persists across process death; no more keeping
+     * two independent in-memory copies in sync by hand).
      */
-    private data class RecentPosition(val positionMs: Long, val playlistIndex: Int)
-    // AM (RECENT_POSITION_CROSS_SERIES_FIX) -->
-    // Keyed by (animeId, id), was id alone
-    private val recentEpisodePositions = mutableMapOf<Pair<Long, Long>, RecentPosition>()
-    // <-- AM (RECENT_POSITION_CROSS_SERIES_FIX)
+    private val recentEpisodePositionManager: RecentEpisodePositionManager = Injekt.get()
 
     private fun rememberRecentEpisodePosition() {
         val anime = stateData.value.currentAnime ?: return
         val episode = stateData.value.currentEpisode ?: return
-        val id = episode.id ?: return
-        val key = anime.id to id
+        val episodeId = episode.id ?: return
         val positionMs = (episodePosition ?: 0L) * 1000L
-        if (positionMs <= 0L) return
-
-        // AM (RECENT_POSITION_FINISHED_CLEAR) -->
-        // A finished episode (position at or past its final second) shouldn't get cached
-        // as a resume point - that would just replay the last second forever on return.
-        // This is intentionally independent of the "mark as watched after %" setting;
-        // clear strictly at the last second regardless of where that threshold sits.
         val durationMs = playbackData.value.duration.toLong() * 1000L
-        if (durationMs > 0L && positionMs >= durationMs) {
-            recentEpisodePositions.remove(key)
-            return
-        }
-        // <-- AM (RECENT_POSITION_FINISHED_CLEAR)
-
-        recentEpisodePositions[key] = RecentPosition(positionMs, stateData.value.currentPlaylistIndex)
+        recentEpisodePositionManager.remember(anime.id, episodeId, positionMs, durationMs)
     }
-
-    private fun pruneRecentEpisodePositions(aroundPlaylistIndex: Int) {
-        val maxSlots = playerPreferences.recentEpisodePositionSlots.get()
-        recentEpisodePositions.entries.removeAll { (_, saved) ->
-            kotlin.math.abs(saved.playlistIndex - aroundPlaylistIndex) > maxSlots
-        }
-    }
-    // <-- AM (RECENT_EPISODE_POSITIONS)
+    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
 
     /** Restored on process kill. */
     private var qualityIndex = savedState.get<Pair<Int, Int>>("quality_index") ?: Pair(-1, -1)
@@ -1122,7 +1098,23 @@ class PlayerViewModel @JvmOverloads constructor(
         if (!needsInit(animeId, initialEpisodeId)) return Pair(defaultResult, Result.success(true))
 
         // AM (REUSED_PLAYER_TARGET_MISMATCH_FIX) -->
-        // Belongs to another session; build fresh
+        // wasPlayerReusedFromLiveHolder only means "a live holder with an adopted
+        // player existed at construction time" - the actual target wasn't known
+        // yet then to check against. needsInit() passing above confirms this IS a
+        // different anime/episode, so if the player was reused, it's still the
+        // OTHER, still-playing session's real player, not a throwaway - sharing it
+        // would load new content into a native mpv context that session depends
+        // on. Build a genuinely fresh MPVPlayer instead. Must NOT .release() the
+        // discarded one - it's still in use elsewhere.
+        //
+        // This only covers a DIFFERENT ViewModel instance's construction-time
+        // reuse. The other case - THIS instance already alive and playing
+        // something when a different anime is requested via onNewIntent()
+        // redelivery - is handled separately, by a real teardown-and-relaunch in
+        // PlayerActivity.onNewIntent() rather than a hot-swap here (swapping
+        // _player in that case would leave the Service/holder still wired to the
+        // old player object, since PlayerMediaHolder.adopt() only runs its setup
+        // once per holder).
         if (wasPlayerReusedFromLiveHolder) {
             val liveState = PlayerMediaHolder.current?.state?.value
             if (liveState?.animeId != animeId || liveState.episodeId != initialEpisodeId) {
@@ -1994,55 +1986,97 @@ class PlayerViewModel @JvmOverloads constructor(
         val resumePosition = if (isLoadingEpisode) {
             stateData.value.currentEpisode?.let { episode ->
                 val preservePos = playerPreferences.preserveWatchingPosition.get()
-                // AM (RECENT_EPISODE_POSITIONS) -->
-                // Keyed (animeId, episodeId), not episodeId alone - see
-                // recentEpisodePositions' own doc comment.
-                val recentPosition = stateData.value.currentAnime?.id?.let { animeId ->
-                    episode.id?.let { episodeId -> recentEpisodePositions.remove(animeId to episodeId) }
-                }
-                // <-- AM (RECENT_EPISODE_POSITIONS)
                 val liveHolderState = mediaHolder?.state?.value
-                forceResumeFromLastPosition.let { resumeFromLast ->
-                    forceResumeFromLastPosition = false
-                    when {
-                        // AM (LIVE_POSITION_TRACKING) -->
-                        // Prefer the holder's live, Service-tracked position over
-                        // episode.last_second_seen - that DB value only gets written
-                        // by this ViewModel's own per-second save, which stops the
-                        // instant a ViewModel is cleared, so playback that continued
-                        // via the Service-owned player after an old ViewModel died
-                        // would otherwise resume from a stale position. animeId
-                        // check added after a cross-series bleed: the holder's state
-                        // stays live for whatever was PREVIOUSLY playing right up
-                        // until a new session adopts it, and an episode.id collision
-                        // between two unrelated series hit that exact window.
-                        resumeFromLast && liveHolderState != null &&
-                            liveHolderState.animeId == stateData.value.currentAnime?.id &&
-                            liveHolderState.episodeId == episode.id && liveHolderState.positionMs > 0 ->
-                            liveHolderState.positionMs / 1000L
-                        // <-- AM (LIVE_POSITION_TRACKING)
-                        resumeFromLast -> episode.last_second_seen / 1000L
-                        // AM (RECENT_EPISODE_POSITIONS) -->
-                        recentPosition != null -> recentPosition.positionMs / 1000L
-                        // <-- AM (RECENT_EPISODE_POSITIONS)
-                        episode.seen && !preservePos -> 0L
-                        else -> episode.last_second_seen / 1000L
+                // AM (RESUME_PRIORITY_SYSTEM) -->
+                // Two-step resume: (1) any live/temp position wins outright, no matter
+                // what the episode's seen state is - it's currently/very-recently in
+                // progress, so it isn't stale. (2) only once no temp position exists do
+                // we fall back to what "watch progress" means for this episode: 0 if
+                // it's marked seen (unless preserving watch position on seen episodes),
+                // otherwise the DB's last_second_seen (0 by default for anything never
+                // played or already wiped).
+                val resumeFromLast = forceResumeFromLastPosition
+                forceResumeFromLastPosition = false
+                // AM (TEMP_MEMORY_PRIORITY_FIX) -->
+                // Checked first, unconditionally - not nested inside the resumeFromLast
+                // branches below. forceResumeFromLastPosition is set true on EVERY fresh
+                // PlayerActivity launch (onNewIntent()'s shared cold-start path), not just
+                // a genuine process-death reinit - that includes the deliberate
+                // teardown-and-relaunch a cross-series switch does (see
+                // CROSS_SERIES_TEARDOWN_RELAUNCH_FIX). With the manager consult nested
+                // under an `else` that only ran once resumeFromLast's own branches had
+                // already been checked, resumeFromLast being (near-)always true on a
+                // fresh launch meant temp memory got shadowed on essentially every
+                // cross-series reopen, even with a correct, present cache entry sitting
+                // right there. This matches the original design intent: any live/temp
+                // position wins outright, no matter what else is going on.
+                val tempFromManager = stateData.value.currentAnime?.id?.let { animeId ->
+                    episode.id?.let { episodeId ->
+                        recentEpisodePositionManager.consume(animeId, episodeId)
                     }
-                        // DEBUG (POSITION_BLEED_TRACE) -->
-                        .also { chosen ->
-                            logcat(LogPriority.INFO) {
-                                "PositionTrace: setVideo RESUME chosen=${chosen}s " +
-                                    "animeId=${stateData.value.currentAnime?.id} episodeId=${episode.id} " +
-                                    "resumeFromLast=$resumeFromLast " +
-                                    "liveHolderState=(animeId=${liveHolderState?.animeId} " +
-                                    "episodeId=${liveHolderState?.episodeId} " +
-                                    "posMs=${liveHolderState?.positionMs}) " +
-                                    "recentPosition=$recentPosition " +
-                                    "episode.last_second_seen=${episode.last_second_seen}"
-                            }
-                        }
-                        // <-- DEBUG (POSITION_BLEED_TRACE)
                 }
+                val tempPositionMs = when {
+                    tempFromManager != null -> tempFromManager
+                    // <-- AM (TEMP_MEMORY_PRIORITY_FIX)
+                    // AM (LIVE_POSITION_REINIT_ONLY_FIX) -->
+                    // Gated on resumeFromLast, deliberately - NOT "any time the holder's
+                    // identity happens to match, trust its position." setupEpisode() ->
+                    // syncHolderSessionState() updates the holder's animeId/episodeId on
+                    // EVERY episode switch, including a completely ordinary
+                    // changeEpisode() - but syncSessionState()'s positionMs param is left
+                    // null on that path on purpose (see its own doc comment: the
+                    // foreground path has its own separate, continuous position-tracking
+                    // timer and never touches this field here). That means the instant
+                    // after an ordinary switch, the holder's identity already matches the
+                    // NEW episode while positionMs is still whatever was last live-tracked
+                    // for the OLD one - so without this guard, every ordinary next-episode
+                    // click would satisfy every condition below and hand back the previous
+                    // episode's position. resumeFromLast is only true for the one case
+                    // this shortcut is actually valid for: a process died mid-playback and
+                    // this is the reinit picking that exact same episode back up, where
+                    // there's no live in-memory temp source left and the holder's position
+                    // genuinely still belongs to what's being resumed. animeId/episodeId
+                    // checks below guard a narrower cross-series bleed within that same
+                    // reinit case: the holder's state stays live for whatever was
+                    // PREVIOUSLY playing right up until a new session adopts it.
+                    resumeFromLast && liveHolderState != null &&
+                        liveHolderState.animeId == stateData.value.currentAnime?.id &&
+                        liveHolderState.episodeId == episode.id && liveHolderState.positionMs > 0 ->
+                        liveHolderState.positionMs.toLong()
+                    // <-- AM (LIVE_POSITION_REINIT_ONLY_FIX)
+                    // Process died mid-playback and this is the reinit picking the
+                    // session back up - there's no live in-memory temp source left, but
+                    // the position just persisted to the DB right before restart plays
+                    // that same role here: it's a live position, not a stored one, so it
+                    // also has to bypass the seen check below.
+                    resumeFromLast -> episode.last_second_seen
+                    else -> null
+                }
+                (
+                    if (tempPositionMs != null && tempPositionMs > 0) {
+                        tempPositionMs / 1000L
+                    } else if (episode.seen && !preservePos) {
+                        0L
+                    } else {
+                        episode.last_second_seen / 1000L
+                    }
+                    )
+                    // DEBUG (POSITION_BLEED_TRACE) -->
+                    .also { chosen ->
+                        logcat(LogPriority.INFO) {
+                            "PositionTrace: setVideo RESUME chosen=${chosen}s " +
+                                "animeId=${stateData.value.currentAnime?.id} episodeId=${episode.id} " +
+                                "resumeFromLast=$resumeFromLast " +
+                                "liveHolderState=(animeId=${liveHolderState?.animeId} " +
+                                "episodeId=${liveHolderState?.episodeId} " +
+                                "posMs=${liveHolderState?.positionMs}) " +
+                                "tempPositionMs=$tempPositionMs " +
+                                "episode.seen=${episode.seen} " +
+                                "episode.last_second_seen=${episode.last_second_seen}"
+                        }
+                    }
+                    // <-- DEBUG (POSITION_BLEED_TRACE)
+                // <-- AM (RESUME_PRIORITY_SYSTEM)
             }
         } else if (castState.hasLoadedVideo) {
             castState.position
@@ -2910,12 +2944,9 @@ class PlayerViewModel @JvmOverloads constructor(
             clearTracks()
         }
 
-        // AM (RECENT_EPISODE_POSITIONS) -->
+        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
         rememberRecentEpisodePosition()
-        stateData.value.currentPlaylist.indexOfFirst { it.id == episodeId }
-            .takeIf { it != -1 }
-            ?.let { pruneRecentEpisodePositions(it) }
-        // <-- AM (RECENT_EPISODE_POSITIONS)
+        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
 
         updateStateData { it.copy(hosterList = emptyList()) }
         updateUiData {
@@ -3625,6 +3656,16 @@ class PlayerViewModel @JvmOverloads constructor(
             }
         }
 
+        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+        // changeEpisode()'s own call to this only covers next/prev within the same
+        // series - backing out of the player entirely to go watch something else never
+        // goes through changeEpisode() at all, so without this, temp memory was never
+        // actually written on the one path that's most of what "switching series"
+        // means in practice. Same call, same guards (finished-episode clear, duration
+        // buffer) as the in-series case - this is just the other real exit point.
+        rememberRecentEpisodePosition()
+        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+
         super.onCleared()
     }
 
@@ -3705,7 +3746,9 @@ class PlayerViewModel @JvmOverloads constructor(
         updateTrackEpisodeSeen(currentEp)
         deleteEpisodeIfNeeded(currentEp)
         // Persist explicitly - not guaranteed to run after onSecondReached()'s own call.
-        saveWatchingProgress(currentEp)
+        // writeSeenState = true: this call is the one intentionally making the episode
+        // seen (natural completion), unlike every other saveWatchingProgress call site.
+        saveWatchingProgress(currentEp, writeSeenState = true)
 
         val markDuplicateAsSeen = libraryPreferences.markDuplicateSeenEpisodeAsSeen.get()
             .contains(LibraryPreferences.MARK_DUPLICATE_EPISODE_SEEN_EXISTING)
@@ -3718,7 +3761,7 @@ class PlayerViewModel @JvmOverloads constructor(
                     episode.isRecognizedNumber &&
                     episode.episode_number == currentEp.episode_number
                 ) {
-                    EpisodeUpdate(id = episode.id!!, seen = true)
+                    EpisodeUpdate(id = episode.id!!, seen = true, lastSecondSeen = 0)
                 } else {
                     null
                 }
@@ -3752,15 +3795,23 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /** Called on episode change or activity pause. */
-    private fun saveWatchingProgress(episode: Episode) {
+    // AM (TICK_NEVER_OWNS_SEEN) -->
+    // writeSeenState is false for every routine per-second call - a live tick has no
+    // business writing seen/bookmark at all, it only owns position/duration. Passing
+    // null for those fields coalesces to "leave whatever's in the DB alone" (see the
+    // episodes.sq update query), so a tick can never race an external mark-as-seen and
+    // stomp it back to false, no matter how the timing lines up. Only a call that is
+    // itself intentionally changing seen (episode naturally finishing) passes true.
+    // <-- AM (TICK_NEVER_OWNS_SEEN)
+    private fun saveWatchingProgress(episode: Episode, writeSeenState: Boolean = false) {
         viewModelScope.launchNonCancellable {
-            saveEpisodeProgress(episode)
+            saveEpisodeProgress(episode, writeSeenState)
             saveEpisodeHistory(episode)
         }
     }
 
     /** Saves [episode] progress if not in incognito mode, or has at least one tracker. */
-    private suspend fun saveEpisodeProgress(episode: Episode) {
+    private suspend fun saveEpisodeProgress(episode: Episode, writeSeenState: Boolean = false) {
         // DEBUG (POSITION_BLEED_TRACE) -->
         logcat(LogPriority.INFO) {
             "PositionTrace: saveEpisodeProgress WRITE animeId=${episode.anime_id} " +
@@ -3775,24 +3826,36 @@ class PlayerViewModel @JvmOverloads constructor(
             // while this player stays alive (e.g. from the anime screen during PIP). The
             // `version` column bumps on every real seen/bookmark/last_second_seen change
             // (see the episodes.sq trigger), so use it to detect a change we don't know
-            // about and defer to the DB's seen instead of blindly overwriting it.
+            // about and defer to the DB's seen instead of blindly overwriting it. This is
+            // now purely for keeping local/UI state accurate during a live session - the
+            // DB write itself no longer depends on it, see writeSeenState above.
             val fresh = getEpisode.await(episode.id!!)
             if (fresh != null && fresh.version != episode.version) {
                 episode.seen = fresh.seen
                 episode.bookmark = fresh.bookmark
                 episode.version = fresh.version
+                // AM (WIPE_POSITION_ON_SEEN) -->
+                // If this refresh just picked up an external "marked as seen" that
+                // happened while this episode was still actively playing, don't let
+                // the position this tick already computed (from the pre-refresh,
+                // stale `seen = false`) get written back below and reclobber the
+                // wipe the external mark-as-seen action just did.
+                if (episode.seen && !playerPreferences.preserveWatchingPosition.get()) {
+                    episode.last_second_seen = 0L
+                }
+                // <-- AM (WIPE_POSITION_ON_SEEN)
             }
             val willChangeTrackedFields = fresh != null && (
-                episode.seen != fresh.seen ||
-                    episode.bookmark != fresh.bookmark ||
+                (writeSeenState && episode.seen != fresh.seen) ||
+                    (writeSeenState && episode.bookmark != fresh.bookmark) ||
                     episode.last_second_seen != fresh.lastSecondSeen
                 )
             // <-- AM (RECENT_EPISODE_POSITIONS)
             updateEpisode.await(
                 EpisodeUpdate(
                     id = episode.id!!,
-                    seen = episode.seen,
-                    bookmark = episode.bookmark,
+                    seen = if (writeSeenState) episode.seen else null,
+                    bookmark = if (writeSeenState) episode.bookmark else null,
                     fillermark = episode.fillermark,
                     lastSecondSeen = episode.last_second_seen,
                     totalSeconds = episode.total_seconds,
