@@ -1358,12 +1358,7 @@ class PlayerMediaHolder(
         mediaSession?.release()
         mediaSession = null
         // AM (NATIVE_PLAYER_LEAK_FIX) -->
-        // Was `_player?.isExiting = true` directly, bypassing the real release().
-        // MPVPlayer.release() guards itself with `if (isExiting) return`, so that
-        // permanently disarmed the real teardown - mpv.close()/surface release
-        // never ran, leaking the native mpv/GPU context every time. Confirmed via
-        // dumpsys meminfo: Native Heap and EGL mtrack ballooned and never
-        // recovered (not a Java-heap leak, so GC never touched it).
+        // Was isExiting only; leaked mpv/GPU
         _player?.release()
         // <-- AM (NATIVE_PLAYER_LEAK_FIX)
         // AM (STALE_HOLDER_STATE_FIX) -->

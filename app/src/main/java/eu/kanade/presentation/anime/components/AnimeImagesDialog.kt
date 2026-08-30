@@ -221,12 +221,7 @@ fun AnimeImagesDialog(
                         update = { view ->
                             val context = view.context
                             // AY -->
-                            // Same bug as AnimeInfoBox's backdrop (AnimeInfoHeader.kt): if
-                            // page 1 (background) is requested but the anime has neither a
-                            // custom background nor a source-provided backgroundUrl, there's
-                            // nothing to fetch - building the request anyway is guaranteed to
-                            // fail (AnimeImageFetcher: "No cover specified"). Skip the request
-                            // entirely rather than attempting a doomed load.
+                            // Skip if no backdrop
                             val hasBackdrop = anime.backgroundUrl != null || anime.hasCustomBackground()
                             if (page != 1 || hasBackdrop) {
                                 // <-- AY
@@ -239,8 +234,7 @@ fun AnimeImagesDialog(
                                     .memoryCachePolicy(CachePolicy.DISABLED)
                                     .target { image ->
                                         val drawable = image.asDrawable(context.resources)
-                                        // Copy bitmap in case it came from memory cache
-                                        // Because SSIV needs to thoroughly read the image
+                                        // Copy bitmap for SSIV
                                         val copy = (drawable as? BitmapDrawable)
                                             ?.bitmap
                                             ?.copy(Bitmap.Config.HARDWARE, false)

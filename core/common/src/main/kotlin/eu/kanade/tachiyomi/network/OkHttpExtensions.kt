@@ -36,18 +36,7 @@ fun Call.asObservable(): Observable<Response> {
                 if (n == 0L || !boolean.compareAndSet(expectedValue = false, newValue = true)) return
 
                 // AY -->
-                // Was call.execute() - a genuinely blocking, synchronous OkHttp call,
-                // running directly on whatever thread happens to be executing the
-                // coroutine at the moment this legacy fetchXXX()/asObservableSuccess()
-                // path gets invoked, despite every caller treating this as async work.
-                // This is the RxJava bridge every extension still using the older
-                // (pre-suspend) API overrides goes through - not something specific to
-                // any one extension. A hung or merely slow server response here parks a
-                // real thread for the duration, indistinguishable from a genuine
-                // framework freeze to anything sharing that thread pool. Using
-                // enqueue() instead makes this and every extension route through it
-                // genuinely non-blocking, matching what Call.await()/awaitSuccess()
-                // below already do correctly for the newer suspend-based extension API.
+                // Was blocking call.execute()
                 call.enqueue(
                     object : Callback {
                         override fun onResponse(call: Call, response: Response) {

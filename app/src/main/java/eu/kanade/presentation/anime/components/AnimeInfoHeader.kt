@@ -131,15 +131,7 @@ fun AnimeInfoBox(
             MaterialTheme.colorScheme.background,
         )
         // AY -->
-        // Only attempt to load a backdrop when the anime actually has one - a source
-        // entry with no backgroundUrl/custom background has nothing to fetch, and
-        // requesting one anyway is guaranteed to fail (AnimeImageFetcher: "No cover
-        // specified"). Also, memoize the request keyed on only the fields that
-        // actually affect the image, rather than rebuilding (and re-firing) it on
-        // every unrelated `anime` field change - anime.copy() for e.g. episodeFlags,
-        // viewerFlags, or a remote-info refresh creates a new Anime instance on every
-        // update, which without this would restart the backdrop load from scratch on
-        // each one, appearing as a backdrop that never finishes loading.
+        // Only if backdrop exists, memoized
         val hasBackdrop = remember(anime.backgroundUrl, anime.hasCustomBackground()) {
             anime.backgroundUrl != null || anime.hasCustomBackground()
         }
@@ -405,13 +397,7 @@ private fun AnimeAndSourceTitlesLarge(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // AY -->
-        // Same "No cover specified" churn bug the backdrop had (see AnimeInfoBox above),
-        // but for the anime's own cover this time - anime.thumbnailUrl can genuinely be
-        // null/absent for some source entries, and building this request unmemoized from
-        // the whole anime object meant it restarted on every unrelated field change
-        // during the info-refresh cycle, never settling into the error state for those.
-        // This runs for every anime opened (not just ones missing a background), so it's
-        // a much more widely-hit instance of the same bug.
+        // Same as above
         val context = LocalContext.current
         val hasCover = anime.thumbnailUrl != null || anime.hasCustomCover()
         val coverRequest = remember(anime.id, anime.thumbnailUrl, anime.coverLastModified) {
@@ -458,7 +444,7 @@ private fun AnimeAndSourceTitlesSmall(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // AY -->
-        // See the matching comment/fix in AnimeAndSourceTitlesLarge above.
+        // Same fix as above
         val context = LocalContext.current
         val hasCover = anime.thumbnailUrl != null || anime.hasCustomCover()
         val coverRequest = remember(anime.id, anime.thumbnailUrl, anime.coverLastModified) {

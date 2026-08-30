@@ -151,25 +151,10 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     // AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX) -->
-    // setDeleteIntent() paired with PendingIntent.getService() is the less common
-    // form - PendingIntent.getBroadcast() to a BroadcastReceiver is the
-    // documented, standard way to observe notification deletion, so this uses
-    // that instead of assuming getService() was equivalent. Registered/
-    // unregistered with the Service's own lifecycle (not the shared, manifest-
-    // registered NotificationReceiver) to keep this change self-contained and
-    // not risk any of that class's existing action handling. RECEIVER_NOT_EXPORTED
-    // since this is purely an internal, same-process signal - nothing outside
-    // this app should ever be able to trigger it.
+    // Standard getBroadcast() pairing
     private var dismissReceiverRegistered = false
     // AM (NOTIFICATION_DISMISS_KEEPS_ACTIVITY_FIX) -->
-    // Deliberately does NOT call onStopRequested?.invoke() - that's the "Stop"
-    // button's chain (viewModel.pause() + stopService() + finish()), which
-    // closes PlayerActivity outright. A swipe-dismiss should only tear down
-    // the background-continuation apparatus this Service owns (wake lock,
-    // foreground state, notification, the Service-owned mediaHolder) - not
-    // close the player screen if it's still open. Since the notification can
-    // only be swiped while paused (framework-enforced), there's no live
-    // playback being cut off here either way.
+    // Doesn't close PlayerActivity
     private val dismissReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             stopBackgroundPlayback()
@@ -433,12 +418,7 @@ class PlayerBackgroundPlaybackService : Service() {
         )
         val openAppPendingIntent = buildReopenPendingIntent()
         // AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX) -->
-        // getBroadcast() to the dynamically-registered dismissReceiver above,
-        // not getService() - this is the standard, documented pairing for
-        // setDeleteIntent(). setPackage() makes the broadcast explicit (required
-        // since Android 8 for most implicit broadcasts anyway, and correct
-        // practice regardless) so only this app's registered receiver can ever
-        // receive it.
+        // Explicit broadcast, this app only
         val deletePendingIntent = PendingIntent.getBroadcast(
             this,
             REQUEST_CODE_DISMISS,
@@ -452,24 +432,7 @@ class PlayerBackgroundPlaybackService : Service() {
             .setContentTitle(title)
             .setContentText(subtitle)
             // AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX) -->
-            // Was setOngoing(true). Every dumpsys capture during this
-            // investigation showed flags=0x6a - FLAG_FOREGROUND_SERVICE (0x40) +
-            // FLAG_NO_CLEAR (0x20) + FLAG_ONLY_ALERT_ONCE (0x08) +
-            // FLAG_ONGOING_EVENT (0x02) - the latter two coming directly from
-            // this call. A real user swipe was confirmed to visually remove the
-            // notification every time, yet the Service consistently still
-            // reported isForeground=true with foregroundNoti attached afterward,
-            // and setDeleteIntent() never fired - meaning cancelNotification()
-            // was very likely never actually invoked, only a SystemUI-local hide
-            // of the row. FLAG_NO_CLEAR is the framework's explicit "don't treat
-            // this as cleared" signal; Android 13+'s policy letting users swipe
-            // FGS notifications by default is a UI-layer allowance, not a
-            // guarantee that swiping performs a real cancel when the app has
-            // separately marked the notification ongoing/no-clear. The
-            // foregroundServiceType (mediaPlayback) is what actually keeps this
-            // Service alive and undismissed from the task list regardless -
-            // setOngoing() was only ever fighting the one behavior (user
-            // dismissal) that this whole feature needs to work.
+            // Was setOngoing(true), blocked swipe-dismiss
             // <-- AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)

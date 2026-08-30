@@ -84,14 +84,7 @@ abstract class BaseSourcePagingSource(
         } catch (e: NoResultsException) {
             LoadResult.Error(e)
         } catch (e: Exception) {
-            // Anything else here is almost always a source's own parser crashing on this
-            // particular page's content (e.g. an unexpected null/missing element) - a bug
-            // in that source, not a network issue. Retrying via the snackbar would just
-            // hit the exact same crash on the exact same page every time, permanently
-            // blocking further browsing. Log it for diagnosis and skip past the broken
-            // page instead so scrolling can continue, but give up for real after a few
-            // consecutive failures rather than silently skipping forever if the source is
-            // broken from here on.
+            // Parser crash; skip page
             logcat(LogPriority.ERROR, e) {
                 "SourcePagingSource: source parser crashed on page=$page, skipping page"
             }

@@ -21,11 +21,7 @@ import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 
 // AY -->
-// Dedicated, process-lifetime scope for surfacing skipped-item toasts below - these are
-// short-lived, fire-and-forget notifications with no natural owner to cancel them, so a
-// small scope of their own (matching how other fire-and-forget work is scoped elsewhere
-// in this codebase, e.g. ExtensionManager's own `scope`) is more appropriate than trying
-// to thread a caller-owned scope all the way down through every source implementation.
+// Scope for skipped-item toasts
 private val toastScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 // <-- AY
 
@@ -40,13 +36,7 @@ private val toastScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 abstract class ParsedAnimeHttpSource : AnimeHttpSource() {
 
     // AY -->
-    // Parses one element, returning null instead of propagating if a source's own
-    // xxxFromElement() throws on this one entry - a missing/unexpected element on a
-    // single card shouldn't cost every other, successfully-parsed entry on the same
-    // page. Every skip is logged in full (id + reason + stack trace) via logcat
-    // regardless; skipped is additionally collected so the three parse functions below
-    // can surface one summary toast per page once the whole page is done, rather than
-    // one toast per item (which would spam the user if a page has several bad entries).
+    // Isolates bad element; logs+skips
     private fun <T> parseElementOrNull(
         element: Element,
         selectorName: String,

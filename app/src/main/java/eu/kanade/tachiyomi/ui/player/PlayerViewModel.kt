@@ -242,9 +242,7 @@ class PlayerViewModel @JvmOverloads constructor(
     // derived bookkeeping needs syncing, not a full mpv reload. See
     // syncSessionStateFromDb().
     // AM (REUSED_PLAYER_TARGET_MISMATCH_FIX) -->
-    // var, not val: init() below can correct this to false once the actual
-    // target anime/episode is known and turns out not to match what was reused -
-    // see that fix for why.
+    // Corrected later in init()
     var wasPlayerReusedFromLiveHolder = reusableHolder != null
     // <-- AM (REUSED_PLAYER_TARGET_MISMATCH_FIX)
     // <-- AM (REUSED_PLAYER_SYNC_FIX)
@@ -889,11 +887,7 @@ class PlayerViewModel @JvmOverloads constructor(
      */
     private data class RecentPosition(val positionMs: Long, val playlistIndex: Int)
     // AM (RECENT_POSITION_CROSS_SERIES_FIX) -->
-    // Was keyed by episode id alone. Episode.id is nullable for a not-yet-
-    // persisted entity, and two different series' episodes can both land on the
-    // same not-yet-assigned id - keying by episode id alone let those collide
-    // and silently share a cache slot, bleeding a resume position from one
-    // series into an unrelated one. Disambiguating with animeId closes that off.
+    // Keyed by (animeId, id), was id alone
     private val recentEpisodePositions = mutableMapOf<Pair<Long, Long>, RecentPosition>()
     // <-- AM (RECENT_POSITION_CROSS_SERIES_FIX)
 
@@ -1128,23 +1122,7 @@ class PlayerViewModel @JvmOverloads constructor(
         if (!needsInit(animeId, initialEpisodeId)) return Pair(defaultResult, Result.success(true))
 
         // AM (REUSED_PLAYER_TARGET_MISMATCH_FIX) -->
-        // wasPlayerReusedFromLiveHolder only means "a live holder with an adopted
-        // player existed at construction time" - the actual target wasn't known
-        // yet then to check against. needsInit() passing above confirms this IS a
-        // different anime/episode, so if the player was reused, it's still the
-        // OTHER, still-playing session's real player, not a throwaway - sharing it
-        // would load new content into a native mpv context that session depends
-        // on. Build a genuinely fresh MPVPlayer instead. Must NOT .release() the
-        // discarded one - it's still in use elsewhere.
-        //
-        // This only covers a DIFFERENT ViewModel instance's construction-time
-        // reuse. The other case - THIS instance already alive and playing
-        // something when a different anime is requested via onNewIntent()
-        // redelivery - is handled separately, by a real teardown-and-relaunch in
-        // PlayerActivity.onNewIntent() rather than a hot-swap here (swapping
-        // _player in that case would leave the Service/holder still wired to the
-        // old player object, since PlayerMediaHolder.adopt() only runs its setup
-        // once per holder).
+        // Belongs to another session; build fresh
         if (wasPlayerReusedFromLiveHolder) {
             val liveState = PlayerMediaHolder.current?.state?.value
             if (liveState?.animeId != animeId || liveState.episodeId != initialEpisodeId) {
