@@ -458,6 +458,24 @@ class MainActivity : BaseActivity() {
             Constants.SHORTCUT_ANIME -> {
                 val idToOpen = intent.extras?.getLong(Constants.ANIME_EXTRA) ?: return false
                 navigator.popUntilRoot()
+                // AM (PIP_LAUNCH_VIA_LIVE_MAINACTIVITY_FIX) -->
+                // Notification-reopen for a video that was hidden into background
+                // playback routes here now, with an episode id attached - once
+                // this MainActivity is actually resumed and settled (this whole
+                // function runs inside a LaunchedEffect, already a coroutine
+                // scope), launch the player exactly the way a normal in-app
+                // episode tap does. See buildReopenPendingIntent()'s own comment
+                // for why this needs to be a live MainActivity's own call rather
+                // than a system-constructed batch launch.
+                if (intent.hasExtra(Constants.EPISODE_EXTRA)) {
+                    val episodeToOpen = intent.getLongExtra(Constants.EPISODE_EXTRA, -1L)
+                    if (episodeToOpen != -1L) {
+                        lifecycleScope.launch {
+                            startPlayerActivity(this@MainActivity, idToOpen, episodeToOpen, extPlayer = false)
+                        }
+                    }
+                }
+                // <-- AM (PIP_LAUNCH_VIA_LIVE_MAINACTIVITY_FIX)
                 HomeScreen.Tab.Library(idToOpen)
             }
             // AM (RECENTS) -->

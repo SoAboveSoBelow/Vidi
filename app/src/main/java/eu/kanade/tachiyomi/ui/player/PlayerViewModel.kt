@@ -725,6 +725,20 @@ class PlayerViewModel @JvmOverloads constructor(
                     _eventFlow.emit(Event.EnterPip)
                 }
             }
+            // AM (PIP_BACK_AUTOENTER_MAIN_FIX) -->
+            // Distinct from EnterPip (the explicit PIP-button tap) so PlayerActivity
+            // can tell back-triggered PIP entry apart from the button and route it
+            // through the auto-enter mechanism instead of a manual
+            // enterPictureInPictureMode() call - see PlayerActivity's
+            // Event.EnterPipFromBack handler for why. Only back is meant to land the
+            // PIP over the app itself; the PIP button and onUserLeaveHint() (Home)
+            // both keep floating over whatever's currently frontmost, unchanged.
+            PlayerEvent.EnterPipFromBack -> {
+                viewModelScope.launch {
+                    _eventFlow.emit(Event.EnterPipFromBack)
+                }
+            }
+            // <-- AM (PIP_BACK_AUTOENTER_MAIN_FIX)
             is PlayerEvent.ExecuteCustomButton -> {
                 uiData.value.primaryButton?.let {
                     if (event.long) {
@@ -4348,6 +4362,9 @@ class PlayerViewModel @JvmOverloads constructor(
         data class ChangeSpeed(val value: Float) : PlayerEvent
         data object CycleRotation : PlayerEvent
         data object EnterPip : PlayerEvent
+        // AM (PIP_BACK_AUTOENTER_MAIN_FIX): back-triggered PIP entry, distinct from
+        // the explicit PIP-button tap above - see handlePlayerEvent for why.
+        data object EnterPipFromBack : PlayerEvent
         data class ExecuteCustomButton(val long: Boolean) : PlayerEvent
         data class LockControls(val lock: Boolean) : PlayerEvent
         data class NextEpisode(val next: Boolean) : PlayerEvent
@@ -4367,6 +4384,8 @@ class PlayerViewModel @JvmOverloads constructor(
 
     sealed interface Event {
         data object EnterPip : Event
+        // AM (PIP_BACK_AUTOENTER_MAIN_FIX): see PlayerEvent.EnterPipFromBack above.
+        data object EnterPipFromBack : Event
         data class EpisodeTitle(val name: String) : Event
         data object Finish : Event
         data class InitialEpisodeError(val error: Throwable) : Event

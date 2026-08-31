@@ -14,7 +14,6 @@ import android.os.PowerManager
 import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import androidx.core.app.TaskStackBuilder
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
@@ -427,17 +426,37 @@ class PlayerBackgroundPlaybackService : Service() {
         }
         // <-- SVC_RACE_DEBUG
         val safeAnimeId = animeId
-        if (safeAnimeId != null) {
-            val stackPendingIntent = TaskStackBuilder.create(this).run {
-                addNextIntent(
-                    Intent(this@PlayerBackgroundPlaybackService, MainActivity::class.java)
-                        .setAction(Constants.SHORTCUT_ANIME)
-                        .putExtra(Constants.ANIME_EXTRA, safeAnimeId),
-                )
-                addNextIntent(PlayerActivity.newIntent(this@PlayerBackgroundPlaybackService, animeId, episodeId))
-                getPendingIntent(REQUEST_CODE_OPEN, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            }
-            if (stackPendingIntent != null) return stackPendingIntent
+        if (safeAnimeId != null && episodeId != null) {
+            // AM (PIP_LAUNCH_VIA_LIVE_MAINACTIVITY_FIX) -->
+            // Was a TaskStackBuilder-constructed PendingIntent bundling
+            // MainActivity + PlayerActivity into one atomic startActivities()
+            // call - correctly reaches the right final stack shape, but that's
+            // not the same launch cold start uses: cold start is a live,
+            // already-resumed MainActivity making its own ordinary
+            // startActivity() call. Confirmed via logcat: cold start reliably
+            // enters PIP on the very first Recents press; this reopen path
+            // needed a second, separate PIP entry first every time, even after
+            // the routing itself was fixed to correctly target MainActivity
+            // first (PIP_STALE_REOPEN_INTENT_FIX) - so the remaining gap isn't
+            // about which Activity is targeted, it's about how the launch
+            // itself happens. Targeting only MainActivity here, with an extra
+            // that tells it to open this episode once it's actually resumed
+            // and settled (see handleIntentAction()'s SHORTCUT_ANIME case),
+            // means PlayerActivity ends up started the exact same way a normal
+            // in-app tap starts it - a live MainActivity calling
+            // startPlayerActivity() itself - not a system-constructed batch
+            // launch.
+            return PendingIntent.getActivity(
+                this,
+                REQUEST_CODE_OPEN,
+                Intent(this, MainActivity::class.java)
+                    .setAction(Constants.SHORTCUT_ANIME)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .putExtra(Constants.ANIME_EXTRA, safeAnimeId)
+                    .putExtra(Constants.EPISODE_EXTRA, episodeId),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            // <-- AM (PIP_LAUNCH_VIA_LIVE_MAINACTIVITY_FIX)
         }
         return PendingIntent.getActivity(
             this,

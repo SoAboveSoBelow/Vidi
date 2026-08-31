@@ -868,6 +868,27 @@ class PlayerActivity : BaseActivity() {
                         }
                         // <-- AM (PIP_REENTRY_CRASH_FIX)
                     }
+                    // AM (PIP_BACK_AUTOENTER_MAIN_FIX) -->
+                    // Back-triggered PIP entry only. A manual enterPictureInPictureMode()
+                    // call here (as EnterPip above does) requires PlayerActivity to
+                    // still be RESUMED at the moment it runs - but bringing
+                    // MainActivity's task forward first knocks PlayerActivity out of
+                    // that state before a synchronous follow-up call would run,
+                    // which is why an earlier attempt at this (starting MainActivity
+                    // then immediately calling enterPictureInPictureMode()) silently
+                    // did nothing. Using the OS's own auto-enter-on-leave mechanism
+                    // instead avoids that race entirely: register auto-enter (with
+                    // forceAutoEnter, since a paused video wouldn't otherwise qualify)
+                    // while still RESUMED, THEN start MainActivity - the framework
+                    // transitions PlayerActivity into PIP as one coordinated part of
+                    // that same hand-off, with MainActivity already the task in
+                    // front, no flash and no manual PIP call needed.
+                    PlayerViewModel.Event.EnterPipFromBack -> {
+                        if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.RESUMED) {
+                            enterPipFromBack()
+                        }
+                    }
+                    // <-- AM (PIP_BACK_AUTOENTER_MAIN_FIX)
                     is PlayerViewModel.Event.EpisodeTitle -> {
                         // No-op: used to toast "<anime> - <episode>" on change; not wanted.
                     }
@@ -991,9 +1012,11 @@ class PlayerActivity : BaseActivity() {
                             // <-- AM (BACK_PRESERVE_PAUSED_FIX)
                             playerPreferences.pipOnExit.get() && !viewModel.stateData.value.isCasting
                         ) {
-                            // AM (PIP_RECREATE_FIX) -->
-                            tryEnterPictureInPicture(createPipParams())
-                            // <-- AM (PIP_RECREATE_FIX)
+                            // AM (PIP_BACK_AUTOENTER_MAIN_FIX) -->
+                            // Same call as the BackHandler's Event.EnterPipFromBack -
+                            // see enterPipFromBack()'s own doc comment for why.
+                            enterPipFromBack()
+                            // <-- AM (PIP_BACK_AUTOENTER_MAIN_FIX)
                         } else {
                             // AM (BACK_FALLBACK_TO_ANIME) -->
                             // If this Activity is its task's root, finish() alone drops
@@ -1083,6 +1106,11 @@ class PlayerActivity : BaseActivity() {
     }
 
     override fun onDestroy() {
+        // AM (PIP_STALE_REOPEN_INTENT_FIX) -->
+        // See the PRESERVE-session branch below and the final decrement at the
+        // end of this function for how this is used.
+        var isPreserveSessionDecremented = false
+        // <-- AM (PIP_STALE_REOPEN_INTENT_FIX)
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Safety net: onPictureInPictureModeChanged(false, ...) normally clears this, but
         // isn't guaranteed to fire if the activity is destroyed directly out of PIP.
@@ -1168,6 +1196,37 @@ class PlayerActivity : BaseActivity() {
                 }
                 // <-- SVC_RACE_DEBUG
 
+                // AM (PIP_STALE_REOPEN_INTENT_FIX) -->
+                // Confirmed via logcat, matched against buildReopenPendingIntent()'s
+                // own branch logging: updateEpisodeInfo() below rebuilds the
+                // notification, and that used to run while liveInstanceCount hadn't
+                // been decremented yet - so buildReopenPendingIntent() kept taking
+                // the REUSE-EXISTING branch and baking a PendingIntent aimed
+                // directly at this about-to-be-destroyed Activity into the
+                // notification, instead of the MainActivity-first path
+                // (SYNTHETIC-BACKSTACK) a cold start actually uses. Decrementing
+                // here, only for this branch, fixes that. An earlier attempt moved
+                // the single shared decrement for ALL THREE onDestroy() paths to
+                // this same early position - simpler, but wrong: the other two
+                // paths (genuine teardown, duplicate-self-terminate) apparently
+                // depend on something later in their own teardown still seeing the
+                // pre-decrement count, and moving it broke cold-start Recents-PIP
+                // in a way this scoped version doesn't. isPreserveSessionDecremented
+                // below skips the original unconditional decrement at the end of
+                // this function for this one path only, since it's already been
+                // done here - the other two paths still hit that original call,
+                // completely unchanged from stock.
+                liveInstanceCount--
+                isPreserveSessionDecremented = true
+                // SVC_RACE_DEBUG -->
+                logcat {
+                    "SVC_RACE_DEBUG Activity.onDestroy() liveInstanceCount-- -> $liveInstanceCount " +
+                        "activity=${System.identityHashCode(this)} isDuplicateInstanceSelfTerminating=$isDuplicateInstanceSelfTerminating " +
+                        "at=${android.os.SystemClock.elapsedRealtime()}"
+                }
+                // <-- SVC_RACE_DEBUG
+                // <-- AM (PIP_STALE_REOPEN_INTENT_FIX)
+
                 // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
                 // Hand the MediaSession's callback back to the Service-owned fallback
                 // before this instance's ViewModel is cleared - the mirror image of
@@ -1241,7 +1300,14 @@ class PlayerActivity : BaseActivity() {
         // AM (LIVE_INSTANCE_REOPEN_FIX) -->
         // Unconditional, regardless of isFinishing - this tracks whether an Activity
         // window exists right now, not whether the underlying session is preserved.
-        liveInstanceCount--
+        // AM (PIP_STALE_REOPEN_INTENT_FIX) -->
+        // Skipped when the PRESERVE-session branch above already did this early
+        // (see its own comment for why) - everything else (genuine teardown,
+        // duplicate-self-terminate) still hits this exact original, unmoved call.
+        if (!isPreserveSessionDecremented) {
+            liveInstanceCount--
+        }
+        // <-- AM (PIP_STALE_REOPEN_INTENT_FIX)
         // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
         // SVC_RACE_DEBUG -->
         logcat {
@@ -1445,9 +1511,9 @@ class PlayerActivity : BaseActivity() {
             // exemption no longer applies. The notification itself is untouched here -
             // it stays up regardless of foreground/background state since step 4b.
             stopBackgroundPlayback()
+            setPictureInPictureParams(createPipParams())
         }
         // <-- AM (RESUME_LOCK_RACE_FIX)
-        setPictureInPictureParams(createPipParams())
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setFlags(
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -1581,7 +1647,31 @@ class PlayerActivity : BaseActivity() {
         }
     }
 
-    fun createPipParams(forceDisableAutoEnter: Boolean = false): PictureInPictureParams {
+    // AM (PIP_BACK_AUTOENTER_MAIN_FIX) -->
+    // Shared by every back-triggered PIP entry point (the BackHandler in
+    // PlayerScreen.kt and the in-player UI back button, which calls the onBack
+    // lambda below directly, bypassing BackHandler entirely) so they can't drift
+    // out of sync with each other - see BACK_PRESERVE_PAUSED_FIX's own comment
+    // for why that already happened once with the old duplicated-condition
+    // approach. A manual enterPictureInPictureMode() call here would require
+    // PlayerActivity to still be RESUMED at the moment it runs, but starting
+    // MainActivity's task forward first knocks PlayerActivity out of that state
+    // before a synchronous follow-up call would run. Registering auto-enter
+    // (forceAutoEnter, since a paused video wouldn't otherwise qualify) while
+    // still RESUMED, then starting MainActivity, lets the framework transition
+    // PlayerActivity into PIP as one coordinated part of that same hand-off -
+    // MainActivity already the task in front, no flash, no manual PIP call.
+    private fun enterPipFromBack() {
+        setPictureInPictureParams(createPipParams(forceAutoEnter = true))
+        startActivity(
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK
+            },
+        )
+    }
+    // <-- AM (PIP_BACK_AUTOENTER_MAIN_FIX)
+
+    fun createPipParams(forceDisableAutoEnter: Boolean = false, forceAutoEnter: Boolean = false): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val anime = viewModel.stateData.value.currentAnime
@@ -1611,10 +1701,20 @@ class PlayerActivity : BaseActivity() {
             // moment specifically because the deferred clear hasn't run yet - a
             // fresh instance reopening from a genuine background-play session
             // correctly suppresses auto-enter until that clear actually happens.
-            val shouldAutoEnter = !forceDisableAutoEnter &&
-                !SecureActivityDelegate.isBackgroundPlaybackActive &&
-                !viewModel.playbackData.value.paused &&
-                autoEnter
+            val shouldAutoEnter = forceAutoEnter || (
+                !forceDisableAutoEnter &&
+                    !SecureActivityDelegate.isBackgroundPlaybackActive &&
+                    !viewModel.playbackData.value.paused &&
+                    autoEnter
+                )
+            // AM (PIP_BACK_AUTOENTER_MAIN_FIX) -->
+            // forceAutoEnter covers exactly one caller: back-triggered PIP entry
+            // (Event.EnterPipFromBack below). That trigger is meant to enter PIP
+            // unconditionally, same as the old manual tryEnterPictureInPicture() call
+            // it replaces (see BACK_PRESERVE_PAUSED_FIX - back on a paused video
+            // still enters PIP), so it bypasses the paused/background-playback-active
+            // exclusions that otherwise gate the OS's automatic leave-triggered entry.
+            // <-- AM (PIP_BACK_AUTOENTER_MAIN_FIX)
             builder.setAutoEnterEnabled(shouldAutoEnter)
             builder.setSeamlessResizeEnabled(shouldAutoEnter)
             // <-- AM (AUTO_PIP_LOOP_FIX)
@@ -1762,7 +1862,9 @@ class PlayerActivity : BaseActivity() {
                                     viewModel.pause()
                                     isIntentionalBackgroundTransition = true
                                     enterBackground(force = true)
-                                    moveTaskToBack(true)
+                                    isBackgroundPlayTransitionFinish = true
+                                    setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
+                                    finish()
                                 } else {
                                     SecureActivityDelegate.setPipActive(false)
                                     viewModel.player.release()
@@ -1782,6 +1884,8 @@ class PlayerActivity : BaseActivity() {
                 // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
                 SecureActivityDelegate.setPipActive(false)
                 // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
+                stopBackgroundPlayback()
+                setPictureInPictureParams(createPipParams())
                 window.attributes = window.attributes.apply {
                     screenBrightness = viewModel.playbackData.value.currentBrightness.coerceIn(0f, 1f)
                 }

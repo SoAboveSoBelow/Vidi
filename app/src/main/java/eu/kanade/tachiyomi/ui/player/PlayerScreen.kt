@@ -157,7 +157,12 @@ fun PlayerScreen(
                 uiData.panelShown == Panels.None &&
                 uiData.dialogShown == Dialogs.None
             ) {
-                viewModel.handlePlayerEvent(PlayerEvent.EnterPip)
+                // AM (PIP_BACK_AUTOENTER_MAIN_FIX) -->
+                // Distinct from the explicit PIP-button's PlayerEvent.EnterPip - back
+                // is the only trigger meant to bring MainActivity forward underneath
+                // the PIP window. See PlayerActivity's Event.EnterPipFromBack handler.
+                viewModel.handlePlayerEvent(PlayerEvent.EnterPipFromBack)
+                // <-- AM (PIP_BACK_AUTOENTER_MAIN_FIX)
             } else {
                 viewModel.castManager.disconnect()
                 onBack()
