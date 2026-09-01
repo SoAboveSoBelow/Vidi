@@ -53,6 +53,10 @@ import eu.kanade.tachiyomi.ui.player.PlayerUpdates
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
 import eu.kanade.tachiyomi.ui.player.Sheets
+import eu.kanade.tachiyomi.ui.player.components.FakeNavBarSide
+import eu.kanade.tachiyomi.ui.player.components.rememberFakeNavBarSide
+import eu.kanade.tachiyomi.ui.player.components.rememberRealNavBarThickness
+import eu.kanade.tachiyomi.ui.player.components.rememberRealStatusBarHeight
 import eu.kanade.tachiyomi.ui.player.controls.components.BrightnessSlider
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
 import eu.kanade.tachiyomi.ui.player.controls.components.SeekbarWithTimers
@@ -135,16 +139,60 @@ fun PlayerControls(
     // underneath the (now-visible) status/navigation bars. Only add the extra offset
     // while those bars are actually being shown alongside controls - the normal
     // immersive/hidden state shouldn't get any extra padding.
+    //
+    // AM (PIP_FAKE_TOP_BAR) -->
+    // Was WindowInsets.statusBars directly - same bug as the nav bar had:
+    // FakeSystemBarOverlay/FakeTopBar keep the real status bar force-hidden
+    // even when statusBarShown is true, so this was reporting zero.
+    // rememberRealStatusBarHeight() is the same function FakeTopBar itself
+    // uses, captured before the real bar gets hidden.
+    // <-- AM (PIP_FAKE_TOP_BAR)
+    val realStatusBarHeight = rememberRealStatusBarHeight()
     val statusBarTopPadding = if (uiData.statusBarShown) {
-        WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        realStatusBarHeight
     } else {
         0.dp
     }
-    val navigationBarBottomPadding = if (uiData.statusBarShown) {
-        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    // AM (PIP_FAKE_SYSTEM_BAR_INSET_FIX) -->
+    // Was WindowInsets.navigationBars - correct for a real, visible navigation
+    // bar, but FakeSystemBarOverlay now keeps the real bar force-hidden even
+    // when statusBarShown is true (its whole point - see that file's own doc
+    // comment), so this was reporting zero and the seekbar sat right where the
+    // fake bar renders. rememberRealNavBarThickness() is the same function
+    // FakeSystemBarOverlay itself uses for the bar's own size, so this always
+    // reserves exactly as much space as the bar actually occupies on this
+    // specific device, not a generic default that was confirmed not to match.
+    //
+    // AM (PIP_FAKE_SYSTEM_BAR_ORIENTATION_FIX) -->
+    // The fake bar now switches to a vertical side layout in landscape (see
+    // FakeSystemBarOverlay's own doc comment) - no bottom reservation is
+    // needed there, since nothing sits at the bottom in that orientation.
+    // navigationBarSidePadding instead reserves horizontal space matching
+    // whichever side the bar is actually on, applied to the whole
+    // ConstraintLayout below. This is a coarser fix than adjusting every
+    // individual constraint the way AOSP's own layout does per-element - it
+    // shifts the whole controls layout away from that edge rather than
+    // precisely repositioning each control, but avoids the fake bar
+    // overlapping anything in landscape.
+    val fakeNavBarSide = rememberFakeNavBarSide()
+    val realNavBarThickness = rememberRealNavBarThickness()
+    val navigationBarBottomPadding = if (uiData.statusBarShown && fakeNavBarSide == FakeNavBarSide.Bottom) {
+        realNavBarThickness
     } else {
         0.dp
     }
+    val navigationBarSideStartPadding = if (uiData.statusBarShown && fakeNavBarSide == FakeNavBarSide.Left) {
+        realNavBarThickness
+    } else {
+        0.dp
+    }
+    val navigationBarSideEndPadding = if (uiData.statusBarShown && fakeNavBarSide == FakeNavBarSide.Right) {
+        realNavBarThickness
+    } else {
+        0.dp
+    }
+    // <-- AM (PIP_FAKE_SYSTEM_BAR_ORIENTATION_FIX)
+    // <-- AM (PIP_FAKE_SYSTEM_BAR_INSET_FIX)
     // <-- AM (SYSTEM_BAR_CONTROLS_INSET)
 
     CompositionLocalProvider(
@@ -161,7 +209,10 @@ fun PlayerControls(
                     ),
                     alpha = transparentOverlay,
                 )
-                .padding(horizontal = MaterialTheme.padding.medium),
+                .padding(horizontal = MaterialTheme.padding.medium)
+                // AM (PIP_FAKE_SYSTEM_BAR_ORIENTATION_FIX) -->
+                .padding(start = navigationBarSideStartPadding, end = navigationBarSideEndPadding),
+                // <-- AM (PIP_FAKE_SYSTEM_BAR_ORIENTATION_FIX)
         ) {
             val (topLeftControls, topRightControls) = createRefs()
             val (volumeSlider, brightnessSlider) = createRefs()

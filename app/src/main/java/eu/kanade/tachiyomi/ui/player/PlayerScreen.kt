@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -49,7 +50,8 @@ import eu.kanade.tachiyomi.ui.player.components.BrightnessOverlay
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
 import eu.kanade.tachiyomi.ui.player.components.OrientationOverlay
 import eu.kanade.tachiyomi.ui.player.components.SystemAwakeOverlay
-import eu.kanade.tachiyomi.ui.player.components.SystemBarOverlay
+import eu.kanade.tachiyomi.ui.player.components.FakeSystemBarOverlay
+import eu.kanade.tachiyomi.ui.player.components.FakeTopBar
 import eu.kanade.tachiyomi.ui.player.controls.DoubleTapToSeekOvals
 import eu.kanade.tachiyomi.ui.player.controls.GestureHandler
 import eu.kanade.tachiyomi.ui.player.controls.LocalPlayerButtonsClickEvent
@@ -64,6 +66,7 @@ import eu.kanade.tachiyomi.ui.player.controls.components.panels.toColorHexString
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.toFixed
 import eu.kanade.tachiyomi.ui.player.mpv.MpvVideoTrack
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import tachiyomi.core.common.preference.deleteAndGet
 import tachiyomi.core.common.preference.minusAssign
 import tachiyomi.core.common.preference.plusAssign
@@ -328,10 +331,6 @@ fun PlayerScreen(
                 brightness = playbackData.currentBrightness,
             )
 
-            SystemBarOverlay(
-                showStatusBar = uiData.statusBarShown,
-            )
-
             var resetControls by remember { mutableStateOf(true) }
 
             LaunchedEffect(
@@ -365,6 +364,48 @@ fun PlayerScreen(
                     playbackSpeed = playbackSpeed,
                     modifier = Modifier.fillMaxSize(),
                 )
+
+                // AM (PIP_FAKE_SYSTEM_BAR) -->
+                // Composed after PlayerControls specifically, not before it -
+                // Compose draws later-composed children of the same Box on top
+                // of earlier ones, and PlayerControls' own bottom control bar
+                // was covering this when it was placed earlier. onRecentsClick
+                // routes through the same reliable mechanism the explicit PIP
+                // button already uses, never touching the real,
+                // confirmed-unreliable system Recents gesture.
+                //
+                // AM (PIP_FAKE_NAV_RECENTS_SERVICE) -->
+                // Enters PIP first (already reliable on its own), then, once
+                // that's had a moment to visually complete, opens the real
+                // system Recents screen via RecentsAccessibilityService - see
+                // that file's own doc comment for why an accessibility
+                // service is the only way to do this at all. Silently does
+                // nothing beyond the PIP entry if the user hasn't enabled
+                // that service - PIP alone is still the actual fix for the
+                // original bug, Recents opening on top of it is an addition,
+                // not something the core fix depends on.
+                // <-- AM (PIP_FAKE_NAV_RECENTS_SERVICE)
+                val coroutineScope = rememberCoroutineScope()
+                FakeSystemBarOverlay(
+                    showBar = uiData.statusBarShown,
+                    onRecentsClick = {
+                        viewModel.handlePlayerEvent(PlayerEvent.EnterPip)
+                        coroutineScope.launch {
+                            delay(300)
+                            RecentsAccessibilityService.openRecents()
+                        }
+                    },
+                    onHomeClick = { viewModel.handlePlayerEvent(PlayerEvent.EnterPipThenGoHome) },
+                    onBackClick = onBack,
+                )
+                // <-- AM (PIP_FAKE_SYSTEM_BAR)
+
+                // AM (PIP_FAKE_TOP_BAR) -->
+                // Same showBar gate and same reasoning as the bottom bar -
+                // composed after PlayerControls so it draws on top instead of
+                // underneath its own top row.
+                FakeTopBar(showBar = uiData.statusBarShown)
+                // <-- AM (PIP_FAKE_TOP_BAR)
 
                 // Sheets
                 val showSubtitles by subtitlePreferences.screenshotSubtitles.collectAsState()

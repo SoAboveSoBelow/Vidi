@@ -471,7 +471,7 @@ class PlayerViewModel @JvmOverloads constructor(
         // AM (SHARED_SESSION_SYNC_FIX) -->
         // Was its own separate mediaHolder?.updateState { it.copy(...) } call, built
         // independently from - and once genuinely out of sync with - the equivalent
-        // call in PlayerMediaHolder's own performBackgroundSkipLoad(). Both now go
+        // call in PlayerMediaHolder's own resolveAndLoadTarget(). Both now go
         // through PlayerMediaHolder.syncSessionState() (see its own doc comment) -
         // one place both paths write these fields from, not two.
         //
@@ -736,6 +736,17 @@ class PlayerViewModel @JvmOverloads constructor(
             PlayerEvent.EnterPipFromBack -> {
                 viewModelScope.launch {
                     _eventFlow.emit(Event.EnterPipFromBack)
+                }
+            }
+            // AM (PIP_FAKE_NAV_HOME_FIX) -->
+            // Same coordinated-transition mechanism as EnterPipFromBack, for the
+            // fake nav bar's Home button specifically - relying on
+            // moveTaskToBack() reliably triggering onUserLeaveHint() the way a
+            // real Home press does turned out not to hold up under testing.
+            // <-- AM (PIP_FAKE_NAV_HOME_FIX)
+            PlayerEvent.EnterPipThenGoHome -> {
+                viewModelScope.launch {
+                    _eventFlow.emit(Event.EnterPipThenGoHome)
                 }
             }
             // <-- AM (PIP_BACK_AUTOENTER_MAIN_FIX)
@@ -3038,14 +3049,31 @@ class PlayerViewModel @JvmOverloads constructor(
     fun pauseUnpause() {
         mpvCommand("cycle", "pause")
     }
+    // AM (PIP_PAUSE_SEEK_UNIFY) -->
+    // Was setPropertyBoolean("pause", true) directly - the exact same mpv
+    // operation PlayerMediaHolder.setPaused() already does, called
+    // independently through a separate code path. Since _player is the SAME
+    // instance as the holder's own player whenever one exists (see this
+    // class's own _player initialization), the underlying mpv state was
+    // never actually duplicated - only the code calling it was, which is
+    // exactly what let playbackData drift out of sync with mpv's real state
+    // (see reconcilePausedFromPlayer()'s own doc comment, written specifically
+    // to patch over that gap). Delegating to the holder when one exists means
+    // there's only ever one place that actually calls
+    // setPropertyBoolean("pause", ...) - this function now only owns its own
+    // playbackData bookkeeping, which is genuinely ViewModel-specific UI
+    // state, not something the holder needs or should own. Falls back to the
+    // direct call only in the brief window before a holder has been adopted
+    // at all.
+    // <-- AM (PIP_PAUSE_SEEK_UNIFY)
     fun pause() {
-        setPropertyBoolean("pause", true)
+        mediaHolder?.setPaused(true) ?: setPropertyBoolean("pause", true)
 
         // PiP needs the state immediately
         updatePlaybackData { it.copy(paused = true) }
     }
     fun unpause() {
-        setPropertyBoolean("pause", false)
+        mediaHolder?.setPaused(false) ?: setPropertyBoolean("pause", false)
         updatePlaybackData { it.copy(paused = false) }
     }
 
@@ -3590,8 +3618,18 @@ class PlayerViewModel @JvmOverloads constructor(
         if (showSeekBar) showSeekBar()
     }
 
+    // AM (PIP_PAUSE_SEEK_UNIFY) -->
+    // Was mpvCommand("seek", ...) directly - same reasoning as pause()/
+    // unpause() above: delegates the actual seek to
+    // PlayerMediaHolder.seekBy() (the same function the MediaSession
+    // callback's Seek gesture option already uses) instead of independently
+    // reimplementing the same command. smoothSeeking here is still this
+    // class's own cached copy (read once at init) rather than the holder's
+    // always-fresh read - a real, minor difference if the preference changes
+    // mid-session, not something this specific change addresses.
+    // <-- AM (PIP_PAUSE_SEEK_UNIFY)
     fun seekBy(offset: Int) {
-        mpvCommand("seek", offset.toString(), if (smoothSeeking) "relative+exact" else "relative")
+        mediaHolder?.seekBy(offset) ?: mpvCommand("seek", offset.toString(), if (smoothSeeking) "relative+exact" else "relative")
     }
 
     fun seekTo(position: Int) {
@@ -4365,6 +4403,13 @@ class PlayerViewModel @JvmOverloads constructor(
         // AM (PIP_BACK_AUTOENTER_MAIN_FIX): back-triggered PIP entry, distinct from
         // the explicit PIP-button tap above - see handlePlayerEvent for why.
         data object EnterPipFromBack : PlayerEvent
+        // AM (PIP_FAKE_NAV_HOME_FIX): the fake nav bar's Home button - same
+        // auto-enter, coordinated-transition mechanism as EnterPipFromBack, but
+        // handing off to the real launcher instead of MainActivity. See
+        // PlayerActivity.enterPipThenGoHome()'s own doc comment for why this
+        // needed its own mechanism rather than relying on moveTaskToBack()
+        // reliably triggering onUserLeaveHint() the way a real Home press does.
+        data object EnterPipThenGoHome : PlayerEvent
         data class ExecuteCustomButton(val long: Boolean) : PlayerEvent
         data class LockControls(val lock: Boolean) : PlayerEvent
         data class NextEpisode(val next: Boolean) : PlayerEvent
@@ -4386,6 +4431,8 @@ class PlayerViewModel @JvmOverloads constructor(
         data object EnterPip : Event
         // AM (PIP_BACK_AUTOENTER_MAIN_FIX): see PlayerEvent.EnterPipFromBack above.
         data object EnterPipFromBack : Event
+        // AM (PIP_FAKE_NAV_HOME_FIX): see PlayerEvent.EnterPipThenGoHome above.
+        data object EnterPipThenGoHome : Event
         data class EpisodeTitle(val name: String) : Event
         data object Finish : Event
         data class InitialEpisodeError(val error: Throwable) : Event

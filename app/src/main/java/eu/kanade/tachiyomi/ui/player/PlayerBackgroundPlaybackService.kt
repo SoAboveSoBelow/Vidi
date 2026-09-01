@@ -64,7 +64,7 @@ class PlayerBackgroundPlaybackService : Service() {
             // than relying solely on PlayerActivity's REOPEN_TARGET_STALENESS_FIX
             // observer pushing updates via updateEpisodeInfo() - that observer only
             // runs while a live Activity exists. Without this, a successful
-            // background skip (see PlayerMediaHolder.skipToAdjacentEpisode())
+            // background skip (see PlayerMediaHolder.switchToAdjacentEpisode())
             // updated the holder's own bookkeeping correctly but the visible
             // notification never refreshed to match, since nothing was watching
             // for that change with no Activity around to notice it.
@@ -110,7 +110,7 @@ class PlayerBackgroundPlaybackService : Service() {
             // <-- AM (BACKGROUND_SKIP_FIX)
 
             // AM (NOTIFICATION_RESUME_RESTORE_FIX) -->
-            // Handles the pause-then-resume case: fallbackCallback.onPlay() (the
+            // Handles the pause-then-resume case: mediaSessionCallback.onPlay() (the
             // resume path used with no live Activity, e.g. resuming from Bluetooth
             // controls after the notification was dismissed while paused) only
             // ever flipped mpv's own pause state - nothing called back into this

@@ -5,4 +5,6 @@
          priority over a same-named resource pulled in from a dependency, so this doesn't
          need to touch (and re-conflict on) the shared upstream strings.xml. -->
     <string name="app_name" translatable="false">Vidi</string>
+    <!-- AM (PIP_FAKE_NAV_RECENTS_SERVICE) -->
+    <string name="recents_accessibility_service_description" translatable="false">Lets Vidi\'s in-player Recents button open the real system Recents screen. Does not read screen content, does not act on your behalf anywhere else - only used for this one button.</string>
 </resources>

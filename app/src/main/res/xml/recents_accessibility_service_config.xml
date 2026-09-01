@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AM (PIP_FAKE_NAV_RECENTS_SERVICE) -->
+<!--
+    Deliberately minimal - this service exists only to call
+    performGlobalAction(GLOBAL_ACTION_RECENTS), not to observe or act on
+    anything happening elsewhere on the device. accessibilityEventTypes is
+    required by the framework even though onAccessibilityEvent() does
+    nothing; everything else is left at its most restrictive/absent setting.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="false"
+    android:canPerformGestures="false"
+    android:canRequestTouchExplorationMode="false"
+    android:notificationTimeout="0"
+    android:description="@string/recents_accessibility_service_description" />

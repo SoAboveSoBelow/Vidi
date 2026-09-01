@@ -6,7 +6,7 @@ import `is`.xyz.mpv.MPV
  * AM (SHARED_LOAD_FILE_FIX) -->
  * Extracted from what were two separately-written, independently-maintained copies of
  * this exact operation - PlayerViewModel.loadFile() (foreground) and
- * PlayerMediaHolder.performBackgroundSkipLoad() (background skip, no live Activity).
+ * PlayerMediaHolder.resolveAndLoadTarget() (background skip, no live Activity).
  * Both disable hwdec first when there's no attached Surface (MediaCodec hwdec needs one
  * to initialize a decoder session) and then issue the same loadfile command - the
  * foreground path just has a real Surface to check for, while the background path
