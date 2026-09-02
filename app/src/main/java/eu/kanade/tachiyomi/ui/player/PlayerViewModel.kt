@@ -284,7 +284,6 @@ class PlayerViewModel @JvmOverloads constructor(
     private val showSeekBar = gesturePreferences.showSeekBar.get()
     private val pipEpisodeToasts = playerPreferences.pipEpisodeToasts.get()
     private val showStatusBar = playerPreferences.showSystemStatusBar.get()
-    private val downloadAheadAmount = downloadPreferences.autoDownloadWhileWatching.get()
     private val progress = playerPreferences.progressPreference.get()
     private val castProxy = playerPreferences.castProxy.get()
     private val castProxyPort = playerPreferences.castProxyPort.get().toInt()
@@ -1799,13 +1798,13 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     fun loadHosters(hosterList: List<Hoster>, hosterIndex: Int, videoIndex: Int) {
-        val hasFoundPreferredVideo = AtomicBoolean(false)
-
         updateStateData { it.copy(hosterList = hosterList) }
         updateUiData { it.copy(hosterExpandedList = List(hosterList.size) { true }) }
 
         val source = stateData.value.currentSource
             ?: throw Exception("No source available")
+        val holder = mediaHolder
+            ?: throw Exception("No mediaHolder bound")
 
         getHosterVideoLinksJob?.cancel()
         getHosterVideoLinksJob = viewModelScope.launchIO {
@@ -1829,60 +1828,57 @@ class PlayerViewModel @JvmOverloads constructor(
             }
 
             try {
-                coroutineScope {
-                    hosterList.mapIndexed { hosterIdx, hoster ->
-                        async {
-                            val hosterState = EpisodeLoader.loadHosterVideos(source, hoster)
-
-                            updateHosterStateAt(hosterIdx, hosterState)
-
-                            if (hosterState is HosterState.Ready) {
-                                if (hosterIdx == hosterIndex) {
-                                    hosterState.videoList.getOrNull(videoIndex)?.let {
-                                        hasFoundPreferredVideo.set(true)
-                                        val success = loadVideo(it, hosterIndex, videoIndex)
-                                        if (!success) {
-                                            hasFoundPreferredVideo.set(false)
-                                        }
-                                    }
-                                }
-
-                                val prefIndex = hosterState.videoList.indexOfFirst { it.preferred }
-                                if (prefIndex != -1 && hosterIndex == -1) {
-                                    if (hasFoundPreferredVideo.compareAndSet(false, true)) {
-                                        if (uiData.value.selectedHosterVideoIndex == Pair(-1, -1)) {
-                                            val success =
-                                                loadVideo(
-                                                    hosterState.videoList[prefIndex],
-                                                    hosterIdx,
-                                                    prefIndex,
-                                                )
-                                            if (!success) {
-                                                hasFoundPreferredVideo.set(false)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }.awaitAll()
-
-                    if (hasFoundPreferredVideo.compareAndSet(false, true)) {
-                        if (uiData.value.selectedHosterVideoIndex == Pair(-1, -1)) {
-                            val (hosterIdx, videoIdx) = HosterLoader.selectBestVideo(stateData.value.hosterState)
-                            if (hosterIdx == -1) {
-                                throw ExceptionWithStringResource(
-                                    "No available videos",
-                                    AYMR.strings.no_available_videos,
-                                )
-                            }
-
-                            val video = (stateData.value.hosterState[hosterIdx] as HosterState.Ready)
-                                .videoList[videoIdx]
-                            loadVideo(video, hosterIdx, videoIdx)
-                        }
-                    }
+                // AM (SHARED_HOSTER_RACE_FIX) -->
+                // Was its own separate racing loop (hasFoundPreferredVideo/
+                // async-per-hoster/selectBestVideo fallback), independently
+                // maintained from PlayerMediaHolder's equivalent for background
+                // skips - which until tonight didn't even have retry/fallback at
+                // all (see MODULAR_MERGING_SCOPE.md's confirmed gap). Both now
+                // call PlayerMediaHolder.raceHostersForVideo() for this part -
+                // updateHosterStateAt is passed through as the progress callback
+                // so this dialog's live per-hoster display is unchanged.
+                //
+                // Known behavior difference from the old inline version: that
+                // version interleaved racing and loading, so a winning hoster's
+                // video failing at actual LOAD time would reset the race and let
+                // a later hoster win instead. Separating "find a winner" from
+                // "load it" (needed so both callers can share the winner-finding
+                // step) means that specific retry no longer happens automatically
+                // - see raceHostersForVideo()'s own doc comment for the same
+                // note from the other caller's side.
+                val winner = holder.raceHostersForVideo(
+                    source = source,
+                    hosters = hosterList,
+                    preferredHosterIndex = hosterIndex,
+                    preferredVideoIndex = videoIndex,
+                    onHosterStateUpdate = { idx, state -> updateHosterStateAt(idx, state) },
+                )
+                // The original only gated its AUTO-preferred-video and
+                // FALLBACK(selectBestVideo) branches behind
+                // selectedHosterVideoIndex == Pair(-1, -1) - an explicit manual
+                // pick (hosterIndex/videoIndex both set, and the winner is
+                // exactly that pair) always loaded unconditionally once found,
+                // ungated, since it's a deliberate user action that should win
+                // over a stale in-flight auto-selection rather than be silently
+                // dropped by it. Inferred here from the winner itself rather
+                // than needing raceHostersForVideo() to report which of its
+                // three paths matched.
+                val isExactManualMatch = winner != null &&
+                    hosterIndex != -1 &&
+                    winner.first == hosterIndex &&
+                    winner.second == videoIndex
+                if (!isExactManualMatch && uiData.value.selectedHosterVideoIndex != Pair(-1, -1)) {
+                    return@launchIO
                 }
+                if (winner == null) {
+                    throw ExceptionWithStringResource(
+                        "No available videos",
+                        AYMR.strings.no_available_videos,
+                    )
+                }
+                val (hosterIdx, videoIdx, video) = winner
+                loadVideo(video, hosterIdx, videoIdx)
+                // <-- AM (SHARED_HOSTER_RACE_FIX)
             } catch (e: CancellationException) {
                 updateStateData {
                     it.copy(
@@ -1897,15 +1893,44 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    fun loadBestVideo(): Boolean {
-        val (hosterIdx, videoIdx) = HosterLoader.selectBestVideo(stateData.value.hosterState)
-        if (hosterIdx == -1) return false
-        val newVideo = (stateData.value.hosterState[hosterIdx] as HosterState.Ready).videoList[videoIdx]
-        viewModelScope.launchIO {
-            loadVideo(newVideo, hosterIdx, videoIdx)
+    // AM (SHARED_HOSTER_RACE_FIX) -->
+    // Was HosterLoader.selectBestVideo(stateData.value.hosterState) - reading
+    // whatever per-hoster results were cached from the ORIGINAL race, picking
+    // a different already-known-good video without re-fetching anything.
+    // That's a genuinely different (and staler) approach than
+    // resolveAndLoadTarget()'s own retry, which re-races every hoster fresh
+    // via PlayerMediaHolder.raceHostersForVideo() - the exact same shared
+    // function loadHosters() itself calls for the initial load. Pointed here
+    // at that too, rather than leaving this the one remaining place with its
+    // own separate "how do I recover from a failed video" mechanism -
+    // genuinely fresher data (a hoster that's since come back up, or one that
+    // failed differently than the cached state remembers), not just a
+    // refactor for its own sake.
+    //
+    // No longer returns a synchronous Boolean - a fresh race needs real
+    // network calls, unlike reading an already-cached array - so this now
+    // handles its own no-video-found case (emitting Event.Finish) rather
+    // than the caller checking a return value it can't have synchronously
+    // anymore. endFile() just calls this and stops.
+    fun loadBestVideo() {
+        val source = stateData.value.currentSource ?: return
+        val hosterList = stateData.value.hosterList
+        val holder = mediaHolder
+        if (hosterList.isEmpty() || holder == null) {
+            viewModelScope.launch { _eventFlow.emit(Event.Finish) }
+            return
         }
-        return true
+        viewModelScope.launchIO {
+            val winner = holder.raceHostersForVideo(source, hosterList)
+            if (winner == null) {
+                _eventFlow.emit(Event.Finish)
+                return@launchIO
+            }
+            val (hosterIdx, videoIdx, video) = winner
+            loadVideo(video, hosterIdx, videoIdx)
+        }
     }
+    // <-- AM (SHARED_HOSTER_RACE_FIX)
 
     /** Loads [video]; returns true if successful. */
     private suspend fun loadVideo(video: Video, hosterIndex: Int, videoIndex: Int): Boolean {
@@ -2084,15 +2109,25 @@ class PlayerViewModel @JvmOverloads constructor(
                     resumeFromLast -> episode.last_second_seen
                     else -> null
                 }
+                // AM (SHARED_RESUME_POSITION_FIX) -->
+                // Was its own separate final decision here (temp position wins, else
+                // seen-and-not-preserving -> 0, else last_second_seen) - now calls
+                // PlayerMediaHolder.resolveResumePositionMs(), the same function
+                // resolveAndLoadTarget() calls too, for this final tail. Everything
+                // ABOVE this point (tempPositionMs's own multi-tier computation,
+                // including the reinit-only live-holder-state check) stays exactly as
+                // it was - that part is legitimately foreground-only, with nothing
+                // for background's in-session skip to share it with. Only the actual
+                // duplicated decision moves.
                 (
-                    if (tempPositionMs != null && tempPositionMs > 0) {
-                        tempPositionMs / 1000L
-                    } else if (episode.seen && !preservePos) {
-                        0L
-                    } else {
-                        episode.last_second_seen / 1000L
-                    }
-                    )
+                    mediaHolder?.resolveResumePositionMs(
+                        tempPositionMs = tempPositionMs,
+                        episodeSeen = episode.seen,
+                        episodeLastSecondSeenMs = episode.last_second_seen,
+                        preservePosition = preservePos,
+                    ) ?: episode.last_second_seen
+                    ) / 1000L
+                // <-- AM (SHARED_RESUME_POSITION_FIX)
                     // DEBUG (POSITION_BLEED_TRACE) -->
                     .also { chosen ->
                         logcat(LogPriority.INFO) {
@@ -2137,33 +2172,72 @@ class PlayerViewModel @JvmOverloads constructor(
             "$option=\"$value\""
         }
 
-        if (torrentPreferences.torrServerEnable.get() && isTorrent(video)) {
+        val source = stateData.value.currentSource ?: run {
+            logcat(LogPriority.ERROR) { "setVideo: no current source, cannot resolve video" }
+            return
+        }
+        // Only needed by the shared torrent/plain-resolve branch below - bailing
+        // loudly (logged error, no silent duplicate-logic fallback) rather than
+        // reimplementing resolution again here for an edge case that, per the
+        // Service-owned architecture, shouldn't be reachable once an episode is
+        // actually loading; if it turns out to be reachable, it should surface
+        // immediately as "nothing loaded," not a subtle behavior difference.
+        val holder = mediaHolder
+
+        if (video.usesHttpServer()) {
+            // AM (SHARED_VIDEO_RESOLUTION_FIX) -->
+            // NOT yet pointed at PlayerMediaHolder.resolveFinalVideoUrl() like
+            // the torrent/plain branches below - traced startCasting() (search
+            // for "If the video already requires a http server") and found it
+            // depends on this ViewModel's own httpServer field being correctly
+            // populated to know whether to relaunch the proxy before casting.
+            // resolveFinalVideoUrl() creates its server in a local scope with
+            // nothing tracking it, so pointing this branch at it too would have
+            // silently broken casting for any http-proxy source - not something
+            // to ship blind without startCasting() itself getting traced and
+            // tested. Left as its own implementation until that's done as its
+            // own pass.
+            // <-- AM (SHARED_VIDEO_RESOLUTION_FIX)
             launchIO {
-                TorrentServerService.start()
-                torrentLinkHandler(video.videoUrl, video.videoTitle, videoOptions)
+                val httpSource = source as? AnimeHttpSource
+                val port = try {
+                    httpServer = httpSource?.createHttpServer()
+                    httpServer?.start()
+                    httpServer?.listeningPort ?: 0
+                } catch (e: Exception) {
+                    logcat(LogPriority.ERROR, e) { "Failed to start http server" }
+                    _eventFlow.emit(Event.ToastResource(AYMR.strings.http_server_start_failure))
+                    return@launchIO
+                }
+                val newVideo = video.copyHttpServer(port)
+                updateStateData { it.copy(currentVideo = newVideo) }
+                loadFile(parseVideoUrl(newVideo.videoUrl)!!, videoOptions)
             }
         } else {
+            // AM (SHARED_VIDEO_RESOLUTION_FIX) -->
+            // Torrent + plain-URL resolution have no equivalent hidden-state
+            // coupling (startCasting() re-resolves torrent URLs fresh itself
+            // rather than reading anything cached here) - safe to share. Was
+            // its own separate torrent branch (isTorrent()/torrentLinkHandler()/
+            // getTorrentUrl() below, now unused for this call site - kept for
+            // startCasting()'s own still-separate torrent handling above, and
+            // because deleting them without a compiler to confirm nothing else
+            // calls them felt riskier than a follow-up cleanup once this is
+            // confirmed working), independently maintained from
+            // PlayerMediaHolder.resolveAndLoadTarget()'s equivalent - which used
+            // to just refuse torrent outright (see MODULAR_MERGING_SCOPE.md's
+            // confirmed gap). Both now call
+            // PlayerMediaHolder.resolveFinalVideoUrl() for this part.
             launchIO {
-                val httpSource = stateData.value.currentSource as? AnimeHttpSource
-                var videoUrl: String = video.videoUrl
-                if (video.usesHttpServer() && httpSource != null) {
-                    val port = try {
-                        httpServer = httpSource.createHttpServer()
-                        httpServer?.start()
-                        httpServer?.listeningPort ?: 0
-                    } catch (e: Exception) {
-                        logcat(LogPriority.ERROR, e) { "Failed to start http server" }
-                        _eventFlow.emit(Event.ToastResource(AYMR.strings.http_server_start_failure))
-                        return@launchIO
-                    }
-
-                    val newVideo = video.copyHttpServer(port)
-                    videoUrl = newVideo.videoUrl
-                    updateStateData { it.copy(currentVideo = newVideo) }
+                val resolvedVideo = holder?.resolveFinalVideoUrl(video, source)
+                if (resolvedVideo == null) {
+                    logcat(LogPriority.ERROR) { "setVideo: resolveFinalVideoUrl failed or no mediaHolder bound" }
+                    _eventFlow.emit(Event.ToastResource(AYMR.strings.http_server_start_failure))
+                    return@launchIO
                 }
-
-                loadFile(parseVideoUrl(videoUrl)!!, videoOptions)
+                loadFile(resolvedVideo.videoUrl, videoOptions)
             }
+            // <-- AM (SHARED_VIDEO_RESOLUTION_FIX)
         }
     }
 
@@ -2289,9 +2363,7 @@ class PlayerViewModel @JvmOverloads constructor(
         setCurrentVideoError()
 
         if (playerPreferences.switchOnFailure.get()) {
-            if (!loadBestVideo()) {
-                viewModelScope.launch { _eventFlow.emit(Event.Finish) }
-            }
+            loadBestVideo()
         } else {
             updateStateData { it.copy(isStopped = true) }
         }
@@ -3692,24 +3764,30 @@ class PlayerViewModel @JvmOverloads constructor(
 
     /** Persists progress when the activity is saved without a config change. */
     fun onSaveInstanceStateNonConfigurationChange() {
-        val currentEpisode = stateData.value.currentEpisode ?: return
-        viewModelScope.launchNonCancellable {
-            saveEpisodeProgress(currentEpisode)
+        // AM (SHARED_WATCH_PROGRESS_FIX) -->
+        // Was saveEpisodeProgress(currentEpisode) directly - see
+        // PlayerMediaHolder.saveWatchingProgress()'s own doc comment for why
+        // this delegates now. writeHistory = false preserves this call site's
+        // original behavior (progress only, no history entry for a config-
+        // change save).
+        mediaHolder?.let { holder ->
+            viewModelScope.launchNonCancellable { holder.saveWatchingProgress(writeHistory = false) }
         }
+        // <-- AM (SHARED_WATCH_PROGRESS_FIX)
     }
 
     override fun onCleared() {
         stateData.value.currentEpisode?.let {
-            // AM (PRESERVE_POSITION_SETTING) -->
-            // Per-second saves during playback keep last_second_seen live in the DB so
-            // background/notification playback can resume correctly if the process dies.
-            // On true exit though, only keep that position for an already-seen episode if
-            // the user opted in to preserving watch position on seen episodes.
-            if (it.seen && !playerPreferences.preserveWatchingPosition.get()) {
-                it.last_second_seen = 0L
+            // AM (SHARED_WATCH_PROGRESS_FIX) -->
+            // Was its own local "wipe position if seen and not preserving, then
+            // saveWatchingProgress(it)" - the wipe-if-already-seen behavior is
+            // now handled inside PlayerMediaHolder.saveWatchingProgress() itself
+            // (see its own PRESERVE_POSITION_SETTING note), so no separate
+            // pre-step is needed here.
+            mediaHolder?.let { holder ->
+                viewModelScope.launchNonCancellable { holder.saveWatchingProgress() }
             }
-            // <-- AM (PRESERVE_POSITION_SETTING)
-            saveWatchingProgress(it)
+            // <-- AM (SHARED_WATCH_PROGRESS_FIX)
             episodeToDownload?.let { toDownload ->
                 downloadManager.addDownloadsToStartOfQueue(listOf(toDownload))
             }
@@ -3789,12 +3867,26 @@ class PlayerViewModel @JvmOverloads constructor(
             }
         }
 
-        saveWatchingProgress(currentEpisode)
+        // AM (SHARED_WATCH_PROGRESS_FIX) -->
+        // Was a delegate call to mediaHolder?.saveWatchingProgress() here.
+        // Removed entirely, not just redirected - PlayerMediaHolder now
+        // subscribes to the exact same mpv.propFlow<Int>("time-pos") this
+        // function itself reacts to (see its own doc comment in adopt()),
+        // so that subscription already covers every tick, foreground
+        // included. Keeping a second call here would just double-write on
+        // every single tick while a ViewModel is alive.
+        // <-- AM (SHARED_WATCH_PROGRESS_FIX)
 
-        val inDownloadRange = position.toDouble() / duration > 0.35
-        if (inDownloadRange) {
-            downloadNextEpisodes()
-        }
+        // AM (SHARED_DOWNLOAD_AHEAD_FIX) -->
+        // Was an inDownloadRange check + downloadNextEpisodes() call here.
+        // Removed entirely, not redirected - same reasoning as the
+        // SHARED_WATCH_PROGRESS_FIX removal just above: PlayerMediaHolder now
+        // subscribes to the exact same mpv.propFlow<Int>("time-pos") this
+        // function itself reacts to, with its own equivalent 35% trigger (see
+        // its own downloadNextEpisodes()). That subscription already covers
+        // every tick, foreground included - a second call here would just be
+        // redundant while a ViewModel is alive.
+        // <-- AM (SHARED_DOWNLOAD_AHEAD_FIX)
     }
 
     private suspend fun updateEpisodeProgressOnComplete(currentEp: Episode) {
@@ -3802,12 +3894,29 @@ class PlayerViewModel @JvmOverloads constructor(
         // Reset resume position now that it's finished, otherwise it stays near the
         // "seen" threshold (close to the end) for anything reading it later.
         currentEp.last_second_seen = 0L
-        updateTrackEpisodeSeen(currentEp)
-        deleteEpisodeIfNeeded(currentEp)
-        // Persist explicitly - not guaranteed to run after onSecondReached()'s own call.
-        // writeSeenState = true: this call is the one intentionally making the episode
-        // seen (natural completion), unlike every other saveWatchingProgress call site.
-        saveWatchingProgress(currentEp, writeSeenState = true)
+        // AM (SHARED_EPISODE_COMPLETION_FIX) -->
+        // Was three separate calls here (updateTrackEpisodeSeen(currentEp),
+        // deleteEpisodeIfNeeded(currentEp), then saveWatchingProgress via the
+        // already-shared writer) - now one call into
+        // PlayerMediaHolder.handleEpisodeCompletion(), which does all three
+        // itself (see its own doc comment - this was a confirmed real gap for
+        // background: an episode finishing purely in the background never got
+        // marked seen at all, not just missing tracker sync/auto-delete).
+        // updateTrackEpisodeSeen()/deleteEpisodeIfNeeded() have no remaining
+        // call sites now - deleted below, not left as dead code. The one
+        // side effect deleteEpisodeIfNeeded() had beyond its own purpose -
+        // clearing episodeToDownload once an episode naturally completes, so
+        // onCleared()'s own exit-flow doesn't act on a now-stale pending
+        // download - moved here directly rather than lost.
+        episodeToDownload = null
+        val episodeId = currentEp.id
+        val animeId = currentEp.anime_id
+        if (episodeId != null && animeId != null) {
+            mediaHolder?.let { holder ->
+                viewModelScope.launchNonCancellable { holder.handleEpisodeCompletion(animeId, episodeId) }
+            }
+        }
+        // <-- AM (SHARED_EPISODE_COMPLETION_FIX)
 
         val markDuplicateAsSeen = libraryPreferences.markDuplicateSeenEpisodeAsSeen.get()
             .contains(LibraryPreferences.MARK_DUPLICATE_EPISODE_SEEN_EXISTING)
@@ -3836,118 +3945,17 @@ class PlayerViewModel @JvmOverloads constructor(
         // <-- AM (SYNC)
     }
 
-    private fun updateTrackEpisodeSeen(episode: Episode) {
-        if (basePreferences.incognitoMode.get() || !stateData.value.hasTrackers) return
-        if (!trackPreferences.autoUpdateTrack.get()) return
-
-        val anime = stateData.value.currentAnime ?: return
-
-        viewModelScope.launchNonCancellable {
-            trackEpisode.await(context, anime.id, episode.episode_number.toDouble())
-        }
-    }
-
     fun saveCurrentEpisodeWatchingProgress() {
-        stateData.value.currentEpisode?.let {
-            saveWatchingProgress(it)
+        // AM (SHARED_WATCH_PROGRESS_FIX) -->
+        // Was saveWatchingProgress(it) - this ViewModel's own implementation,
+        // now deleted entirely (see PlayerMediaHolder.saveWatchingProgress()'s
+        // own doc comment). Every call site that used to write through it,
+        // including this one, now delegates there instead.
+        mediaHolder?.let { holder ->
+            viewModelScope.launchNonCancellable { holder.saveWatchingProgress() }
         }
+        // <-- AM (SHARED_WATCH_PROGRESS_FIX)
     }
-
-    /** Called on episode change or activity pause. */
-    // AM (TICK_NEVER_OWNS_SEEN) -->
-    // writeSeenState is false for every routine per-second call - a live tick has no
-    // business writing seen/bookmark at all, it only owns position/duration. Passing
-    // null for those fields coalesces to "leave whatever's in the DB alone" (see the
-    // episodes.sq update query), so a tick can never race an external mark-as-seen and
-    // stomp it back to false, no matter how the timing lines up. Only a call that is
-    // itself intentionally changing seen (episode naturally finishing) passes true.
-    // <-- AM (TICK_NEVER_OWNS_SEEN)
-    private fun saveWatchingProgress(episode: Episode, writeSeenState: Boolean = false) {
-        viewModelScope.launchNonCancellable {
-            saveEpisodeProgress(episode, writeSeenState)
-            saveEpisodeHistory(episode)
-        }
-    }
-
-    /** Saves [episode] progress if not in incognito mode, or has at least one tracker. */
-    private suspend fun saveEpisodeProgress(episode: Episode, writeSeenState: Boolean = false) {
-        // DEBUG (POSITION_BLEED_TRACE) -->
-        logcat(LogPriority.INFO) {
-            "PositionTrace: saveEpisodeProgress WRITE animeId=${episode.anime_id} " +
-                "episodeId=${episode.id} lastSecondSeen=${episode.last_second_seen}"
-        }
-        // <-- DEBUG (POSITION_BLEED_TRACE)
-        val stateData = stateData.value
-        if (!stateData.incognitoMode || stateData.hasTrackers) {
-            // AM (RECENT_EPISODE_POSITIONS) -->
-            // currentPlaylist is loaded once per player session and never refreshed, so our
-            // in-memory seen can go stale in EITHER direction if it's toggled elsewhere
-            // while this player stays alive (e.g. from the anime screen during PIP). The
-            // `version` column bumps on every real seen/bookmark/last_second_seen change
-            // (see the episodes.sq trigger), so use it to detect a change we don't know
-            // about and defer to the DB's seen instead of blindly overwriting it. This is
-            // now purely for keeping local/UI state accurate during a live session - the
-            // DB write itself no longer depends on it, see writeSeenState above.
-            val fresh = getEpisode.await(episode.id!!)
-            if (fresh != null && fresh.version != episode.version) {
-                episode.seen = fresh.seen
-                episode.bookmark = fresh.bookmark
-                episode.version = fresh.version
-                // AM (WIPE_POSITION_ON_SEEN) -->
-                // If this refresh just picked up an external "marked as seen" that
-                // happened while this episode was still actively playing, don't let
-                // the position this tick already computed (from the pre-refresh,
-                // stale `seen = false`) get written back below and reclobber the
-                // wipe the external mark-as-seen action just did.
-                if (episode.seen && !playerPreferences.preserveWatchingPosition.get()) {
-                    episode.last_second_seen = 0L
-                }
-                // <-- AM (WIPE_POSITION_ON_SEEN)
-            }
-            val willChangeTrackedFields = fresh != null && (
-                (writeSeenState && episode.seen != fresh.seen) ||
-                    (writeSeenState && episode.bookmark != fresh.bookmark) ||
-                    episode.last_second_seen != fresh.lastSecondSeen
-                )
-            // <-- AM (RECENT_EPISODE_POSITIONS)
-            updateEpisode.await(
-                EpisodeUpdate(
-                    id = episode.id!!,
-                    seen = if (writeSeenState) episode.seen else null,
-                    bookmark = if (writeSeenState) episode.bookmark else null,
-                    fillermark = episode.fillermark,
-                    lastSecondSeen = episode.last_second_seen,
-                    totalSeconds = episode.total_seconds,
-                ),
-            )
-            // AM (RECENT_EPISODE_POSITIONS) -->
-            // Mirror the DB trigger's version bump locally so our next save's staleness
-            // check compares against what the DB will actually have, not last tick's.
-            if (willChangeTrackedFields) {
-                episode.version = fresh!!.version + 1
-            }
-            // <-- AM (RECENT_EPISODE_POSITIONS)
-            // AM (SYNC) -->
-            val isSyncEnabled = syncPreferences.isSyncEnabled()
-            val syncTriggerOpt = syncPreferences.getSyncTriggerOptions()
-            if (isSyncEnabled && syncTriggerOpt.syncOnEpisodeOpen && episode.last_second_seen >= 1L) {
-                SyncDataJob.startNow(context)
-            }
-            // <-- AM (SYNC)
-        }
-    }
-
-    /** Saves [episode] last-seen history if not in incognito mode. */
-    private suspend fun saveEpisodeHistory(episode: Episode) {
-        if (!stateData.value.incognitoMode) {
-            val episodeId = episode.id!!
-            val seenAt = Date()
-            upsertHistory.await(
-                HistoryUpdate(episodeId, seenAt),
-            )
-        }
-    }
-
     fun bookmarkEpisode(episodeId: Long?, bookmarked: Boolean) {
         viewModelScope.launchNonCancellable {
             updateEpisode.await(
@@ -3967,55 +3975,6 @@ class PlayerViewModel @JvmOverloads constructor(
                     fillermark = fillermarked,
                 ),
             )
-        }
-    }
-
-    private fun downloadNextEpisodes() {
-        if (downloadAheadAmount == 0) return
-        val anime = stateData.value.currentAnime ?: return
-
-        val currentPlaylist = stateData.value.currentPlaylist
-        val currentPlaylistIndex = stateData.value.currentPlaylistIndex
-
-        // Only download ahead if current + next episode are already downloaded (avoids jank)
-        if (currentPlaylistIndex == currentPlaylist.lastIndex) return
-        val currentEpisode = stateData.value.currentEpisode ?: return
-
-        val nextEpisode = currentPlaylist[currentPlaylistIndex + 1]
-        val episodesAreDownloaded =
-            EpisodeLoader.isDownload(currentEpisode.toDomainEpisode()!!, anime) &&
-                EpisodeLoader.isDownload(nextEpisode.toDomainEpisode()!!, anime)
-
-        viewModelScope.launchIO {
-            if (!episodesAreDownloaded) {
-                return@launchIO
-            }
-            val episodesToDownload = getNextEpisodes.await(anime.id, nextEpisode.id!!)
-                .take(downloadAheadAmount)
-            downloadManager.downloadEpisodes(anime, episodesToDownload)
-        }
-    }
-
-    /** Enqueues the nth-back episode for deletion if the delete-after-seen option is enabled. */
-    private fun deleteEpisodeIfNeeded(chosenEpisode: Episode) {
-        val currentEpisodePosition = stateData.value.currentPlaylist.indexOf(chosenEpisode)
-        val removeAfterSeenSlots = downloadPreferences.removeAfterSeenSlots.get()
-        val episodeToDelete = stateData.value.currentPlaylist.getOrNull(
-            currentEpisodePosition - removeAfterSeenSlots,
-        )
-        episodeToDownload = null
-
-        if (removeAfterSeenSlots != -1 && episodeToDelete != null) {
-            enqueueDeleteSeenEpisodes(episodeToDelete)
-        }
-    }
-
-    /** Enqueues [episode] for deletion (persisted across process death) until [deletePendingEpisodes] runs. */
-    private fun enqueueDeleteSeenEpisodes(episode: Episode) {
-        if (!episode.seen) return
-        val anime = stateData.value.currentAnime ?: return
-        viewModelScope.launchNonCancellable {
-            downloadManager.enqueueEpisodesToDelete(listOf(episode.toDomainEpisode()!!), anime)
         }
     }
 
