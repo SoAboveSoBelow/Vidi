@@ -459,6 +459,22 @@ class PlayerMediaHolder(
         }
         val targetEpisodeId = playlist[newIndex]
 
+        return switchToEpisode(animeId, targetEpisodeId)
+    }
+
+    // AM (SHARED_EPISODE_SWITCH_FIX) -->
+    // Factored out of switchToAdjacentEpisode() above so both that (background
+    // skip, computing the adjacent id itself) and PlayerViewModel.changeEpisode()
+    // (an explicit target id from the playlist screen or autoplay) can call the
+    // exact same implementation instead of two independently-maintained copies
+    // of "pause, resolve, load, restore pause state on any outcome." Was the
+    // actual point of this whole unification pass - see MODULAR_MERGING_SCOPE.md's
+    // own "episode switching/loading" item, and the whole reason
+    // resolveAndLoadTarget() below already took an explicit (animeId,
+    // targetEpisodeId) pair rather than "next/previous" in the first place: it
+    // was always general enough for this, just not exposed as its own entry
+    // point until now.
+    suspend fun switchToEpisode(animeId: Long, targetEpisodeId: Long): Boolean {
         // Mirrors PlayerViewModel.changeEpisode()'s own pause() call, made at the
         // same point - once a skip is confirmed valid, before any of the (possibly
         // slow) resolution work begins, not at the very top where an ultimately
@@ -466,12 +482,16 @@ class PlayerMediaHolder(
         // nothing.
         setPaused(true)
 
-        recentEpisodePositionManager.remember(
-            animeId = animeId,
-            episodeId = currentEpisodeId,
-            positionMs = currentState.positionMs.toLong(),
-            durationMs = currentState.durationMs.toLong(),
-        )
+        val currentState = state.value
+        val currentEpisodeId = currentState.episodeId
+        if (currentEpisodeId != null) {
+            recentEpisodePositionManager.remember(
+                animeId = animeId,
+                episodeId = currentEpisodeId,
+                positionMs = currentState.positionMs.toLong(),
+                durationMs = currentState.durationMs.toLong(),
+            )
+        }
 
         var wasCancelled = false
         return try {
@@ -487,7 +507,7 @@ class PlayerMediaHolder(
             wasCancelled = true
             throw e
         } catch (e: Throwable) {
-            logcat(LogPriority.DEBUG, e) { "switchToAdjacentEpisode: threw" }
+            logcat(LogPriority.DEBUG, e) { "switchToEpisode: threw" }
             false
         } finally {
             // AM (BACKGROUND_SKIP_PAUSE_RACE_FIX) -->
@@ -509,14 +529,15 @@ class PlayerMediaHolder(
             if (!wasCancelled) {
                 setPaused(false)
                 logcat(LogPriority.DEBUG) {
-                    "switchToAdjacentEpisode: done, mpv pause=${player.mpv.getPropertyBoolean("pause")}"
+                    "switchToEpisode: done, mpv pause=${player.mpv.getPropertyBoolean("pause")}"
                 }
             } else {
-                logcat(LogPriority.DEBUG) { "switchToAdjacentEpisode: cancelled by a newer skip request" }
+                logcat(LogPriority.DEBUG) { "switchToEpisode: cancelled by a newer skip request" }
             }
             // <-- AM (BACKGROUND_SKIP_PAUSE_RACE_FIX)
         }
     }
+    // <-- AM (SHARED_EPISODE_SWITCH_FIX)
 
     // AM (SHARED_VIDEO_RESOLUTION_FIX) -->
     // Ported from PlayerViewModel.setVideo()'s torrent/HTTP-proxy branching -
@@ -689,7 +710,7 @@ class PlayerMediaHolder(
     // <-- AM (SHARED_HOSTER_RACE_FIX)
 
     /**
-     * Does the actual resolution + mpv load for [switchToAdjacentEpisode] - split out
+     * Does the actual resolution + mpv load for [switchToEpisode] - split out
      * so its own early-return-on-failure points only exit THIS function, letting
      * the caller's single finally block handle pause restoration uniformly instead
      * of every early-return needing to do it individually.

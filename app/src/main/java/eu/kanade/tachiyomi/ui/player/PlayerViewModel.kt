@@ -2992,42 +2992,6 @@ class PlayerViewModel @JvmOverloads constructor(
         updateStateData { it.copy(chapters = chapters) }
     }
 
-    private data class EpisodeLoadResult(
-        val hosterList: List<Hoster>?,
-        val episodeTitle: String,
-    )
-
-    /** Loads an episode, returning its hoster list and title. */
-    private suspend fun loadEpisode(episodeId: Long?): EpisodeLoadResult? {
-        val anime = stateData.value.currentAnime ?: return null
-        val source = sourceManager.getOrStub(anime.source)
-
-        val chosenEpisode = stateData.value.currentPlaylist.firstOrNull { ep ->
-            ep.id == episodeId
-        } ?: return null
-
-        setupEpisode(chosenEpisode)
-
-        return withIOContext {
-            try {
-                currentHosterList = EpisodeLoader.getHosters(
-                    episode = chosenEpisode.toDomainEpisode()!!,
-                    anime,
-                    source,
-                )
-                this@PlayerViewModel.episodeId = chosenEpisode.id!!
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                logcat(LogPriority.ERROR, e) { e.message ?: "Error getting links" }
-            }
-
-            EpisodeLoadResult(
-                hosterList = currentHosterList,
-                episodeTitle = "${anime.title} - ${chosenEpisode.name}",
-            )
-        }
-    }
-
     fun nextEpisode(next: Boolean, autoplay: Boolean = false) {
         val currentIndex = stateData.value.currentPlaylistIndex
         val newIndex = if (next) currentIndex + 1 else currentIndex - 1
@@ -3039,6 +3003,20 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     /** Switches playback to [episodeId]; [autoPlay] indicates an automatic transition. */
+    // AM (SHARED_EPISODE_SWITCH_FIX) -->
+    // The actual load/resolve/mpv-load sequence now runs through
+    // PlayerMediaHolder.switchToEpisode() - the exact same function
+    // switchToAdjacentEpisode() (background skip/autoplay) calls - instead of a
+    // second, independently-maintained copy via loadEpisode()/loadHosters()/
+    // loadVideo()/setVideo(). Everything staying here is genuinely UI-only:
+    // sheet/thumbnail/picker-state resets that only make sense with a screen to
+    // reset, and setupEpisode() for the immediate title/identity update this
+    // screen shows before the (possibly slow) resolve/load work even starts.
+    // Manual hoster/video re-selection (an explicit hosterIndex/videoIndex from
+    // the picker sheet) still goes through loadHosters()/loadVideo() below,
+    // unchanged - there's no background equivalent of a user browsing a picker,
+    // so that path was never the duplicated one.
+    // <-- AM (SHARED_EPISODE_SWITCH_FIX)
     fun changeEpisode(episodeId: Long?, autoPlay: Boolean = false) {
         if (stateData.value.isCasting) {
             castManager.stopRemoteMediaClient()
@@ -3069,41 +3047,52 @@ class PlayerViewModel @JvmOverloads constructor(
         thumbnailFetchJob?.cancel()
         lastThumbnailFetch = 0L
 
+        val anime = stateData.value.currentAnime
+        val animeId = anime?.id
+        val chosenEpisode = stateData.value.currentPlaylist.firstOrNull { it.id == episodeId }
+        val holder = mediaHolder
+
+        if (anime == null || animeId == null || chosenEpisode == null || episodeId == null || holder == null) {
+            updateUiData { it.copy(isLoadingHosters = false) }
+            if (stateData.value.currentAnime != null && !autoPlay) {
+                viewModelScope.launch { _eventFlow.emit(Event.ToastResource(AYMR.strings.no_next_episode)) }
+            }
+            return
+        }
+
+        setupEpisode(chosenEpisode)
+        // Preserves loadEpisode()'s own side effect (see this function's own
+        // SHARED_EPISODE_SWITCH_FIX comment for why that function is gone) -
+        // holderState.episodeId == episodeId comparisons elsewhere still need
+        // this ViewModel-local field current for every switch, not just the
+        // initial load.
+        this.episodeId = episodeId
+
         viewModelScope.launch {
-            val switchMethod = loadEpisode(episodeId)
+            val success = try {
+                holder.switchToEpisode(animeId, episodeId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logcat(LogPriority.ERROR, e) { "changeEpisode: switchToEpisode threw" }
+                false
+            }
             updateUiData { it.copy(isLoadingHosters = false) }
 
-            if (switchMethod == null) {
-                if (stateData.value.currentAnime != null && !autoPlay) {
-                    _eventFlow.emit(Event.ToastResource(AYMR.strings.no_next_episode))
-                }
+            if (!success) {
+                _eventFlow.emit(
+                    Event.InitialEpisodeError(
+                        ExceptionWithStringResource(
+                            "Failed to load episode",
+                            AYMR.strings.no_hosters,
+                        ),
+                    ),
+                )
                 return@launch
             }
 
-            if (switchMethod.hosterList != null) {
-                when {
-                    switchMethod.hosterList.isEmpty() -> _eventFlow.emit(
-                        Event.InitialEpisodeError(
-                            ExceptionWithStringResource(
-                                "Hoster list is empty",
-                                AYMR.strings.no_hosters,
-                            ),
-                        ),
-                    )
-                    else -> {
-                        loadHosters(
-                            hosterList = switchMethod.hosterList,
-                            hosterIndex = -1,
-                            videoIndex = -1,
-                        )
-                    }
-                }
-            } else {
-                logcat(LogPriority.ERROR) { "Error getting links" }
-            }
-
             if (pipEpisodeToasts) {
-                _eventFlow.emit(Event.EpisodeTitle(switchMethod.episodeTitle))
+                _eventFlow.emit(Event.EpisodeTitle("${anime.title} - ${chosenEpisode.name}"))
             }
         }
     }
