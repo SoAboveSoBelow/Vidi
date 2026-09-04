@@ -762,12 +762,12 @@ class PlayerViewModel @JvmOverloads constructor(
     }
     // <-- AM (SERVICE_OWNED_PLAYER)
 
-    fun isPlayerExiting(): Boolean {
-        return player.isExiting
+    fun isPlayerForegroundSuspended(): Boolean {
+        return player.isForegroundSuspended
     }
 
-    fun setPlayerExiting(value: Boolean) {
-        player.isExiting = value
+    fun setPlayerForegroundSuspended(value: Boolean) {
+        player.isForegroundSuspended = value
     }
 
     private fun updateStateData(update: (PlayerStateData) -> PlayerStateData) {
@@ -1522,7 +1522,7 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     fun setupPlayerOrientation() {
-        if (player.isExiting) return
+        if (player.isForegroundSuspended) return
         val orientation = when (playerPreferences.defaultPlayerOrientationType.get()) {
             PlayerOrientation.Free -> ActivityInfo.SCREEN_ORIENTATION_SENSOR
             PlayerOrientation.Video -> if ((aspectRatio.value ?: 0.0) > 1.0) {
@@ -1593,7 +1593,7 @@ class PlayerViewModel @JvmOverloads constructor(
         val anime = stateData.value.currentAnime ?: return
         val episode = stateData.value.currentEpisode ?: return
 
-        if (!player.isExiting) {
+        if (!player.isReleased) {
             mpvCommand("stop")
         }
 
@@ -2141,7 +2141,7 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     private fun setVideo(video: Video?) {
-        if (player.isExiting) return
+        if (player.isReleased) return
         if (video == null) return
         stopHttpServer()
         // DEBUG (POSITION_BLEED_TRACE) -->
@@ -2530,7 +2530,7 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     private fun fileLoaded() {
-        if (player.isExiting) return
+        if (player.isReleased) return
 
         setMpvOptions()
         setMpvMediaTitle()
@@ -2582,7 +2582,7 @@ class PlayerViewModel @JvmOverloads constructor(
         viewModelScope.launchIO {
             // Give mpv a moment to decode a real frame, not a black/loading frame.
             delay(3000)
-            if (player.isExiting) return@launchIO
+            if (player.isReleased) return@launchIO
             // Only capture if still on the episode this was scheduled for.
             if (stateData.value.currentEpisode?.id != episodeId) return@launchIO
             runCatching {

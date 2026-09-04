@@ -938,16 +938,22 @@ class PlayerMediaHolder(
         mediaSession = null
         // AM (NATIVE_PLAYER_LEAK_FIX) -->
         // Was `_player?.isExiting = true` directly, bypassing the real release().
-        // MPVPlayer.release() guards itself with `if (isExiting) return`, so that
-        // permanently disarmed the real teardown - mpv.close()/surface release
-        // never ran, leaking the native mpv/GPU context every time. Confirmed via
-        // dumpsys meminfo: Native Heap and EGL mtrack ballooned and never
-        // recovered (not a Java-heap leak, so GC never touched it).
+        // MPVPlayer.release() guards itself against a repeat call (now
+        // `if (isReleased) return`), so that permanently disarmed the real
+        // teardown - mpv.close()/surface release never ran, leaking the native
+        // mpv/GPU context every time. Confirmed via dumpsys meminfo: Native Heap
+        // and EGL mtrack ballooned and never recovered (not a Java-heap leak, so
+        // GC never touched it).
+        //
+        // The same leak class resurfaced later through a different door:
+        // PlayerViewModel's onPause()-driven foreground toggle used to share
+        // this same field, poisoning release()'s guard on every ordinary close
+        // too. See MPVPlayer's ISEXITING_SPLIT_FIX for that one.
         _player?.release()
         // <-- AM (NATIVE_PLAYER_LEAK_FIX)
         // AM (STALE_HOLDER_STATE_FIX) -->
         // Clearing the player reference and session state here (not just marking
-        // isExiting) matters because this holder can outlive any single PlayerActivity
+        // isReleased) matters because this holder can outlive any single PlayerActivity
         // instance and be reused by a fast reopen (e.g. tapping the always-on
         // notification) before the Service's own onDestroy() gets around to running -
         // stopService() from PlayerActivity.onDestroy() is asynchronous, so there's a

@@ -1341,7 +1341,7 @@ class PlayerActivity : BaseActivity() {
             return
         }
 
-        viewModel.setPlayerExiting(true)
+        viewModel.setPlayerForegroundSuspended(true)
         // AM (PIP_FINISH_NOT_MOVETASKTOBACK) -->
         // Defensive: isInPictureInPictureMode might already read false by the time
         // this runs (finish() itself is what causes PIP to exit, and the exact
@@ -1482,10 +1482,10 @@ class PlayerActivity : BaseActivity() {
         // Restructured from two early-returns into if/else so both paths fall
         // through consistently (no longer gated on a pending-PIP check here - see
         // PIP_RECREATE_FIX_REMOVED below).
-        if (!viewModel.isPlayerExiting()) {
+        if (!viewModel.isPlayerForegroundSuspended()) {
             super.onResume()
         } else {
-            viewModel.setPlayerExiting(false)
+            viewModel.setPlayerForegroundSuspended(false)
             super.onResume()
 
             viewModel.setVolumeTo(

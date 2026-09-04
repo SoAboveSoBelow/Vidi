@@ -56,8 +56,25 @@ class MPVPlayer(
     private var restoreAudioFocus: () -> Unit = {}
     private var audioFocusRequest: AudioFocusRequestCompat? = null
 
+    // AM (ISEXITING_SPLIT_FIX) -->
+    // isExiting used to mean three different things: a permanent one-way
+    // teardown latch (release()), a resettable foreground/background toggle
+    // (PlayerViewModel.setPlayerExiting(), driven by onPause()/onResume()),
+    // and a transient reset on mpv's own MPV_EVENT_PLAYBACK_RESTART. Since
+    // onPause() always runs before onDestroy(), the foreground toggle
+    // poisoned release()'s own guard on every genuine close, silently
+    // skipping mpv.close()/surface release - the same leak class
+    // NATIVE_PLAYER_LEAK_FIX already fixed once, through a different call
+    // path (see PlayerMediaHolder.release()). Split into the two fields
+    // below so neither meaning can interfere with the other; the
+    // PLAYBACK_RESTART reset matched neither and was removed (see that
+    // handler's own note).
     @Volatile
-    var isExiting = false
+    var isReleased = false
+        private set
+
+    var isForegroundSuspended = false
+    // <-- AM (ISEXITING_SPLIT_FIX)
     private var httpError: String? = null
 
     // AM (HWDEC_REATTACH_FIX) -->
@@ -355,19 +372,19 @@ class MPVPlayer(
 
     override fun eventProperty(property: String) {
         handler.post {
-            if (isExiting) return@post
+            if (isReleased) return@post
         }
     }
 
     override fun eventProperty(property: String, value: Long) {
         handler.post {
-            if (isExiting) return@post
+            if (isReleased) return@post
         }
     }
 
     override fun eventProperty(property: String, value: Boolean) {
         handler.post {
-            if (isExiting) return@post
+            if (isReleased) return@post
             when (property) {
                 "eof-reached" -> _eventFlow.tryEmit(Event.EOF(value))
                 // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
@@ -387,7 +404,7 @@ class MPVPlayer(
 
     override fun eventProperty(property: String, value: String) {
         handler.post {
-            if (isExiting) return@post
+            if (isReleased) return@post
             when (property.substringBeforeLast("/")) {
                 "user-data/aniyomi" -> _eventFlow.tryEmit(Event.LuaEvent(property, value))
             }
@@ -396,35 +413,40 @@ class MPVPlayer(
 
     override fun eventProperty(property: String, value: Double) {
         handler.post {
-            if (isExiting) return@post
+            if (isReleased) return@post
         }
     }
 
     override fun eventProperty(property: String, value: MPVNode) {
         handler.post {
-            if (isExiting) return@post
+            if (isReleased) return@post
         }
     }
 
     override fun event(eventId: Int, data: MPVNode) {
         handler.post {
-            if (isExiting) return@post
+            if (isReleased) return@post
             when (eventId) {
                 MPV.mpvEvent.MPV_EVENT_FILE_LOADED -> _eventFlow.tryEmit(Event.FileLoaded)
                 MPV.mpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
-                    isExiting = false
                     // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
                     // mpv fires this on every playback discontinuity - overwhelmingly
                     // a user seek, also after unpausing in some cases. This was
-                    // already being received (for the isExiting reset above) but
-                    // silently discarded otherwise - nothing downstream could react
-                    // to a seek actually happening. PlaybackState's speed+timestamp
-                    // lets the OS interpolate the seek bar during ordinary steady
-                    // playback, but a seek is exactly the one case interpolation
-                    // can't predict - the position just jumped. This is the signal
-                    // to push a corrected position immediately instead of waiting
-                    // for a periodic backstop to eventually catch up.
+                    // already being received (for an isExiting reset - removed, see
+                    // ISEXITING_SPLIT_FIX below) but silently discarded otherwise -
+                    // nothing downstream could react to a seek actually happening.
+                    // PlaybackState's speed+timestamp lets the OS interpolate the seek
+                    // bar during ordinary steady playback, but a seek is exactly the
+                    // one case interpolation can't predict - the position just jumped.
+                    // This is the signal to push a corrected position immediately
+                    // instead of waiting for a periodic backstop to eventually catch
+                    // up.
                     // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
+                    // AM (ISEXITING_SPLIT_FIX) -->
+                    // Used to also reset isExiting = false here - removed. Matched
+                    // neither replacement field's meaning; see their declaration
+                    // near the top of this class for why.
+                    // <-- AM (ISEXITING_SPLIT_FIX)
                     _eventFlow.tryEmit(Event.PlaybackRestart)
                 }
                 MPV.mpvEvent.MPV_EVENT_END_FILE -> _eventFlow.tryEmit(Event.EndFile(data))
@@ -530,8 +552,8 @@ class MPVPlayer(
     }
 
     fun release() {
-        if (isExiting) return
-        isExiting = true
+        if (isReleased) return
+        isReleased = true
 
         audioFocusRequest?.let {
             AudioManagerCompat.abandonAudioFocusRequest(audioManager, it)
