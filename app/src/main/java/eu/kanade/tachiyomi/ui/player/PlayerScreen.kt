@@ -138,7 +138,19 @@ fun PlayerScreen(
     }
     // <-- AM (BACK_HANDLER_STALE_GUARD_FIX)
 
-    BackHandler {
+    // AM (BACK_TRIGGERS_UNIFIED_FIX) -->
+    // Was inlined directly in BackHandler below, only reachable from the system
+    // back gesture/button - the in-player back button (TopLeftPlayerControls, via
+    // PlayerControls' own onBack param) called the raw onBack() parameter
+    // directly instead, skipping both hasNavigatedBack's debounce and the
+    // PIP-preference check below entirely. That meant the in-player button never
+    // entered PIP on back, regardless of the pip-on-exit setting, while the
+    // system back button did - two different triggers for what's supposed to be
+    // one action. Extracted so both call this same function and are guaranteed
+    // to behave identically; see the PlayerControls call site below for the
+    // other half of this.
+    val handleBackPress: () -> Unit = {
+        // <-- AM (BACK_TRIGGERS_UNIFIED_FIX)
         if (!hasNavigatedBack) {
             hasNavigatedBack = true
             // AM (BACK_PRESERVE_PAUSED_FIX) -->
@@ -157,12 +169,16 @@ fun PlayerScreen(
                 uiData.panelShown == Panels.None &&
                 uiData.dialogShown == Dialogs.None
             ) {
-                viewModel.handlePlayerEvent(PlayerEvent.EnterPip)
+                viewModel.handlePlayerEvent(PlayerEvent.EnterPipFromBack)
             } else {
                 viewModel.castManager.disconnect()
                 onBack()
             }
         }
+    }
+
+    BackHandler {
+        handleBackPress()
     }
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
@@ -350,7 +366,7 @@ fun PlayerScreen(
                     stateData = stateData,
                     uiData = uiData,
                     playbackData = playbackData,
-                    onBack = onBack,
+                    onBack = handleBackPress,
                     onPlayerEvent = viewModel::handlePlayerEvent,
                     mpvVolume = mpvVolume,
                     pausedForCache = pausedForCache,

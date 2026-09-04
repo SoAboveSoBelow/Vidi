@@ -894,6 +894,11 @@ class PlayerViewModel @JvmOverloads constructor(
                     _eventFlow.emit(Event.EnterPip)
                 }
             }
+            PlayerEvent.EnterPipFromBack -> {
+                viewModelScope.launch {
+                    _eventFlow.emit(Event.EnterPipFromBack)
+                }
+            }
             is PlayerEvent.ExecuteCustomButton -> {
                 uiData.value.primaryButton?.let {
                     if (event.long) {
@@ -4552,6 +4557,17 @@ class PlayerViewModel @JvmOverloads constructor(
         data class ChangeSpeed(val value: Float) : PlayerEvent
         data object CycleRotation : PlayerEvent
         data object EnterPip : PlayerEvent
+        // AM (PIP_BRING_MAIN_TO_FRONT_FIX) -->
+        // Distinct from EnterPip above on purpose: EnterPip is the dedicated PIP
+        // button's event and must stay plain PIP entry, nothing else. This one is
+        // only for the two back-press triggers (see PlayerScreen.kt's
+        // handleBackPress) - PlayerActivity's handling of it additionally brings
+        // MainActivity to front. Keeping them as separate PlayerEvent/Event cases
+        // rather than a shared one with a flag means the dedicated PIP button can
+        // never accidentally pick up the extra behavior by sharing a code path
+        // with back - confirmed by the user this was happening before the split.
+        data object EnterPipFromBack : PlayerEvent
+        // <-- AM (PIP_BRING_MAIN_TO_FRONT_FIX)
         data class ExecuteCustomButton(val long: Boolean) : PlayerEvent
         data class LockControls(val lock: Boolean) : PlayerEvent
         data class NextEpisode(val next: Boolean) : PlayerEvent
@@ -4571,6 +4587,7 @@ class PlayerViewModel @JvmOverloads constructor(
 
     sealed interface Event {
         data object EnterPip : Event
+        data object EnterPipFromBack : Event
         data class EpisodeTitle(val name: String) : Event
         data object Finish : Event
         data class InitialEpisodeError(val error: Throwable) : Event

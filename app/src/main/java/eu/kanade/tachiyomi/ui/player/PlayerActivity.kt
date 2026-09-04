@@ -20,6 +20,7 @@
 package eu.kanade.tachiyomi.ui.player
 
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.app.PictureInPictureParams
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -858,12 +859,76 @@ class PlayerActivity : BaseActivity() {
                         // exactly the state this exception fires from. Checking the actual
                         // lifecycle state directly is the correct guard: only ever request
                         // PIP entry from an Activity the framework itself agrees is resumed.
-                        if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.RESUMED) {
-                            // AM (PIP_RECREATE_FIX) -->
-                            tryEnterPictureInPicture(createPipParams())
-                            // <-- AM (PIP_RECREATE_FIX)
-                        }
                         // <-- AM (PIP_REENTRY_CRASH_FIX)
+                        // AM (PIP_BRING_MAIN_TO_FRONT_FIX) -->
+                        // This is the dedicated PIP button's event (PlayerControls'
+                        // onPipClick) - plain PIP entry only, nothing else, on purpose.
+                        // See EnterPipFromBack below for the back-triggered variant that
+                        // also brings MainActivity to front - the two used to share this
+                        // one case, which meant pressing the plain PIP button picked up
+                        // that extra behavior too. Confirmed by the user that's wrong: the
+                        // PIP button must stay exactly this, nothing more.
+                        enterPipIfEligible()
+                        // <-- AM (PIP_BRING_MAIN_TO_FRONT_FIX)
+                    }
+                    PlayerViewModel.Event.EnterPipFromBack -> {
+                        // AM (PIP_BRING_MAIN_TO_FRONT_FIX) -->
+                        // Requested: both back triggers (system back, in-player back
+                        // button - see PlayerScreen.kt's BACK_TRIGGERS_UNIFIED_FIX for the
+                        // other half of this) should still enter PIP as before, but also
+                        // bring MainActivity to front rather than leaving whatever else
+                        // was previously on screen behind the PIP window. Kept as its own
+                        // event, not folded into EnterPip above, specifically so the
+                        // dedicated PIP button never picks up this extra step - confirmed
+                        // by the user it doesn't (PIP button alone shows none of the
+                        // symptoms below).
+                        //
+                        // First version fired startActivity(MainActivity, SHORTCUT_ANIME)
+                        // gated on isTaskRoot, on the theory that isTaskRoot was the rare
+                        // case (no MainActivity beneath PlayerActivity in this task, so
+                        // PIP has nothing of its own to reveal). Wrong assumption: per the
+                        // manifest's own DISTINCT_TASK_AFFINITY_FIX comment, PlayerActivity
+                        // has its own distinct taskAffinity specifically so it's never
+                        // nested inside MainActivity's task - meaning isTaskRoot is true on
+                        // essentially every ordinary back press, not just a rare fallback
+                        // case. So this fired constantly, and confirmed by the user it was
+                        // actively harmful every time: a black-flash Activity-start
+                        // transition, followed by MainActivity's SHORTCUT_ANIME handler
+                        // unconditionally calling navigator.popUntilRoot() - destroying
+                        // whatever screen/nav-stack state was already there, including if
+                        // the user was already sitting on that exact anime screen, and
+                        // leaving no way back to whatever the popUntilRoot() discarded.
+                        //
+                        // Replaced entirely: what's actually needed is "bring MainActivity's
+                        // existing task forward, unchanged" - not "navigate to a specific
+                        // screen". ActivityManager.AppTask.moveToFront() does exactly that -
+                        // it reorders an already-live task without starting or restarting
+                        // any Activity, so there's no onNewIntent() dispatch at all,
+                        // therefore no popUntilRoot(), and no fresh Activity-transition to
+                        // cause the black flash. isTaskRoot no longer matters here: this
+                        // works the same whether or not MainActivity happens to already sit
+                        // beneath this task. Falls back to a plain, action-less launch only
+                        // if no MainActivity task can be found at all (e.g. process was
+                        // fully killed) - deliberately not SHORTCUT_ANIME, since a genuinely
+                        // fresh MainActivity has no prior screen state to preserve or
+                        // disrupt either way. Only runs if enterPipIfEligible() actually
+                        // entered PIP - same RESUMED/not-already-in-PIP guard as EnterPip
+                        // above, and no reason to touch MainActivity for a PIP request that
+                        // didn't even go through.
+                        if (enterPipIfEligible()) {
+                            val mainActivityTask = getSystemService(ActivityManager::class.java)
+                                ?.appTasks
+                                ?.firstOrNull { it.taskInfo?.baseActivity?.className == MainActivity::class.java.name }
+                            if (mainActivityTask != null) {
+                                mainActivityTask.moveToFront()
+                            } else {
+                                startActivity(
+                                    Intent(this, MainActivity::class.java)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                )
+                            }
+                        }
+                        // <-- AM (PIP_BRING_MAIN_TO_FRONT_FIX)
                     }
                     is PlayerViewModel.Event.EpisodeTitle -> {
                         // No-op: used to toast "<anime> - <episode>" on change; not wanted.
@@ -911,7 +976,14 @@ class PlayerActivity : BaseActivity() {
                 .distinctUntilChanged()
                 .onEach {
                     if (isInPictureInPictureMode) {
-                        setPictureInPictureParams(createPipParams())
+                        // AM (PIP_AUTOENTER_SELF_POISON_FIX) -->
+                        // Same reasoning as onPictureInPictureModeChanged's own call -
+                        // this only ever runs while isPipActive is already true, so the
+                        // reopen-race guard in createPipParams() would always read as
+                        // "block" here too, for the same reason unrelated to what it
+                        // actually exists to prevent.
+                        setPictureInPictureParams(createPipParams(ignoreBackgroundPlaybackActiveGuard = true))
+                        // <-- AM (PIP_AUTOENTER_SELF_POISON_FIX)
                     }
                 }
                 .launchIn(lifecycleScope)
@@ -927,9 +999,30 @@ class PlayerActivity : BaseActivity() {
                 .map { it.paused }
                 .distinctUntilChanged()
                 .onEach {
-                    if (isInPictureInPictureMode) {
-                        setPictureInPictureParams(createPipParams())
-                    }
+                    // AM (PIP_PAUSED_AUTOENTER_RACE_FIX) -->
+                    // Was gated on isInPictureInPictureMode, same as the dimension
+                    // observer above - meaning pausing while NOT in PIP never touched
+                    // the registered auto-enter flag at all, leaving it stuck at
+                    // whatever it was from some earlier state (onStart(), a previous
+                    // episode, an earlier PIP session). Confirmed via a full logcat
+                    // capture: mpv's own "pause" property was continuously true for
+                    // nearly a second before Home was pressed, yet PIP still
+                    // auto-entered - moving the disable call earlier inside
+                    // onUserLeaveHint() (an earlier attempt at this fix) didn't help,
+                    // which makes sense once the actual mechanism is this: the OS's
+                    // auto-enter check reads whatever was last registered, which can
+                    // be arbitrarily stale by the time backgrounding actually happens -
+                    // nothing done inside onUserLeaveHint() itself can retroactively
+                    // fix params that already should have been updated the moment the
+                    // user paused, well before any backgrounding was even in progress.
+                    // Removed the gate entirely: this now keeps auto-enter
+                    // continuously accurate to the current paused state regardless of
+                    // whether PIP is currently active, the same way any other
+                    // reactive PIP-params observer should behave.
+                    setPictureInPictureParams(
+                        createPipParams(ignoreBackgroundPlaybackActiveGuard = isInPictureInPictureMode),
+                    )
+                    // <-- AM (PIP_PAUSED_AUTOENTER_RACE_FIX)
                 }
                 .launchIn(lifecycleScope)
             // <-- AM (PIP_NEXT_PAUSE_ICON)
@@ -1387,28 +1480,75 @@ class PlayerActivity : BaseActivity() {
         // same as pressing Home. This check used to run regardless of *why* the
         // app was leaving, so it was immediately re-entering PIP right on top of
         // that explicit background-play transition, completely undoing it.
-        //
-        // Checking isIntentionalBackgroundTransition alone (an earlier attempt at
-        // this exact fix) wasn't enough: it's a per-Activity-instance field, but
-        // the reopen loop this causes involves a brand new PlayerActivity instance
-        // each cycle (confirmed via logcat - a fresh Android Task ID every time) -
-        // a fresh instance's own copy of that field starts false regardless of the
-        // original session's intent, so it protected only the very first
-        // moveTaskToBack() call and nothing after. isBackgroundPlaybackActive is
-        // the same static, cross-instance flag createPipParams() already relies on
-        // for the same reason - it stays true across every instance boundary in
-        // this exact window, until the deferred stopBackgroundPlayback() posted in
-        // onStart() (see RESUME_LOCK_RACE_FIX) actually runs.
-        if (!isInPictureInPictureMode && lifecycle.currentState == Lifecycle.State.RESUMED &&
-            !isIntentionalBackgroundTransition &&
-            !SecureActivityDelegate.isBackgroundPlaybackActive &&
-            isPipSupportedAndEnabled && !viewModel.playbackData.value.paused && playerPreferences.pipOnExit.get()
-        ) {
-            // AM (PIP_RECREATE_FIX) -->
-            tryEnterPictureInPicture(null)
-            // <-- AM (PIP_RECREATE_FIX)
+        if (isIntentionalBackgroundTransition) {
+            super.onUserLeaveHint()
+            return
         }
         // <-- AM (AUTO_PIP_LOOP_FIX)
+        // AM (HOME_BUTTON_SIMPLIFIED_FIX) -->
+        // This whole function used to check paused/isBackgroundPlaybackActive on top
+        // of what the back button and dedicated PIP button check - both of which just
+        // call enterPipIfEligible() directly, no extra preconditions, and both work
+        // correctly. Confirmed by the user: this function was simply
+        // over-engineered relative to those two, not protecting against anything
+        // real. isBackgroundPlaybackActive in particular is the same flag already
+        // found unreliable elsewhere in this file (see the Recents self-poisoning
+        // investigation) - the back button never needed it.
+        //
+        // paused is handled differently now, not just dropped outright: requested by
+        // the user specifically to clean up an edge case where a paused, backgrounded
+        // PlayerActivity sits in Recents as its own separate card (it has its own
+        // distinct taskAffinity - see DISTINCT_TASK_AFFINITY_FIX - so it never merges
+        // into MainActivity's own card there). Mirrors the headphones "Background
+        // Play" action's own PIP_BACKGROUND_PLAY branch exactly - force background
+        // playback, then finish() - which already avoids exactly this by collapsing
+        // the task away entirely instead of leaving it sitting backgrounded and
+        // visible. isBackgroundPlayTransitionFinish is essential here, not optional -
+        // without it, onDestroy()'s teardown-vs-preserve check would wrongly stop mpv
+        // as part of this finish(), killing the background session being started in
+        // the same breath.
+        if (viewModel.playbackData.value.paused) {
+            // AM (PIP_PAUSED_AUTOENTER_RACE_FIX) -->
+            // Moved to the very first line of this branch. Confirmed via a full
+            // logcat capture: mpv's own "pause" property was continuously true for
+            // nearly a full second before this ran, with no intervening unpause -
+            // so this branch's own decision to skip enterPipIfEligible() was almost
+            // certainly correct, yet PIP still entered anyway. enterPictureInPictureMode's
+            // internal callstack doesn't distinguish an explicit app call from the
+            // OS's own auto-enter (still reading isAutoPipEnabled=true from
+            // whatever PictureInPictureParams was last registered, possibly from
+            // well before this transition even started) - so if the OS's auto-enter
+            // check runs against the params as they stood before this line, calling
+            // it later in the branch is too late to matter for this transition,
+            // only the next one. Not fully guaranteed to close the gap - depends on
+            // exactly when within onUserLeaveHint()'s dispatch the OS reads current
+            // params - but it removes the two calls (enterBackground(),
+            // isIntentionalBackgroundTransition/isBackgroundPlayTransitionFinish)
+            // that were previously running ahead of it for no real reason.
+            setPictureInPictureParams(createPipParams(forceDisableAutoEnter = true))
+            // <-- AM (PIP_PAUSED_AUTOENTER_RACE_FIX)
+            enterBackground(force = true)
+            isIntentionalBackgroundTransition = true
+            isBackgroundPlayTransitionFinish = true
+            // AM (PIP_PAUSED_RECENTS_REMOVETASK_FIX) -->
+            // Was finish() alone, mirroring the headphones action's own call - but
+            // that only relies on Android's default post-finish task cleanup, which
+            // isn't guaranteed to be immediate, or on some OEM Recents
+            // implementations (Samsung's included), reliable at all. Confirmed by
+            // the user: this left a separate, still-visible Recents card for the
+            // finished PlayerActivity task instead of actually disappearing.
+            // finishAndRemoveTask() is already the established pattern in this exact
+            // file for the same goal - see KEYCODE_MEDIA_STOP below - it removes the
+            // task explicitly, as part of the same call, rather than hoping the
+            // system gets to it.
+            Handler(Looper.getMainLooper()).post {
+                finishAndRemoveTask()
+            }
+            // <-- AM (PIP_PAUSED_RECENTS_REMOVETASK_FIX)
+        } else if (isPipSupportedAndEnabled && playerPreferences.pipOnExit.get()) {
+            enterPipIfEligible()
+        }
+        // <-- AM (HOME_BUTTON_SIMPLIFIED_FIX)
         super.onUserLeaveHint()
     }
 
@@ -1549,6 +1689,38 @@ class PlayerActivity : BaseActivity() {
     // instance repeat entry, that means the RESUMED guard alone isn't sufficient
     // and recreate() (or some other fresh mitigation) needs reinstating.
     // <-- AM (PIP_RECREATE_FIX_REMOVED)
+    // AM (PIP_BRING_MAIN_TO_FRONT_FIX) -->
+    // Extracted so Event.EnterPip (plain, dedicated PIP button) and
+    // Event.EnterPipFromBack (both back triggers, PIP + conditional MainActivity
+    // focus) share this exact guard/call instead of duplicating it - see both
+    // event cases in the eventFlow collector above. Returns whether PIP entry
+    // was actually attempted, so the back-triggered caller knows whether to also
+    // run its extra step.
+    private fun enterPipIfEligible(): Boolean {
+        // AM (PIP_REENTRY_CRASH_FIX) -->
+        // Confirmed via logcat: entering PIP a second time on a reused instance
+        // (see LIVE_INSTANCE_REOPEN_FIX) can hit a genuine Android framework race
+        // - "java.lang.RuntimeException: Performing pause of activity that is not
+        // resumed", thrown from inside ActivityThread.performPauseActivity() as
+        // part of the PIP-entry transition itself. That's the framework's own
+        // internal lifecycle bookkeeping getting out of sync with reality, not
+        // something our app's own uncaught-exception handler catches (it's
+        // thrown from a system-dispatched lifecycle callback, not our code) - it
+        // can bring the whole process down with no toast, no crash dialog, no
+        // visible PIP transition. isInPictureInPictureMode alone (an earlier,
+        // wrong guess at this fix) doesn't catch it, since the Activity can
+        // genuinely not be in PIP yet while also not being fully RESUMED -
+        // exactly the state this exception fires from. Checking the actual
+        // lifecycle state directly is the correct guard: only ever request PIP
+        // entry from an Activity the framework itself agrees is resumed.
+        if (isInPictureInPictureMode || lifecycle.currentState != Lifecycle.State.RESUMED) return false
+        // <-- AM (PIP_REENTRY_CRASH_FIX)
+        // AM (PIP_RECREATE_FIX) -->
+        tryEnterPictureInPicture(createPipParams())
+        // <-- AM (PIP_RECREATE_FIX)
+        return true
+    }
+    // <-- AM (PIP_BRING_MAIN_TO_FRONT_FIX)
     private fun tryEnterPictureInPicture(params: PictureInPictureParams?) {
         isPipEntryPending = true
         // AM (PIP_LOCK_RACE_FIX) -->
@@ -1577,7 +1749,14 @@ class PlayerActivity : BaseActivity() {
         }
     }
 
-    fun createPipParams(forceDisableAutoEnter: Boolean = false): PictureInPictureParams {
+    fun createPipParams(
+        forceDisableAutoEnter: Boolean = false,
+        // AM (PIP_AUTOENTER_SELF_POISON_FIX) -->
+        // Added alongside the doc comment below. See that comment for why this
+        // exists and the one call site that needs it.
+        ignoreBackgroundPlaybackActiveGuard: Boolean = false,
+        // <-- AM (PIP_AUTOENTER_SELF_POISON_FIX)
+    ): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val anime = viewModel.stateData.value.currentAnime
@@ -1607,8 +1786,30 @@ class PlayerActivity : BaseActivity() {
             // moment specifically because the deferred clear hasn't run yet - a
             // fresh instance reopening from a genuine background-play session
             // correctly suppresses auto-enter until that clear actually happens.
+            //
+            // AM (PIP_AUTOENTER_SELF_POISON_FIX) -->
+            // isBackgroundPlaybackActive is isPipActive || isBackgroundServiceActive -
+            // and onPictureInPictureModeChanged's confirmed-entry branch calls this
+            // function again (see that branch's own setPictureInPictureParams call)
+            // right after setting isPipActive = true. At that exact call,
+            // isBackgroundPlaybackActive is unavoidably true - not because of the
+            // reopen race above, but simply because we're now, by definition,
+            // confirmed to be in PIP. Confirmed via a full logcat capture:
+            // isAutoPipEnabled flips true -> false within the same fraction of a
+            // second as every single PIP entry, and - unlike explicit triggers, which
+            // compute this fresh at click-time and so keep working regardless -
+            // nothing else ever re-registers it correctly afterward, so Recents' own
+            // OS-driven auto-enter (which only ever reads whatever was last stored)
+            // stays permanently disabled from the first PIP entry onward. The
+            // reopen-race concern this guard exists for is entirely about the
+            // earlier, pre-entry moment in onStart() - by the time we're confirming
+            // an already-succeeded entry here, that race is over; using the same
+            // guard for both moments made this call permanently self-poisoning.
+            // ignoreBackgroundPlaybackActiveGuard lets that one call site opt out of
+            // a check that was never meant to apply to it.
             val shouldAutoEnter = !forceDisableAutoEnter &&
-                !SecureActivityDelegate.isBackgroundPlaybackActive &&
+                (ignoreBackgroundPlaybackActiveGuard || !SecureActivityDelegate.isBackgroundPlaybackActive) &&
+                // <-- AM (PIP_AUTOENTER_SELF_POISON_FIX)
                 !viewModel.playbackData.value.paused &&
                 autoEnter
             builder.setAutoEnterEnabled(shouldAutoEnter)
@@ -1786,7 +1987,13 @@ class PlayerActivity : BaseActivity() {
             window.attributes = window.attributes.apply {
                 screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
             }
-            setPictureInPictureParams(createPipParams())
+            // AM (PIP_AUTOENTER_SELF_POISON_FIX) -->
+            // See createPipParams()'s own doc comment - this call runs with
+            // isPipActive already true (set at the top of this function, right above),
+            // so the reopen-race guard there would always read as "block" here, every
+            // time, for a reason unrelated to what it actually exists to prevent.
+            setPictureInPictureParams(createPipParams(ignoreBackgroundPlaybackActiveGuard = true))
+            // <-- AM (PIP_AUTOENTER_SELF_POISON_FIX)
             viewModel.hideControls()
             viewModel.hideSeekBar()
             viewModel.displayBrightnessSlider(false)
@@ -1865,7 +2072,12 @@ class PlayerActivity : BaseActivity() {
                             return
                         }
                     }
-                    setPictureInPictureParams(createPipParams())
+                    // AM (PIP_AUTOENTER_SELF_POISON_FIX) -->
+                    // Same reasoning as onPictureInPictureModeChanged's own call - this
+                    // receiver is only ever registered/active while isPipActive is
+                    // already true.
+                    setPictureInPictureParams(createPipParams(ignoreBackgroundPlaybackActiveGuard = true))
+                    // <-- AM (PIP_AUTOENTER_SELF_POISON_FIX)
                 }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
