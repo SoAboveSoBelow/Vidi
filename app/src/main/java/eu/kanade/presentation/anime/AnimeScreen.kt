@@ -38,6 +38,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -78,8 +79,15 @@ import eu.kanade.tachiyomi.source.getNameForAnimeInfo
 import eu.kanade.tachiyomi.ui.anime.AnimeScreenModel
 import eu.kanade.tachiyomi.ui.anime.AnimeSeasonItem
 import eu.kanade.tachiyomi.ui.anime.EpisodeList
+// AM (NOW_PLAYING_INDICATOR) -->
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
+// <-- AM (NOW_PLAYING_INDICATOR)
 import eu.kanade.tachiyomi.util.system.copyToClipboard
 import kotlinx.coroutines.delay
+// AM (NOW_PLAYING_INDICATOR) -->
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+// <-- AM (NOW_PLAYING_INDICATOR)
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.EpisodeViewMode
@@ -443,6 +451,10 @@ private fun AnimeScreenSmallImpl(
     }
     // <-- AM (EPISODE_SEARCH)
 
+    // AM (NOW_PLAYING_INDICATOR) -->
+    val nowPlayingEpisodeId = rememberNowPlayingEpisodeId(state.anime.id)
+    // <-- AM (NOW_PLAYING_INDICATOR)
+
     var toolbarHeight by remember { mutableIntStateOf(0) }
     // <-- AY
 
@@ -747,6 +759,9 @@ private fun AnimeScreenSmallImpl(
                                 showSummaries = state.showSummaries,
                                 showPreviews = state.showPreviews,
                                 // <-- AY
+                                // AM (NOW_PLAYING_INDICATOR) -->
+                                nowPlayingEpisodeId = nowPlayingEpisodeId,
+                                // <-- AM (NOW_PLAYING_INDICATOR)
                                 episodeSwipeStartAction = episodeSwipeStartAction,
                                 episodeSwipeEndAction = episodeSwipeEndAction,
                                 onEpisodeClicked = onEpisodeClicked,
@@ -875,6 +890,10 @@ fun AnimeScreenLargeImpl(
         }
     }
     // <-- AM (EPISODE_SEARCH)
+
+    // AM (NOW_PLAYING_INDICATOR) -->
+    val nowPlayingEpisodeId = rememberNowPlayingEpisodeId(state.anime.id)
+    // <-- AM (NOW_PLAYING_INDICATOR)
 
     val insetPadding = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal).asPaddingValues()
     var topBarHeight by remember { mutableIntStateOf(0) }
@@ -1154,6 +1173,9 @@ fun AnimeScreenLargeImpl(
                                         showSummaries = state.showSummaries,
                                         showPreviews = state.showPreviews,
                                         // <-- AY
+                                        // AM (NOW_PLAYING_INDICATOR) -->
+                                        nowPlayingEpisodeId = nowPlayingEpisodeId,
+                                        // <-- AM (NOW_PLAYING_INDICATOR)
                                         episodeSwipeStartAction = episodeSwipeStartAction,
                                         episodeSwipeEndAction = episodeSwipeEndAction,
                                         onEpisodeClicked = onEpisodeClicked,
@@ -1240,6 +1262,28 @@ private fun SharedAnimeBottomActionMenu(
 }
 
 // AY -->
+// AM (NOW_PLAYING_INDICATOR) -->
+/**
+ * The episode ID currently playing in the background player (via
+ * [PlayerMediaHolder]), scoped to [animeId] - null whenever no session is
+ * live, or the live session belongs to a different anime.
+ */
+@Composable
+private fun rememberNowPlayingEpisodeId(animeId: Long): Long? {
+    val nowPlaying by produceState<Pair<Long?, Long?>?>(
+        initialValue = null,
+        key1 = Unit,
+    ) {
+        PlayerMediaHolder.currentFlow
+            .flatMapLatest { holder -> holder?.state ?: flowOf(null) }
+            .collect { mediaState ->
+                value = mediaState?.let { it.animeId to it.episodeId }
+            }
+    }
+    return nowPlaying?.takeIf { it.first == animeId }?.second
+}
+// <-- AM (NOW_PLAYING_INDICATOR)
+
 private fun LazyGridScope.sharedSeasons(
     anime: Anime,
     seasons: List<AnimeSeasonItem>,
@@ -1277,6 +1321,9 @@ private fun LazyGridScope.sharedEpisodeItems(
     showSummaries: Boolean,
     showPreviews: Boolean,
     // <-- AY
+    // AM (NOW_PLAYING_INDICATOR) -->
+    nowPlayingEpisodeId: Long?,
+    // <-- AM (NOW_PLAYING_INDICATOR)
     episodeSwipeStartAction: LibraryPreferences.EpisodeSwipeAction,
     episodeSwipeEndAction: LibraryPreferences.EpisodeSwipeAction,
     // AY -->
@@ -1402,6 +1449,9 @@ private fun LazyGridScope.sharedEpisodeItems(
                     minimalView = anime.hideEpisodeMetadata(),
                     // <-- AM (EPISODE_VIEW_MODE)
                     // <-- AM (MINIMAL_EPISODE_LIST)
+                    // AM (NOW_PLAYING_INDICATOR) -->
+                    isCurrentlyPlaying = item.episode.id == nowPlayingEpisodeId,
+                    // <-- AM (NOW_PLAYING_INDICATOR)
                     // AY -->
                     modifier = itemModifier,
                     // <-- AY

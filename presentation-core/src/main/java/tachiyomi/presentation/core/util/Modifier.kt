@@ -34,6 +34,20 @@ fun Modifier.selectedBackground(isSelected: Boolean): Modifier {
     return this.drawBehind { drawRect(color) }
 }
 
+// AM (NOW_PLAYING_INDICATOR) -->
+// Same treatment as selectedBackground above, but keyed off the theme's primary
+// color instead of secondary and noticeably lighter, so a currently-playing
+// episode reads as visually distinct from a multi-selected one without the
+// tint feeling as heavy/boxed-in as a full-strength fill.
+@Composable
+fun Modifier.nowPlayingBackground(isCurrentlyPlaying: Boolean): Modifier {
+    if (!isCurrentlyPlaying) return this
+    val alpha = if (isSystemInDarkTheme()) 0.08f else 0.10f
+    val color = MaterialTheme.colorScheme.primary.copy(alpha = alpha)
+    return this.drawBehind { drawRect(color) }
+}
+// <-- AM (NOW_PLAYING_INDICATOR)
+
 fun Modifier.secondaryItemAlpha(): Modifier = this.alpha(SECONDARY_ALPHA)
 
 fun Modifier.clickableNoIndication(

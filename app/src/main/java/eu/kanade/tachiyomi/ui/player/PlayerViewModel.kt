@@ -2984,8 +2984,11 @@ class PlayerViewModel @JvmOverloads constructor(
 
     private fun selectAudioById(id: Int, force: Boolean) {
         if (!force && id == mpv.getPropertyInt("aid")) {
+            audioDeselectedByUser = true
+            pendingAudioTrackRestoreJob?.cancel()
             setPropertyBoolean("aid", false)
         } else {
+            audioDeselectedByUser = false
             setPropertyInt("aid", id)
         }
     }
@@ -2999,14 +3002,22 @@ class PlayerViewModel @JvmOverloads constructor(
     // value change arrives, so a real track switch is never delayed by this.
     private var pendingAudioTrackRestoreJob: Job? = null
 
+    // Set when the user explicitly deselects the audio track (as opposed to mpv
+    // spontaneously clearing aid mid-reconfig), so the self-heal below doesn't
+    // fight a deliberate "no audio" choice. Cleared as soon as any real track
+    // becomes selected again.
+    private var audioDeselectedByUser = false
+
     private fun onAudioTrackSelectChange() {
         val id = mpv.getPropertyInt("aid")
         if (id != null && id > 0) {
             lastKnownAudioTrackId = id
+            audioDeselectedByUser = false
             pendingAudioTrackRestoreJob?.cancel()
-        } else if (!uiData.value.isLoadingEpisode) {
+        } else if (!uiData.value.isLoadingEpisode && !audioDeselectedByUser) {
             // Guarded by isLoadingEpisode so this doesn't fight genuine "no track
-            // selected yet" states during an actual new episode load.
+            // selected yet" states during an actual new episode load, and by
+            // audioDeselectedByUser so it doesn't fight a deliberate deselect.
             //
             // Debounced past mpv's own documented ~100-200ms clear window (see
             // lastKnownAudioTrackId's doc comment above), and re-checks aid is

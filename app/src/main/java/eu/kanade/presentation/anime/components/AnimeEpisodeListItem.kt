@@ -59,6 +59,7 @@ import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
 import tachiyomi.presentation.core.components.material.SECONDARY_ALPHA
 import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.util.nowPlayingBackground
 import tachiyomi.presentation.core.util.secondaryItemAlpha
 import tachiyomi.presentation.core.util.selectedBackground
 
@@ -96,6 +97,9 @@ fun AnimeEpisodeListItem(
     // AM (MINIMAL_EPISODE_LIST) -->
     minimalView: Boolean = false,
     // <-- AM (MINIMAL_EPISODE_LIST)
+    // AM (NOW_PLAYING_INDICATOR) -->
+    isCurrentlyPlaying: Boolean = false,
+    // <-- AM (NOW_PLAYING_INDICATOR)
     modifier: Modifier = Modifier,
 ) {
     val start = getSwipeAction(
@@ -134,6 +138,9 @@ fun AnimeEpisodeListItem(
             // <-- AY
             modifier = Modifier
                 .selectedBackground(selected)
+                // AM (NOW_PLAYING_INDICATOR) -->
+                .nowPlayingBackground(isCurrentlyPlaying)
+                // <-- AM (NOW_PLAYING_INDICATOR)
                 .combinedClickable(
                     onClick = onClick,
                     onLongClick = onLongClick,
@@ -206,6 +213,29 @@ fun AnimeEpisodeListItem(
                                 )
                             }
                         }
+
+                        // AM (MINIMAL_EPISODE_LIST) -->
+                        if (minimalView) {
+                            // Placed under the title, inside the space next to the
+                            // thumbnail (which is taller than the 2-line title), so
+                            // it doesn't grow the row's overall height.
+                            Row(
+                                horizontalArrangement = Arrangement.End,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                BookmarkDownloadIcons(
+                                    bookmark = bookmark,
+                                    downloadIndicatorEnabled = downloadIndicatorEnabled,
+                                    downloadStateProvider = downloadStateProvider,
+                                    downloadProgressProvider = downloadProgressProvider,
+                                    onDownloadClick = onDownloadClick,
+                                    // AM (FILE_SIZE) -->
+                                    fileSize = fileSize,
+                                    // <-- AM (FILE_SIZE)
+                                )
+                            }
+                        }
+                        // <-- AM (MINIMAL_EPISODE_LIST)
 
                         EpisodeSummary(
                             seen = seen,
@@ -296,22 +326,16 @@ private fun RowScope.SimpleEpisodeListItemImpl(
         // <-- AM (MINIMAL_EPISODE_LIST)
     }
 
-    // AM (MINIMAL_EPISODE_LIST) -->
-    if (!minimalView) {
-        // <-- AM (MINIMAL_EPISODE_LIST)
-        BookmarkDownloadIcons(
-            bookmark = bookmark,
-            downloadIndicatorEnabled = downloadIndicatorEnabled,
-            downloadStateProvider = downloadStateProvider,
-            downloadProgressProvider = downloadProgressProvider,
-            onDownloadClick = onDownloadClick,
-            // AM (FILE_SIZE) -->
-            fileSize = fileSize,
-            // <-- AM (FILE_SIZE)
-        )
-        // AM (MINIMAL_EPISODE_LIST) -->
-    }
-    // <-- AM (MINIMAL_EPISODE_LIST)
+    BookmarkDownloadIcons(
+        bookmark = bookmark,
+        downloadIndicatorEnabled = downloadIndicatorEnabled,
+        downloadStateProvider = downloadStateProvider,
+        downloadProgressProvider = downloadProgressProvider,
+        onDownloadClick = onDownloadClick,
+        // AM (FILE_SIZE) -->
+        fileSize = fileSize,
+        // <-- AM (FILE_SIZE)
+    )
 }
 // <-- AY
 

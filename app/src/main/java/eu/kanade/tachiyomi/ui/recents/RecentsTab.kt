@@ -27,8 +27,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -111,7 +111,15 @@ data object RecentsTab : Tab {
         // AM (TAB_HOLD) -->
         val snackbarHostState = SnackbarHostState()
         // <-- AM (TAB_HOLD)
-        var showHistoryScreen by remember { mutableStateOf(false) }
+        // AM (SUBTAB_SELECTION_PERSISTED) -->
+        // rememberSaveable, not remember - RecentsTab's Content() gets disposed and
+        // recomposed fresh when a pushed screen (e.g. AnimeScreen) is popped back to
+        // it, and a plain remember would silently reset this to its default (Updates)
+        // regardless of which sub-tab was actually showing before, discarding that
+        // sub-tab's own scroll position along with it (its LazyListState never even
+        // gets a chance to be restored, since it's the wrong sub-tab being shown).
+        var showHistoryScreen by rememberSaveable { mutableStateOf(false) }
+        // <-- AM (SUBTAB_SELECTION_PERSISTED)
 
         RecentsScaffold(
             showHistoryScreen = showHistoryScreen,

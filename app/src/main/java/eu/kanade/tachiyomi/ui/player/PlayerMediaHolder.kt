@@ -107,6 +107,14 @@ class PlayerMediaHolder(
 ) {
     // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
     companion object {
+        // AM (NOW_PLAYING_INDICATOR) -->
+        // Backing StateFlow so UI (e.g. the episode list) can react to a holder
+        // being created/released, not just read the value once. [current] stays
+        // as a plain property over this for every existing synchronous call site.
+        private val _current = MutableStateFlow<PlayerMediaHolder?>(null)
+        val currentFlow = _current.asStateFlow()
+        // <-- AM (NOW_PLAYING_INDICATOR)
+
         /**
          * The currently-alive holder for this process, if any. Set the moment a
          * holder is constructed, cleared on [release] - self-managed rather than
@@ -114,8 +122,11 @@ class PlayerMediaHolder(
          * this holder's own construction/release lifecycle is already the
          * authoritative signal for whether a live session exists.
          */
-        var current: PlayerMediaHolder? = null
-            private set
+        var current: PlayerMediaHolder?
+            // AM (NOW_PLAYING_INDICATOR) -->
+            get() = _current.value
+            private set(value) { _current.value = value }
+            // <-- AM (NOW_PLAYING_INDICATOR)
     }
     // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
 
