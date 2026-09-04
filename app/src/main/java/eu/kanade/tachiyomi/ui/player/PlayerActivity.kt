@@ -33,7 +33,6 @@ import android.graphics.Rect
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -47,7 +46,6 @@ import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInWindow
@@ -57,12 +55,10 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.lifecycleScope
 import animiru.domain.player.model.ArtType
-import animiru.domain.player.model.CustomKeyCodes
 import animiru.domain.player.model.SetAsArt
-import animiru.domain.player.model.SingleActionGesture
-import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
 import coil3.asDrawable
 import coil3.imageLoader
@@ -99,7 +95,29 @@ import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 
 class PlayerActivity : BaseActivity() {
-    private val viewModel by viewModels<PlayerViewModel>()
+    // AM (SERVICE_OWNED_VIEWMODEL) -->
+    // Was `by viewModels<PlayerViewModel>()` - tied this instance's ViewModel to
+    // THIS Activity's own ViewModelStore, cleared whenever this specific instance
+    // finishes. PlayerMediaHolder now owns it instead (see its own
+    // adoptViewModel() doc comment), the exact same reuse-or-construct pattern
+    // PlayerViewModel's own init already uses for the player (reusableHolder
+    // below) - a live holder's existing ViewModel is reused as-is (a genuine
+    // reattach, e.g. after Recents); otherwise a fresh one is built directly,
+    // exactly mirroring how a fresh MPVPlayer gets built directly whenever no
+    // holder exists yet either. SavedStateHandle() is a plain, empty instance
+    // outside the ViewModelProvider machinery - this only affects restoring
+    // episode_position/quality_index/episode_id across a genuine OS process
+    // death, a materially rarer event once a foreground service with an active
+    // notification is keeping this process's priority elevated most of the time
+    // this matters.
+    private val viewModel: PlayerViewModel by lazy {
+        PlayerMediaHolder.current?.viewModel
+            ?: PlayerMediaHolder.current?.adoptViewModel(
+                PlayerViewModel(application, SavedStateHandle()),
+            )
+            ?: PlayerViewModel(application, SavedStateHandle())
+    }
+    // <-- AM (SERVICE_OWNED_VIEWMODEL)
     private val windowInsetsController by lazy { WindowCompat.getInsetsController(window, window.decorView) }
     private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
     private val inputMethodManager by lazy { getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager }
@@ -112,7 +130,6 @@ class PlayerActivity : BaseActivity() {
     private val mediaSession: MediaSession?
         get() = mediaHolder?.mediaSession
     // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
-    private val gesturePreferences: GesturePreferences = Injekt.get()
     private val playerPreferences: PlayerPreferences = Injekt.get()
 
     private var backgroundPlaybackService: PlayerBackgroundPlaybackService? = null
@@ -260,27 +277,25 @@ class PlayerActivity : BaseActivity() {
             logcat { "PlayerActivity bound to PlayerMediaHolder: $bound (viewModel.player=${viewModel.player})" }
             viewModel.bindToService(bound)
 
-            // AM (MEDIA_SESSION_SERVICE_OWNED) -->
-            // The MediaSession is now Service-owned (via the holder), same reasoning
-            // as the player: it needs to survive this Activity's destruction, not get
-            // garbage-collected along with it. ensureMediaSession() creates it once and
-            // redirects the callback on every later call, so a reattaching instance's
-            // media-button presses route to the current ViewModel, not a dead one.
-            setupMediaSessionCallback(bound)
-            // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
+            // AM (MEDIA_SESSION_UNIFIED_CALLBACK) -->
+            // The MediaSession callback itself is now installed inside
+            // viewModel.bindToService() above, not here - see that function's own
+            // doc comment. What's left in this Activity is genuinely
+            // instance-scoped broadcast receivers with nothing to do with the
+            // MediaSession.
+            registerBackgroundActionReceivers()
+            // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
 
-            // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
-            // Reconcile paused state now: mpv is the only source of truth for whether
-            // playback is paused across a gap where control may have come from the
-            // fallback callback rather than viewModel.pause()/unpause(). Deliberately
-            // NOT consuming any pending skip here yet - this fresh instance's
-            // stateData.currentPlaylist is still empty at this point (only populated
-            // once onNewIntent()'s viewModel.init() completes, which hasn't run yet),
-            // so nextEpisode() would silently no-op. See onNewIntent() for where the
-            // pending skip actually gets applied, once a real playlist exists to apply
-            // it against.
+            // AM (PAUSE_STATE_RECONCILE) -->
+            // Reconcile paused state now: mpv is the only source of truth for
+            // whether playback is paused across any gap since this instance was
+            // last bound (e.g. a system-level pause while unbound). Deliberately
+            // NOT consuming any pending skip here - this fresh instance's
+            // stateData.currentPlaylist is still empty at this point (only
+            // populated once onNewIntent()'s viewModel.init() completes, which
+            // hasn't run yet).
             viewModel.reconcilePausedFromPlayer()
-            // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
+            // <-- AM (PAUSE_STATE_RECONCILE)
 
             // AM (CONTINUE_BUTTON_RESUME_FIX) -->
             // See pendingForceResume's own doc comment. If onNewIntent()'s init()
@@ -541,7 +556,6 @@ class PlayerActivity : BaseActivity() {
                 val current = viewModel.stateData.value
                 when {
                     current.currentAnime?.id == animeId && current.currentEpisode?.id == episodeId -> {
-                        mediaHolder?.consumePendingSkip()?.let { next -> viewModel.nextEpisode(next = next) }
                         withUIContext { setIntent(intent) }
                     }
                     current.currentAnime?.id == animeId -> {
@@ -615,9 +629,6 @@ class PlayerActivity : BaseActivity() {
                 // Already playing this exact episode (e.g. reopened from the
                 // background-playback notification) - avoid restarting the whole
                 // file-open pipeline.
-                // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
-                mediaHolder?.consumePendingSkip()?.let { next -> viewModel.nextEpisode(next = next) }
-                // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
                 withUIContext { setIntent(intent) }
                 return@launchNonCancellable
             }
@@ -640,7 +651,6 @@ class PlayerActivity : BaseActivity() {
                 holderState?.animeId == animeId &&
                 holderState.episodeId == episodeId
             if (canSyncWithoutReload && viewModel.syncSessionStateFromDb(animeId, episodeId)) {
-                mediaHolder?.consumePendingSkip()?.let { next -> viewModel.nextEpisode(next = next) }
                 withUIContext { setIntent(intent) }
                 return@launchNonCancellable
             }
@@ -736,27 +746,13 @@ class PlayerActivity : BaseActivity() {
             }
             // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
 
-            // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
-            // Apply any skip queued via the fallback MediaSession callback while this
-            // session was backgrounded with no ViewModel attached (see
-            // PlayerMediaHolder.requestSkip) - init() above has now populated a real
-            // currentPlaylist for this fresh instance, so nextEpisode() can resolve and
-            // load the actually-desired episode instead of the one this reopen intent
-            // happened to carry. Supersedes the hoster load below for the just-reopened
-            // episode, which is fine - the user has already moved past it.
-            val pendingSkip = mediaHolder?.consumePendingSkip()
-            if (pendingSkip != null) {
-                viewModel.nextEpisode(next = pendingSkip)
-            } else {
-                lifecycleScope.launch {
-                    viewModel.loadHosters(
-                        hosterList = initResult.first.hosterList ?: emptyList(),
-                        hosterIndex = initResult.first.videoIndex.first,
-                        videoIndex = initResult.first.videoIndex.second,
-                    )
-                }
+            lifecycleScope.launch {
+                viewModel.loadHosters(
+                    hosterList = initResult.first.hosterList ?: emptyList(),
+                    hosterIndex = initResult.first.videoIndex.first,
+                    videoIndex = initResult.first.videoIndex.second,
+                )
             }
-            // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
 
             withUIContext { setIntent(intent) }
         }
@@ -800,11 +796,12 @@ class PlayerActivity : BaseActivity() {
         }
         // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
 
-        // AM (MEDIA_SESSION_SERVICE_OWNED) -->
-        // No longer set up synchronously here - it's created/redirected via the
-        // holder once mediaHolderConnection binds (setupMediaSessionCallback()),
-        // same timing as the notification and player adoption below.
-        // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
+        // AM (MEDIA_SESSION_UNIFIED_CALLBACK) -->
+        // No longer set up here at all - the MediaSession callback is installed
+        // once, inside PlayerViewModel.bindToService(), the first time this
+        // persistent ViewModel ever binds to a holder. Same timing as the
+        // notification and player adoption below.
+        // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
         viewModel.setupPlayerOrientation()
 
         // AM (SERVICE_OWNED_PLAYER) -->
@@ -954,21 +951,6 @@ class PlayerActivity : BaseActivity() {
         // the foreground - the same trade-off this codebase already accepted for background
         // playback (BACKGROUND_SEEKBAR_FIGHT_FIX), now applied uniformly.
         // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
-
-        // AM (BACKGROUND_SKIP_FIX) -->
-        // Mirrors the already-correctly-sorted/filtered playlist (see
-        // PlayerViewModel.setupEpisodeList()) into the holder as a flat ordered list
-        // of episode ids - PlayerMediaHolder.skipToAdjacentEpisode() needs this to
-        // resolve "next"/"previous" without re-deriving sort/filter logic itself,
-        // which would risk landing on the wrong episode if that logic ever depends on
-        // a user preference this observer can't see. Reusing the ViewModel's own,
-        // already-correct computation here is the safe way to keep both in sync.
-        viewModel.stateData
-            .map { it.currentPlaylist.mapNotNull { episode -> episode.id } }
-            .distinctUntilChanged()
-            .onEach { episodeIds -> mediaHolder?.updatePlaylist(episodeIds) }
-            .launchIn(lifecycleScope)
-        // <-- AM (BACKGROUND_SKIP_FIX)
 
         // Metadata/artwork/duration in the media notification are now pushed solely by
         // PlayerMediaHolder (its periodic timer + its own artwork flow) - see the
@@ -1168,39 +1150,17 @@ class PlayerActivity : BaseActivity() {
                 }
                 // <-- SVC_RACE_DEBUG
 
-                // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
-                // Hand the MediaSession's callback back to the Service-owned fallback
-                // before this instance's ViewModel is cleared - the mirror image of
-                // setupMediaSessionCallback()'s redirect-to-the-reattaching-instance
-                // behavior. Without this, the callback stays pointed at this instance's
-                // (about to be dead) ViewModel until some future reattach overwrites it.
-                mediaHolder?.restoreFallbackCallback()
-                // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
-
-                // AM (BACKGROUND_HANDOFF_NOTIFY_FIX) -->
-                // The periodic timer in PlayerMediaHolder (BACKGROUND_SEEKBAR_TICK_FIX)
-                // pushes correct PlaybackState/MediaMetadata to the MediaSession the
-                // moment hasLiveInstance goes false, even with nothing having actually
-                // changed yet - but the lock screen's rich media widget was still
-                // showing blank until the next thing that happened to trigger an
-                // actual NotificationManagerCompat.notify() call (a skip, since that's
-                // gated on a title change). Explicitly forcing one here, using this
-                // still-alive instance's own last-known-correct values, gives the lock
-                // screen a fresh post to render from at the exact moment control hands
-                // off - not waiting for something else to eventually cause one.
-                viewModel.stateData.value.let { data ->
-                    val anime = data.currentAnime
-                    val episode = data.currentEpisode
-                    if (anime != null && episode != null) {
-                        backgroundPlaybackService?.updateEpisodeInfo(
-                            title = anime.title,
-                            subtitle = episode.name,
-                            animeId = anime.id,
-                            episodeId = episode.id,
-                        )
-                    }
-                }
-                // <-- AM (BACKGROUND_HANDOFF_NOTIFY_FIX)
+                // AM (BACKGROUND_HANDOFF_NOTIFY_FIX_REMOVED) -->
+                // Removed: this duplicated what PlayerBackgroundPlaybackService's own
+                // holder-driven observer (BACKGROUND_SKIP_FIX/MEDIASESSION_SINGLE_WRITER_FIX)
+                // already does reactively off PlayerMediaHolder.state - that comment
+                // explicitly documents this Activity-side caller as already removed
+                // ("the sole writer... live Activity or not"), but it was never actually
+                // deleted. A genuine, pre-existing dual-writer case for this exact
+                // moment (session handoff at onDestroy()), unrelated to anything else
+                // tonight - confirmed present in the pristine baseline before any of
+                // today's changes.
+                // <-- AM (BACKGROUND_HANDOFF_NOTIFY_FIX_REMOVED)
             }
 
             unbindService(mediaHolderConnection)
@@ -1335,11 +1295,47 @@ class PlayerActivity : BaseActivity() {
         // and talks to the Service (no Activity-transition APIs), so skipping it
         // left a real gap - right at the moment a PIP-entry attempt might get
         // cancelled by the OS - where nothing promptly told Samsung's own power/task
-        // management "this app is still legitimately active." isInPictureInPictureMode
-        // is the only check that's actually meaningful here: PIP being genuinely,
-        // confirmedly active is the one case where re-establishing background
-        // exemption is redundant, not just pending-and-uncertain.
-        if (isInPictureInPictureMode) {
+        // management "this app is still legitimately active."
+        //
+        // AM (RECENTS_PIP_RACE_FIX) -->
+        // The conclusion above - "isInPictureInPictureMode is the only check that's
+        // actually meaningful here" - was itself wrong, and is the actual root cause
+        // of the Recents-specific breakage this fix addresses. isInPictureInPictureMode
+        // is set optimistically, synchronously, the instant enterPictureInPictureMode()
+        // is called in onUserLeaveHint() - before the system has confirmed the
+        // transition actually succeeded, not only once "genuinely, confirmedly
+        // active" as assumed here. onPause() always runs immediately after
+        // onUserLeaveHint() within the same pause sequence, so this check was reading
+        // that optimistic value, not a confirmed one.
+        //
+        // For Home this went unnoticed because the PIP request reliably succeeds
+        // there (nothing else owns the window's transition), so the optimism was
+        // never wrong in practice. For Recents, RecentsAnimationController already
+        // owns this window's exit transition the instant Recents is pressed -
+        // confirmed via logcat, the window stays visible=true, mid-transition into
+        // the Overview UI - so the system reliably rejects/cancels the competing
+        // PIP-entry request (clearWaitForEnteringPinnedMode reason=exit_pip, see
+        // PIP_ENTRY_CANCELLED_FIX below). isInPictureInPictureMode reads true here
+        // regardless, skipping enterBackground() entirely - and unlike the cancelled-
+        // entry fallback in onPictureInPictureModeChanged(), which only catches this
+        // once lifecycle.currentState reaches CREATED, this skip happens unconditionally,
+        // before that fallback even has a chance to run.
+        //
+        // isPipEntryPending is the confirmation bit that was missing: true from the
+        // instant tryEnterPictureInPicture() is called until either a genuine
+        // confirmed entry (onPictureInPictureModeChanged(true, ...)) or a detected
+        // cancellation clears it. Checking it here - not to re-gate the whole
+        // onPause() block, only this specific early-return - means enterBackground()
+        // always runs immediately whenever PIP hasn't actually been confirmed yet,
+        // regardless of which button caused the optimistic flag to be set. Directly
+        // closes the gap at its source instead of relying on a later callback to
+        // catch the fallout: if PIP does go on to succeed a moment later, this call
+        // is harmless (enterBackground() only sets flags and talks to the
+        // already-running Service); if it doesn't, background playback is already
+        // correctly established the instant onPause() runs, not whenever some later
+        // fallback happens to catch it.
+        // <-- AM (RECENTS_PIP_RACE_FIX)
+        if (isInPictureInPictureMode && !isPipEntryPending) {
             // <-- AM (NO_IDLE_WINDOW_FIX)
             super.onPause()
             return
@@ -1914,132 +1910,20 @@ class PlayerActivity : BaseActivity() {
         return super.onKeyUp(keyCode, event)
     }
 
-    // AM (MEDIA_SESSION_SERVICE_OWNED) -->
-    // Builds the media-button callback and registers/redirects it via the holder's
-    // ensureMediaSession(). Callback body is otherwise unchanged from before this
-    // moved to the Service - it still closes over this instance's viewModel/gesture
-    // prefs, which is correct: ensureMediaSession() redirects the session to
-    // whichever instance called it most recently, so a reattach's callback always
-    // wins over a stale one from a dead Activity.
-    private fun setupMediaSessionCallback(holder: PlayerMediaHolder) {
-        // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
-        val previousAction = gesturePreferences.mediaPreviousGesture.get()
-        val playAction = gesturePreferences.mediaPlayPauseGesture.get()
-        val nextAction = gesturePreferences.mediaNextGesture.get()
-
-        val callback = object : MediaSession.Callback() {
-            override fun onPlay() {
-                when (playAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {}
-                    SingleActionGesture.PlayPause -> {
-                        super.onPlay()
-                        viewModel.unpause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
-                    }
-
-                    SingleActionGesture.Switch -> {}
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
-
-            override fun onPause() {
-                when (playAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {}
-                    SingleActionGesture.PlayPause -> {
-                        super.onPause()
-                        viewModel.pause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
-                    }
-
-                    SingleActionGesture.Switch -> {}
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
-
-            override fun onSkipToPrevious() {
-                when (previousAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {
-                        viewModel.leftSeek()
-                    }
-                    SingleActionGesture.PlayPause -> {
-                        viewModel.pauseUnpause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaPrevious.keyCode)
-                    }
-
-                    SingleActionGesture.Switch -> viewModel.nextEpisode(next = false)
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
-
-            override fun onSkipToNext() {
-                when (nextAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {
-                        viewModel.rightSeek()
-                    }
-                    SingleActionGesture.PlayPause -> {
-                        viewModel.pauseUnpause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        viewModel.mpvCommand("keypress", CustomKeyCodes.MediaNext.keyCode)
-                    }
-
-                    SingleActionGesture.Switch -> viewModel.nextEpisode(next = true)
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
-
-            override fun onStop() {
-                super.onStop()
-                // AM (MEDIASESSION_STOP_SAFETY_FIX) -->
-                // Used to be session.isActive = false followed by manually calling
-                // this@PlayerActivity.onStop() directly - invoking an Activity's own
-                // lifecycle method outside the real system dispatch is never actually
-                // safe, since it runs our lifecycle-tracking code at a moment that
-                // doesn't correspond to the Activity's real state, exactly the kind of
-                // thing that could corrupt lifecycle bookkeeping the framework itself
-                // relies on. An external "stop" transport command (Bluetooth/AVRCP, a
-                // system media widget, etc.) reaching this callback is meant to behave
-                // like the notification's own Stop button - reusing that exact same,
-                // already-correct pattern (pause, stop the Service, then a real
-                // finish() dispatched through the normal Android API) instead of
-                // inventing an unsafe shortcut.
-                viewModel.pause()
-                stopService(PlayerBackgroundPlaybackService.newIntent(this@PlayerActivity))
-                finish()
-                // <-- AM (MEDIASESSION_STOP_SAFETY_FIX)
-            }
-        }
-
-        val session = holder.ensureMediaSession(this, callback).apply {
-            setPlaybackState(
-                PlaybackState.Builder()
-                    .setActions(
-                        PlaybackState.ACTION_PLAY or
-                            PlaybackState.ACTION_PAUSE or
-                            PlaybackState.ACTION_STOP or
-                            PlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                            PlaybackState.ACTION_SKIP_TO_NEXT,
-                    )
-                    .build(),
-            )
-            isActive = true
-        }
-
-        // AM (MEDIA_SESSION_SERVICE_OWNED) -->
-        // Guarded: this function now runs from mediaHolderConnection.onServiceConnected,
-        // which could in theory fire more than once per Activity instance if the Service
-        // ever disconnects and reconnects mid-session - without this check that would
-        // double-register these receivers and crash.
+    // AM (MEDIA_SESSION_UNIFIED_CALLBACK) -->
+    // Was setupMediaSessionCallback(holder) - the actual MediaSession callback
+    // construction and installation moved to PlayerViewModel.buildMediaSessionCallback()/
+    // bindToService() (see those functions' own doc comments) now that the
+    // ViewModel is Service-owned and persistent, with no more per-Activity-instance
+    // swapping needed at all. What's left here is genuinely Activity-instance-scoped
+    // (broadcast receivers tied to this specific instance's registered/unregistered
+    // lifecycle) and has nothing to do with the MediaSession itself - renamed to
+    // reflect that, and no longer takes a PlayerMediaHolder parameter it no longer
+    // needs.
+    private fun registerBackgroundActionReceivers() {
+        // Guarded: this could in theory run more than once per Activity instance if
+        // the Service connection ever disconnects and reconnects mid-session -
+        // without this check that would double-register these receivers and crash.
         if (!noisyReceiver.initialized) {
             val filter = IntentFilter().apply { addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY) }
             registerReceiver(noisyReceiver, filter)
@@ -2053,8 +1937,8 @@ class PlayerActivity : BaseActivity() {
             registerReceiver(screenStateReceiver, screenStateFilter)
             screenStateReceiver.initialized = true
         }
-        // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
     }
+    // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
 
     // ==== END MPVKT ====
 

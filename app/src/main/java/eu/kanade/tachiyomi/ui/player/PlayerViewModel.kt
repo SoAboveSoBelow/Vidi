@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.view.KeyEvent
 import androidx.compose.runtime.Stable
@@ -408,6 +410,42 @@ class PlayerViewModel @JvmOverloads constructor(
     /** Called once PlayerActivity's Service connection delivers a live PlayerMediaHolder. */
     fun bindToService(holder: PlayerMediaHolder) {
         mediaHolder = holder
+        // AM (SERVICE_OWNED_VIEWMODEL) -->
+        // Mirrors adopt(player) just below, one level up: a cold-started instance
+        // built its own PlayerViewModel directly (see that property's own removal
+        // notes in PlayerActivity), since no holder existed yet to reuse one from.
+        // Registers it now that a holder genuinely exists - a no-op if some other
+        // instance's ViewModel already got here first (adoptViewModel() only
+        // accepts the first one, same as adopt() already does for the player).
+        holder.adoptViewModel(this)
+        // <-- AM (SERVICE_OWNED_VIEWMODEL)
+        // AM (MEDIA_SESSION_UNIFIED_CALLBACK) -->
+        // Was setupMediaSessionCallback() in PlayerActivity, swapped away to a
+        // separate, simplified fallback implementation whenever no Activity was
+        // considered "live" - see buildMediaSessionCallback()'s own doc comment
+        // for why that swap (and the fallback it swapped to) is gone entirely now.
+        // Installed once, here, the first time this persistent ViewModel binds -
+        // never needs reinstalling on Activity onStart()/onStop() the way the old
+        // per-instance callback did, since this callback closes over `this`, the
+        // same persistent object regardless of which (or whether any) Activity
+        // instance is currently attached. A later reattach's own bindToService()
+        // call rebuilding an equivalent callback is harmless, redundant work, not
+        // incorrect - ensureMediaSession() just re-registers it.
+        holder.ensureMediaSession(context, buildMediaSessionCallback()).apply {
+            setPlaybackState(
+                PlaybackState.Builder()
+                    .setActions(
+                        PlaybackState.ACTION_PLAY or
+                            PlaybackState.ACTION_PAUSE or
+                            PlaybackState.ACTION_STOP or
+                            PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                            PlaybackState.ACTION_SKIP_TO_NEXT,
+                    )
+                    .build(),
+            )
+            isActive = true
+        }
+        // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
         // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
         // Checked BEFORE adopt() - see PlayerMediaHolder.hasAdoptedPlayer's doc
         // comment for why the ordering matters here.
@@ -446,6 +484,123 @@ class PlayerViewModel @JvmOverloads constructor(
         syncHolderSessionState()
         _playerReady.value = true
     }
+
+    // AM (MEDIA_SESSION_UNIFIED_CALLBACK) -->
+    /**
+     * Was PlayerActivity.setupMediaSessionCallback()'s inner `callback` object,
+     * moved here unchanged in behavior - only the receiver changed, from
+     * PlayerActivity's `viewModel.xxx()` to this ViewModel's own `xxx()`
+     * directly. This is now the ONLY MediaSession.Callback this app ever
+     * installs: PlayerMediaHolder's separate fallbackCallback (and everything
+     * that only existed to swap to/from it - restoreFallbackCallback(),
+     * skipToAdjacentEpisode(), performBackgroundSkipLoad()) is gone. That
+     * fallback existed because the old callback closed over an Activity
+     * instance's own soon-to-be-dead ViewModel; this one closes over `this`,
+     * the same persistent, Service-owned ViewModel regardless of whether any
+     * Activity is currently attached at all - there's no state left where a
+     * live UI is needed for this callback to safely do its job.
+     *
+     * The one genuinely Activity-only action - Stop needing to visually close
+     * the player screen if one happens to be open - no longer calls finish()
+     * on a held Activity reference at all. It emits the exact same Event.Finish
+     * already used elsewhere for this (see PlayerActivity's existing eventFlow
+     * collector) - a live Activity reacts and closes itself; if none exists,
+     * the emission is simply consumed by nothing, which is correct.
+     */
+    fun buildMediaSessionCallback(): MediaSession.Callback {
+        val previousAction = gesturePreferences.mediaPreviousGesture.get()
+        val playAction = gesturePreferences.mediaPlayPauseGesture.get()
+        val nextAction = gesturePreferences.mediaNextGesture.get()
+
+        return object : MediaSession.Callback() {
+            override fun onPlay() {
+                when (playAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {}
+                    SingleActionGesture.PlayPause -> {
+                        super.onPlay()
+                        unpause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
+                    }
+
+                    SingleActionGesture.Switch -> {}
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
+
+            override fun onPause() {
+                when (playAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {}
+                    SingleActionGesture.PlayPause -> {
+                        super.onPause()
+                        pause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
+                    }
+
+                    SingleActionGesture.Switch -> {}
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
+
+            override fun onSkipToPrevious() {
+                when (previousAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {
+                        leftSeek()
+                    }
+                    SingleActionGesture.PlayPause -> {
+                        pauseUnpause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        mpvCommand("keypress", CustomKeyCodes.MediaPrevious.keyCode)
+                    }
+
+                    SingleActionGesture.Switch -> nextEpisode(next = false)
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
+
+            override fun onSkipToNext() {
+                when (nextAction) {
+                    SingleActionGesture.None -> {}
+                    SingleActionGesture.Seek -> {
+                        rightSeek()
+                    }
+                    SingleActionGesture.PlayPause -> {
+                        pauseUnpause()
+                    }
+                    SingleActionGesture.Custom -> {
+                        mpvCommand("keypress", CustomKeyCodes.MediaNext.keyCode)
+                    }
+
+                    SingleActionGesture.Switch -> nextEpisode(next = true)
+                    SingleActionGesture.Screenshot -> {}
+                }
+            }
+
+            override fun onStop() {
+                super.onStop()
+                // AM (MEDIASESSION_STOP_SAFETY_FIX) -->
+                // An external "stop" transport command (Bluetooth/AVRCP, a system
+                // media widget, etc.) reaching this callback is meant to behave
+                // like the notification's own Stop button - pause, stop the
+                // Service, and end the session for real. context.stopService()
+                // works identically via Application context, no Activity needed.
+                // finish() on a specific Activity instance is replaced by
+                // Event.Finish, per this function's own doc comment above.
+                // <-- AM (MEDIASESSION_STOP_SAFETY_FIX)
+                pause()
+                context.stopService(PlayerBackgroundPlaybackService.newIntent(context))
+                viewModelScope.launch { _eventFlow.emit(Event.Finish) }
+            }
+        }
+    }
+    // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
 
     // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
     // Publishes this instance's current anime/episode onto the holder so a LATER
@@ -693,6 +848,20 @@ class PlayerViewModel @JvmOverloads constructor(
      * genuinely narrow window before the surface has ever been attached even
      * once (very early cold start, before Compose has rendered the TextureView
      * for the first time).
+     *
+     * REVERT NOTE: tonight's session briefly changed this to isSurfaceAttached
+     * alone, theorizing the surface genuinely goes invalid while backgrounded.
+     * A separate, related fix (forcing MpvSurface to re-attach on Compose
+     * recomposition) turned out to be actively harmful - confirmed by testing,
+     * it froze playback on a static frame after reopening from the
+     * notification, because TextureView survives visibility changes by design
+     * and that recomposition was never a real detach to begin with. Reverting
+     * both together: this flag's original premise (isSurfaceAttached rarely if
+     * ever actually goes false during backgrounding, so this line was likely
+     * already correct/inert either way) hasn't been disproven, only the separate
+     * reattach change has - so restoring the original, unmodified logic here is
+     * the safe choice pending an actual confirmed cause for the underlying bug,
+     * which is still open.
      * <-- AM (AUDIO_BLIP_FIX_2)
      */
     private fun loadFile(url: String, options: String) {
@@ -2941,6 +3110,31 @@ class PlayerViewModel @JvmOverloads constructor(
         changeEpisode(episodeId, autoplay)
     }
 
+    // AM (EPISODE_CHANGE_RACE_FIX) -->
+    // Was PlayerMediaHolder's currentSkipJob, scoped to the now-deleted background
+    // skip path only (BACKGROUND_SKIP_RACE_FIX). That protection never made it
+    // into changeEpisode() itself, because changeEpisode() was previously only
+    // ever called from foreground UI taps, naturally rate-limited by a human and
+    // by the UI disabling itself while isLoadingEpisode is true - concurrent
+    // overlapping calls essentially never happened in practice. Now that every
+    // skip trigger (autoplay-on-EOF, external media-button presses, backgrounded
+    // or not) routes through this exact function unconditionally, that assumption
+    // no longer holds: a skip that hasn't finished loading (e.g. one arriving
+    // while backgrounded, with the notification/PIP UI never actually blocking a
+    // second one from firing) followed by another before the first completes
+    // means two independent loadEpisode() calls both running loadfile() against
+    // mpv, neither aware of the other, each eventually committing its own
+    // episode as "current" whichever happens to finish last - confirmed
+    // reproducible via: autoplay-on-EOF (or an external skip) left pending while
+    // backgrounded, then Next/Previous pressed again after reopening - the first,
+    // never-cancelled call's result still lands, on top of the second one's,
+    // giving a predictable extra +1 (or a net-zero forward+back) beyond what was
+    // actually requested. Cancelling any still-in-flight change before starting a
+    // new one, at this single shared implementation, is the correct fix - not
+    // re-splitting this back into two separately-guarded paths.
+    private var episodeChangeJob: Job? = null
+    // <-- AM (EPISODE_CHANGE_RACE_FIX)
+
     /** Switches playback to [episodeId]; [autoPlay] indicates an automatic transition. */
     fun changeEpisode(episodeId: Long?, autoPlay: Boolean = false) {
         if (stateData.value.isCasting) {
@@ -2972,7 +3166,11 @@ class PlayerViewModel @JvmOverloads constructor(
         thumbnailFetchJob?.cancel()
         lastThumbnailFetch = 0L
 
-        viewModelScope.launch {
+        // AM (EPISODE_CHANGE_RACE_FIX) -->
+        // See episodeChangeJob's own doc comment just above.
+        episodeChangeJob?.cancel()
+        episodeChangeJob = viewModelScope.launch {
+            // <-- AM (EPISODE_CHANGE_RACE_FIX)
             val switchMethod = loadEpisode(episodeId)
             updateUiData { it.copy(isLoadingHosters = false) }
 
@@ -3646,7 +3844,13 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
-    override fun onCleared() {
+    // AM (SERVICE_OWNED_VIEWMODEL) -->
+    // Public, not protected (the default for an override with no explicit
+    // modifier is to inherit the parent's visibility, not widen to public) -
+    // PlayerMediaHolder.release() now calls this directly once ViewModelProvider
+    // no longer does. See release()'s own doc comment for why.
+    public override fun onCleared() {
+    // <-- AM (SERVICE_OWNED_VIEWMODEL)
         stateData.value.currentEpisode?.let {
             // AM (PRESERVE_POSITION_SETTING) -->
             // Per-second saves during playback keep last_second_seen live in the DB so

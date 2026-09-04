@@ -8,7 +8,6 @@ import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
-import eu.kanade.tachiyomi.ui.player.mpv.loadFileWithHwdecGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -150,442 +149,32 @@ class PlayerMediaHolder(
     val hasAdoptedPlayer: Boolean get() = _player != null
     // <-- AM (AUDIO_FOCUS_ORPHAN_FIX)
 
+    // AM (SERVICE_OWNED_VIEWMODEL) -->
+    /**
+     * Direct mirror of _player/adopt() above, one level up: PlayerActivity no
+     * longer owns a PlayerViewModel via `by viewModels()` (see that property's
+     * own removal notes) - this holder does, so the exact same object, same
+     * viewModelScope, same in-memory state survives Activity onStop()/onDestroy()
+     * identically to how the player already does. adoptViewModel() mirrors
+     * adopt()'s exact shape: a fresh cold start still has to build one directly
+     * (no holder may exist yet either, same as the player's own cold-start case),
+     * then hands it off here the first time a holder does exist - later calls
+     * with an already-adopted ViewModel are a no-op, returning the existing one
+     * unchanged, same as adopt() already does for the player.
+     */
+    private var _viewModel: PlayerViewModel? = null
+    val viewModel: PlayerViewModel? get() = _viewModel
+
+    fun adoptViewModel(existing: PlayerViewModel): PlayerViewModel {
+        if (_viewModel == null) {
+            _viewModel = existing
+        }
+        return _viewModel!!
+    }
+    // <-- AM (SERVICE_OWNED_VIEWMODEL)
+
     var mediaSession: MediaSession? = null
         private set
-
-    // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
-    /**
-     * Installed on [mediaSession] whenever no [eu.kanade.tachiyomi.ui.player.PlayerActivity]
-     * instance is currently attached (see [restoreFallbackCallback]). Without this, the
-     * session's callback stays pointed at whichever Activity instance's
-     * `setupMediaSessionCallback()` last set it - a closure over that instance's
-     * [eu.kanade.tachiyomi.ui.player.PlayerViewModel], which is cleared the moment the
-     * Activity is genuinely destroyed. Hardware/notification media-button presses
-     * arriving in that gap were silently firing against a dead ViewModel: coroutines
-     * launched in an already-cancelled viewModelScope never completing, leaving episode
-     * navigation stuck mid-transition and this holder's own animeId/episodeId (used to
-     * build the notification's reopen intent) never updated to match.
-     *
-     * This callback intentionally does the minimum that's safe to do without a live
-     * ViewModel: play/pause operate on mpv directly (no DB/UI-state involvement needed).
-     * Skip requests attempt an immediate resolve-and-load via [skipToAdjacentEpisode]
-     * for the common case (direct-URL HTTP/local sources); anything that isn't
-     * covered there (torrent sources, sources needing a local HTTP proxy server)
-     * falls back to the original behavior - queued via [requestSkip] and applied for
-     * real once a live Activity/ViewModel reattaches, through the full pipeline - see
-     * PlayerActivity's onNewIntent().
-     */
-    // AM (BACKGROUND_SKIP_RACE_FIX) -->
-    // Rapid repeated skip presses (lock-screen/Bluetooth next/next/next quickly)
-    // used to each launch their own, fully independent performBackgroundSkipLoad()
-    // coroutine with nothing coordinating between them. Since each one waits on
-    // mpv's own FileLoaded event (BACKGROUND_SKIP_LOAD_CONFIRM_FIX) - a generic
-    // event that doesn't say WHICH load it's confirming - an earlier, slower call
-    // could still have its wait resolve (matching a LATER load that had already
-    // replaced its own) and go on to commit ITS episode's info as if it were the
-    // one actually playing. Tracking and cancelling any still-in-flight skip
-    // before starting a new one means only the most recently requested skip is
-    // ever allowed to reach the point of committing anything - matching mpv's own
-    // "replace" load semantics, where the latest request is what actually wins.
-    // <-- AM (BACKGROUND_SKIP_RACE_FIX)
-    private var currentSkipJob: Job? = null
-
-    private val fallbackCallback = object : MediaSession.Callback() {
-        override fun onPlay() {
-            setPaused(false)
-        }
-
-        override fun onPause() {
-            setPaused(true)
-        }
-
-        // AM (BACKGROUND_SKIP_FIX) -->
-        // Attempt the skip for real, immediately, without needing a live Activity -
-        // see skipToAdjacentEpisode(). Falls back to the original queue-until-reopen
-        // behavior (requestSkip) if that fails or isn't supported for this specific
-        // content (e.g. a torrent source, or one needing a local HTTP proxy server) -
-        // nothing regresses versus the pre-existing behavior in that case.
-        override fun onSkipToNext() {
-            logcat(LogPriority.DEBUG) { "fallbackCallback.onSkipToNext fired" }
-            currentSkipJob?.cancel()
-            currentSkipJob = holderScope.launch {
-                if (!skipToAdjacentEpisode(next = true)) {
-                    requestSkip(next = true)
-                }
-            }
-        }
-
-        override fun onSkipToPrevious() {
-            logcat(LogPriority.DEBUG) { "fallbackCallback.onSkipToPrevious fired" }
-            currentSkipJob?.cancel()
-            currentSkipJob = holderScope.launch {
-                if (!skipToAdjacentEpisode(next = false)) {
-                    requestSkip(next = false)
-                }
-            }
-        }
-        // <-- AM (BACKGROUND_SKIP_FIX)
-    }
-
-    /**
-     * Hands [mediaSession]'s callback back to [fallbackCallback]. Called from
-     * PlayerActivity.onDestroy() whenever this session is being preserved across the
-     * Activity's destruction (background playback continuing) - the mirror image of
-     * [ensureMediaSession]'s redirect-to-the-reattaching-instance behavior.
-     */
-    fun restoreFallbackCallback() {
-        mediaSession?.setCallback(fallbackCallback)
-    }
-
-    /** Directly pauses/resumes mpv, independent of any ViewModel. Safe to call with no Activity attached. */
-    fun setPaused(paused: Boolean) {
-        _player?.mpv?.setPropertyBoolean("pause", paused)
-        updateState { it.copy(paused = paused) }
-    }
-
-    private var pendingSkipDirection: Boolean? = null
-
-    // AM (BACKGROUND_SKIP_FIX) -->
-    /** Mirrored from PlayerActivity's own observer on the ViewModel's already-sorted/
-     * filtered currentPlaylist - see PlayerActivity's BACKGROUND_SKIP_FIX observer. */
-    private var playlistEpisodeIds: List<Long> = emptyList()
-
-    fun updatePlaylist(episodeIds: List<Long>) {
-        logcat(LogPriority.DEBUG) { "updatePlaylist: mirrored ${episodeIds.size} episode ids" }
-        playlistEpisodeIds = episodeIds
-    }
-
-    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
-    // Shared with PlayerViewModel - see RecentEpisodePositionManager's own doc comment
-    // for why this used to be two separate in-memory maps kept in sync by hand, and
-    // isn't anymore.
-    private val recentEpisodePositionManager: RecentEpisodePositionManager = Injekt.get()
-    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
-
-    /**
-     * Resolves and loads the next/previous episode directly, without needing a live
-     * PlayerActivity/ViewModel - the actual fix for skip-while-backgrounded doing
-     * nothing at all. Covers the common case only: a direct-URL HTTP or local
-     * source. Deliberately does NOT attempt torrent-based sources or sources
-     * requiring a local HTTP proxy server (Video.usesHttpServer()) - replicating
-     * that handling correctly without the ability to test against real sources
-     * risked silently mishandling it, so those fall back to the pre-existing
-     * queue-until-reopen behavior instead (see the callers in [fallbackCallback]).
-     *
-     * Returns false on anything not resolved (source unsupported, resolution
-     * failure, no player adopted) - callers fall back to [requestSkip].
-     */
-    private suspend fun skipToAdjacentEpisode(next: Boolean): Boolean {
-        if (!hasAdoptedPlayer) {
-            logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: no adopted player" }
-            return false
-        }
-        val currentState = state.value
-        val animeId = currentState.animeId ?: run {
-            logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: holder state has no animeId" }
-            return false
-        }
-        val currentEpisodeId = currentState.episodeId ?: run {
-            logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: holder state has no episodeId" }
-            return false
-        }
-
-        val playlist = playlistEpisodeIds
-        val currentIndex = playlist.indexOf(currentEpisodeId)
-        if (currentIndex == -1) {
-            logcat(LogPriority.DEBUG) {
-                "skipToAdjacentEpisode: episode $currentEpisodeId not in mirrored playlist " +
-                    "(size=${playlist.size})"
-            }
-            return false
-        }
-        val newIndex = if (next) currentIndex + 1 else currentIndex - 1
-        if (newIndex !in playlist.indices) {
-            logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: newIndex $newIndex out of range (size=${playlist.size})" }
-            return false
-        }
-        val targetEpisodeId = playlist[newIndex]
-
-        // AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX) -->
-        // Mirrors PlayerViewModel.changeEpisode()'s own pause() call, made at the
-        // same point - once a skip is confirmed valid, before any of the (possibly
-        // slow) resolution work begins, not at the very top where an ultimately
-        // invalid/no-op skip attempt would needlessly interrupt playback for
-        // nothing. The foreground path's pause-then-resume around a switch was
-        // originally just PIP visual polish (freezing the frame during the async
-        // load) - but it has a second effect this path was missing entirely: it's
-        // what makes Event.PauseChanged actually fire during a foreground switch.
-        // This path only ever called setPaused(false) after loading, which is a
-        // no-op (no event fires at all) if mpv was already unpaused going in - the
-        // ordinary case for a background skip. That's not a cosmetic difference;
-        // it meant a background skip's notification update depended entirely on
-        // the artwork flow's own completion with no earlier nudge, while a
-        // foreground switch got one for free - the same underlying update
-        // eventually happens either way, but there's no reason for the two paths
-        // to genuinely behave differently when they don't have to.
-        // <-- AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
-        setPaused(true)
-
-        // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
-        // Remember where this episode was left, so flipping back to it later in the
-        // same backgrounded session (or a future cold-started one) resumes correctly
-        // instead of restarting at 0. Delegates to the same manager PlayerViewModel
-        // uses - see its own doc comment for the finished-episode guard and pruning
-        // this used to have to reimplement here by hand.
-        recentEpisodePositionManager.remember(
-            animeId = animeId,
-            episodeId = currentEpisodeId,
-            positionMs = currentState.positionMs.toLong(),
-            durationMs = currentState.durationMs.toLong(),
-        )
-        // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
-
-        val succeeded = try {
-            performBackgroundSkipLoad(animeId, targetEpisodeId)
-        } catch (e: CancellationException) {
-            // AM (BACKGROUND_SKIP_RACE_FIX) -->
-            // Must rethrow, not treat as a normal failure - this specifically
-            // means a NEWER skip request superseded this one (see
-            // currentSkipJob's own doc comment) and cancelled it deliberately.
-            // Broadly catching Throwable below would otherwise also catch this,
-            // and this now-stale job would go on to run its own failure handling
-            // (restore pause, fall back to requestSkip) - actively interfering
-            // with the newer job that's already taken over, undoing its progress
-            // out from under it. Rethrowing lets cancellation propagate normally
-            // and does nothing else at all.
-            // <-- AM (BACKGROUND_SKIP_RACE_FIX)
-            throw e
-        } catch (e: Throwable) {
-            logcat(LogPriority.DEBUG, e) { "skipToAdjacentEpisode: threw" }
-            false
-        }
-
-        // AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX) -->
-        // Restore playback if the skip ultimately failed - setPaused(true) above
-        // ran before any of this resolution work, so a failed attempt (bad
-        // hoster, unsupported source, any exception) must not leave the ORIGINAL,
-        // still-valid episode stuck paused for no reason. A failed skip should
-        // look like nothing happened, not like playback silently stopped.
-        // <-- AM (BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
-        if (!succeeded) {
-            setPaused(false)
-        }
-        return succeeded
-    }
-
-    /**
-     * Does the actual resolution + mpv load for [skipToAdjacentEpisode] - split out
-     * so its own early-return-on-failure points only exit THIS function, letting
-     * the caller reliably restore pause state (see BACKGROUND_SKIP_PAUSE_SYMMETRY_FIX)
-     * on any failure path without needing to handle each one individually.
-     */
-    private suspend fun performBackgroundSkipLoad(animeId: Long, targetEpisodeId: Long): Boolean {
-            val anime = getAnime.await(animeId) ?: run {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: getAnime($animeId) returned null" }
-                return false
-            }
-            val episode = getEpisode.await(targetEpisodeId) ?: run {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: getEpisode($targetEpisodeId) returned null" }
-                return false
-            }
-            val source = sourceManager.getOrStub(anime.source)
-
-            val hosters = EpisodeLoader.getHosters(episode, anime, source)
-            val hoster = hosters.firstOrNull() ?: run {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: no hosters returned" }
-                return false
-            }
-            val hosterState = EpisodeLoader.loadHosterVideos(source, hoster)
-            val videoList = (hosterState as? HosterState.Ready)?.videoList ?: run {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: hoster state not Ready ($hosterState)" }
-                return false
-            }
-            val video = videoList.firstOrNull { it.preferred } ?: videoList.firstOrNull() ?: run {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: hoster returned an empty video list" }
-                return false
-            }
-            val resolvedVideo = HosterLoader.getResolvedVideo(source, video) ?: video
-            if (resolvedVideo.videoUrl.isEmpty()) {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: resolved video has an empty url" }
-                return false
-            }
-
-            // Deliberately unsupported here - see this function's doc comment.
-            if (resolvedVideo.usesHttpServer()) {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: video requires a local HTTP proxy server, unsupported" }
-                return false
-            }
-            if (resolvedVideo.videoUrl.endsWith("torrent") || resolvedVideo.videoUrl.startsWith("magnet")) {
-                logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: video is torrent-based, unsupported" }
-                return false
-            }
-
-            val httpSource = source as? AnimeHttpSource
-            if (httpSource != null) {
-                val headers = (resolvedVideo.headers ?: httpSource.headers)
-                    .toMultimap()
-                    .mapValues { it.value.firstOrNull() ?: "" }
-                val httpHeaderString = headers.entries.joinToString(",") {
-                    it.key + ": " + it.value.replace(",", "\\,")
-                }
-                mpv.setOptionString("http-header-fields", httpHeaderString)
-            }
-
-            // AM (BACKGROUND_SKIP_AUDIO_FIX) -->
-            // aid was originally "no", copied from PlayerViewModel.setVideo()'s
-            // exact pattern - there, that's a deliberate placeholder: audio is
-            // explicitly disabled on load, then separately, elsewhere (preference-
-            // based track selection reacting to the file being loaded), the
-            // ViewModel sets the real audio track index. This background-skip path
-            // has no equivalent follow-up step, so "no" left audio permanently
-            // disabled - confirmed directly in mpv's own log: "playback restart
-            // complete @ 0.000000, audio=eof, video=playing" on every background
-            // skip. "auto" (matching what vid already correctly uses) lets mpv pick
-            // a reasonable default track itself instead of deliberately turning
-            // audio off with nothing left to turn it back on.
-            val mpvOpts = listOf(Pair("sid", "no"), Pair("aid", "auto"), Pair("vid", "auto"))
-            // <-- AM (BACKGROUND_SKIP_AUDIO_FIX)
-            val videoOptions = (resolvedVideo.mpvArgs + mpvOpts).joinToString(",") { (option, value) ->
-                "$option=\"$value\""
-            }
-            val resolvedUrl = resolvedVideo.videoUrl.toUri().resolveUri(context) ?: resolvedVideo.videoUrl
-
-            // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
-            // Resume position priority mirrors PlayerViewModel.setVideo()'s own rules,
-            // simplified: the shared recent-positions cache first (flipping back to an
-            // episode you were just on, however briefly, is the strongest signal
-            // available - and now survives a cold start too), otherwise the
-            // DB-persisted last-seen position unless the episode's already marked fully
-            // watched (matching the same already-watched -> start at 0 rule the rest of
-            // the app uses).
-            val resumePositionMs = recentEpisodePositionManager.consume(animeId, targetEpisodeId)
-                ?: if (!episode.seen) episode.lastSecondSeen else 0L
-            if (resumePositionMs > 0L) {
-                player.mpv.command("set", "start", (resumePositionMs / 1000L).toString())
-            }
-            // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
-
-            // AM (SHARED_LOAD_FILE_FIX) -->
-            // Mirrors PlayerViewModel.loadFile()'s exact pattern - previously
-            // duplicated inline here; now both call the same shared function (see
-            // its own doc comment for why).
-            // <-- AM (SHARED_LOAD_FILE_FIX)
-            // AM (AUDIO_BLIP_FIX_2) -->
-            // Was unconditionally false, reasoning "background skip by definition
-            // only ever runs with no live Activity/Surface, so there's nothing to
-            // check" - true for the REAL surface, but this holder shares the same
-            // MPVPlayer instance that was alive before the Activity was destroyed
-            // (the whole point of the Service-owned-player architecture), and that
-            // instance's dummy surface (see MpvSurface.kt's surfaceDestroyed) is
-            // still attached from the last time it backgrounded. If the real
-            // surface was ever attached at all this session,
-            // player.hasAttachedSurfaceBefore is still true here too - same fix,
-            // same reasoning as PlayerViewModel.loadFile()'s own doc comment.
-            // <-- AM (AUDIO_BLIP_FIX_2)
-            player.mpv.loadFileWithHwdecGuard(
-                resolvedUrl,
-                videoOptions,
-                hasAttachedSurface = player.hasAttachedSurfaceBefore,
-            )
-
-            // AM (BACKGROUND_SKIP_LOAD_CONFIRM_FIX) -->
-            // BACKGROUND_SKIP_STATE_ORDER_FIX moved syncSessionState() to run before
-            // this load, to close a metadata-mismatch window - but that assumed the
-            // load would basically always succeed once resolution had already
-            // succeeded, which isn't actually guaranteed: mpv.command("loadfile",...)
-            // only ISSUES the load, it doesn't confirm the resolved URL is actually
-            // playable. If it isn't (an expired/bad URL from this specific hoster),
-            // playback would genuinely fail to start while the notification had
-            // already committed to showing the new episode as if it had - exactly
-            // "title/thumbnail changed, but nothing plays" with no fallback,
-            // because this function still reported success. Waiting here for mpv's
-            // own confirmation that the file is actually loaded - not just assuming
-            // it after issuing the command - is what makes committing to the new
-            // episode's info actually conditional on the switch having genuinely
-            // worked, the same way it already effectively is for the foreground
-            // path (which reacts to this same event through handlePlayerFlow()).
-            // <-- AM (BACKGROUND_SKIP_LOAD_CONFIRM_FIX)
-            val loadConfirmed = withTimeoutOrNull(10_000) {
-                player.eventFlow.filterIsInstance<MPVPlayer.Event.FileLoaded>().first()
-            } != null
-            if (!loadConfirmed) {
-                logcat(LogPriority.DEBUG) {
-                    "skipToAdjacentEpisode: mpv never confirmed the file loaded, treating as failed"
-                }
-                return false
-            }
-
-            // AM (BACKGROUND_SKIP_STATE_ORDER_FIX) -->
-            // Called here, now confirmed AFTER a genuine load success (see
-            // BACKGROUND_SKIP_LOAD_CONFIRM_FIX above) but still BEFORE the resume
-            // below - this used to run AFTER loadFileWithHwdecGuard()+
-            // setPaused(false) entirely, meaning the resume's own PauseChanged-
-            // triggered push could fire while state still held the OLD episode's
-            // values, but mpv had ALREADY loaded the new file - so that push
-            // paired the new episode's real position/duration with the old
-            // episode's title/artist, and the resolvedEpisodeKey gate couldn't
-            // catch it (animeId/episodeId hadn't changed yet at that point, so the
-            // check was trivially comparing old-to-old). Doing this before resume
-            // also gives the artwork-resolution flow (which reacts to this exact
-            // animeId/episodeId change) a head start before playback actually
-            // resumes, instead of starting only once loading was already complete.
-            // <-- AM (BACKGROUND_SKIP_STATE_ORDER_FIX)
-            // AM (SHARED_SESSION_SYNC_FIX) -->
-            // Previously duplicated inline here - now calls the same shared
-            // function PlayerViewModel's foreground path also calls (see its own
-            // doc comment for why). Duration is deliberately left out of both -
-            // see BACKGROUND_SKIP_DURATION_FIX below for why resetting it here
-            // specifically caused its own problem; it's left to update through the
-            // normal propFlow/timer path instead, same as the foreground path.
-            // <-- AM (SHARED_SESSION_SYNC_FIX)
-            syncSessionState(
-                animeId = animeId,
-                episodeId = targetEpisodeId,
-                animeTitle = anime.title,
-                episodeTitle = episode.name,
-                animeThumbnailUrl = anime.thumbnailUrl,
-                episodePreviewUrl = episode.previewUrl,
-                positionMs = resumePositionMs.toInt(),
-            )
-            // AM (BACKGROUND_SKIP_DURATION_FIX) -->
-            // Reverted: resetting this to 0 here was meant to avoid ever showing a
-            // stale wrong duration, but instead made the lock-screen's seek bar
-            // disappear entirely rather than just show stale data - Android's
-            // media widget appears to treat duration=0 as "no seekable content"
-            // and hides the whole progress UI, worse than the staleness this was
-            // meant to fix. Left untouched (previous episode's value persists)
-            // until the real new duration arrives via the propFlow observer below -
-            // see its own logging for why that isn't happening reliably.
-            // <-- AM (BACKGROUND_SKIP_DURATION_FIX)
-
-            // AM (BACKGROUND_SKIP_LOAD_STUCK_FIX) -->
-            // The ViewModel's own equivalent path relies on live reactive event-flow
-            // collection (handlePlayerFlow(), wired only while a ViewModel exists) to
-            // notice mpv's own file-loaded/pause-state transitions and react
-            // accordingly - none of that is running here. Without an explicit resume,
-            // whatever pause state mpv's new file starts in after a "replace" load is
-            // whatever it stays in indefinitely - loaded and silent, never resumed.
-            setPaused(false)
-            logcat(LogPriority.DEBUG) {
-                "skipToAdjacentEpisode: post-load mpv pause=${player.mpv.getPropertyBoolean("pause")}"
-            }
-            // <-- AM (BACKGROUND_SKIP_LOAD_STUCK_FIX)
-
-            logcat(LogPriority.DEBUG) { "skipToAdjacentEpisode: loaded episode $targetEpisodeId directly" }
-            return true
-    }
-    // <-- AM (BACKGROUND_SKIP_FIX)
-
-    /** Queues a skip request for the next Activity/ViewModel reattach to apply for real. */
-    fun requestSkip(next: Boolean) {
-        pendingSkipDirection = next
-    }
-
-    /** Returns and clears any pending skip request. Null if none is queued. */
-    fun consumePendingSkip(): Boolean? {
-        return pendingSkipDirection.also { pendingSkipDirection = null }
-    }
-    // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
 
     // AM (ARTWORK_WIPE_FIX) -->
     // See pushLiveMediaState()'s own doc comment - these track the last artwork the
@@ -926,34 +515,14 @@ class PlayerMediaHolder(
             }
             // <-- AM (BACKGROUND_SEEKBAR_TICK_FIX)
             // AM (BACKGROUND_AUTOPLAY_FIX) -->
-            // Mirrors PlayerViewModel.eofReached() - which only ever reacted to
-            // player.eventFlow while a ViewModel existed to collect it
-            // (wirePlayerFlows(), viewModelScope-bound). player.eventFlow itself
-            // lives on the MPVPlayer object, not the ViewModel, so it's just as
-            // observable from here - reusing the already-working
-            // skipToAdjacentEpisode() (see MEDIA_SESSION_FALLBACK_CALLBACK) to
-            // actually perform the advance once autoplay fires with no Activity
-            // around to do it. playerPreferences read directly, same preference
-            // store PlayerViewModel itself reads from, no ViewModel needed.
-            existing.eventFlow
-                .filterIsInstance<MPVPlayer.Event.EOF>()
-                .filter { it.value }
-                .onEach {
-                    // AM (BACKGROUND_MEDIASESSION_DOUBLE_WRITER_FIX) -->
-                    // PlayerViewModel's own eofReached() already handles autoplay
-                    // whenever an Activity is alive. Without this guard, both fire on
-                    // every episode-end while foregrounded too - not just a wasted
-                    // duplicate call like the notification/metadata cases above, but
-                    // a genuine race: two independent attempts to advance to the next
-                    // episode at once, one through the full ViewModel pipeline and
-                    // one through this simplified background path.
-                    if (PlayerActivity.hasLiveInstance) return@onEach
-                    // <-- AM (BACKGROUND_MEDIASESSION_DOUBLE_WRITER_FIX)
-                    if (playerPreferences.autoplayEnabled.get()) {
-                        skipToAdjacentEpisode(next = true)
-                    }
-                }
-                .launchIn(holderScope)
+            // Removed: existed only because PlayerViewModel.eofReached()'s own
+            // autoplay handling used to stop running the moment no Activity was
+            // alive to keep its viewModelScope going. Now that the ViewModel is
+            // Service-owned and persistent (see PlayerMediaHolder.adoptViewModel()),
+            // wirePlayerFlows() - and the eofReached() autoplay handling it wires
+            // up - keeps running via the ViewModel's own viewModelScope regardless
+            // of Activity state, foreground or not. Nothing left for a separate
+            // holder-level path to compensate for.
             // <-- AM (BACKGROUND_AUTOPLAY_FIX)
             // AM (BACKGROUND_ARTWORK_FIX) -->
             // Kept deliberately separate from the fast title/artist/duration observer
@@ -1296,6 +865,18 @@ class PlayerMediaHolder(
         _state.value = transform(_state.value)
     }
 
+    // AM (SETPAUSED_RESTORED) -->
+    // Deleted along with the rest of the MEDIA_SESSION_FALLBACK_CALLBACK block
+    // by mistake - this has a genuinely separate, still-needed caller outside
+    // ui/player entirely: AnimeScreen's "Continue" button toggles a
+    // background-playing session's pause state directly through here without
+    // opening the player Activity at all. Unchanged from the original.
+    fun setPaused(paused: Boolean) {
+        _player?.mpv?.setPropertyBoolean("pause", paused)
+        updateState { it.copy(paused = paused) }
+    }
+    // <-- AM (SETPAUSED_RESTORED)
+
     // AM (SHARED_SESSION_SYNC_FIX) -->
     // Replaces two separately-written copies of this exact update -
     // PlayerViewModel.syncHolderSessionState() (foreground) and this holder's own
@@ -1375,12 +956,21 @@ class PlayerMediaHolder(
         // see the stale animeId/episodeId still "matching" and skip reinitializing
         // entirely, leaving playback permanently stuck against an already-released
         // player.
+        // AM (SERVICE_OWNED_VIEWMODEL) -->
+        // Bypassing ViewModelProvider entirely (see that property's own removal
+        // notes) means Android never calls onCleared() automatically anymore -
+        // this is now the one place that reliably corresponds to "the session is
+        // genuinely, permanently over," so it's the correct place to call it
+        // manually, once, before dropping the reference. Requires onCleared()
+        // explicitly widened to public in PlayerViewModel - an override with no
+        // explicit modifier inherits the parent's (protected) visibility rather
+        // than defaulting to public, unlike a fresh declaration.
+        _viewModel?.onCleared()
+        _viewModel = null
+        // <-- AM (SERVICE_OWNED_VIEWMODEL)
         _player = null
         _state.value = PlayerMediaState()
         // <-- AM (STALE_HOLDER_STATE_FIX)
-        // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
-        pendingSkipDirection = null
-        // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
         // AM (LIVE_POSITION_TRACKING) -->
         holderScope.cancel()
         // <-- AM (LIVE_POSITION_TRACKING)
