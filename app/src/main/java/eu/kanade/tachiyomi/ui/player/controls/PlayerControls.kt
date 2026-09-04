@@ -15,6 +15,8 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
@@ -147,6 +149,28 @@ fun PlayerControls(
     }
     // <-- AM (SYSTEM_BAR_CONTROLS_INSET)
 
+    // AM (LANDSCAPE_NAV_BAR_INSET) -->
+    // In landscape, 2/3-button navigation renders the nav bar as a side bar
+    // (left or right) instead of along the bottom - calculateBottomPadding()
+    // alone is 0 there, so the SYSTEM_BAR_CONTROLS_INSET block above (top/
+    // bottom only) left every horizontal edge - the back button, the top-right
+    // controls, and the seekbar (which is only bounded by this ConstraintLayout's
+    // own horizontal padding below, having no explicit start/end constraints of
+    // its own) - with no margin against it, so the side nav bar drew right over
+    // them. LayoutDirection is pinned to Ltr just below, so start/end here are
+    // unambiguously left/right, matching that pin.
+    val navigationBarStartPadding = if (uiData.statusBarShown) {
+        WindowInsets.navigationBars.asPaddingValues().calculateStartPadding(LayoutDirection.Ltr)
+    } else {
+        0.dp
+    }
+    val navigationBarEndPadding = if (uiData.statusBarShown) {
+        WindowInsets.navigationBars.asPaddingValues().calculateEndPadding(LayoutDirection.Ltr)
+    } else {
+        0.dp
+    }
+    // <-- AM (LANDSCAPE_NAV_BAR_INSET)
+
     CompositionLocalProvider(
         LocalLayoutDirection provides LayoutDirection.Ltr,
     ) {
@@ -161,7 +185,10 @@ fun PlayerControls(
                     ),
                     alpha = transparentOverlay,
                 )
-                .padding(horizontal = MaterialTheme.padding.medium),
+                .padding(
+                    start = MaterialTheme.padding.medium + navigationBarStartPadding,
+                    end = MaterialTheme.padding.medium + navigationBarEndPadding,
+                ),
         ) {
             val (topLeftControls, topRightControls) = createRefs()
             val (volumeSlider, brightnessSlider) = createRefs()

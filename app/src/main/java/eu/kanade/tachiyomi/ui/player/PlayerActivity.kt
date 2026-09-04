@@ -120,6 +120,32 @@ class PlayerActivity : BaseActivity() {
     }
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
     private val windowInsetsController by lazy { WindowCompat.getInsetsController(window, window.decorView) }
+
+    // AM (UNIFIED_NAV_BAR_VISIBILITY) -->
+    // Was two independent places touching system bar visibility: onStart()
+    // unconditionally called .hide(systemBars())/.hide(navigationBars()) on
+    // every Activity (re)start regardless of whatever uiData.controlsShown
+    // actually was at that moment, while SystemBarOverlay (Compose) separately
+    // called .show()/.hide(systemBars()) reactively off uiData.statusBarShown.
+    // Since SystemBarOverlay's LaunchedEffect(showStatusBar) only reruns when
+    // that value CHANGES, not on every recomposition, a stop/restart (PiP
+    // exit, notification shade, screen lock, etc.) while controls were shown
+    // hit onStart()'s hardcoded hide with no matching value change to trigger
+    // SystemBarOverlay's effect and correct it - the nav bar stayed hidden
+    // despite the controls being visibly on screen. This is now the single
+    // function either caller goes through, always passing the actual current
+    // controls state instead of a hardcoded value, so both stay in sync.
+    fun applySystemBarVisibility(show: Boolean) {
+        if (show) {
+            windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
+            windowInsetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+        } else {
+            windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
+            windowInsetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+    // <-- AM (UNIFIED_NAV_BAR_VISIBILITY)
     private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
     private val inputMethodManager by lazy { getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager }
 
@@ -1595,9 +1621,7 @@ class PlayerActivity : BaseActivity() {
             View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_LOW_PROFILE
-        windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
-        windowInsetsController.hide(WindowInsetsCompat.Type.navigationBars())
-        windowInsetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        applySystemBarVisibility(show = viewModel.uiData.value.statusBarShown)
         window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode = if (playerPreferences.playerFullscreen.get()) {

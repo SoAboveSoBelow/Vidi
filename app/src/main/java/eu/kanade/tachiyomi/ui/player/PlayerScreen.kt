@@ -45,6 +45,7 @@ import eu.kanade.tachiyomi.ui.player.cast.components.CAST_PLAYBACK_MAX
 import eu.kanade.tachiyomi.ui.player.cast.components.CAST_PLAYBACK_MIN
 import eu.kanade.tachiyomi.ui.player.cast.components.CastDialogs
 import eu.kanade.tachiyomi.ui.player.cast.components.CastSheets
+import tachiyomi.cast.CastManagerEvent
 import eu.kanade.tachiyomi.ui.player.components.BrightnessOverlay
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
 import eu.kanade.tachiyomi.ui.player.components.OrientationOverlay
@@ -222,7 +223,21 @@ fun PlayerScreen(
                 },
                 onClickCustomButton = viewModel::castOnSeekIntro,
                 onLongClickCustomButton = { viewModel.setCastDialog(CastDialog.IntroLength) },
-                onCastManagerEvent = viewModel.castManager::handleCastManagerEvent,
+                // AM (UNIFIED_CAST_PLAY_PAUSE) -->
+                // PlayPause is intercepted here and routed through the ViewModel's
+                // pauseUnpause() instead of going straight to CastManager - that's
+                // the same function the (background-safe) MediaSession callback
+                // uses, so there's exactly one play/pause path regardless of
+                // caller. Every other CastManagerEvent has no such duplicate and
+                // still goes straight to CastManager as before.
+                onCastManagerEvent = { event ->
+                    if (event is CastManagerEvent.PlayPause) {
+                        viewModel.pauseUnpause()
+                    } else {
+                        viewModel.castManager.handleCastManagerEvent(event)
+                    }
+                },
+                // <-- AM (UNIFIED_CAST_PLAY_PAUSE)
             )
 
             CastSheets(

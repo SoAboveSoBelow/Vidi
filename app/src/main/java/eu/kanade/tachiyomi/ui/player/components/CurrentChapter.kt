@@ -57,6 +57,7 @@ fun CurrentChapter(
     modifier: Modifier = Modifier,
     background: Color = MaterialTheme.colorScheme.background,
     onBackground: Color = MaterialTheme.colorScheme.onBackground,
+    showTitle: Boolean = true,
     onClick: () -> Unit = {},
 ) {
     Box(
@@ -101,23 +102,33 @@ fun CurrentChapter(
                     overflow = TextOverflow.Clip,
                     color = MaterialTheme.colorScheme.tertiary,
                 )
-                Text(
-                    text = Typography.bullet.toString(),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    color = onBackground,
-                    overflow = TextOverflow.Clip,
-                )
-                Text(
-                    text = chapter.name.substringBeforeLast(ChapterUtils.ANIYOMI_CHAPTER_IDENTIFIER),
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = FontWeight.Bold,
-                    color = onBackground,
-                )
+                // AM (CHAPTER_SLOT_OVERFLOW_FIX) -->
+                // The bullet + chapter name were what had no width cap - a long
+                // title could grow this composable unbounded. BottomPlayerControls'
+                // ChapterSlot (the bottom-row usage that sits packed next to Lock/
+                // Screenshot/etc.) now passes showTitle = false so it's just the
+                // icon + timestamp there; other callers (e.g. the chapters sheet)
+                // are unaffected and keep the full title.
+                if (showTitle) {
+                    Text(
+                        text = Typography.bullet.toString(),
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        color = onBackground,
+                        overflow = TextOverflow.Clip,
+                    )
+                    Text(
+                        text = chapter.name.substringBeforeLast(ChapterUtils.ANIYOMI_CHAPTER_IDENTIFIER),
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.Bold,
+                        color = onBackground,
+                    )
+                }
+                // <-- AM (CHAPTER_SLOT_OVERFLOW_FIX)
             }
         }
     }

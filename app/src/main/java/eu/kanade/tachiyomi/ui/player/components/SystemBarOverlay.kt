@@ -5,41 +5,27 @@ import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import cafe.adriel.voyager.navigator.currentOrThrow
+import eu.kanade.tachiyomi.ui.player.PlayerActivity
 
 // From https://github.com/MakD/AFinity/blob/master/app/src/main/java/com/makd/afinity/ui/player/utils/PlayerSystemBarsController.kt
+// AM (UNIFIED_NAV_BAR_VISIBILITY) -->
+// Was its own WindowInsetsController show()/hide() calls here, duplicating
+// (and racing with) PlayerActivity.onStart()'s. Both now go through
+// PlayerActivity.applySystemBarVisibility() - see that function's doc comment.
+// <-- AM (UNIFIED_NAV_BAR_VISIBILITY)
 @SuppressLint("WrongConstant")
 @Composable
 fun SystemBarOverlay(showStatusBar: Boolean) {
-    val activity = LocalActivity.currentOrThrow
+    val activity = LocalActivity.currentOrThrow as PlayerActivity
 
     LaunchedEffect(showStatusBar) {
-        val window = activity.window
-        val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
-
-        if (showStatusBar) {
-            windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
-            windowInsetsController.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
-        } else {
-            windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
-            windowInsetsController.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
+        activity.applySystemBarVisibility(show = showStatusBar)
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            val window = activity.window
-            val windowInsetsController =
-                WindowCompat.getInsetsController(window, window.decorView)
-
-            windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
-            windowInsetsController.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+            activity.applySystemBarVisibility(show = true)
         }
     }
 }

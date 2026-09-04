@@ -186,8 +186,19 @@ private fun ChapterSlot(
     onClick: () -> Unit,
 ) {
     if (!showChapterIndicator || currentChapter == null) return
+    // AM (CHAPTER_SLOT_OVERFLOW_FIX) -->
+    // CurrentChapter's title Text had overflow = TextOverflow.Ellipsis, but
+    // nothing constrained the slot's width for that to ever take effect -
+    // Compose just let it grow to its full intrinsic width. With a long
+    // chapter title that meant this slot could grow arbitrarily wide, pushing
+    // every other tightly-packed button in the row (Lock, Screenshot, etc.)
+    // out toward, and sometimes past, the screen edge. Dropping the title here
+    // (showTitle = false, icon + timestamp only) removes the unbounded part
+    // entirely instead of just capping it.
     CurrentChapter(
         chapter = currentChapter,
+        showTitle = false,
         onClick = onClick,
     )
+    // <-- AM (CHAPTER_SLOT_OVERFLOW_FIX)
 }

@@ -127,6 +127,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import tachiyomi.cast.CastEvent
 import tachiyomi.cast.CastManager
+import tachiyomi.cast.CastManagerEvent
 import tachiyomi.cast.domain.TrackInformation
 import tachiyomi.cast.domain.VideoInformation
 import tachiyomi.core.common.i18n.stringResource
@@ -3062,12 +3063,39 @@ class PlayerViewModel @JvmOverloads constructor(
         }
     }
 
+    // AM (STALE_CHAPTER_INDICATOR_FIX) -->
+    // currentChapter (what ChapterSlot in BottomPlayerControls actually checks)
+    // was previously left to the separate "chapter" mpv property observer
+    // (onChapterChanged()) to populate on every file transition. That observer
+    // only fires on an actual value CHANGE as mpv tracks it, and mpv's "chapter"
+    // property doesn't reliably re-transition through every file load - notably,
+    // going from a chapterless episode to a chaptered one could land on the same
+    // raw index mpv last held, firing nothing, leaving currentChapter stuck null.
+    // This now queries mpv's "chapter" property directly, synchronously, the
+    // moment the new file's chapter-list itself changes - not dependent on that
+    // separate observer's timing/firing behavior at all - so it's correct
+    // immediately on every transition, chaptered-to-chapterless or the reverse.
     fun onChapterListChanged(node: MPVNode) {
-        val chapters = node.toObject<List<ChapterNode>>(json).map {
-            it.toSegment()
+        val chapterNodes = node.toObject<List<ChapterNode>>(json)
+        updateStateData {
+            it.copy(
+                chapters = chapterNodes.map { chapterNode -> chapterNode.toSegment() },
+                currentChapter = currentChapterFor(chapterNodes),
+            )
         }
-        updateStateData { it.copy(chapters = chapters) }
     }
+
+    private fun currentChapterFor(chapterNodes: List<ChapterNode>): Segment? {
+        if (chapterNodes.isEmpty()) return null
+        val chapterIndex = mpv.getPropertyInt("chapter") ?: -1
+        val chapterNode = if (chapterIndex == -1) {
+            ChapterNode(time = 0.0f, "")
+        } else {
+            chapterNodes.getOrNull(chapterIndex) ?: return null
+        }
+        return chapterNode.toSegment()
+    }
+    // <-- AM (STALE_CHAPTER_INDICATOR_FIX)
 
     private data class EpisodeLoadResult(
         val hosterList: List<Hoster>?,
@@ -3224,19 +3252,55 @@ class PlayerViewModel @JvmOverloads constructor(
         updateStateData { it.copy(isPipAvailable = value) }
     }
 
+    // AM (UNIFIED_CAST_PLAY_PAUSE) -->
+    // Was two separate paths: this ViewModel's pause()/unpause()/pauseUnpause()
+    // touched mpv only, while the CastScreen play/pause button dispatched
+    // CastManagerEvent.PlayPause straight to CastManager, bypassing the
+    // ViewModel entirely (see PlayerScreen's onCastManagerEvent wiring). Since
+    // the unified MediaSession.Callback (buildMediaSessionCallback() above)
+    // calls these same three functions regardless of whether an Activity/UI is
+    // attached, that meant a backgrounded play/pause command while casting hit
+    // local mpv instead of the actual cast session - the two states silently
+    // desynced and the TV never responded. These now branch on isCasting and
+    // are the single path either caller (MediaSession callback or CastScreen's
+    // button, see PlayerScreen.kt) goes through - CastManager.handleCastManagerEvent
+    // is only ever invoked from here for play/pause now.
+    //
+    // CastManagerEvent.PlayPause is toggle-only (it reads castState.value.playing
+    // itself), so pause()/unpause() guard on the current playing state before
+    // firing it, to preserve their explicit (not toggle) semantics and stay
+    // idempotent - onPlay()/onPause() above call these directly, not
+    // pauseUnpause().
     fun pauseUnpause() {
+        if (stateData.value.isCasting) {
+            castManager.handleCastManagerEvent(CastManagerEvent.PlayPause)
+            return
+        }
         mpvCommand("cycle", "pause")
     }
     fun pause() {
+        if (stateData.value.isCasting) {
+            if (castManager.castState.value.playing) {
+                castManager.handleCastManagerEvent(CastManagerEvent.PlayPause)
+            }
+            return
+        }
         setPropertyBoolean("pause", true)
 
         // PiP needs the state immediately
         updatePlaybackData { it.copy(paused = true) }
     }
     fun unpause() {
+        if (stateData.value.isCasting) {
+            if (!castManager.castState.value.playing) {
+                castManager.handleCastManagerEvent(CastManagerEvent.PlayPause)
+            }
+            return
+        }
         setPropertyBoolean("pause", false)
         updatePlaybackData { it.copy(paused = false) }
     }
+    // <-- AM (UNIFIED_CAST_PLAY_PAUSE)
 
     // AM (MEDIA_SESSION_FALLBACK_CALLBACK) -->
     /**
