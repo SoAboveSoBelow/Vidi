@@ -17,6 +17,8 @@ import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import kotlin.math.abs
 
+const val MAX_BRIGHTNESS = 1f
+
 @Composable
 fun BrightnessOverlay(
     @FloatRange(from = -0.75, to = 1.0) brightness: Float,
