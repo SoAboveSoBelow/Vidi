@@ -258,6 +258,13 @@ class AnimeScreen(
                     }
                 }
             },
+            onRelatedAnimeClicked = { relatedAnime ->
+                navigator.push(AnimeScreen(relatedAnime.id, fromSource = !relatedAnime.favorite))
+            },
+            onRelatedAnimeLongClicked = { relatedAnime ->
+                navigator.push(GlobalSearchScreen(relatedAnime.title))
+            },
+            relatedAnimeDisplayMode = screenModel.relatedAnimeDisplayMode,
             // <-- AY
         )
 

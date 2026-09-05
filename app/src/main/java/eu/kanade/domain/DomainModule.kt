@@ -4,9 +4,13 @@ import android.app.Application
 import animiru.data.player.EpisodeTempPositionRepositoryImpl
 import animiru.domain.player.interactor.TrackSelect
 import animiru.domain.player.repository.EpisodeTempPositionRepository
+import aniyomi.data.anime.AnimeRelationRepositoryImpl
+import aniyomi.domain.anime.interactor.GetRelatedAnime
+import aniyomi.domain.anime.repository.AnimeRelationRepository
 import eu.kanade.domain.anime.interactor.GetExcludedScanlators
 import eu.kanade.domain.anime.interactor.SetAnimeViewerFlags
 import eu.kanade.domain.anime.interactor.SetExcludedScanlators
+import eu.kanade.domain.anime.interactor.SyncRelatedAnimeWithSource
 import eu.kanade.domain.anime.interactor.SyncSeasonsWithSource
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.download.interactor.DeleteDownload
@@ -174,6 +178,10 @@ class DomainModule : InjektModule {
         addFactory { SetAnimeDefaultSeasonFlags(get(), get(), get()) }
         addFactory { ShouldUpdateDbSeason() }
         addFactory { SyncSeasonsWithSource(get(), get(), get(), get(), get()) }
+
+        addSingletonFactory<AnimeRelationRepository> { AnimeRelationRepositoryImpl(get()) }
+        addFactory { GetRelatedAnime(get()) }
+        addFactory { SyncRelatedAnimeWithSource(get(), get(), get()) }
         // <-- AY
 
         addSingletonFactory<ReleaseService> { ReleaseServiceImpl(get(), get()) }
