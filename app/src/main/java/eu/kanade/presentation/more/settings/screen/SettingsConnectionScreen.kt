@@ -22,7 +22,7 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.tachiyomi.data.connection.Connection
 import eu.kanade.tachiyomi.data.connection.ConnectionManager
-import eu.kanade.tachiyomi.util.system.openDiscordLoginActivity
+import eu.kanade.tachiyomi.ui.setting.connection.DiscordLoginScreen
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.collections.immutable.persistentListOf
 import tachiyomi.i18n.MR
@@ -51,7 +51,7 @@ object SettingsConnectionScreen : SearchableSettings {
                     Preference.PreferenceItem.ConnectionPreference(
                         title = connectionManager.discord.name,
                         connection = connectionManager.discord,
-                        login = { context.openDiscordLoginActivity() },
+                        login = { navigator.push(DiscordLoginScreen()) },
                         openSettings = { navigator.push(SettingsDiscordScreen) },
                     ),
                     // <-- AM (DISCORD_RPC)

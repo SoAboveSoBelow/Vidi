@@ -66,11 +66,15 @@ import coil3.imageLoader
 import coil3.request.ImageRequest
 import coil3.size.Size
 import dev.icerock.moko.resources.StringResource
+import eu.kanade.domain.connection.service.ConnectionPreferences
 import eu.kanade.presentation.theme.TachiyomiTheme
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SerializableHoster.Companion.serialize
+import eu.kanade.tachiyomi.data.connection.discord.DiscordRPCService
+import eu.kanade.tachiyomi.data.connection.discord.PlayerData
 import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
+import eu.kanade.tachiyomi.source.isNsfw
 import eu.kanade.tachiyomi.ui.base.activity.BaseActivity
 import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
 import eu.kanade.tachiyomi.ui.main.MainActivity
@@ -88,6 +92,7 @@ import kotlinx.coroutines.launch
 import logcat.LogPriority
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchNonCancellable
 import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
@@ -95,6 +100,8 @@ import tachiyomi.i18n.MR
 import tachiyomi.i18n.aniyomi.AYMR
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.seconds
 
 class PlayerActivity : BaseActivity() {
     // AM (SERVICE_OWNED_VIEWMODEL) -->
@@ -379,7 +386,7 @@ class PlayerActivity : BaseActivity() {
     // <-- AM (SERVICE_OWNED_PLAYER)
 
     // AM (DISCORD_RPC) -->
-    // private val connectionPreferences: ConnectionPreferences = Injekt.get()
+    private val connectionPreferences: ConnectionPreferences = Injekt.get()
     // <-- AM (DISCORD_RPC)
 
     private var pipRect: Rect? = null
@@ -831,6 +838,7 @@ class PlayerActivity : BaseActivity() {
         // notification and player adoption below.
         // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
         viewModel.setupPlayerOrientation()
+        updateDiscordRPC(exitingPlayer = false)
 
         // AM (SERVICE_OWNED_PLAYER) -->
         // Step 3: an explicit (non-foreground) start, independent of any bind/unbind
@@ -990,6 +998,9 @@ class PlayerActivity : BaseActivity() {
                     }
                     PlayerViewModel.Event.ToggleKeyboard -> {
                         toggleShowSoftwareKeyboard()
+                    }
+                    is PlayerViewModel.Event.UpdateDiscordRPC -> {
+                        updateDiscordRPC(exitingPlayer = false, paused = event.paused, position = event.position)
                     }
                 }
             }
@@ -1404,6 +1415,7 @@ class PlayerActivity : BaseActivity() {
         // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
 
         viewModel.saveCurrentEpisodeWatchingProgress()
+        updateDiscordRPC(exitingPlayer = false)
 
         // AM (NO_IDLE_WINDOW_FIX) -->
         // isPipEntryPending used to also gate this whole block, on the theory that
@@ -1496,6 +1508,8 @@ class PlayerActivity : BaseActivity() {
 
         if (isInPictureInPictureMode && powerManager.isInteractive) {
             viewModel.deletePendingEpisodes()
+        } else if (!isInPictureInPictureMode) {
+            updateDiscordRPC(exitingPlayer = true)
         }
 
         super.onStop()
@@ -1633,6 +1647,8 @@ class PlayerActivity : BaseActivity() {
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER
             }
         }
+
+        updateDiscordRPC(exitingPlayer = false)
     }
 
     override fun onResume() {
@@ -1645,6 +1661,8 @@ class PlayerActivity : BaseActivity() {
             return
         }
         // <-- AM (DUPLICATE_INSTANCE_SELF_TERMINATE)
+
+        updateDiscordRPC(exitingPlayer = false)
 
         // Restructured from two early-returns into if/else so both paths fall
         // through consistently (no longer gated on a pending-PIP check here - see
@@ -2259,31 +2277,50 @@ class PlayerActivity : BaseActivity() {
     }
 
     // AM (DISCORD_RPC) -->
-    /*
-     private fun updateDiscordRPC(exitingPlayer: Boolean) {
-     DiscordRPCService.discordScope.launchIO {
-     if (connectionPreferences.enableDiscordRPC.get()) {
-     if (!exitingPlayer) {
-     DiscordRPCService.setPlayerActivity(
-     context = applicationContext,
-     PlayerData(
-     incognitoMode = viewModel.currentSource.isNsfw() || viewModel.incognitoMode,
-     animeId = viewModel.currentAnime?.id,
-     // AM (CUSTOM_INFORMATION) -->
-     animeTitle = viewModel.currentAnime?.ogTitle,
-     // <-- AM (CUSTOM_INFORMATION)
-     episodeNumber = viewModel.currentEpisode?.episode_number?.toString(),
-     thumbnailUrl = viewModel.currentAnime?.thumbnailUrl,
-     ),
-     )
-     } else {
-     with(DiscordRPCService) {
-     setScreen(this@PlayerActivity.applicationContext, lastUsedScreen)
-     }
-     }
-     }
-     }
-     }
-     // <-- AM (DISCORD_RPC)
-     **/
+    private fun updateDiscordRPC(exitingPlayer: Boolean, paused: Boolean = false, position: Int? = null) {
+        if (!connectionPreferences.enableDiscordRPC.get()) return
+
+        lifecycleScope.launchIO {
+            try {
+                if (!exitingPlayer) {
+                    val playbackData = viewModel.playbackData.value
+                    val stateData = viewModel.stateData.value
+                    if (playbackData.duration == 0) return@launchIO
+
+                    val timePos = position?.seconds ?: playbackData.position.seconds
+                    val duration = playbackData.duration.seconds
+
+                    val startTimestamp = Clock.System.now() - timePos
+                    val endTimestamp = startTimestamp + duration
+
+                    val anime = stateData.currentAnime ?: return@launchIO
+                    val episode = stateData.currentEpisode ?: return@launchIO
+
+                    DiscordRPCService.setPlayerActivity(
+                        context = this@PlayerActivity,
+                        PlayerData(
+                            incognitoMode = stateData.currentSource?.isNsfw() == true || stateData.incognitoMode,
+                            paused = paused,
+                            animeId = anime.id,
+                            animeTitle = anime.ogTitle,
+                            thumbnailUrl = anime.thumbnailUrl ?: "",
+                            episodeNumber = if (connectionPreferences.discordShowEpisodeTitle.get()) {
+                                episode.name
+                            } else {
+                                episode.episode_number.toString()
+                            },
+                            startTimestamp = startTimestamp.toEpochMilliseconds().takeUnless { paused },
+                            endTimestamp = endTimestamp.toEpochMilliseconds().takeUnless { paused },
+                        ),
+                    )
+                } else {
+                    val lastUsedScreen = DiscordRPCService.lastUsedScreen
+                    DiscordRPCService.setScreen(this@PlayerActivity, lastUsedScreen)
+                }
+            } catch (e: Exception) {
+                logcat(LogPriority.ERROR) { "Error updating Discord RPC: ${e.message}" }
+            }
+        }
+    }
+    // <-- AM (DISCORD_RPC)
 }
