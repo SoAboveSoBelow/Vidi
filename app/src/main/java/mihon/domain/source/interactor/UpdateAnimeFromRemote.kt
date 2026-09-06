@@ -27,7 +27,7 @@ import tachiyomi.domain.episode.repository.EpisodeRepository
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.source.local.LocalSource
 import tachiyomi.source.local.isLocal
-import java.time.Instant
+import kotlin.time.Clock
 
 class UpdateAnimeFromRemote(
     private val sourceManager: SourceManager,
@@ -198,14 +198,14 @@ class UpdateAnimeFromRemote(
                 // Never refresh covers if the url is empty to avoid "losing" existing covers
                 remoteAnime.thumbnail_url.isNullOrEmpty() -> null
                 !manualFetch && localAnime.thumbnailUrl == remoteAnime.thumbnail_url -> null
-                localAnime.isLocal() -> Instant.now().toEpochMilli()
+                localAnime.isLocal() -> Clock.System.now().toEpochMilliseconds()
                 localAnime.hasCustomCover(coverCache) -> {
                     coverCache.deleteFromCache(localAnime, false)
                     null
                 }
                 else -> {
                     coverCache.deleteFromCache(localAnime, false)
-                    Instant.now().toEpochMilli()
+                    Clock.System.now().toEpochMilliseconds()
                 }
             }
 
@@ -214,14 +214,14 @@ class UpdateAnimeFromRemote(
                 // Never refresh backgrounds if the url is empty to avoid "losing" existing backgrounds
                 remoteAnime.background_url.isNullOrEmpty() -> null
                 !manualFetch && localAnime.backgroundUrl == remoteAnime.background_url -> null
-                localAnime.isLocal() -> Instant.now().toEpochMilli()
+                localAnime.isLocal() -> Clock.System.now().toEpochMilliseconds()
                 localAnime.hasCustomBackground(backgroundCache) -> {
                     backgroundCache.deleteFromCache(localAnime, false)
                     null
                 }
                 else -> {
                     backgroundCache.deleteFromCache(localAnime, false)
-                    Instant.now().toEpochMilli()
+                    Clock.System.now().toEpochMilliseconds()
                 }
             }
 

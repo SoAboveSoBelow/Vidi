@@ -124,7 +124,7 @@ open class DiscordWebSocketImpl(
             scope.cancel()
             scope = CoroutineScope(coroutineContext)
             scope.launch {
-                delay(heartbeatInterval!!)
+                delay(heartbeatInterval!!.milliseconds)
                 webSocket?.send("{\"op\":1, \"d\":$seq}")
             }
             if (sendIdentify) sendIdentify()

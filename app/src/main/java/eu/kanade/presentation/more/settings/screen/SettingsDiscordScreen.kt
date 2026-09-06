@@ -32,8 +32,6 @@ import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.widget.TriStateListDialog
 import eu.kanade.tachiyomi.data.connection.ConnectionManager
 import eu.kanade.tachiyomi.util.system.toast
-import kotlinx.collections.immutable.persistentListOf
-import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.coroutines.runBlocking
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.i18n.MR
@@ -91,7 +89,7 @@ object SettingsDiscordScreen : SearchableSettings {
         return listOf(
             Preference.PreferenceGroup(
                 title = stringResource(AMMR.strings.connection_discord),
-                preferenceItems = persistentListOf(
+                preferenceItems = listOf(
                     Preference.PreferenceItem.SwitchPreference(
                         preference = enableDRPCPref,
                         title = stringResource(AMMR.strings.pref_enable_discord_rpc),
@@ -99,7 +97,7 @@ object SettingsDiscordScreen : SearchableSettings {
                     Preference.PreferenceItem.ListPreference(
                         preference = discordRPCStatus,
                         title = stringResource(AMMR.strings.pref_discord_status),
-                        entries = persistentMapOf(
+                        entries = mapOf(
                             -1 to stringResource(AMMR.strings.pref_discord_dnd),
                             0 to stringResource(AMMR.strings.pref_discord_idle),
                             1 to stringResource(AMMR.strings.pref_discord_online),
@@ -166,7 +164,7 @@ object SettingsDiscordScreen : SearchableSettings {
 
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.categories),
-            preferenceItems = persistentListOf(
+            preferenceItems = listOf(
                 Preference.PreferenceItem.SwitchPreference(
                     preference = discordRPCIncognitoPref,
                     title = stringResource(AMMR.strings.pref_discord_incognito),
@@ -256,7 +254,7 @@ object SettingsDiscordScreen : SearchableSettings {
         return Preference.PreferenceGroup(
             title = stringResource(AMMR.strings.pref_category_discord_customization),
             enabled = enabled,
-            preferenceItems = persistentListOf(
+            preferenceItems = listOf(
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(AMMR.strings.pref_discord_custom_message),
                     subtitle = stringResource(AMMR.strings.pref_discord_custom_message_summary),

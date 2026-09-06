@@ -50,7 +50,6 @@ import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.components.AppBarTitle
 import eu.kanade.presentation.components.DownloadDropdownMenu
-import kotlinx.collections.immutable.persistentListOf
 import tachiyomi.domain.anime.model.EpisodeViewMode
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
@@ -190,7 +189,7 @@ fun AnimeToolbar(
 
             val filterTint = if (hasFilters) MaterialTheme.colorScheme.active else LocalContentColor.current
             AppBarActions(
-                actions = persistentListOf<AppBar.AppBarAction>().builder().apply {
+                actions = buildList {
                     if (isActionMode) {
                         add(
                             AppBar.Action(
@@ -206,7 +205,7 @@ fun AnimeToolbar(
                                 onClick = onInvertSelection,
                             ),
                         )
-                        return@apply
+                        return@buildList
                     }
                     // AM (EPISODE_SEARCH) -->
                     if (!isSearching) {
@@ -329,8 +328,7 @@ fun AnimeToolbar(
                         )
                     }
                     // <-- AY
-                }
-                    .build(),
+                },
             )
         },
         isActionMode = isActionMode,

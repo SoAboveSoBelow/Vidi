@@ -32,7 +32,7 @@ Base features:
 * Watch videos
 * Local watching of downloaded content
 * A configurable player built on mpv-android with multiple options and settings
-* Tracker support: [MyAnimeList](https://myanimelist.net/), [AniList](https://anilist.co/), [Kitsu](https://kitsu.app/), [Shikimori](https://shikimori.io), and [Bangumi](https://bgm.tv/)
+* Tracker support: [MyAnimeList](https://myanimelist.net/), [AniList](https://anilist.co/), [Kitsu](https://kitsu.app/), [Shikimori](https://shikimori.io), [Simkl](https://simkl.com/), [Bangumi](https://bgm.tv/), and [Hikka](https://hikka.io/) support.
 * Categories to organize your library
 * Light and dark themes
 * Create backups locally to watch offline or to your desired cloud service
