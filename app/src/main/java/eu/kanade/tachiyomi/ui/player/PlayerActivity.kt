@@ -60,12 +60,14 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.lifecycleScope
 import animiru.domain.player.model.ArtType
 import animiru.domain.player.model.SetAsArt
+import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
 import coil3.asDrawable
 import coil3.imageLoader
 import coil3.request.ImageRequest
 import coil3.size.Size
 import dev.icerock.moko.resources.StringResource
+import dev.zacsweers.metro.Inject
 import eu.kanade.domain.connection.service.ConnectionPreferences
 import eu.kanade.presentation.theme.TachiyomiTheme
 import eu.kanade.tachiyomi.animesource.model.Hoster
@@ -90,6 +92,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import logcat.LogPriority
+import mihon.app.di.AppGraph
+import mihon.core.metro.metroGraph
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
@@ -98,8 +102,6 @@ import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.aniyomi.AYMR
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.seconds
 
@@ -119,12 +121,14 @@ class PlayerActivity : BaseActivity() {
     // death, a materially rarer event once a foreground service with an active
     // notification is keeping this process's priority elevated most of the time
     // this matters.
+    private val graph: AppGraph by lazy { metroGraph() }
+
     private val viewModel: PlayerViewModel by lazy {
         PlayerMediaHolder.current?.viewModel
             ?: PlayerMediaHolder.current?.adoptViewModel(
-                PlayerViewModel(application, SavedStateHandle()),
+                graph.playerViewModelFactory.create(SavedStateHandle()),
             )
-            ?: PlayerViewModel(application, SavedStateHandle())
+            ?: graph.playerViewModelFactory.create(SavedStateHandle())
     }
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
     private val windowInsetsController by lazy { WindowCompat.getInsetsController(window, window.decorView) }
@@ -165,7 +169,10 @@ class PlayerActivity : BaseActivity() {
     private val mediaSession: MediaSession?
         get() = mediaHolder?.mediaSession
     // <-- AM (MEDIA_SESSION_SERVICE_OWNED)
-    private val playerPreferences: PlayerPreferences = Injekt.get()
+
+    @Inject private lateinit var gesturePreferences: GesturePreferences
+
+    @Inject private lateinit var playerPreferences: PlayerPreferences
 
     private var backgroundPlaybackService: PlayerBackgroundPlaybackService? = null
 
@@ -386,7 +393,7 @@ class PlayerActivity : BaseActivity() {
     // <-- AM (SERVICE_OWNED_PLAYER)
 
     // AM (DISCORD_RPC) -->
-    private val connectionPreferences: ConnectionPreferences = Injekt.get()
+    @Inject private lateinit var connectionPreferences: ConnectionPreferences
     // <-- AM (DISCORD_RPC)
 
     private var pipRect: Rect? = null
@@ -795,6 +802,7 @@ class PlayerActivity : BaseActivity() {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
+        graph.inject(this)
         enableEdgeToEdge()
         registerSecureActivity(this)
         super.onCreate(savedInstanceState)
@@ -837,6 +845,8 @@ class PlayerActivity : BaseActivity() {
         // persistent ViewModel ever binds to a holder. Same timing as the
         // notification and player adoption below.
         // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
+        viewModel.setupPlayerOrientation()
+        updateDiscordRPC(exitingPlayer = false)
         viewModel.setupPlayerOrientation()
         updateDiscordRPC(exitingPlayer = false)
 
@@ -1201,7 +1211,7 @@ class PlayerActivity : BaseActivity() {
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Safety net: onPictureInPictureModeChanged(false, ...) normally clears this, but
         // isn't guaranteed to fire if the activity is destroyed directly out of PIP.
-        SecureActivityDelegate.setPipActive(false)
+        SecureActivityDelegate.setPipActive(this, false)
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
 
         // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
@@ -1356,13 +1366,14 @@ class PlayerActivity : BaseActivity() {
         // since the notification is now always-on while playing. This is just the
         // exemption toggle now; setBackgroundServiceActive is idempotent, so no guard
         // is needed against calling it more than once.
-        SecureActivityDelegate.setBackgroundServiceActive(true)
+        SecureActivityDelegate.setBackgroundServiceActive(this, true)
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     }
 
+
     private fun stopBackgroundPlayback() {
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
-        SecureActivityDelegate.setBackgroundServiceActive(false)
+        SecureActivityDelegate.setBackgroundServiceActive(this, false)
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     }
 
@@ -1399,7 +1410,7 @@ class PlayerActivity : BaseActivity() {
             // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
         } else {
             viewModel.pause()
-            SecureActivityDelegate.setPipActive(false)
+            SecureActivityDelegate.setPipActive(this, false)
         }
     }
     // <-- AM (ENTER_BACKGROUND_CONSOLIDATION)
@@ -1786,7 +1797,7 @@ class PlayerActivity : BaseActivity() {
         // onPictureInPictureModeChanged() - setPipActive() is idempotent for the
         // same value.
         // <-- AM (PIP_LOCK_RACE_FIX)
-        SecureActivityDelegate.setPipActive(true)
+        SecureActivityDelegate.setPipActive(this, true)
         if (params != null) {
             enterPictureInPictureMode(params)
         } else {
@@ -1893,7 +1904,7 @@ class PlayerActivity : BaseActivity() {
         // both flags are false and a concurrently-firing ProcessLifecycleOwner stop can
         // wrongly consume the exemption.
         if (isInPictureInPictureMode) {
-            SecureActivityDelegate.setPipActive(true)
+            SecureActivityDelegate.setPipActive(this, true)
             // AM (PIP_ENTRY_CANCELLED_FIX) -->
             isPipEntryPending = false
             // <-- AM (PIP_ENTRY_CANCELLED_FIX)
@@ -1908,7 +1919,7 @@ class PlayerActivity : BaseActivity() {
 
             if (isIntentionalBackgroundTransition) {
                 isIntentionalBackgroundTransition = false
-                SecureActivityDelegate.setPipActive(false)
+                SecureActivityDelegate.setPipActive(this, false)
             } else if (lifecycle.currentState == Lifecycle.State.CREATED) {
                 // AM (PIP_ENTRY_CANCELLED_FIX) -->
                 // If a PIP entry attempt was just made (isPipEntryPending, set right
@@ -2006,7 +2017,7 @@ class PlayerActivity : BaseActivity() {
                                     enterBackground(force = true)
                                     moveTaskToBack(true)
                                 } else {
-                                    SecureActivityDelegate.setPipActive(false)
+                                    SecureActivityDelegate.setPipActive(this, false)
                                     viewModel.player.release()
                                     finish()
                                 }
@@ -2022,7 +2033,7 @@ class PlayerActivity : BaseActivity() {
                 }
             } else {
                 // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
-                SecureActivityDelegate.setPipActive(false)
+                SecureActivityDelegate.setPipActive(this, false)
                 // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
                 window.attributes = window.attributes.apply {
                     val brightness = viewModel.playbackData.value.currentBrightness

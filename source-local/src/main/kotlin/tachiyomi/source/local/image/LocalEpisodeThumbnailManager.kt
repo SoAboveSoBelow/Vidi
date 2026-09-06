@@ -3,6 +3,9 @@ package tachiyomi.source.local.image
 
 import android.content.Context
 import com.hippo.unifile.UniFile
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.util.storage.DiskUtil
@@ -20,6 +23,8 @@ private const val DEFAULT_THUMBNAIL_SUFFIX = "thumbnail"
 private const val THUMBNAILS_DIR_NAME = ".thumbnails"
 // <-- AM (THUMBNAILS_SUBFOLDER)
 
+@Inject
+@SingleIn(AppScope::class)
 class LocalEpisodeThumbnailManager(
     private val context: Context,
     private val fileSystem: LocalSourceFileSystem,

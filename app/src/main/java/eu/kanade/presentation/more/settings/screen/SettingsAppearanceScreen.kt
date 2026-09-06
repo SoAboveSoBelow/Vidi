@@ -25,14 +25,13 @@ import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toJavaLocalDateTime
 import kotlinx.datetime.toLocalDateTime
+import mihon.app.di.appGraph
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import kotlin.time.Clock
 
 object SettingsAppearanceScreen : SearchableSettings {
@@ -43,7 +42,8 @@ object SettingsAppearanceScreen : SearchableSettings {
 
     @Composable
     override fun getPreferences(): List<Preference> {
-        val uiPreferences = remember { Injekt.get<UiPreferences>() }
+        val context = LocalContext.current
+        val uiPreferences = remember { context.appGraph.uiPreferences }
 
         return listOf(
             getThemeGroup(uiPreferences = uiPreferences),
@@ -117,7 +117,7 @@ object SettingsAppearanceScreen : SearchableSettings {
 
         // AM (EPISODE_VIEW_MODE) -->
         val defaultEpisodeViewModePreference = remember {
-            DefaultEpisodeViewModePreference(Injekt.get())
+            DefaultEpisodeViewModePreference(context.appGraph.libraryPreferences)
         }
         // <-- AM (EPISODE_VIEW_MODE)
 

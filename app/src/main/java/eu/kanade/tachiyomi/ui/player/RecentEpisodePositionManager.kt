@@ -2,6 +2,9 @@ package eu.kanade.tachiyomi.ui.player
 
 import animiru.domain.player.repository.EpisodeTempPositionRepository
 import animiru.domain.player.service.PlayerPreferences
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,6 +34,8 @@ import java.util.concurrent.ConcurrentHashMap
  * playlist-index-distance scheme - simpler, and matches what
  * `recentEpisodePositionSlots` describes.
  */
+@Inject
+@SingleIn(AppScope::class)
 class RecentEpisodePositionManager(
     private val repository: EpisodeTempPositionRepository,
     private val playerPreferences: PlayerPreferences,

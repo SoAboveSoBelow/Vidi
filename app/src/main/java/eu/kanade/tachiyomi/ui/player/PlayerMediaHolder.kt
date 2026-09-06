@@ -42,6 +42,7 @@ import eu.kanade.tachiyomi.ui.player.loader.EpisodeLoader
 import eu.kanade.tachiyomi.ui.player.loader.HosterLoader
 import kotlinx.coroutines.launch
 import logcat.LogPriority
+import mihon.app.di.appGraph
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.anime.model.asAnimeCover
@@ -50,8 +51,6 @@ import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.source.local.image.LocalCoverManager
 import tachiyomi.source.local.image.LocalEpisodeThumbnailManager
 import tachiyomi.source.local.isLocal
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 // <-- AM (BACKGROUND_SKIP_FIX)
 
 /**
@@ -97,12 +96,12 @@ import uy.kohesive.injekt.api.get
 class PlayerMediaHolder(
     private val context: Context,
     // AM (BACKGROUND_SKIP_FIX) -->
-    private val getAnime: GetAnime = Injekt.get(),
-    private val getEpisode: GetEpisode = Injekt.get(),
-    private val sourceManager: SourceManager = Injekt.get(),
-    private val playerPreferences: PlayerPreferences = Injekt.get(),
-    private val coverManager: LocalCoverManager = Injekt.get(),
-    private val episodeThumbnailManager: LocalEpisodeThumbnailManager = Injekt.get(),
+    private val getAnime: GetAnime = context.appGraph.getAnime,
+    private val getEpisode: GetEpisode = context.appGraph.getEpisode,
+    private val sourceManager: SourceManager = context.appGraph.sourceManager,
+    private val playerPreferences: PlayerPreferences = context.appGraph.playerPreferences,
+    private val coverManager: LocalCoverManager = context.appGraph.coverManager,
+    private val episodeThumbnailManager: LocalEpisodeThumbnailManager = context.appGraph.episodeThumbnailManager,
     // <-- AM (BACKGROUND_SKIP_FIX)
 ) {
     // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->

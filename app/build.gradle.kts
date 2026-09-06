@@ -12,6 +12,7 @@ plugins {
     alias(mihonx.plugins.compose)
     alias(mihonx.plugins.spotless)
 
+    alias(libs.plugins.metro)
     alias(libs.plugins.aboutLibraries)
     alias(libs.plugins.androidx.baselineProfile)
     alias(libs.plugins.kotlin.serialization)
@@ -115,10 +116,10 @@ android {
 
             matchingFallbacks.addAll(commonMatchingFallbacks)
         }
-        create("preview") {
+        create("nightly") {
             initWith(release)
 
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = ".nightly"
 
             versionNameSuffix = debug.versionNameSuffix
 
@@ -137,7 +138,7 @@ android {
     }
 
     sourceSets {
-        getByName("preview").res.directories.add("src/debug/res")
+        getByName("nightly").res.directories.add("src/debug/res")
         getByName("benchmark").res.directories.add("src/debug/res")
     }
 
@@ -256,7 +257,7 @@ dependencies {
     // <-- AM
     implementation(projects.core.archive)
     implementation(projects.core.common)
-    implementation(projects.core.viewmodel)
+    implementation(projects.core.metro)
     implementation(projects.coreMetadata)
     implementation(projects.sourceApi)
     implementation(projects.sourceLocal)
@@ -340,6 +341,9 @@ dependencies {
 
     // Dependency injection
     implementation(libs.injekt)
+    implementation(libs.metro.runtime)
+    implementation(libs.metrox.viewmodel)
+    implementation(libs.metrox.viewmodel.compose)
 
     // Image loading
     implementation(libs.bundles.coil)

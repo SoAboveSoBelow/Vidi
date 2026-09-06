@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.ui.base.delegate
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Handler
@@ -11,6 +12,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import dev.zacsweers.metro.Inject
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.ui.security.UnlockActivity
@@ -20,9 +22,9 @@ import eu.kanade.tachiyomi.util.view.setSecureScreen
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import mihon.app.di.appGraph
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
-import uy.kohesive.injekt.injectLazy
 
 interface SecureActivityDelegate {
     fun registerSecureActivity(activity: AppCompatActivity)
@@ -61,14 +63,14 @@ interface SecureActivityDelegate {
          */
         private var wasBackgroundPlaybackExempt = false
 
-        fun setPipActive(active: Boolean) {
+        fun setPipActive(context: Context, active: Boolean) {
             isPipActive = active
-            if (!isBackgroundPlaybackActive) deferredApplicationStoppedCheck()
+            if (!isBackgroundPlaybackActive) deferredApplicationStoppedCheck(context)
         }
 
-        fun setBackgroundServiceActive(active: Boolean) {
+        fun setBackgroundServiceActive(context: Context, active: Boolean) {
             isBackgroundServiceActive = active
-            if (!isBackgroundPlaybackActive) deferredApplicationStoppedCheck()
+            if (!isBackgroundPlaybackActive) deferredApplicationStoppedCheck(context)
         }
 
         /**
@@ -92,13 +94,13 @@ interface SecureActivityDelegate {
          * switch. Posting defers evaluation until after the current lifecycle dispatch (and
          * ProcessLifecycleOwner's own state update) has settled.
          */
-        private fun deferredApplicationStoppedCheck() {
-            Handler(Looper.getMainLooper()).post { onApplicationStopped() }
+        private fun deferredApplicationStoppedCheck(context: Context) {
+            Handler(Looper.getMainLooper()).post { onApplicationStopped(context) }
         }
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
 
-        fun onApplicationStopped() {
-            val preferences = Injekt.get<SecurityPreferences>()
+        fun onApplicationStopped(context: Context) {
+            val preferences = context.appGraph.securityPreferences
             if (!preferences.useAuthenticator.get()) return
 
             // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
@@ -125,8 +127,8 @@ interface SecureActivityDelegate {
         /**
          * Checks if unlock is needed when app comes foreground.
          */
-        fun onApplicationStart() {
-            val preferences = Injekt.get<SecurityPreferences>()
+        fun onApplicationStart(context: Context) {
+            val preferences = context.appGraph.securityPreferences
             if (!preferences.useAuthenticator.get()) return
 
             // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
@@ -164,11 +166,13 @@ class SecureActivityDelegateImpl : SecureActivityDelegate, DefaultLifecycleObser
 
     private lateinit var activity: AppCompatActivity
 
-    private val preferences: BasePreferences by injectLazy()
-    private val securityPreferences: SecurityPreferences by injectLazy()
+    @Inject private lateinit var preferences: BasePreferences
+
+    @Inject private lateinit var securityPreferences: SecurityPreferences
 
     override fun registerSecureActivity(activity: AppCompatActivity) {
         this.activity = activity
+        Injekt.get<Context>().appGraph.inject(this)
         activity.lifecycle.addObserver(this)
     }
 

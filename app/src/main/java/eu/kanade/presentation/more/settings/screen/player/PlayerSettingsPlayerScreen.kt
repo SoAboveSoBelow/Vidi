@@ -20,19 +20,17 @@ import eu.kanade.tachiyomi.ui.player.MX_PLAYER
 import eu.kanade.tachiyomi.ui.player.MX_PLAYER_FREE
 import eu.kanade.tachiyomi.ui.player.MX_PLAYER_PRO
 import eu.kanade.tachiyomi.ui.player.NEXT_PLAYER
-import eu.kanade.tachiyomi.ui.player.RecentEpisodePositionManager
 import eu.kanade.tachiyomi.ui.player.VLC_PLAYER
 import eu.kanade.tachiyomi.ui.player.WEB_VIDEO_CASTER
 import eu.kanade.tachiyomi.ui.player.X_PLAYER
 import eu.kanade.tachiyomi.util.system.castIncluded
 import eu.kanade.tachiyomi.util.system.toast
+import mihon.app.di.appGraph
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import java.text.NumberFormat
 
 object PlayerSettingsPlayerScreen : SearchableSettings {
@@ -43,8 +41,9 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
 
     @Composable
     override fun getPreferences(): List<Preference> {
-        val playerPreferences = remember { Injekt.get<PlayerPreferences>() }
-        val basePreferences = remember { Injekt.get<BasePreferences>() }
+        val context = LocalContext.current
+        val playerPreferences = remember { context.appGraph.playerPreferences }
+        val basePreferences = remember { context.appGraph.basePreferences }
         val deviceSupportsPip = basePreferences.deviceHasPip()
 
         return listOfNotNull(
@@ -73,7 +72,7 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 onValueChanged = {
                     // Trim the persisted cache down to the new limit right away, rather
                     // than waiting for the next write to notice it shrank.
-                    Injekt.get<RecentEpisodePositionManager>().onSlotsPreferenceChanged()
+                    context.appGraph.recentEpisodePositionManager.onSlotsPreferenceChanged()
                     true
                 },
             ),

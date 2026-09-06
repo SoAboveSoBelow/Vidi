@@ -42,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.LayoutDirection
@@ -49,7 +50,6 @@ import androidx.compose.ui.unit.dp
 import androidx.constraintlayout.compose.ConstraintLayout
 import androidx.constraintlayout.compose.Dimension
 import animiru.domain.player.model.SingleActionGesture
-import animiru.domain.player.service.GesturePreferences
 import eu.kanade.tachiyomi.ui.player.Panels
 import eu.kanade.tachiyomi.ui.player.PlayerUpdates
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel
@@ -62,10 +62,9 @@ import eu.kanade.tachiyomi.ui.player.controls.components.TextPlayerUpdate
 import eu.kanade.tachiyomi.ui.player.controls.components.ThumbnailPreview
 import eu.kanade.tachiyomi.ui.player.controls.components.VolumeSlider
 import kotlinx.coroutines.delay
+import mihon.app.di.appGraph
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
 
@@ -112,7 +111,8 @@ fun PlayerControls(
     )
 
     // AM (MEDIA_CONTROLS) -->
-    val gesturePreferences = remember { Injekt.get<GesturePreferences>() }
+    val context = LocalContext.current
+    val gesturePreferences = remember { context.appGraph.gesturePreferences }
     val mediaPreviousGesture = remember { gesturePreferences.mediaPreviousGesture.get() }
     val mediaNextGesture = remember { gesturePreferences.mediaNextGesture.get() }
     val previousIcon = remember(mediaPreviousGesture) { mediaGestureIcon(mediaPreviousGesture, isNext = false) }

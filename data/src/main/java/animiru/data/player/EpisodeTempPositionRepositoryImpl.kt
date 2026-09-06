@@ -3,11 +3,18 @@ package animiru.data.player
 import animiru.domain.player.model.EpisodeTempPosition
 import animiru.domain.player.repository.EpisodeTempPositionRepository
 import app.cash.sqldelight.async.coroutines.awaitAsList
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.ContributesBinding
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
 import logcat.LogPriority
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.data.Database
 
 // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+@Inject
+@SingleIn(AppScope::class)
+@ContributesBinding(AppScope::class)
 class EpisodeTempPositionRepositoryImpl(
     private val database: Database,
 ) : EpisodeTempPositionRepository {

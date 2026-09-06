@@ -1,6 +1,6 @@
 package eu.kanade.tachiyomi.ui.player
 
-import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
@@ -13,9 +13,11 @@ import androidx.compose.runtime.Stable
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.net.toUri
-import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.CreationExtras
 import animiru.domain.player.interactor.TrackSelect
 import animiru.domain.player.model.ArtType
 import animiru.domain.player.model.BottomPlayerButton
@@ -36,7 +38,15 @@ import aniyomi.core.common.torrent.TorrentServerUtils
 import com.yubyf.truetypeparser.TTFFile
 import dev.icerock.moko.resources.StringResource
 import dev.vivvvek.seeker.Segment
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.Assisted
+import dev.zacsweers.metro.AssistedFactory
+import dev.zacsweers.metro.AssistedInject
+import dev.zacsweers.metro.ContributesIntoMap
+import dev.zacsweers.metrox.viewmodel.ViewModelAssistedFactory
+import dev.zacsweers.metrox.viewmodel.ViewModelAssistedFactoryKey
 import eu.kanade.domain.anime.interactor.SetAnimeViewerFlags
+import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.connection.SyncPreferences
 import eu.kanade.domain.episode.model.toDbEpisode
@@ -53,10 +63,13 @@ import eu.kanade.tachiyomi.animesource.model.TileInfo
 import eu.kanade.tachiyomi.animesource.model.TimeStamp
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
+import eu.kanade.tachiyomi.data.cache.BackgroundCache
+import eu.kanade.tachiyomi.data.cache.CoverCache
 import eu.kanade.tachiyomi.data.connection.syncmiru.SyncDataJob
 import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.data.database.models.isRecognizedNumber
 import eu.kanade.tachiyomi.data.database.models.toDomainEpisode
+import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.data.player.service.HttpServerService
@@ -100,6 +113,7 @@ import eu.kanade.tachiyomi.util.lang.takeBytes
 import eu.kanade.tachiyomi.util.storage.DiskUtil
 import eu.kanade.tachiyomi.util.storage.cacheImageDir
 import eu.kanade.tachiyomi.util.system.getWanIp
+import eu.kanade.tachiyomi.util.system.workManager
 import `is`.xyz.mpv.MPVNode
 import `is`.xyz.mpv.Utils
 import kotlinx.coroutines.Dispatchers
@@ -159,9 +173,10 @@ import tachiyomi.domain.storage.service.StorageManager
 import tachiyomi.domain.track.interactor.GetTracks
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
+import tachiyomi.source.local.image.LocalBackgroundManager
+import tachiyomi.source.local.image.LocalCoverManager
+import tachiyomi.source.local.image.LocalEpisodeThumbnailManager
 import tachiyomi.source.local.isLocal
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import java.io.File
 import java.io.InputStream
 import java.util.Date
@@ -171,58 +186,85 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.time.Duration.Companion.seconds
 
-class PlayerViewModel @JvmOverloads constructor(
-    private val context: Application,
-    private val savedState: SavedStateHandle,
-    private val json: Json = Injekt.get(),
+@AssistedInject
+class PlayerViewModel(
+    @Assisted private val savedState: SavedStateHandle,
+    private val context: Context,
+    private val json: Json,
+    private val mpvFactory: MPVPlayer.Factory,
 
-    private val getAnime: GetAnime = Injekt.get(),
-    private val getNextEpisodes: GetNextEpisodes = Injekt.get(),
-    private val getEpisodesByAnimeId: GetEpisodesByAnimeId = Injekt.get(),
-    private val getCategories: GetCategories = Injekt.get(),
-    private val getTracks: GetTracks = Injekt.get(),
-    private val getIncognitoState: GetIncognitoState = Injekt.get(),
+    private val getAnime: GetAnime,
+    private val getNextEpisodes: GetNextEpisodes,
+    private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
+    private val getCategories: GetCategories,
+    private val getTracks: GetTracks,
+    private val getIncognitoState: GetIncognitoState,
 
-    private val upsertHistory: UpsertHistory = Injekt.get(),
-    private val updateEpisode: UpdateEpisode = Injekt.get(),
+    private val updateAnime: UpdateAnime,
+    private val upsertHistory: UpsertHistory,
+    private val updateEpisode: UpdateEpisode,
     // AM (RECENT_EPISODE_POSITIONS) -->
-    private val getEpisode: GetEpisode = Injekt.get(),
+    private val getEpisode: GetEpisode,
     // <-- AM (RECENT_EPISODE_POSITIONS)
-    private val trackEpisode: TrackEpisode = Injekt.get(),
-    private val setAnimeViewerFlags: SetAnimeViewerFlags = Injekt.get(),
+    private val trackEpisode: TrackEpisode,
+    private val setAnimeViewerFlags: SetAnimeViewerFlags,
+    private val downloadCache: DownloadCache,
+    private val coverCache: CoverCache,
+    private val backgroundCache: BackgroundCache,
 
-    private val imageSaver: ImageSaver = Injekt.get(),
-    private val downloadManager: DownloadManager = Injekt.get(),
-    private val sourceManager: SourceManager = Injekt.get(),
-    private val storageManager: StorageManager = Injekt.get(),
-    private val trackerManager: TrackerManager = Injekt.get(),
+    private val imageSaver: ImageSaver,
+    private val downloadManager: DownloadManager,
+    private val sourceManager: SourceManager,
+    private val storageManager: StorageManager,
+    private val trackerManager: TrackerManager,
+    private val episodeLoader: EpisodeLoader,
+    private val hosterLoader: HosterLoader,
+    private val aniSkipApi: AniSkipApi,
 
-    private val torrentServerApi: TorrentServerApi = Injekt.get(),
-    private val torrentServerUtils: TorrentServerUtils = Injekt.get(),
-    private val torrentPreferences: TorrentPreferences = Injekt.get(),
+    private val torrentServerApi: TorrentServerApi,
+    private val torrentServerUtils: TorrentServerUtils,
+    private val torrentPreferences: TorrentPreferences,
 
-    private val basePreferences: BasePreferences = Injekt.get(),
-    private val episodeShufflePreferences: EpisodeShufflePreferences = Injekt.get(),
-    private val libraryPreferences: LibraryPreferences = Injekt.get(),
-    private val downloadPreferences: DownloadPreferences = Injekt.get(),
-    private val trackPreferences: TrackPreferences = Injekt.get(),
-    private val playerPreferences: PlayerPreferences = Injekt.get(),
-    decoderPreferences: DecoderPreferences = Injekt.get(),
-    private val gesturePreferences: GesturePreferences = Injekt.get(),
-    private val audioPreferences: AudioPreferences = Injekt.get(),
-    private val subtitlePreferences: SubtitlePreferences = Injekt.get(),
-    private val getCustomButtons: GetCustomButtons = Injekt.get(),
-    private val trackSelect: TrackSelect = Injekt.get(),
-    private val audioManager: AudioManager = Injekt.get(),
-    brightnessManager: BrightnessManager = Injekt.get(),
+    private val basePreferences: BasePreferences,
+    private val episodeShufflePreferences: EpisodeShufflePreferences,
+    private val libraryPreferences: LibraryPreferences,
+    private val downloadPreferences: DownloadPreferences,
+    private val trackPreferences: TrackPreferences,
+    private val playerPreferences: PlayerPreferences,
+    decoderPreferences: DecoderPreferences,
+    private val gesturePreferences: GesturePreferences,
+    private val audioPreferences: AudioPreferences,
+    private val subtitlePreferences: SubtitlePreferences,
+    private val getCustomButtons: GetCustomButtons,
+    private val trackSelect: TrackSelect,
+    private val audioManager: AudioManager,
+    brightnessManager: BrightnessManager,
+    private val coverManager: LocalCoverManager,
+    private val backgroundManager: LocalBackgroundManager,
+    private val thumbnailManager: LocalEpisodeThumbnailManager,
     // AM (SYNC) -->
-    private val syncPreferences: SyncPreferences = Injekt.get(),
+    private val syncPreferences: SyncPreferences,
     // <-- AM (SYNC)
     // AM --> (CAST)
-    internal val castManager: CastManager = Injekt.get(),
-    private val videoInformation: VideoInformation = Injekt.get(),
+    internal val castManager: CastManager,
+    private val videoInformation: VideoInformation,
     // <-- AM (CAST)
-) : AndroidViewModel(context) {
+    // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
+    private val recentEpisodePositionManager: RecentEpisodePositionManager,
+    // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+) : ViewModel() {
+
+    @AssistedFactory
+    @ViewModelAssistedFactoryKey(PlayerViewModel::class)
+    @ContributesIntoMap(AppScope::class)
+    fun interface Factory : ViewModelAssistedFactory {
+        override fun create(extras: CreationExtras): PlayerViewModel {
+            return create(extras.createSavedStateHandle())
+        }
+
+        fun create(@Assisted savedState: SavedStateHandle): PlayerViewModel
+    }
+
     val videoOutput = if (decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
 
     // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
@@ -235,7 +277,7 @@ class PlayerViewModel @JvmOverloads constructor(
     // before, whenever no live holder/adopted player exists yet - a true fresh
     // session, where there's nothing to reuse.
     private val reusableHolder = PlayerMediaHolder.current?.takeIf { it.hasAdoptedPlayer }
-    private var _player = reusableHolder?.player ?: MPVPlayer(context, videoOutput)
+    private var _player = reusableHolder?.player ?: mpvFactory.create(videoOutput)
     // AM (REUSED_PLAYER_SYNC_FIX) -->
     // Exposed for PlayerActivity.onNewIntent() to check: this fresh ViewModel's
     // own local bookkeeping (currentPlaylist, etc.) starts empty regardless of
@@ -1069,7 +1111,6 @@ class PlayerViewModel @JvmOverloads constructor(
      * class's own doc comment for why (persists across process death; no more keeping
      * two independent in-memory copies in sync by hand).
      */
-    private val recentEpisodePositionManager: RecentEpisodePositionManager = Injekt.get()
 
     private fun rememberRecentEpisodePosition() {
         val anime = stateData.value.currentAnime ?: return
@@ -1301,7 +1342,7 @@ class PlayerViewModel @JvmOverloads constructor(
         if (wasPlayerReusedFromLiveHolder) {
             val liveState = PlayerMediaHolder.current?.state?.value
             if (liveState?.animeId != animeId || liveState.episodeId != initialEpisodeId) {
-                _player = MPVPlayer(context, videoOutput)
+                _player = mpvFactory.create(videoOutput)
                 wasPlayerReusedFromLiveHolder = false
             }
         }
@@ -1362,7 +1403,7 @@ class PlayerViewModel @JvmOverloads constructor(
                     }
                     qualityIndex = Pair(hostIndex, vidIndex)
                 } else {
-                    EpisodeLoader.getHosters(episode.toDomainEpisode()!!, anime, source)
+                    episodeLoader.getHosters(episode.toDomainEpisode()!!, anime, source)
                         .takeIf { it.isNotEmpty() }
                         ?.also { currentHosterList = it }
                         ?: run {
@@ -1410,7 +1451,7 @@ class PlayerViewModel @JvmOverloads constructor(
             .sortedWith(getEpisodeSort(anime, sortDescending = false))
             .run {
                 if (basePreferences.downloadedOnly.get()) {
-                    filterDownloaded(anime)
+                    filterDownloaded(anime, downloadCache)
                 } else {
                     this
                 }
@@ -1488,7 +1529,7 @@ class PlayerViewModel @JvmOverloads constructor(
         val anime = currentState.currentAnime ?: return null
         val source = currentState.currentSource ?: return null
         return source is AnimeHttpSource &&
-            !EpisodeLoader.isDownload(
+            !episodeLoader.isDownload(
                 episode.toDomainEpisode()!!,
                 anime,
             )
@@ -1644,7 +1685,7 @@ class PlayerViewModel @JvmOverloads constructor(
 
             if (isTorrent) {
                 video = withIOContext {
-                    TorrentServerService.start()
+                    TorrentServerService.start(context)
                     val videoUrl = getTorrentUrl(video.videoUrl, video.videoTitle).toHttpUrl().newBuilder()
                         .host(address)
                         .build()
@@ -1985,7 +2026,7 @@ class PlayerViewModel @JvmOverloads constructor(
                 coroutineScope {
                     hosterList.mapIndexed { hosterIdx, hoster ->
                         async {
-                            val hosterState = EpisodeLoader.loadHosterVideos(source, hoster)
+                            val hosterState = episodeLoader.loadHosterVideos(source, hoster)
 
                             updateHosterStateAt(hosterIdx, hosterState)
 
@@ -2022,7 +2063,7 @@ class PlayerViewModel @JvmOverloads constructor(
 
                     if (hasFoundPreferredVideo.compareAndSet(false, true)) {
                         if (uiData.value.selectedHosterVideoIndex == Pair(-1, -1)) {
-                            val (hosterIdx, videoIdx) = HosterLoader.selectBestVideo(stateData.value.hosterState)
+                            val (hosterIdx, videoIdx) = hosterLoader.selectBestVideo(stateData.value.hosterState)
                             if (hosterIdx == -1) {
                                 throw ExceptionWithStringResource(
                                     "No available videos",
@@ -2051,7 +2092,7 @@ class PlayerViewModel @JvmOverloads constructor(
     }
 
     fun loadBestVideo(): Boolean {
-        val (hosterIdx, videoIdx) = HosterLoader.selectBestVideo(stateData.value.hosterState)
+        val (hosterIdx, videoIdx) = hosterLoader.selectBestVideo(stateData.value.hosterState)
         if (hosterIdx == -1) return false
         val newVideo = (stateData.value.hosterState[hosterIdx] as HosterState.Ready).videoList[videoIdx]
         viewModelScope.launchIO {
@@ -2090,7 +2131,7 @@ class PlayerViewModel @JvmOverloads constructor(
         pause()
 
         val resolvedVideo = if (selectedHosterState.videoState[videoIndex] != Video.State.READY) {
-            HosterLoader.getResolvedVideo(source, video)
+            hosterLoader.getResolvedVideo(source, video)
         } else {
             video
         }
@@ -2099,7 +2140,7 @@ class PlayerViewModel @JvmOverloads constructor(
             if (stateData.value.currentVideo == null) {
                 updateHosterStateAt(hosterIndex, selectedHosterState.getChangedAt(videoIndex, video, Video.State.ERROR))
 
-                val (newHosterIdx, newVideoIdx) = HosterLoader.selectBestVideo(stateData.value.hosterState)
+                val (newHosterIdx, newVideoIdx) = hosterLoader.selectBestVideo(stateData.value.hosterState)
                 if (newHosterIdx == -1) {
                     if (stateData.value.hosterState.any { it is HosterState.Loading }) {
                         updateUiData { it.copy(selectedHosterVideoIndex = Pair(-1, -1)) }
@@ -2292,7 +2333,7 @@ class PlayerViewModel @JvmOverloads constructor(
 
         if (torrentPreferences.torrServerEnable.get() && isTorrent(video)) {
             launchIO {
-                TorrentServerService.start()
+                TorrentServerService.start(context)
                 torrentLinkHandler(video.videoUrl, video.videoTitle, videoOptions)
             }
         } else {
@@ -2516,7 +2557,7 @@ class PlayerViewModel @JvmOverloads constructor(
                 updateHosterStateAt(index, HosterState.Loading(hosterName))
 
                 viewModelScope.launchIO {
-                    val hosterState = EpisodeLoader.loadHosterVideos(
+                    val hosterState = episodeLoader.loadHosterVideos(
                         source = source,
                         hoster = stateData.value.hosterList[index],
                         force = true,
@@ -2603,7 +2644,7 @@ class PlayerViewModel @JvmOverloads constructor(
                 mpvCommand("screenshot-to-file", tempFile.absolutePath, "video")
                 if (!tempFile.exists()) return@launchIO
                 tempFile.inputStream().use { stream ->
-                    episode.editThumbnail(anime, Injekt.get(), stream)
+                    episode.editThumbnail(anime, thumbnailManager, stream)
                 }
                 tempFile.delete()
             }.onSuccess {
@@ -3133,7 +3174,7 @@ class PlayerViewModel @JvmOverloads constructor(
 
         return withIOContext {
             try {
-                currentHosterList = EpisodeLoader.getHosters(
+                currentHosterList = episodeLoader.getHosters(
                     episode = chosenEpisode.toDomainEpisode()!!,
                     anime,
                     source,
@@ -4076,7 +4117,7 @@ class PlayerViewModel @JvmOverloads constructor(
         val isSyncEnabled = syncPreferences.isSyncEnabled()
         val syncTriggerOpt = syncPreferences.getSyncTriggerOptions()
         if (isSyncEnabled && syncTriggerOpt.syncOnEpisodeSeen) {
-            SyncDataJob.startNow(context)
+            SyncDataJob.startNow(context.workManager)
         }
         // <-- AM (SYNC)
     }
@@ -4176,7 +4217,7 @@ class PlayerViewModel @JvmOverloads constructor(
             val isSyncEnabled = syncPreferences.isSyncEnabled()
             val syncTriggerOpt = syncPreferences.getSyncTriggerOptions()
             if (isSyncEnabled && syncTriggerOpt.syncOnEpisodeOpen && episode.last_second_seen >= 1L) {
-                SyncDataJob.startNow(context)
+                SyncDataJob.startNow(context.workManager)
             }
             // <-- AM (SYNC)
         }
@@ -4228,8 +4269,8 @@ class PlayerViewModel @JvmOverloads constructor(
 
         val nextEpisode = currentPlaylist[currentPlaylistIndex + 1]
         val episodesAreDownloaded =
-            EpisodeLoader.isDownload(currentEpisode.toDomainEpisode()!!, anime) &&
-                EpisodeLoader.isDownload(nextEpisode.toDomainEpisode()!!, anime)
+            episodeLoader.isDownload(currentEpisode.toDomainEpisode()!!, anime) &&
+                episodeLoader.isDownload(nextEpisode.toDomainEpisode()!!, anime)
 
         viewModelScope.launchIO {
             if (!episodesAreDownloaded) {
@@ -4283,9 +4324,14 @@ class PlayerViewModel @JvmOverloads constructor(
         viewModelScope.launchNonCancellable {
             val result = try {
                 when (artType) {
-                    ArtType.Cover -> anime.editCover(Injekt.get(), imageStream())
-                    ArtType.Background -> anime.editBackground(Injekt.get(), imageStream())
-                    ArtType.Thumbnail -> episode.editThumbnail(anime, Injekt.get(), imageStream())
+                    ArtType.Cover -> anime.editCover(coverManager, imageStream(), updateAnime, coverCache)
+                    ArtType.Background -> anime.editBackground(
+                        backgroundManager,
+                        imageStream(),
+                        updateAnime,
+                        backgroundCache,
+                    )
+                    ArtType.Thumbnail -> episode.editThumbnail(anime, thumbnailManager, imageStream())
                 }
 
                 if (anime.isLocal() || anime.favorite) {
@@ -4309,7 +4355,6 @@ class PlayerViewModel @JvmOverloads constructor(
         val anime = stateData.value.currentAnime ?: return
         val pos = playbackData.value.position
 
-        val context = Injekt.get<Application>()
         val destDir = context.cacheImageDir
 
         val seconds = Utils.prettyTime(pos)
@@ -4337,7 +4382,6 @@ class PlayerViewModel @JvmOverloads constructor(
         val anime = stateData.value.currentAnime ?: return
         val pos = playbackData.value.position
 
-        val context = Injekt.get<Application>()
         val notifier = SaveImageNotifier(context)
         notifier.onClear()
 
@@ -4512,12 +4556,12 @@ class PlayerViewModel @JvmOverloads constructor(
             val tracker = trackerManager.get(track.trackerId)
             malId = when (tracker) {
                 is MyAnimeList -> track.remoteId
-                is Anilist -> AniSkipApi().getMalIdFromAL(track.remoteId)
+                is Anilist -> aniSkipApi.getMalIdFromAL(track.remoteId)
                 else -> null
             }
             val duration = playerDuration ?: return null
             return malId?.let {
-                AniSkipApi().getResult(it.toInt(), episodeNumber, duration.toLong())
+                aniSkipApi.getResult(it.toInt(), episodeNumber, duration.toLong())
             }
         }
         return null

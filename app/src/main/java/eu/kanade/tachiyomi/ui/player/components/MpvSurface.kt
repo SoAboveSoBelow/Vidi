@@ -6,11 +6,11 @@ import android.view.TextureView
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import animiru.domain.player.service.DecoderPreferences
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
+import mihon.app.di.appGraph
 
 // Reference: https://github.com/MakD/AFinity/blob/master/app/src/main/java/com/makd/afinity/ui/player/components/MpvSurface.kt
 // AM (SURFACE_TO_TEXTURE_VIEW_FIX) -->
@@ -32,7 +32,8 @@ fun MpvSurface(
     onSurfaceAttachedChanged: (Boolean) -> Unit = {},
     // <-- AM (AUDIO_BLIP_FIX)
 ) {
-    val decoderPreferences: DecoderPreferences = Injekt.get()
+    val context = LocalContext.current
+    val decoderPreferences: DecoderPreferences = context.appGraph.decoderPreferences
     val mpv = player.mpv
 
     AndroidView(

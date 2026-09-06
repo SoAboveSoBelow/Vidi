@@ -1,5 +1,8 @@
 package eu.kanade.tachiyomi.ui.anime
 
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import kotlin.random.Random
@@ -17,6 +20,8 @@ import kotlin.random.Random
  * episode order via [episodeShuffleSortKey] - re-enabling shuffle picks a
  * fresh random seed, producing a genuinely new order each time.
  */
+@Inject
+@SingleIn(AppScope::class)
 class EpisodeShufflePreferences(
     private val preferenceStore: PreferenceStore,
 ) {
