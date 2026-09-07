@@ -14,7 +14,6 @@ import android.os.PowerManager
 import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import androidx.core.app.TaskStackBuilder
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
@@ -30,7 +29,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 // <-- AM (BACKGROUND_SKIP_FIX)
-import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
@@ -365,80 +363,31 @@ class PlayerBackgroundPlaybackService : Service() {
         super.onDestroy()
     }
 
-    // AM (PIP_TASK_ROOT_FIX) -->
-    // Reopening PlayerActivity straight from this notification (via a plain
-    // PendingIntent.getActivity()) made it its task's sole/root Activity - Android
-    // forces FLAG_ACTIVITY_NEW_TASK on Intents fired from a non-Activity context like
-    // this Service, and with nothing else in the back stack, PlayerActivity ends up as
-    // task root. That was observed to be involved in the system tearing the Activity
-    // down on PIP exit after a notification reopen - and critically, the teardown
-    // bypasses PlayerActivity's own onPictureInPictureModeChanged()/finish() entirely,
-    // meaning it's happening below any level the Activity's own code can intercept or
-    // log. Building a synthetic back stack instead (MainActivity showing the anime,
-    // then PlayerActivity on top - reusing the same SHOW_ANIME/SHORTCUT_ANIME deep
-    // link the onBack-fallback and NotificationReceiver paths already rely on) gives
-    // PlayerActivity a parent in its own task, so it's never task-root when reopened
-    // this way - matching how it behaves when opened normally from within the app.
-    // Falls back to the old bare-Activity PendingIntent if animeId is somehow
-    // unavailable or TaskStackBuilder can't produce one, so the notification's open
-    // action never silently breaks.
+    // AM (PIP_TASK_ROOT_FIX_REMOVED) -->
+    // Was a TaskStackBuilder-based synthetic back stack (MainActivity -> PlayerActivity)
+    // built via startActivities() whenever PlayerActivity.hasLiveInstance was false, to
+    // avoid a bare task-root PlayerActivity - originally added because that was observed
+    // to be involved in the system tearing the Activity down on PIP exit, bypassing its
+    // own onPictureInPictureModeChanged()/finish() entirely. Removed because this
+    // function only ever runs while this Service - and therefore its own live
+    // mediaHolder - is already alive; hasLiveInstance=false here never meant "genuinely
+    // cold, no session," only "Activity destroyed, session still live," the exact case
+    // LIVE_INSTANCE_REOPEN_FIX's reuse-existing branch already handles correctly and
+    // cheaply. Git history confirms the original task-root-teardown symptom (no clean
+    // Activity lifecycle trace) predates isBackgroundPlayTransitionFinish and
+    // PIP_DISMISS_RELEASE_CRASH_FIX by several days - both were later fixes for a
+    // player.release()-while-Service-depends-on-it native crash that would produce
+    // exactly that "bypassed my own code" symptom, since the whole process was dying,
+    // not the system selectively tearing down one Activity. That crash is fixed at its
+    // source now, not routed around - keeping this app's own reopen at a flat,
+    // low-signature single-Activity PendingIntent, same as every other reopen path, is
+    // simpler and no longer building a whole synthetic MainActivity+PlayerActivity task
+    // construction burst every single reopen just to dodge a bug that isn't there
+    // anymore. VERIFY before trusting this fully: force a task-root PlayerActivity into
+    // PIP, dismiss it, confirm PIP_DISMISS_PAUSE_FIX's own detection branch actually
+    // fires cleanly rather than the process dying below it - the same way the original
+    // task-root-affinity ambiguity was confirmed via dumpsys, not assumed.
     private fun buildReopenPendingIntent(): PendingIntent {
-        // AM (LIVE_INSTANCE_REOPEN_FIX) -->
-        // Only build the full synthetic back stack (MainActivity -> PlayerActivity)
-        // below when no PlayerActivity instance is currently alive. That stack exists
-        // specifically to give a genuinely fresh, cold-started PlayerActivity a real
-        // parent so it isn't a bare task root (see PIP_TASK_ROOT_FIX) - but building it
-        // unconditionally, even when a live singleTask instance already exists
-        // elsewhere, doesn't correctly consolidate into that existing task. Firing a
-        // TaskStackBuilder PendingIntent goes through startActivities(), which
-        // constructs a brand new task regardless of singleTask, every single time.
-        // That meant every single reopen - even of an already-playing session - was
-        // silently constructing a whole new PlayerActivity/ViewModel/MPVPlayer/
-        // MediaSession from scratch (confirmed via logcat: a full mpv init banner on
-        // every reopen, a fresh Android Task ID every time), leaving a stale duplicate
-        // instance/task behind each cycle and re-registering PIP auto-enter fresh on
-        // each new one - very likely the actual root cause of both the original
-        // permanent-buffer bug and a PIP reopen loop chased across many earlier,
-        // narrower attempts at both. When a live instance already exists, a plain,
-        // direct PendingIntent - using PlayerActivity.newIntent(), which already
-        // carries the correct FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TOP combo
-        // for this exact purpose (see PIP_REOPEN_DUPLICATE_TASK_FIX on that function) -
-        // correctly lets singleTask do its actual job: bring the existing task forward
-        // and deliver the new intent via onNewIntent(), not construct a new one.
-        if (PlayerActivity.hasLiveInstance) {
-            // SVC_RACE_DEBUG -->
-            logcat {
-                "SVC_RACE_DEBUG buildReopenPendingIntent() taking REUSE-EXISTING branch " +
-                    "at=${android.os.SystemClock.elapsedRealtime()}"
-            }
-            // <-- SVC_RACE_DEBUG
-            return PendingIntent.getActivity(
-                this,
-                REQUEST_CODE_OPEN,
-                PlayerActivity.newIntent(this, animeId, episodeId),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-        }
-        // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG buildReopenPendingIntent() taking SYNTHETIC-BACKSTACK branch " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
-        val safeAnimeId = animeId
-        if (safeAnimeId != null) {
-            val stackPendingIntent = TaskStackBuilder.create(this).run {
-                addNextIntent(
-                    Intent(this@PlayerBackgroundPlaybackService, MainActivity::class.java)
-                        .setAction(Constants.SHORTCUT_ANIME)
-                        .putExtra(Constants.ANIME_EXTRA, safeAnimeId),
-                )
-                addNextIntent(PlayerActivity.newIntent(this@PlayerBackgroundPlaybackService, animeId, episodeId))
-                getPendingIntent(REQUEST_CODE_OPEN, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            }
-            if (stackPendingIntent != null) return stackPendingIntent
-        }
         return PendingIntent.getActivity(
             this,
             REQUEST_CODE_OPEN,
@@ -446,7 +395,7 @@ class PlayerBackgroundPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
-    // <-- AM (PIP_TASK_ROOT_FIX)
+    // <-- AM (PIP_TASK_ROOT_FIX_REMOVED)
 
     private fun buildNotification(): Notification {
         val togglePendingIntent = PendingIntent.getService(

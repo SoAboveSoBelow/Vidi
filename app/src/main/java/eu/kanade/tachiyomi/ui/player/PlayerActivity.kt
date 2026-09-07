@@ -1561,7 +1561,21 @@ class PlayerActivity : BaseActivity() {
         // without it, onDestroy()'s teardown-vs-preserve check would wrongly stop mpv
         // as part of this finish(), killing the background session being started in
         // the same breath.
-        if (viewModel.playbackData.value.paused) {
+        // AM (RECENTS_PAUSED_PIP_FIX) -->
+        // Was gated on !paused - paused playback skipped straight to forced
+        // background+finishAndRemoveTask() below, never attempting PIP at all, on
+        // the reasoning that PIP is pointless for a static paused frame. Requested
+        // change: PIP should be attempted regardless of paused state. There is no
+        // reliable signal in onUserLeaveHint() to distinguish Home from Recents -
+        // it fires identically for both - so this can't be scoped to "Recents
+        // only" without a separate detection mechanism that doesn't exist yet;
+        // unifying it here means Home-while-paused now also attempts PIP first,
+        // falling back to the forced-background path only when PIP itself isn't
+        // available/enabled at all, same as the already-existing unpaused branch.
+        if (isPipSupportedAndEnabled && playerPreferences.pipOnExit.get()) {
+            enterPipIfEligible()
+            // <-- AM (RECENTS_PAUSED_PIP_FIX)
+        } else if (viewModel.playbackData.value.paused) {
             // AM (PIP_PAUSED_AUTOENTER_RACE_FIX) -->
             // Moved to the very first line of this branch. Confirmed via a full
             // logcat capture: mpv's own "pause" property was continuously true for
@@ -1595,12 +1609,19 @@ class PlayerActivity : BaseActivity() {
             // file for the same goal - see KEYCODE_MEDIA_STOP below - it removes the
             // task explicitly, as part of the same call, rather than hoping the
             // system gets to it.
-            Handler(Looper.getMainLooper()).post {
-                finishAndRemoveTask()
-            }
+            // AM (HOME_PAUSED_RECENTS_STILL_VISIBLE_FIX) -->
+            // Was deferred via Handler.post() here too, copied from the PIP-dismiss-
+            // receiver call site - but that deferral existed there specifically to
+            // let an in-flight broadcast dispatch settle first (see
+            // PIP_MOVETASKTOBACK_RACE_FIX). Nothing equivalent is in flight on the
+            // home-button path: this runs directly inside onUserLeaveHint(), so
+            // posting it just adds a window for Android's own home-transition to
+            // snapshot/reorder the task before this call actually runs, which is a
+            // plausible reason a separate Recents card was still being reported
+            // despite this call existing. Calling it synchronously removes that gap.
+            finishAndRemoveTask()
+            // <-- AM (HOME_PAUSED_RECENTS_STILL_VISIBLE_FIX)
             // <-- AM (PIP_PAUSED_RECENTS_REMOVETASK_FIX)
-        } else if (isPipSupportedAndEnabled && playerPreferences.pipOnExit.get()) {
-            enterPipIfEligible()
         }
         // <-- AM (HOME_BUTTON_SIMPLIFIED_FIX)
         super.onUserLeaveHint()
@@ -1635,6 +1656,24 @@ class PlayerActivity : BaseActivity() {
             // exemption no longer applies. The notification itself is untouched here -
             // it stays up regardless of foreground/background state since step 4b.
             stopBackgroundPlayback()
+            // AM (REOPEN_AUTOENTER_STALE_FIX) -->
+            // The setPictureInPictureParams() call just below this block (at this
+            // function's own top level) runs synchronously, before this post()
+            // resolves - so for a background-reopened instance it registers
+            // autoEnterEnabled=false (see AUTO_PIP_LOOP_FIX's own doc comment on why
+            // that's deliberate at that exact moment: isBackgroundPlaybackActive is
+            // still true then). Nothing previously re-registered it afterward, so
+            // that false stuck permanently for this instance's whole life - not a
+            // problem for Home or the PIP "X" button, both of which call
+            // enterPictureInPictureMode() explicitly and never consult this stale
+            // registration, but Recents' own OS-driven auto-enter reads nothing
+            // else. By the time this specific line runs, stopBackgroundPlayback()
+            // just above has already cleared isBackgroundPlaybackActive for real -
+            // this isn't the same unsafe pre-clear timing AUTO_PIP_LOOP_FIX exists
+            // to guard against, it's specifically re-registering after that state
+            // has resolved.
+            setPictureInPictureParams(createPipParams())
+            // <-- AM (REOPEN_AUTOENTER_STALE_FIX)
         }
         // <-- AM (RESUME_LOCK_RACE_FIX)
         setPictureInPictureParams(createPipParams())
@@ -2015,7 +2054,30 @@ class PlayerActivity : BaseActivity() {
                                     viewModel.pause()
                                     isIntentionalBackgroundTransition = true
                                     enterBackground(force = true)
-                                    moveTaskToBack(true)
+                                    // AM (PIP_DISMISS_RECENTS_HIDE_FIX) -->
+                                    // Was moveTaskToBack(true) - reorders the task
+                                    // behind others but never removes it from Recents,
+                                    // which is exactly why dismissing PIP via the
+                                    // system's own X button left a visible card
+                                    // there. The headphones "Background Play" action
+                                    // hit this identical problem and was fixed by
+                                    // switching to finish() + isBackgroundPlayTransitionFinish
+                                    // (see PIP_FINISH_NOT_MOVETASKTOBACK) instead of
+                                    // moveTaskToBack() - this call site was never
+                                    // migrated to match. finishAndRemoveTask() is used
+                                    // here rather than plain finish(), matching
+                                    // PIP_PAUSED_RECENTS_REMOVETASK_FIX's own reasoning,
+                                    // since the goal here is explicitly to also clear
+                                    // the Recents entry, not just end the session.
+                                    // Diagnostic revert to moveTaskToBack() confirmed the
+                                    // task-freshness theory behind the Recents-PIP-after-
+                                    // reopen issue - reverted back to this, the actual fix,
+                                    // now that confirmation is in.
+                                    isBackgroundPlayTransitionFinish = true
+                                    Handler(Looper.getMainLooper()).post {
+                                        finishAndRemoveTask()
+                                    }
+                                    // <-- AM (PIP_DISMISS_RECENTS_HIDE_FIX)
                                 } else {
                                     SecureActivityDelegate.setPipActive(this, false)
                                     viewModel.player.release()
@@ -2125,6 +2187,9 @@ class PlayerActivity : BaseActivity() {
                             // at the moment this runs, and asking it to also finish() the
                             // Activity inline risks colliding with that in-flight work.
                             // Posting it instead lets the current dispatch settle first.
+                            // Diagnostic revert to moveTaskToBack() confirmed the
+                            // task-freshness theory - reverted back to this, the actual
+                            // fix, now that confirmation is in.
                             Handler(Looper.getMainLooper()).post {
                                 finish()
                             }
