@@ -15,6 +15,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import eu.kanade.tachiyomi.BuildConfig
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.ui.main.MainActivity
@@ -387,14 +388,39 @@ class PlayerBackgroundPlaybackService : Service() {
     // PIP, dismiss it, confirm PIP_DISMISS_PAUSE_FIX's own detection branch actually
     // fires cleanly rather than the process dying below it - the same way the original
     // task-root-affinity ambiguity was confirmed via dumpsys, not assumed.
+    // AM (PLAYER_HOST_SCREEN_REOPEN_FIX) -->
+    // Was PlayerActivity.newIntent(this, animeId, episodeId) unconditionally -
+    // confirmed live on-device (2026-09-06), once PLAYER_HOST_SCREEN_NOTIFICATION_FIX
+    // made this notification actually appear for PlayerHostScreen-originated
+    // sessions (the only kind MainActivity.startPlayerActivity() creates now),
+    // tapping it opened a genuinely NEW PlayerActivity instance, which adopted
+    // the same live PlayerMediaHolder alongside the still-showing
+    // PlayerHostScreen - two simultaneous consumers of one session, visibly
+    // "two instances." Routes through MainActivity's existing onNewIntent()
+    // instead, reusing startPlayerActivity()'s own already-correct reuse-or-
+    // push decision (see that function's own doc comment) rather than
+    // duplicating it - so tapping this now behaves exactly like tapping the
+    // same episode again from inside the app: a no-op if already showing,
+    // brings MainActivity forward with PlayerHostScreen pushed otherwise.
+    // NotificationReceiver's separate new-episode notification (a different
+    // notification entirely, Notifications.ID_NEW_EPISODES) still targets
+    // PlayerActivity directly - not touched here, still a known, separate gap.
     private fun buildReopenPendingIntent(): PendingIntent {
         return PendingIntent.getActivity(
             this,
             REQUEST_CODE_OPEN,
-            PlayerActivity.newIntent(this, animeId, episodeId),
+            Intent(this, MainActivity::class.java).apply {
+                action = "${BuildConfig.APPLICATION_ID}.REOPEN_PLAYER_HOST_SCREEN"
+                putExtra("animeId", animeId)
+                putExtra("episodeId", episodeId)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
+    // <-- AM (PLAYER_HOST_SCREEN_REOPEN_FIX)
     // <-- AM (PIP_TASK_ROOT_FIX_REMOVED)
 
     private fun buildNotification(): Notification {

@@ -50,10 +50,20 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Tachiyomi">
 
+        <!-- AM (SELF_PIP_ENTRY) -->
+        <!-- supportsPictureInPicture and the orientation/screenSize/
+             screenLayout/smallestScreenSize configChanges entries are both
+             required for enterPictureInPictureMode() to work at all - see
+             MainActivity.enterSelfPipIfEligible()'s own doc comment. Missed
+             when PIP entry moved onto this Activity; every other Activity
+             PIP was ever tried on in this session (PlayerActivity,
+             PipSpikeActivity, the reverted PipActivity) already had these. -->
         <activity
             android:name=".ui.main.MainActivity"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboardHidden|keyboard|uiMode"
             android:exported="true"
             android:launchMode="singleTop"
+            android:supportsPictureInPicture="true"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Tachiyomi.SplashScreen">
             <intent-filter>
@@ -184,6 +194,23 @@
             <meta-data android:name="com.samsung.android.support.REMOTE_ACTION"
                 android:resource="@xml/s_pen_actions"/>
         </activity>
+
+        <!-- AM (PIP_HANDOFF_SPIKE) -->
+        <!-- Throwaway prototype for scoping doc work item 1 - see
+             PipSpikeActivity's own doc comment. Not launched from anywhere in
+             the app; adb-only trigger, exported=true only because `adb shell
+             am start` runs as the shell uid and a non-exported Activity
+             rejects that with a SecurityException - no other app-facing
+             entry point (no intent-filter) makes use of it. Remove once item
+             1 is derisked and folded into item 3's real PipActivity. -->
+        <activity
+            android:name=".ui.player.PipSpikeActivity"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboardHidden|keyboard|uiMode"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="true"
+            android:theme="@style/Theme.Tachiyomi" />
+
 
         <activity
             android:name=".ui.security.UnlockActivity"

@@ -1,13 +1,19 @@
 package eu.kanade.tachiyomi.ui.main
 
 import android.animation.ValueAnimator
+import android.app.PictureInPictureParams
 import android.app.SearchManager
 import android.app.assist.AssistContent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.util.Rational
+import android.view.KeyEvent
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -51,6 +57,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.util.Consumer
 import androidx.interpolator.view.animation.FastOutSlowInInterpolator
 import androidx.interpolator.view.animation.LinearOutSlowInInterpolator
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import animiru.feature.mpvfiles.MpvConfig
 import cafe.adriel.voyager.navigator.LocalNavigator
@@ -76,6 +83,7 @@ import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.data.connection.discord.DiscordRPCService
 import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.notification.NotificationReceiver
+import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.data.player.service.HttpServerService
 import eu.kanade.tachiyomi.data.updater.RELEASE_URL
 import eu.kanade.tachiyomi.extension.api.ExtensionApi
@@ -88,7 +96,21 @@ import eu.kanade.tachiyomi.ui.home.HomeScreen
 import eu.kanade.tachiyomi.ui.more.NewUpdateScreen
 import eu.kanade.tachiyomi.ui.more.OnboardingScreen
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
+import eu.kanade.tachiyomi.ui.player.PIP_BACKGROUND_PLAY
+import eu.kanade.tachiyomi.ui.player.PIP_INTENT_ACTION
+import eu.kanade.tachiyomi.ui.player.PIP_INTENTS_FILTER
+import eu.kanade.tachiyomi.ui.player.PIP_NEXT
+import eu.kanade.tachiyomi.ui.player.PIP_PAUSE
+import eu.kanade.tachiyomi.ui.player.PIP_PLAY
+import eu.kanade.tachiyomi.ui.player.PIP_PREVIOUS
+import eu.kanade.tachiyomi.ui.player.PIP_SKIP
 import eu.kanade.tachiyomi.ui.player.PlayerActivity
+import eu.kanade.tachiyomi.ui.player.PlayerBackgroundPlaybackService
+import eu.kanade.tachiyomi.ui.player.PlayerFreshStartScreenSpike
+import eu.kanade.tachiyomi.ui.player.PlayerHostScreen
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
+import eu.kanade.tachiyomi.ui.player.PlayerVoyagerScreenSpike
+import eu.kanade.tachiyomi.ui.player.createPipActions
 import eu.kanade.tachiyomi.ui.setting.SettingsScreen
 import eu.kanade.tachiyomi.util.system.dpToPx
 import eu.kanade.tachiyomi.util.system.isBenchmarkBuildType
@@ -152,11 +174,367 @@ class MainActivity : BaseActivity() {
     // To be checked by splash screen. If true then splash screen will be removed.
     var ready = false
 
-    private var navigator: Navigator? = null
+    // AM (PLAYER_HOST_SCREEN) -->
+    // Was private - widened so the companion object's startPlayerActivity()
+    // can push/inspect it directly, matching every other real call site
+    // reaching this instance the same way (as MainActivity, via context).
+    // <-- AM (PLAYER_HOST_SCREEN)
+    internal var navigator: Navigator? = null
 
     init {
         registerSecureActivity(this)
     }
+
+    // AM (PLAYER_SCREEN_HOSTING_SPIKE) -->
+    // Throwaway, adb-only trigger for PlayerVoyagerScreenSpike - see that
+    // class's own doc comment. Not part of the real notification-reopen or
+    // deep-link routing in handleIntentAction() below; that still only runs
+    // on cold launch (isLaunch), and MainActivity has never overridden
+    // onNewIntent() before this - real reopen-while-running routing (what
+    // item 4 will need for real) is intentionally out of scope for this
+    // spike, which only needs *a* way to push onto the live Navigator while
+    // MainActivity's already running. Trigger with:
+    //   adb shell am start -n xyz.Quickdev.Vidi.mi.dev/eu.kanade.tachiyomi.ui.main.MainActivity \
+    //     -a xyz.Quickdev.Vidi.mi.dev.PLAYER_SCREEN_HOSTING_SPIKE
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == "${BuildConfig.APPLICATION_ID}.PLAYER_SCREEN_HOSTING_SPIKE") {
+            // AM (EXTERNAL_SCREEN_CONSUMER_ORDERING_FIX) -->
+            // Was only set reactively inside PlayerVoyagerScreenSpike's own
+            // Content()/DisposableEffect - confirmed live on-device
+            // (2026-09-06) that's too late: a logcat capture showed
+            // ActivityTaskManagerService.enterPictureInPictureMode()/
+            // moveActivityToPinnedRootTask already committed on
+            // PlayerActivity ~80ms BEFORE Content() ever ran, since Android
+            // dispatches the leave-app lifecycle callbacks that trigger it
+            // (part of just bringing this Task to front) well before this
+            // Activity's own Compose recomposition catches up. Setting it
+            // here instead - synchronous, before push(), before this method
+            // even returns - actually beats that race instead of reacting
+            // to it too late. The DisposableEffect's onDispose clear is
+            // still correct as the counterpart for when the screen goes
+            // away.
+            PlayerMediaHolder.current?.hasExternalScreenConsumer = true
+            // <-- AM (EXTERNAL_SCREEN_CONSUMER_ORDERING_FIX)
+            navigator?.push(PlayerVoyagerScreenSpike())
+        }
+        // AM (PLAYER_FRESH_START_SPIKE) -->
+        // Separate debug action from PLAYER_SCREEN_HOSTING_SPIKE above -
+        // that one adopts a session PlayerActivity already started; this one
+        // originates a session with no PlayerActivity involved at all, ever.
+        // See PlayerFreshStartScreenSpike's own doc comment. Trigger with:
+        //   adb shell am start -n xyz.Quickdev.Vidi.mi.dev/eu.kanade.tachiyomi.ui.main.MainActivity \
+        //     -a xyz.Quickdev.Vidi.mi.dev.PLAYER_FRESH_START_SPIKE \
+        //     --el animeId <id> --el episodeId <id>
+        if (intent.action == "${BuildConfig.APPLICATION_ID}.PLAYER_FRESH_START_SPIKE") {
+            val animeId = intent.getLongExtra("animeId", -1L)
+            val episodeId = intent.getLongExtra("episodeId", -1L)
+            if (animeId != -1L && episodeId != -1L) {
+                navigator?.push(PlayerFreshStartScreenSpike(animeId, episodeId))
+            }
+        }
+        // <-- AM (PLAYER_FRESH_START_SPIKE)
+
+        // AM (PLAYER_HOST_SCREEN_REOPEN_FIX) -->
+        // Real (non-debug) handler for the background-playback notification's
+        // tap-to-reopen action - see PlayerBackgroundPlaybackService.
+        // buildReopenPendingIntent()'s own doc comment for the bug this
+        // fixes. Reuses startPlayerActivity()'s own reuse-or-push decision
+        // rather than duplicating it, so tapping the notification behaves
+        // exactly like tapping the same episode again from inside the app.
+        if (intent.action == "${BuildConfig.APPLICATION_ID}.REOPEN_PLAYER_HOST_SCREEN") {
+            val animeId = intent.getLongExtra("animeId", -1L)
+            val episodeId = intent.getLongExtra("episodeId", -1L)
+            if (animeId != -1L && episodeId != -1L) {
+                lifecycleScope.launch {
+                    startPlayerActivity(context = this@MainActivity, animeId = animeId, episodeId = episodeId, extPlayer = false)
+                }
+            }
+        }
+        // <-- AM (PLAYER_HOST_SCREEN_REOPEN_FIX)
+    }
+    // <-- AM (PLAYER_SCREEN_HOSTING_SPIKE)
+
+    // AM (PLAYER_SCREEN_KEY_HANDLING_SPIKE) -->
+    // Port of PlayerActivity.onKeyDown()/onKeyUp() - see that pair's own
+    // comments for the un-simplified version. All the actual logic there was
+    // already pure viewModel.* calls, so this is a straight copy, just
+    // gated on hasExternalScreenConsumer (see that property's own doc
+    // comment) instead of "this IS the player Activity", since MainActivity
+    // hosts plenty of other screens these keys shouldn't touch. One
+    // deliberate change: PlayerActivity's KEYCODE_MEDIA_STOP case called
+    // finishAndRemoveTask() on itself - not applicable here (MainActivity
+    // is never meant to finish for this), so it calls the same session
+    // teardown PlayerFreshStartScreenSpike already uses instead, then pops
+    // back to whatever screen was showing before the player.
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        val holder = PlayerMediaHolder.current
+        val viewModel = holder?.viewModel
+        if (holder?.hasExternalScreenConsumer != true || viewModel == null) {
+            return super.onKeyDown(keyCode, event)
+        }
+        when (keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP -> {
+                viewModel.changeVolumeBy(1)
+                viewModel.displayVolumeSlider(true)
+            }
+            KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                viewModel.changeVolumeBy(-1)
+                viewModel.displayVolumeSlider(true)
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> viewModel.handleLeftDoubleTap()
+            KeyEvent.KEYCODE_DPAD_RIGHT -> viewModel.handleRightDoubleTap()
+            KeyEvent.KEYCODE_SPACE -> viewModel.pauseUnpause()
+            KeyEvent.KEYCODE_MEDIA_STOP -> {
+                holder.release()
+                stopService(PlayerBackgroundPlaybackService.newIntent(this))
+                navigator?.pop()
+            }
+
+            KeyEvent.KEYCODE_MEDIA_REWIND -> viewModel.handleLeftDoubleTap()
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> viewModel.handleRightDoubleTap()
+
+            else -> {
+                event?.let { viewModel.onKey(it) }
+                return super.onKeyDown(keyCode, event)
+            }
+        }
+        return true
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        val holder = PlayerMediaHolder.current
+        val viewModel = holder?.viewModel
+        if (holder?.hasExternalScreenConsumer != true || viewModel == null) {
+            return super.onKeyUp(keyCode, event)
+        }
+        if (event != null && viewModel.onKey(event)) return true
+        return super.onKeyUp(keyCode, event)
+    }
+    // <-- AM (PLAYER_SCREEN_KEY_HANDLING_SPIKE)
+
+    // AM (SELF_PIP_ENTRY) -->
+    // Reverted from a separate PipActivity (work item 3 as scoped) after
+    // confirming live on-device (2026-09-06) that it caused a genuine
+    // regression: launching a distinct Activity from onUserLeaveHint() left
+    // MainActivity's own task backgrounded-but-visible instead of properly
+    // going behind the launcher, and required an explicit
+    // FLAG_ACTIVITY_NEW_TASK fix that still only got the task-switching
+    // right, not the actual goal - a real single-Activity player mimics
+    // YouTube (and this codebase's OWN existing PlayerActivity, which has
+    // always done exactly this): the SAME Activity that's showing the video
+    // calls enterPictureInPictureMode() on itself and the OS resizes that
+    // one window in place. No second Activity, no second task, no return-
+    // handoff to build - the window that shrinks is the window that expands
+    // back, because it's the only window there ever was. This function
+    // replaces onUserLeaveHint()'s old PipActivity-launch entirely.
+    //
+    // Deliberately simpler than PlayerActivity.createPipParams()/
+    // tryEnterPictureInPicture() for this first pass - ported the RESUMED
+    // guard (a confirmed real crash, not hypothetical - see
+    // PlayerActivity.enterPipIfEligible()'s own doc comment) and real
+    // aspect-ratio-from-video-dimensions, since both are simple and
+    // self-contained. NOT yet ported: PIP action buttons, auto-enter-on-
+    // Recents, source-rect-hint, and the app-lock (SecureActivityDelegate)
+    // interaction PlayerActivity's version has several fixes for - those are
+    // real, separately-scoped follow-up work, not attempted blind here.
+    // Same reasoning as onUserLeaveHint() below for not attempting
+    // PlayerActivity's Home-vs-Recents distinguishing logic: the Recents
+    // case is a known, still-open, OS/OEM-level risk per the scoping doc's
+    // own open-risks section.
+    // AM (SELF_PIP_AUTO_ENTER_FIX) -->
+    // Was missing pipOnExit's own preference gate entirely, and only ever
+    // called enterPictureInPictureMode() reactively from onUserLeaveHint() -
+    // which Android deliberately does NOT fire for Recents/Overview, only
+    // Home-press (by design, not an OEM quirk - confirmed by Dan directly,
+    // and matching Android's own documented behavior). PlayerActivity
+    // already solves this correctly via proactive
+    // setPictureInPictureParams(..., autoEnterEnabled=true) registration -
+    // see its own createPipParams()'s AUTO_PIP_LOOP_FIX/
+    // PIP_AUTOENTER_SELF_POISON_FIX doc comments for the real history here:
+    // a self-poisoning auto-re-entry loop that took real on-device
+    // debugging to track down and fix. This is a DELIBERATELY minimal
+    // version of that same idea - registers auto-enter=true once a session
+    // starts playing and once whenever pause state changes, nothing else -
+    // and does NOT port either of those two loop-prevention guards, since
+    // neither's trigger condition exists in this path yet (no headphone-
+    // action finish(), no SecureActivityDelegate/app-lock interaction
+    // here). That means this needs real on-device verification for loop
+    // behavior specifically, more than most other pieces built this
+    // session - if PIP re-enters itself repeatedly/immediately after being
+    // dismissed, that's this simplification, not a new unrelated bug.
+    private fun buildSelfPipParams(autoEnter: Boolean): PictureInPictureParams? {
+        val holder = PlayerMediaHolder.current
+        val viewModel = holder?.viewModel
+        if (holder?.hasExternalScreenConsumer != true || viewModel == null) return null
+
+        val builder = PictureInPictureParams.Builder()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val anime = viewModel.stateData.value.currentAnime
+            val episode = viewModel.stateData.value.currentEpisode
+            if (anime != null && episode != null) {
+                builder.setTitle(anime.title).setSubtitle(episode.name)
+            }
+        }
+        viewModel.stateData.value.let {
+            val rational = if (it.videoWidth > 0 && it.videoHeight > 0) {
+                Rational(it.videoWidth, it.videoHeight)
+            } else {
+                Rational(16, 9)
+            }
+            if (rational.toDouble() in 0.42..2.38) {
+                builder.setAspectRatio(rational)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val shouldAutoEnter = autoEnter &&
+                !viewModel.playbackData.value.paused &&
+                graph.playerPreferences.pipOnExit.get()
+            builder.setAutoEnterEnabled(shouldAutoEnter)
+        }
+        builder.setActions(
+            createPipActions(
+                context = this,
+                isPaused = viewModel.playbackData.value.paused,
+                firstButtonAction = graph.playerPreferences.pipFirstButtonAction.get(),
+                playlistCount = viewModel.stateData.value.currentPlaylist.size,
+                playlistPosition = viewModel.stateData.value.currentPlaylistIndex,
+            ),
+        )
+        return builder.build()
+    }
+
+    // Proactively registers current PIP params with the OS - this is what
+    // lets Recents/Overview auto-enter PIP without ever calling
+    // enterPictureInPictureMode() directly (see this function's own doc
+    // comment above for why onUserLeaveHint() alone can't cover that case).
+    // Safe to call whenever relevant state changes; a no-op if nothing's
+    // actually eligible.
+    fun updateAutoEnterPipParams() {
+        if (lifecycle.currentState != Lifecycle.State.RESUMED && lifecycle.currentState != Lifecycle.State.STARTED) return
+        val params = buildSelfPipParams(autoEnter = true) ?: return
+        try {
+            setPictureInPictureParams(params)
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR) { "SELF_PIP_AUTO_ENTER_FIX setPictureInPictureParams failed: $e" }
+        }
+    }
+    // <-- AM (SELF_PIP_AUTO_ENTER_FIX)
+
+    private fun enterSelfPipIfEligible() {
+        if (isInPictureInPictureMode || lifecycle.currentState != Lifecycle.State.RESUMED) return
+        val holder = PlayerMediaHolder.current
+        if (holder?.hasExternalScreenConsumer != true || holder.viewModel?.playbackData?.value?.paused != false) {
+            return
+        }
+        val params = buildSelfPipParams(autoEnter = false) ?: return
+        try {
+            enterPictureInPictureMode(params)
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR) { "SELF_PIP_ENTRY enterPictureInPictureMode failed: $e" }
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        enterSelfPipIfEligible()
+        super.onUserLeaveHint()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        // Matches PlayerActivity.onConfigurationChanged()'s own existing
+        // pattern for the same purpose.
+        if (isInPictureInPictureMode) {
+            PlayerMediaHolder.current?.viewModel?.hideControls()
+        }
+        // AM (SELF_PIP_ACTIONS_FIX) -->
+        // Registered/unregistered exactly when PlayerActivity's own
+        // pipReceiver is - only while actually in PIP. See
+        // pipActionsReceiver's own doc comment for what's ported and what
+        // isn't.
+        if (isInPictureInPictureMode) {
+            val filter = IntentFilter(PIP_INTENTS_FILTER)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(pipActionsReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(pipActionsReceiver, filter)
+            }
+        } else {
+            try {
+                unregisterReceiver(pipActionsReceiver)
+            } catch (e: IllegalArgumentException) {
+                // Not registered - fine, matches PlayerActivity's own
+                // null-checked unregister for the same reason.
+            }
+        }
+        // <-- AM (SELF_PIP_ACTIONS_FIX)
+    }
+
+    // AM (SELF_PIP_ACTIONS_FIX) -->
+    // Direct port of PlayerActivity's own pipReceiver for the simple cases
+    // (pause/play/next/previous/skip - all plain viewModel calls, no
+    // Activity-lifecycle involvement). Deliberately NOT porting
+    // PIP_BACKGROUND_PLAY - PlayerActivity's version of that action is
+    // built entirely around finish()ing itself in a specific, carefully-
+    // sequenced way (see that receiver's own PIP_MOVETASKTOBACK_RACE_FIX/
+    // AUTO_PIP_LOOP_FIX doc comments) to survive its own destruction model.
+    // MainActivity is never meant to finish() for this at all in the new
+    // architecture, so that logic doesn't have an equivalent to port yet -
+    // this logs clearly instead of silently doing nothing, so a tap on it
+    // is diagnosable rather than a mysterious no-op.
+    private val pipActionsReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent == null || intent.action != PIP_INTENTS_FILTER) return
+            val holder = PlayerMediaHolder.current
+            val viewModel = holder?.viewModel
+            if (holder?.hasExternalScreenConsumer != true || viewModel == null) return
+            when (intent.getIntExtra(PIP_INTENT_ACTION, 0)) {
+                PIP_PAUSE -> viewModel.pause()
+                PIP_PLAY -> viewModel.unpause()
+                PIP_NEXT -> viewModel.nextEpisode(next = true)
+                PIP_PREVIOUS -> viewModel.nextEpisode(next = false)
+                PIP_SKIP -> viewModel.seekBy(10)
+                PIP_BACKGROUND_PLAY -> {
+                    // AM (SELF_PIP_BACKGROUND_PLAY_FIX) -->
+                    // PlayerActivity's version of this exists to finish()
+                    // itself while surviving via its own session-preservation
+                    // model - not applicable here, MainActivity is never
+                    // meant to finish() at all. moveTaskToBack() is the
+                    // actual semantically-correct action for this Activity,
+                    // not a workaround. One thing worth verifying live,
+                    // though: the scoping doc itself flags moveTaskToBack()
+                    // while genuinely PIP-pinned as an open risk needing
+                    // dumpsys verification, not assumption -
+                    // PlayerActivity's own PIP_FINISH_NOT_MOVETASKTOBACK
+                    // fix found real OS-level pinned-state corruption from
+                    // doing exactly this, and that finding was about the
+                    // OS's own behavior, not something specific to
+                    // PlayerActivity's code - so this needs the same kind
+                    // of on-device confirmation before fully trusting it.
+                    //
+                    // startBackgroundPlayback()'s actual job (see its own
+                    // doc comment) is only an app-lock exemption toggle -
+                    // the notification/Service already keep playback alive
+                    // unconditionally now (confirmed working since
+                    // PLAYER_HOST_SCREEN_NOTIFICATION_FIX), so nothing
+                    // further is needed there. No app-lock exemption toggle
+                    // here either - SecureActivityDelegate isn't wired into
+                    // this architecture at all yet, separate, not-yet-done
+                    // work, same as everywhere else this session.
+                    if (!graph.playerPreferences.backgroundPlayback.get()) {
+                        viewModel.pause()
+                    }
+                    moveTaskToBack(true)
+                    return
+                    // <-- AM (SELF_PIP_BACKGROUND_PLAY_FIX)
+                }
+            }
+            updateAutoEnterPipParams()
+        }
+    }
+    // <-- AM (SELF_PIP_ACTIONS_FIX)
+    // <-- AM (SELF_PIP_ENTRY)
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         graph.inject(this)
@@ -602,17 +980,54 @@ class MainActivity : BaseActivity() {
                 } ?: return
                 externalPlayerResult?.launch(intent) ?: return
             } else {
-                context.startActivity(
-                    PlayerActivity.newIntent(
-                        context,
-                        animeId,
-                        episodeId,
-                        hosterList,
-                        hosterIndex,
-                        videoIndex,
-                        forceResume = forceResume,
-                    ),
+                // AM (PLAYER_HOST_SCREEN) -->
+                // Real cutover of the internal (non-external-player) path -
+                // see PlayerHostScreen's own doc comment for the full
+                // reasoning. Only pushes a NEW PlayerHostScreen for a
+                // genuinely new session (no live holder, or a different
+                // anime entirely) - the "same anime" cases are handled
+                // directly here against the already-composed screen's live
+                // viewModel, since Voyager doesn't deduplicate equally-
+                // parameterized screen instances on its own (confirmed by
+                // reading its default key implementation).
+                val mainActivity = context as? MainActivity
+                val navigator = mainActivity?.navigator
+                val holder = PlayerMediaHolder.current
+                val liveViewModel = holder?.takeIf { it.hasExternalScreenConsumer }?.viewModel
+                val liveState = liveViewModel?.stateData?.value
+
+                NotificationReceiver.dismissNotification(
+                    context,
+                    animeId.hashCode(),
+                    Notifications.ID_NEW_EPISODES,
                 )
+
+                when {
+                    navigator?.lastItem is PlayerHostScreen &&
+                        liveViewModel != null &&
+                        liveState?.currentAnime?.id == animeId &&
+                        liveState.currentEpisode?.id == episodeId -> {
+                        // Already exactly this, already showing - nothing to do.
+                    }
+                    navigator?.lastItem is PlayerHostScreen &&
+                        liveViewModel != null &&
+                        liveState?.currentAnime?.id == animeId -> {
+                        liveViewModel.changeEpisode(episodeId)
+                    }
+                    else -> {
+                        navigator?.push(
+                            PlayerHostScreen(
+                                animeId = animeId,
+                                episodeId = episodeId,
+                                hosterList = hosterList,
+                                hosterIndex = hosterIndex,
+                                videoIndex = videoIndex,
+                                forceResume = forceResume,
+                            ),
+                        )
+                    }
+                }
+                // <-- AM (PLAYER_HOST_SCREEN)
             }
         }
 

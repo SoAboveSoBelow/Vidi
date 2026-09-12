@@ -53,8 +53,6 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.lifecycleScope
@@ -81,6 +79,7 @@ import eu.kanade.tachiyomi.ui.base.activity.BaseActivity
 import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.player.components.MAX_BRIGHTNESS
+import eu.kanade.tachiyomi.ui.player.components.applyPlayerSystemBarVisibility
 import eu.kanade.tachiyomi.util.system.powerManager
 import eu.kanade.tachiyomi.util.system.toShareIntent
 import eu.kanade.tachiyomi.util.system.toast
@@ -131,7 +130,11 @@ class PlayerActivity : BaseActivity() {
             ?: graph.playerViewModelFactory.create(SavedStateHandle())
     }
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
-    private val windowInsetsController by lazy { WindowCompat.getInsetsController(window, window.decorView) }
+    // AM (PLAYER_SCREEN_HOSTING_ACTIVITY_AGNOSTIC_FIX) -->
+    // windowInsetsController field removed - applySystemBarVisibility() now
+    // computes it inline via the shared applyPlayerSystemBarVisibility()
+    // function, so it's no longer needed here.
+    // <-- AM (PLAYER_SCREEN_HOSTING_ACTIVITY_AGNOSTIC_FIX)
 
     // AM (UNIFIED_NAV_BAR_VISIBILITY) -->
     // Was two independent places touching system bar visibility: onStart()
@@ -147,15 +150,13 @@ class PlayerActivity : BaseActivity() {
     // despite the controls being visibly on screen. This is now the single
     // function either caller goes through, always passing the actual current
     // controls state instead of a hardcoded value, so both stay in sync.
+    // AM (PLAYER_SCREEN_HOSTING_ACTIVITY_AGNOSTIC_FIX) -->
+    // Delegates to the shared free function now - see that function's own doc
+    // comment in SystemBarOverlay.kt. Kept as an instance method here too so
+    // every existing call site in this file (onStart(), etc.) is unchanged.
+    // <-- AM (PLAYER_SCREEN_HOSTING_ACTIVITY_AGNOSTIC_FIX)
     fun applySystemBarVisibility(show: Boolean) {
-        if (show) {
-            windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
-            windowInsetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
-        } else {
-            windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
-            windowInsetsController.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
+        applyPlayerSystemBarVisibility(this, show)
     }
     // <-- AM (UNIFIED_NAV_BAR_VISIBILITY)
     private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
@@ -1238,7 +1239,11 @@ class PlayerActivity : BaseActivity() {
             // this finish() call, but it represents backgrounding (see that flag's
             // doc comment), not a genuine end - the underlying player/Service must
             // survive it exactly as they already do for the OS-reclaim case below.
-            if (isFinishing && !isBackgroundPlayTransitionFinish) {
+            // AM (EXTERNAL_SCREEN_CONSUMER_FIX) -->
+            // Also excluded: mediaHolder?.hasExternalScreenConsumer - see that
+            // property's own doc comment for the confirmed race this closes.
+            // <-- AM (EXTERNAL_SCREEN_CONSUMER_FIX)
+            if (isFinishing && !isBackgroundPlayTransitionFinish && mediaHolder?.hasExternalScreenConsumer != true) {
                 // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
                 // Genuine end of this playback session - tear everything down.
                 // SVC_RACE_DEBUG -->
@@ -1289,6 +1294,7 @@ class PlayerActivity : BaseActivity() {
                     "SVC_RACE_DEBUG Activity.onDestroy() PRESERVE-session branch activity=${System.identityHashCode(this)} " +
                         "holder=${mediaHolder?.let { System.identityHashCode(it) }} " +
                         "isFinishing=$isFinishing isBackgroundPlayTransitionFinish=$isBackgroundPlayTransitionFinish " +
+                        "hasExternalScreenConsumer=${mediaHolder?.hasExternalScreenConsumer} " +
                         "at=${android.os.SystemClock.elapsedRealtime()}"
                 }
                 // <-- SVC_RACE_DEBUG
@@ -1401,6 +1407,16 @@ class PlayerActivity : BaseActivity() {
      * shouldn't spontaneously start playing an already-paused video.
      */
     private fun enterBackground(force: Boolean = false) {
+        // AM (EXTERNAL_SCREEN_CONSUMER_FIX) -->
+        // Neither branch below applies while a live external consumer (see
+        // that property's own doc comment) is actually showing this
+        // session's video right now - it isn't genuinely backgrounded, it's
+        // just not visible through THIS Activity specifically. Pausing here
+        // would pause the shared viewModel/player out from under whatever's
+        // actually on screen; starting background-audio-only playback would
+        // be equally wrong for the same reason. No-op is correct either way.
+        if (mediaHolder?.hasExternalScreenConsumer == true) return
+        // <-- AM (EXTERNAL_SCREEN_CONSUMER_FIX)
         if (playerPreferences.backgroundPlayback.get() && (force || !viewModel.playbackData.value.paused)) {
             startBackgroundPlayback()
             // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
@@ -1498,8 +1514,18 @@ class PlayerActivity : BaseActivity() {
         // either way.
         if (isFinishing && !isBackgroundPlayTransitionFinish) {
             // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
-            viewModel.deletePendingEpisodes()
-            viewModel.mpvCommand("stop")
+            // AM (EXTERNAL_SCREEN_CONSUMER_FIX) -->
+            // This runs before onDestroy() (in the same finish() sequence),
+            // so onDestroy()'s own hasExternalScreenConsumer guard doesn't
+            // cover it - mpvCommand("stop") here would hard-stop the shared
+            // player out from under a live external consumer before that
+            // guard ever gets a chance to run. Same reasoning as
+            // enterBackground()'s own guard just above.
+            if (mediaHolder?.hasExternalScreenConsumer != true) {
+                viewModel.deletePendingEpisodes()
+                viewModel.mpvCommand("stop")
+            }
+            // <-- AM (EXTERNAL_SCREEN_CONSUMER_FIX)
         } else {
             // AM (ENTER_BACKGROUND_CONSOLIDATION) -->
             enterBackground()
@@ -1810,6 +1836,15 @@ class PlayerActivity : BaseActivity() {
         // entry from an Activity the framework itself agrees is resumed.
         if (isInPictureInPictureMode || lifecycle.currentState != Lifecycle.State.RESUMED) return false
         // <-- AM (PIP_REENTRY_CRASH_FIX)
+        // AM (EXTERNAL_SCREEN_CONSUMER_FIX) -->
+        // A live external consumer (see that property's own doc comment) is
+        // already showing this session's actual video - this Activity's own
+        // TextureView isn't getting fresh frames anymore at that point, so its
+        // own PIP window would just freeze on whatever frame it last rendered,
+        // not track playback. Confirmed live on-device (2026-09-06): a static
+        // frozen PIP thumbnail next to the real, live video playing elsewhere.
+        if (mediaHolder?.hasExternalScreenConsumer == true) return false
+        // <-- AM (EXTERNAL_SCREEN_CONSUMER_FIX)
         // AM (PIP_RECREATE_FIX) -->
         tryEnterPictureInPicture(createPipParams())
         // <-- AM (PIP_RECREATE_FIX)

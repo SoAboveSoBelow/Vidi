@@ -104,6 +104,33 @@ class PlayerMediaHolder(
     private val episodeThumbnailManager: LocalEpisodeThumbnailManager = context.appGraph.episodeThumbnailManager,
     // <-- AM (BACKGROUND_SKIP_FIX)
 ) {
+    // AM (EXTERNAL_SCREEN_CONSUMER_FIX) -->
+    // Set true (via a DisposableEffect) by any consumer OTHER than
+    // PlayerActivity currently showing this holder's session - initially
+    // PlayerVoyagerScreenSpike, adopting a live session per its own doc
+    // comment. PlayerActivity.onDestroy()'s genuine-teardown-vs-preserve
+    // decision (see that function's own doc comments: DUPLICATE_INSTANCE_
+    // SELF_TERMINATE / PIP_FINISH_NOT_MOVETASKTOBACK) was built when
+    // PlayerActivity was the only possible consumer, so "this Activity is
+    // being destroyed for real" and "the session is over" were the same
+    // fact. They no longer are: confirmed live on-device (2026-09-06) that
+    // pushing PlayerVoyagerScreenSpike onto MainActivity's Navigator while
+    // PlayerActivity was still the foreground Activity caused Android to
+    // genuinely finish() PlayerActivity shortly after, and its teardown
+    // path - unaware anything else had already taken over display - called
+    // through to MPVPlayer.release() and tore down the very
+    // persistentSurfaceTexture the new consumer had just started using,
+    // producing a real "Missing surface pointer" mpv fatal. This flag is
+    // the fix: PlayerActivity's own onDestroy() now defers to a live
+    // external consumer's presence instead of assuming its own destruction
+    // is authoritative. Still only a partial fix - PlayerActivity remains
+    // the sole path that can construct a session from scratch (starts the
+    // Service, binds it) until MainActivity/the real player Screen can do
+    // that itself without going through PlayerActivity at all; this only
+    // protects a session PlayerActivity already started and handed off.
+    var hasExternalScreenConsumer: Boolean = false
+    // <-- AM (EXTERNAL_SCREEN_CONSUMER_FIX)
+
     // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
     companion object {
         // AM (NOW_PLAYING_INDICATOR) -->
