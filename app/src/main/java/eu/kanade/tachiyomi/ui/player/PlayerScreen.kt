@@ -74,6 +74,17 @@ import kotlin.time.Duration.Companion.milliseconds
 fun PlayerScreen(
     viewModel: PlayerViewModel,
     onBack: () -> Unit,
+    // AM (DUMMY_PIP) -->
+    // Optional, per-consumer callback - same pattern as onBack above,
+    // which is likewise handled differently by each screen/Activity that
+    // hosts this composable. Null (the default) preserves this function's
+    // existing behavior exactly: PlayerActivity and the debug spike screens
+    // don't pass one, so handleBackPress()'s pipOnExit branch below still
+    // falls through to emitting Event.EnterPipFromBack for them, unchanged.
+    // PlayerHostScreen is the only current caller that passes a real one -
+    // see its own call site for what entering the dummy pip actually does.
+    onEnterDummyPip: (() -> Unit)? = null,
+    // <-- AM (DUMMY_PIP)
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -166,7 +177,19 @@ fun PlayerScreen(
                 uiData.panelShown == Panels.None &&
                 uiData.dialogShown == Dialogs.None
             ) {
-                viewModel.handlePlayerEvent(PlayerEvent.EnterPipFromBack)
+                // AM (DUMMY_PIP) -->
+                // See onEnterDummyPip's own doc comment above - this is the
+                // one branch that actually changes behavior for callers that
+                // pass it. Everything else about this eligibility check
+                // (pipOnExit, casting/sheet/panel/dialog guards) is unchanged
+                // and still applies identically to both outcomes.
+                val enterDummyPip = onEnterDummyPip
+                if (enterDummyPip != null) {
+                    enterDummyPip()
+                } else {
+                    viewModel.handlePlayerEvent(PlayerEvent.EnterPipFromBack)
+                }
+                // <-- AM (DUMMY_PIP)
             } else {
                 viewModel.castManager.disconnect()
                 onBack()

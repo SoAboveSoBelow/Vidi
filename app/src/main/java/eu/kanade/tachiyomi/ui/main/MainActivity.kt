@@ -104,11 +104,12 @@ import eu.kanade.tachiyomi.ui.player.PIP_PAUSE
 import eu.kanade.tachiyomi.ui.player.PIP_PLAY
 import eu.kanade.tachiyomi.ui.player.PIP_PREVIOUS
 import eu.kanade.tachiyomi.ui.player.PIP_SKIP
+import eu.kanade.tachiyomi.ui.player.PlaybackRequest
 import eu.kanade.tachiyomi.ui.player.PlayerActivity
 import eu.kanade.tachiyomi.ui.player.PlayerBackgroundPlaybackService
 import eu.kanade.tachiyomi.ui.player.PlayerFreshStartScreenSpike
-import eu.kanade.tachiyomi.ui.player.PlayerHostScreen
 import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
+import eu.kanade.tachiyomi.ui.player.PlayerOverlayHost
 import eu.kanade.tachiyomi.ui.player.PlayerVoyagerScreenSpike
 import eu.kanade.tachiyomi.ui.player.createPipActions
 import eu.kanade.tachiyomi.ui.setting.SettingsScreen
@@ -180,6 +181,15 @@ class MainActivity : BaseActivity() {
     // reaching this instance the same way (as MainActivity, via context).
     // <-- AM (PLAYER_HOST_SCREEN)
     internal var navigator: Navigator? = null
+
+    // AM (DUMMY_PIP_FULLSCREEN_RESTORE) -->
+    // Set right before enterPictureInPictureMode() when leaving the app
+    // from dummy-pip mode, consumed once in onPictureInPictureModeChanged()
+    // - see enterSelfPipIfEligible()'s own doc comment for why the
+    // fullscreen swap happens there, after the window has actually resized,
+    // rather than before.
+    private var pendingDummyPipFullscreenRestore = false
+    // <-- AM (DUMMY_PIP_FULLSCREEN_RESTORE)
 
     init {
         registerSecureActivity(this)
@@ -366,7 +376,18 @@ class MainActivity : BaseActivity() {
     private fun buildSelfPipParams(autoEnter: Boolean): PictureInPictureParams? {
         val holder = PlayerMediaHolder.current
         val viewModel = holder?.viewModel
+        // AM (DUMMY_PIP) -->
+        // isDummyPipActive intentionally NOT part of this guard (it was,
+        // originally - see DUMMY_PIP_STALE_AUTO_ENTER_FIX below for why that
+        // was wrong). This guard now only covers "is there even a session/
+        // viewModel to build params from at all" - whether dummy pip is up
+        // is handled entirely inside the autoEnter computation further down,
+        // so a valid params object (with autoEnter explicitly false) still
+        // gets built and pushed to the OS while dummy pip is active, instead
+        // of this function bailing out and updateAutoEnterPipParams() below
+        // skipping the OS call entirely.
         if (holder?.hasExternalScreenConsumer != true || viewModel == null) return null
+        // <-- AM (DUMMY_PIP)
 
         val builder = PictureInPictureParams.Builder()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -386,10 +407,58 @@ class MainActivity : BaseActivity() {
                 builder.setAspectRatio(rational)
             }
         }
+        // AM (SELF_PIP_SOURCE_RECT_HINT_FIX) -->
+        // Was never set at all - confirmed missing, and setSourceRectHint()
+        // is the real, documented Android API for exactly the symptom
+        // reported (a grey gap during PIP entry): without it, the OS has no
+        // idea where the actual video content sits and just resizes the
+        // window generically, waiting for a fresh frame at the new size,
+        // instead of animating a smooth crossfade of the real content it
+        // already has on screen. Only meaningful for entering PIP from
+        // fullscreen (holder.isDummyPipActive already gates the dummy-pip
+        // case out entirely via its own enter-then-restore path elsewhere
+        // in this file) - fullscreen video occupies essentially the whole
+        // window at that point, so the window's own current bounds are a
+        // reasonable hint without needing MpvSurface's exact on-screen
+        // rect specifically.
+        if (!holder.isDummyPipActive) {
+            val decorView = window?.decorView
+            if (decorView != null && decorView.width > 0 && decorView.height > 0) {
+                builder.setSourceRectHint(android.graphics.Rect(0, 0, decorView.width, decorView.height))
+            }
+        }
+        // <-- AM (SELF_PIP_SOURCE_RECT_HINT_FIX)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX) -->
+            // holder.isDummyPipActive added here, not just to a top-level
+            // guard on this whole function - confirmed on-device this was
+            // the actual bug behind "leaving the app always enters PIP,
+            // showing the small dummy-pip window instead of fullscreen".
+            // setAutoEnterEnabled() is a registration the OS acts on later,
+            // on its own, without calling back into this code - it isn't
+            // re-derived at the moment of leaving. This function is only
+            // ever re-run reactively (PlayerHostScreen's own playbackData
+            // collector), and that collector stops running the instant
+            // PlayerHostScreen is popped for dummy pip - so whatever
+            // autoEnterEnabled value was last pushed (almost always true,
+            // since back is normally pressed mid-playback) stays registered
+            // with the OS for as long as dummy pip is up, regardless of
+            // what buildSelfPipParams() would compute if it ran again.
+            // Making dummy pip a top-level bail-out here (the original,
+            // wrong version) didn't fix that - it just meant this function
+            // stopped being called at all during dummy pip, which left the
+            // stale true registration in place rather than replacing it
+            // with an explicit false. Folding the check into the value
+            // itself means every call this function still receives (see
+            // PlayerHostScreen's onEnterDummyPip, which now calls
+            // updateAutoEnterPipParams() once immediately on entry)
+            // actively pushes the correct false registration instead of
+            // silently skipping the update.
             val shouldAutoEnter = autoEnter &&
+                !holder.isDummyPipActive &&
                 !viewModel.playbackData.value.paused &&
                 graph.playerPreferences.pipOnExit.get()
+            // <-- AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX)
             builder.setAutoEnterEnabled(shouldAutoEnter)
         }
         builder.setActions(
@@ -427,6 +496,44 @@ class MainActivity : BaseActivity() {
         if (holder?.hasExternalScreenConsumer != true || holder.viewModel?.playbackData?.value?.paused != false) {
             return
         }
+        // AM (DUMMY_PIP_FULLSCREEN_RESTORE) -->
+        // Requirement from the original dummy-pip scoping: leaving the app
+        // must show real PIP with the FULL video, not the small dummy-pip
+        // crop - "skip real PIP entirely while dummy pip is active" (an
+        // earlier version of this guard) was a deliberate stand-in for
+        // this, not the actual answer.
+        //
+        // Enter-then-restore, not restore-then-enter (a first version of
+        // this tried the other order - correctly pointed out that's
+        // backwards): PIP doesn't shrink whatever Compose happens to be
+        // rendering at the moment of capture, it resizes the Activity's
+        // whole window first, and Compose content fills whatever that
+        // window's actual bounds are via fillMaxSize(). So there's no
+        // layout race to win at all if the fullscreen screen gets pushed
+        // AFTER the window has already become PIP-sized - it just
+        // naturally fills whatever small size that now is. That also means
+        // this doesn't need a guessed frame delay: onPictureInPictureMode
+        // Changed() is a real completion callback for exactly the moment
+        // the resize has happened, not an estimate.
+        //
+        // Same real, narrower gap as before, honestly: this only covers the
+        // path WE trigger explicitly and control (Home press, via
+        // onUserLeaveHint()). Auto-enter (setAutoEnterEnabled, still
+        // suppressed below and in buildSelfPipParams()) is the OS acting on
+        // a pre-registered flag on its own, with no callback for us to
+        // intervene on either side of - Recents/Overview still won't
+        // restore fullscreen this way.
+        if (holder.isDummyPipActive) {
+            val params = buildSelfPipParams(autoEnter = false) ?: return
+            try {
+                enterPictureInPictureMode(params)
+                pendingDummyPipFullscreenRestore = true
+            } catch (e: Exception) {
+                logcat(LogPriority.ERROR) { "DUMMY_PIP_FULLSCREEN_RESTORE enterPictureInPictureMode failed: $e" }
+            }
+            return
+        }
+        // <-- AM (DUMMY_PIP_FULLSCREEN_RESTORE)
         val params = buildSelfPipParams(autoEnter = false) ?: return
         try {
             enterPictureInPictureMode(params)
@@ -447,6 +554,18 @@ class MainActivity : BaseActivity() {
         if (isInPictureInPictureMode) {
             PlayerMediaHolder.current?.viewModel?.hideControls()
         }
+        // AM (DUMMY_PIP_FULLSCREEN_RESTORE) -->
+        // The window has genuinely finished resizing to PIP size by the
+        // time this fires - see enterSelfPipIfEligible()'s own doc comment
+        // for why the fullscreen swap belongs here rather than before
+        // enterPictureInPictureMode() was called. Under the PLAYER_OVERLAY_MIGRATION
+        // architecture, PlayerHostScreen is already persistently mounted -
+        // restoring fullscreen is just clearing the flag, no push needed.
+        if (isInPictureInPictureMode && pendingDummyPipFullscreenRestore) {
+            pendingDummyPipFullscreenRestore = false
+            PlayerMediaHolder.current?.isDummyPipActive = false
+        }
+        // <-- AM (DUMMY_PIP_FULLSCREEN_RESTORE)
         // AM (SELF_PIP_ACTIONS_FIX) -->
         // Registered/unregistered exactly when PlayerActivity's own
         // pipReceiver is - only while actually in PIP. See
@@ -619,6 +738,18 @@ class MainActivity : BaseActivity() {
                                 .padding(contentPadding)
                                 .consumeWindowInsets(contentPadding),
                         )
+
+                        // AM (PLAYER_OVERLAY_MIGRATION) -->
+                        // Hosted here, outside DefaultNavigatorScreenTransition
+                        // entirely - see PlayerHostScreen.kt's own doc comment
+                        // for why the player (both fullscreen and dummy-pip
+                        // modes) can't be a Navigator screen at all anymore.
+                        // Renders nothing when there's no live playback
+                        // request, so this is safe to always compose
+                        // regardless of what screen the Navigator itself is
+                        // currently showing.
+                        PlayerOverlayHost()
+                        // <-- AM (PLAYER_OVERLAY_MIGRATION)
 
                         // Draw navigation bar scrim when needed
                         if (remember { isNavigationBarNeedsScrim() }) {
@@ -983,16 +1114,17 @@ class MainActivity : BaseActivity() {
                 // AM (PLAYER_HOST_SCREEN) -->
                 // Real cutover of the internal (non-external-player) path -
                 // see PlayerHostScreen's own doc comment for the full
-                // reasoning. Only pushes a NEW PlayerHostScreen for a
-                // genuinely new session (no live holder, or a different
-                // anime entirely) - the "same anime" cases are handled
-                // directly here against the already-composed screen's live
-                // viewModel, since Voyager doesn't deduplicate equally-
-                // parameterized screen instances on its own (confirmed by
-                // reading its default key implementation).
-                val mainActivity = context as? MainActivity
-                val navigator = mainActivity?.navigator
+                // reasoning.
+                //
+                // AM (PLAYER_OVERLAY_MIGRATION) -->
+                // "Already showing fullscreen" is no longer a Navigator
+                // question (navigator.lastItem is PlayerHostScreen) -
+                // PlayerHostScreen isn't pushed onto the Navigator anymore.
+                // hasExternalScreenConsumer + !isDummyPipActive is the same
+                // fact, asked the holder directly.
+                // <-- AM (PLAYER_OVERLAY_MIGRATION)
                 val holder = PlayerMediaHolder.current
+                val isShowingFullscreen = holder?.hasExternalScreenConsumer == true && holder.isDummyPipActive == false
                 val liveViewModel = holder?.takeIf { it.hasExternalScreenConsumer }?.viewModel
                 val liveState = liveViewModel?.stateData?.value
 
@@ -1003,20 +1135,29 @@ class MainActivity : BaseActivity() {
                 )
 
                 when {
-                    navigator?.lastItem is PlayerHostScreen &&
+                    isShowingFullscreen &&
                         liveViewModel != null &&
                         liveState?.currentAnime?.id == animeId &&
                         liveState.currentEpisode?.id == episodeId -> {
                         // Already exactly this, already showing - nothing to do.
                     }
-                    navigator?.lastItem is PlayerHostScreen &&
-                        liveViewModel != null &&
-                        liveState?.currentAnime?.id == animeId -> {
+                    liveViewModel != null && liveState?.currentAnime?.id == animeId -> {
+                        // AM (PLAYER_OVERLAY_MIGRATION) -->
+                        // Was gated on isShowingFullscreen too (only handled
+                        // directly if the Navigator's top screen already was
+                        // PlayerHostScreen) - now handles the same-anime case
+                        // regardless of fullscreen/dummy-pip mode, expanding
+                        // out of dummy pip if that's where it currently is,
+                        // since PlayerHostScreen is always the one already-
+                        // live instance either way now, never a second one
+                        // to push.
+                        // <-- AM (PLAYER_OVERLAY_MIGRATION)
                         liveViewModel.changeEpisode(episodeId)
+                        holder?.isDummyPipActive = false
                     }
                     else -> {
-                        navigator?.push(
-                            PlayerHostScreen(
+                        PlayerMediaHolder.requestPlayback(
+                            PlaybackRequest(
                                 animeId = animeId,
                                 episodeId = episodeId,
                                 hosterList = hosterList,

@@ -3402,6 +3402,22 @@ class PlayerViewModel(
         }
     }
 
+    // AM (DUMMY_PIP_STATUS_BAR_FIX) -->
+    // hideControls() above couples controlsShown and statusBarShown
+    // together - correct for real fullscreen playback (hiding the
+    // player's own controls there should also go immersive), wrong for
+    // the dummy pip case: a small floating window hiding its own controls
+    // should never affect the OS status/nav bars - only genuine fullscreen
+    // playback should. Confirmed on-device: continuously calling
+    // hideControls() to suppress PlayerScreen's own controls while dummy
+    // pip is up was also hiding the system status and nav bars for as
+    // long as it was active. No existing public function can set the one
+    // without the other.
+    fun setControlsAndStatusBarShown(controlsShown: Boolean, statusBarShown: Boolean) {
+        updateUiData { it.copy(controlsShown = controlsShown, statusBarShown = statusBarShown) }
+    }
+    // <-- AM (DUMMY_PIP_STATUS_BAR_FIX)
+
     fun hideSeekBar() {
         updateUiData { it.copy(seekBarShown = false) }
     }

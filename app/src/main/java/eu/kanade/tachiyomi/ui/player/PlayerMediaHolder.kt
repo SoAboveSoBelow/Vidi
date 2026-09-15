@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -93,6 +94,19 @@ import tachiyomi.source.local.isLocal
  * genuinely racing to construct at the same instant).
  * <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
  */
+// AM (PLAYER_OVERLAY_MIGRATION) -->
+// Top-level, not nested in PlayerMediaHolder's companion object - see
+// requestPlayback()'s own doc comment for why.
+data class PlaybackRequest(
+    val animeId: Long,
+    val episodeId: Long,
+    val hosterList: List<Hoster>? = null,
+    val hosterIndex: Int = -1,
+    val videoIndex: Int = -1,
+    val forceResume: Boolean = false,
+)
+// <-- AM (PLAYER_OVERLAY_MIGRATION)
+
 class PlayerMediaHolder(
     private val context: Context,
     // AM (BACKGROUND_SKIP_FIX) -->
@@ -128,8 +142,71 @@ class PlayerMediaHolder(
     // Service, binds it) until MainActivity/the real player Screen can do
     // that itself without going through PlayerActivity at all; this only
     // protects a session PlayerActivity already started and handed off.
-    var hasExternalScreenConsumer: Boolean = false
+    // AM (PLAYER_OVERLAY_MIGRATION) -->
+    // Converted to StateFlow-backed, same shape as isDummyPipActive's own
+    // DUMMY_PIP_NOT_OBSERVABLE_FIX - PlayerOverlay (see that composable's
+    // own doc comment) needs to reactively show/hide based on this now,
+    // which a plain var never notifies Compose about.
+    private val _hasExternalScreenConsumer = MutableStateFlow(false)
+    val hasExternalScreenConsumerFlow = _hasExternalScreenConsumer.asStateFlow()
+    var hasExternalScreenConsumer: Boolean
+        get() = _hasExternalScreenConsumer.value
+        set(value) { _hasExternalScreenConsumer.value = value }
+    // <-- AM (PLAYER_OVERLAY_MIGRATION)
     // <-- AM (EXTERNAL_SCREEN_CONSUMER_FIX)
+
+    // AM (DUMMY_PIP) -->
+    // True while the floating in-app mini-player (triggered from
+    // PlayerScreen's back handler when pipOnExit is enabled - see
+    // handleBackPress()'s own doc comment) is showing instead of the real,
+    // fullscreen PlayerHostScreen. Deliberately separate from
+    // hasExternalScreenConsumer, not a replacement for it: consumers of
+    // hasExternalScreenConsumer (MainActivity's key handling, the now-
+    // playing lookups, etc.) mean "is there a live foreground consumer of
+    // this session at all", which is still true while the dummy pip is
+    // showing - only the video's actual on-screen size/visibility changed,
+    // not whether the app is actively driving this session. Folding this
+    // into hasExternalScreenConsumer instead of adding a second flag would
+    // have silently disabled hardware key handling and the now-playing
+    // indicator any time the dummy pip was up, for no reason connected to
+    // what those actually gate on.
+    //
+    // What DOES need to key off this specifically: real self-PIP eligibility
+    // (MainActivity.buildSelfPipParams()/enterSelfPipIfEligible()) - entering
+    // real PIP would otherwise capture whatever's currently laid out
+    // on-screen, which while the dummy pip is up is the small floating
+    // window, not the fullscreen video. Real self-PIP is intentionally
+    // skipped entirely while this is true (see those two functions' own
+    // doc comments) rather than attempting to force a fullscreen restore
+    // first - the same ordering problem EXTERNAL_SCREEN_CONSUMER_ORDERING_FIX
+    // hit (Android's leave-app snapshot can beat Compose recomposition) would
+    // apply here too, and needs real on-device verification before relying
+    // on it, not an assumption baked into this first pass.
+    //
+    // AM (DUMMY_PIP_NOT_OBSERVABLE_FIX) -->
+    // Was a plain `var`, same shape as hasExternalScreenConsumer above -
+    // confirmed on-device this doesn't work for this particular flag:
+    // DummyPipOverlay observes PlayerMediaHolder.currentFlow to know which
+    // holder to render, but that StateFlow only re-emits when the holder
+    // *instance* changes (a session starting/stopping), not when a plain
+    // field on the same still-current instance is mutated. hasExternalScreen-
+    // Consumer never needed this - every read of it is an imperative check
+    // inside a plain function/callback (onKeyDown, buildSelfPipParams, this
+    // screen's own onDispose), never something a @Composable needs to
+    // recompose live off. This flag is different: DummyPipOverlay's own
+    // visibility has to react to it changing, in real time, with nothing
+    // else forcing a recomposition when it does. Backed by a StateFlow now,
+    // for exactly that; every existing plain-Boolean call site
+    // (isDummyPipActive = true, if (holder.isDummyPipActive)) keeps working
+    // unchanged through the property below - only DummyPipOverlay itself
+    // needs to switch to collecting isDummyPipActiveFlow instead.
+    private val _isDummyPipActive = MutableStateFlow(false)
+    val isDummyPipActiveFlow = _isDummyPipActive.asStateFlow()
+    var isDummyPipActive: Boolean
+        get() = _isDummyPipActive.value
+        set(value) { _isDummyPipActive.value = value }
+    // <-- AM (DUMMY_PIP_NOT_OBSERVABLE_FIX)
+    // <-- AM (DUMMY_PIP)
 
     // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
     companion object {
@@ -153,6 +230,40 @@ class PlayerMediaHolder(
             get() = _current.value
             private set(value) { _current.value = value }
             // <-- AM (NOW_PLAYING_INDICATOR)
+
+        // AM (PLAYER_OVERLAY_MIGRATION) -->
+        // What used to be "push a PlayerHostScreen onto the Navigator" is
+        // now "submit a request here" - PlayerOverlay (hosted once, at
+        // MainActivity's root, outside the Navigator entirely) observes
+        // this and renders PlayerHostScreen as a persistent composable kept
+        // alive for the life of the request, instead of a Screen that gets
+        // disposed on pop. That's the actual fix for the dummy-pip video
+        // freeze: real system PIP aside, nothing about entering or leaving
+        // dummy pip mode disposes or recreates the video surface anymore -
+        // it's the same MpvSurface, the same TextureView, for the entire
+        // life of a session, with fullscreen vs dummy-pip being a pure
+        // paint-time transform (see PlayerHostScreen's own doc comment) -
+        // not two different surfaces with a handoff between them, which is
+        // what every previous attempt at this bug was trying to patch
+        // around rather than eliminate.
+        //
+        // PlaybackRequest itself is a top-level class (below, outside this
+        // companion object) rather than nested here - a nested version
+        // failed to resolve from MainActivity.kt as PlayerMediaHolder.
+        // PlaybackRequest even after a clean build, for reasons not fully
+        // pinned down; top-level sidesteps whatever that was entirely.
+        private val _playbackRequest = MutableStateFlow<PlaybackRequest?>(null)
+        val playbackRequestFlow = _playbackRequest.asStateFlow()
+
+        fun requestPlayback(request: PlaybackRequest) {
+            _playbackRequest.value = request
+        }
+
+        /** Called once PlayerHostScreen's session for this request has genuinely ended. */
+        fun clearPlaybackRequest() {
+            _playbackRequest.value = null
+        }
+        // <-- AM (PLAYER_OVERLAY_MIGRATION)
     }
     // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
 
