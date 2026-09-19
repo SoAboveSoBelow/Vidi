@@ -88,6 +88,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -107,7 +108,10 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableFloatState
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -117,6 +121,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -170,6 +175,24 @@ class DummyPipController {
 
 @Composable
 fun rememberDummyPipController(): DummyPipController = remember { DummyPipController() }
+
+// AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) -->
+// The current corner radius the video's TextureView should clip itself to,
+// in VIEW-local px (0 = no clip). Needed because neither Compose clip path
+// can round the video during a resize: the layer's outline clip is applied
+// to the TextureView in a space that doesn't scale with the layer (crops
+// the pinch overshoot at the layout bounds - the reason clip turns off
+// while pinching), and an offscreen DstIn content mask never touches the
+// video at all (TextureView content is composited as its own hardware
+// layer, outside the Compose layer's buffer). A View-level outline lives
+// on the TextureView's OWN render node, so ancestor scale/tilt transforms
+// it together with the video. Read the float ONLY in AndroidView's update
+// block - the radius changes per frame mid-pinch, and reading it at
+// composition scope would recompose the whole player subtree per frame.
+// Null (unset) outside the dummy pip host: PlayerActivity's standalone
+// player then never clips.
+// <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
+val LocalDummyPipCornerRadiusPx = compositionLocalOf<MutableFloatState?> { null }
 
 private enum class DummyPipMode { Fullscreen, AnimatingIn, Pip, StashedLeft, StashedRight, AnimatingOut }
 
@@ -352,7 +375,20 @@ fun DummyPipContainer(
         val screenWidthPx = with(density) { maxWidth.toPx() }
         val screenHeightPx = with(density) { maxHeight.toPx() }
         val edgeMarginPx = with(density) { PIP_EDGE_MARGIN.toPx() }
-        val navigationBarHeightPx = WindowInsets.navigationBars.getBottom(density).toFloat()
+        // AM (DUMMY_PIP_ENTRY_NAV_BAR_FIX) -->
+        // The STABLE nav bar height, not the visibility-aware one: plain
+        // navigationBars reports 0 while the bar is hidden, and the
+        // fullscreen player hides the system bars - so entering pip from
+        // an immersive player computed every bottom clamp against a 0
+        // inset and the window ended up partially BELOW the nav bar once
+        // the bars reappeared alongside the pip. ignoringVisibility
+        // reports the bar's size either way, which is also where real PiP
+        // docks.
+        // <-- AM (DUMMY_PIP_ENTRY_NAV_BAR_FIX)
+        val navigationBarHeightPx = maxOf(
+            WindowInsets.navigationBars.getBottom(density),
+            WindowInsets.navigationBarsIgnoringVisibility.getBottom(density),
+        ).toFloat()
         // The status bar always draws OVER the window, so the window must
         // never slide underneath it - the top clamp is status-bar-aware
         // everywhere (drag settle, stash dock, IME push, volume bar).
@@ -428,6 +464,18 @@ fun DummyPipContainer(
         // full-screen touch blocker below (real PiP swallows touches to
         // everything behind the window during a resize).
         var resizeActive by remember { mutableStateOf(false) }
+        // True while a one-finger drag owns the position - the
+        // DUMMY_PIP_ENTRY_BOUNDS_FIX re-clamp must never yank the window
+        // out from under a finger (a swipe-down dismiss drag legitimately
+        // leaves the on-screen band).
+        var dragActive by remember { mutableStateOf(false) }
+        // The TextureView's own corner radius (see LocalDummyPipCornerRadiusPx):
+        // 0 at rest (the layer clip handles corners then, as before), and
+        // PIP_CORNER_RADIUS compensated by the live pinch scale while a
+        // resize/tilt gesture runs, so the on-screen radius stays constant.
+        // Written from the snapshotFlow effect below, read only in
+        // MpvSurface's AndroidView update block.
+        val pipViewCornerRadiusPx = remember { mutableFloatStateOf(0f) }
         // True while the overshoot pull-back is animating pinchScale
         // back down - if it gets cancelled mid-flight, cancelMove
         // commits the paint-time scale into the layout so the two never
@@ -768,7 +816,11 @@ fun DummyPipContainer(
                     val w = windowWidthPx()
                     val h = windowHeightPx()
                     centerX = currentScreenWidth.value - currentEdgeMargin.value - w / 2f
-                    centerY = currentScreenHeight.value - currentNavBarHeight.value - currentEdgeMargin.value - h / 2f
+                    // Bottom inset is max(navBar, ime), matching
+                    // settleToEdge() - entering with the keyboard open
+                    // must not dock the window underneath it either.
+                    centerY = currentScreenHeight.value - maxOf(currentNavBarHeight.value, currentImeBottom.value) -
+                        currentEdgeMargin.value - h / 2f
                     hasPositioned = true
                 }
                 if (mode == DummyPipMode.Fullscreen) {
@@ -830,9 +882,14 @@ fun DummyPipContainer(
         // touch blocker. It's cleared at the end of every pinch gesture,
         // but if the gesture coroutine ever dies mid-pinch (the overlay
         // leaving composition cancels it), a stuck true would block every
-        // background touch for the rest of the instance.
+        // background touch for the rest of the instance. dragActive (the
+        // ENTRY_BOUNDS_FIX re-clamp guard) has the same lifecycle - a
+        // stuck true would freeze the re-clamp instead.
         LaunchedEffect(mode) {
-            if (mode != DummyPipMode.Pip) resizeActive = false
+            if (mode != DummyPipMode.Pip) {
+                resizeActive = false
+                dragActive = false
+            }
         }
 
         LaunchedEffect(flashTick) {
@@ -855,6 +912,88 @@ fun DummyPipContainer(
 
         val pipWidthPx = baseWidthPx * sizeScale
         val pipHeightPx = pipWidthPx / aspectRatio
+
+        // AM (DUMMY_PIP_ENTRY_BOUNDS_FIX) -->
+        // "Dummy pip enters partially below the nav bar": the entry
+        // placement above runs exactly once (hasPositioned), with whatever
+        // insets/aspect are known at that instant - WindowInsets can still
+        // read 0 before the first dispatch, and the window's height
+        // follows the ANIMATED aspect ratio, which can still be gliding
+        // from the 16:9 fallback to the video's real ratio while the
+        // placement happens. Either leaves the freshly entered window
+        // hanging below the nav-bar line, and nothing ever re-checked.
+        // Settle/stash always clamp into [min, max], so ANY out-of-band
+        // resting position is a placement bug, never user intent - snap it
+        // back whenever the placement inputs change. Snap, not animate:
+        // animating would route through animatePosition -> cancelMove,
+        // which commits an in-flight paint-time resize mid-gesture.
+        // Stashed/animating-out modes are excluded on purpose: a stash
+        // legitimately rests OFF-screen.
+        LaunchedEffect(
+            mode,
+            hasPositioned,
+            navigationBarHeightPx,
+            imeBottomPx,
+            statusBarHeightPx,
+            screenWidthPx,
+            screenHeightPx,
+            pipWidthPx,
+            pipHeightPx,
+        ) {
+            if (!hasPositioned) return@LaunchedEffect
+            if (mode != DummyPipMode.Pip && mode != DummyPipMode.AnimatingIn) return@LaunchedEffect
+            // A drag/pinch/settle/toggle owns the position right now -
+            // and a pinch's overshoot legitimately leaves the band
+            // mid-gesture. Never fight those.
+            if (resizeActive || dragActive || toggleRunning || pullBackRunning) return@LaunchedEffect
+            if (moveJobX?.isActive == true || moveJobY?.isActive == true) return@LaunchedEffect
+            val w = windowWidthPx()
+            val h = windowHeightPx()
+            val bottomInset = maxOf(navigationBarHeightPx, imeBottomPx)
+            val clampedX = coerceInSafe(
+                centerX,
+                edgeMarginPx + w / 2f,
+                screenWidthPx - edgeMarginPx - w / 2f,
+            )
+            val clampedY = coerceInSafe(
+                centerY,
+                statusBarHeightPx + edgeMarginPx + h / 2f,
+                screenHeightPx - bottomInset - edgeMarginPx - h / 2f,
+            )
+            if (clampedX != centerX || clampedY != centerY) {
+                centerX = clampedX
+                centerY = clampedY
+            }
+        }
+        // <-- AM (DUMMY_PIP_ENTRY_BOUNDS_FIX)
+
+        // AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) -->
+        // Feeds the TextureView's own outline radius - see the
+        // LocalDummyPipCornerRadiusPx doc for why the view, not any
+        // Compose clip, has to carry the corners mid-gesture. Active only
+        // WHILE pinching/tilted (covers the pinch itself, the overshoot
+        // pull-back, the tilt level-out, and the double-tap toggle - all
+        // run on pinchScale/pipRotation); at rest the layer clip keeps
+        // doing the corners exactly as before, so a device where the view
+        // outline misbehaves degrades to the pre-fix behavior, not to
+        // permanently square corners. snapshotFlow + a plain state write:
+        // pinchScale changes per frame mid-pinch, and this keeps that
+        // per-frame traffic out of the composition entirely - only
+        // MpvSurface's AndroidView update block re-runs.
+        LaunchedEffect(Unit) {
+            snapshotFlow {
+                val pinching = pinchScale != 1f || pipRotation != 0f
+                val pipLike = mode == DummyPipMode.Pip ||
+                    mode == DummyPipMode.StashedLeft ||
+                    mode == DummyPipMode.StashedRight
+                if (pipLike && pinching) {
+                    cornerRadiusPx / pinchScale.coerceAtLeast(0.01f)
+                } else {
+                    0f
+                }
+            }.collect { pipViewCornerRadiusPx.floatValue = it }
+        }
+        // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
 
         // AM (DUMMY_PIP_CONTROLS_REVEAL_GROW_FIX) -->
         // Real PiP grows a small window when its controls are revealed so
@@ -1005,14 +1144,23 @@ fun DummyPipContainer(
                         }
                         translationX = lerp(-(centerX - pipWidthPx / 2f), 0f, t)
                         translationY = lerp(-(centerY - pipHeightPx / 2f), 0f, t)
-                        // The clip comes OFF while pinching/tilted: with
-                        // an embedded TextureView (AndroidView interop)
-                        // the layer clip is applied to the view in a
-                        // space that does NOT scale with the layer - it
-                        // invisibly cropped the pinch overshoot at the
-                        // layout bounds, so the window could never grow
-                        // past the screen edge. Rounded corners return
-                        // the instant the gesture ends.
+                        // The layer's OUTLINE clip still comes OFF while
+                        // pinching/tilted: with an embedded TextureView
+                        // (AndroidView interop) the layer clip is applied
+                        // to the view in a space that does NOT scale with
+                        // the layer - it invisibly cropped the pinch
+                        // overshoot at the layout bounds, so the window
+                        // could never grow past the screen edge. The
+                        // rounded corners no longer disappear with it,
+                        // though - they're carried by an outline on the
+                        // TextureView itself during the gesture (see
+                        // DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX below and in
+                        // MpvSurface.kt). An offscreen DstIn content mask
+                        // was tried here first and did NOT work: a
+                        // TextureView's content is composited as its own
+                        // hardware layer and never lands in the Compose
+                        // layer's offscreen buffer, so the mask simply
+                        // never touches the video.
                         clip = t > 0f && !pinching
                         shape = RoundedCornerShape(cornerRadiusPx * t)
                         // The shadow is dropped while pinching/tilted:
@@ -1050,7 +1198,15 @@ fun DummyPipContainer(
                     content()
                 }
             } else {
-                content()
+                // AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) -->
+                // Provides the live corner radius to the MpvSurface deep
+                // inside content() - provider wraps the CALL, so the
+                // player subtree's composition structure is unchanged and
+                // the TextureView is never re-created.
+                // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
+                CompositionLocalProvider(LocalDummyPipCornerRadiusPx provides pipViewCornerRadiusPx) {
+                    content()
+                }
             }
         }
 
@@ -1396,6 +1552,7 @@ fun DummyPipContainer(
                                         accumulatedMovement += hypot(delta.x, delta.y)
                                         if (accumulatedMovement > touchSlop) {
                                             hasExceededSlop = true
+                                            dragActive = true
                                             // The drag takes over from any
                                             // in-flight move / tilt
                                             // level-out (deferred from
@@ -1438,6 +1595,7 @@ fun DummyPipContainer(
                             // Gesture over - lift the background touch
                             // block before the release handling runs.
                             resizeActive = false
+                            dragActive = false
 
                             // The size the window will REST at after a
                             // pinch release (post pull-back) - the settle
