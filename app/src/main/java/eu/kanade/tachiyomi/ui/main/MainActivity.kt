@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.Color
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -95,7 +96,10 @@ import eu.kanade.tachiyomi.ui.deeplink.DeepLinkScreen
 import eu.kanade.tachiyomi.ui.home.HomeScreen
 import eu.kanade.tachiyomi.ui.more.NewUpdateScreen
 import eu.kanade.tachiyomi.ui.more.OnboardingScreen
+import eu.kanade.tachiyomi.ui.player.Dialogs
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
+import eu.kanade.tachiyomi.ui.player.Panels
+import eu.kanade.tachiyomi.ui.player.Sheets
 import eu.kanade.tachiyomi.ui.player.PIP_BACKGROUND_PLAY
 import eu.kanade.tachiyomi.ui.player.PIP_INTENT_ACTION
 import eu.kanade.tachiyomi.ui.player.PIP_INTENTS_FILTER
@@ -191,6 +195,32 @@ class MainActivity : BaseActivity() {
     private var pendingDummyPipFullscreenRestore = false
     // <-- AM (DUMMY_PIP_FULLSCREEN_RESTORE)
 
+    // AM (SELF_PIP_DISMISS_PAUSE_FIX) -->
+    // No state field here - see onPictureInPictureModeChanged()'s else
+    // branch. An earlier version armed a flag there and consumed it in
+    // onStop(); that never fired on-device because the system STOPPING
+    // the Activity is what generates the pip-exit callback, so onStop()
+    // had already run (with the flag still false) by the time the flag
+    // was armed. PlayerActivity's proven pattern does the opposite: the
+    // callback itself checks whether the Activity is already stopped
+    // (lifecycle == CREATED), which is exactly what distinguishes a
+    // genuine X/swipe dismiss (stopped, never resumed) from an
+    // expand-tap return (resumed, or about to be).
+    // <-- AM (SELF_PIP_DISMISS_PAUSE_FIX)
+
+    // AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX) -->
+    // The headphones "Background Play" PIP action ends with
+    // moveTaskToBack(), which closes the PIP window exactly like a user
+    // X/swipe dismiss does - pip-exit callback, Activity stopped, the
+    // SELF_PIP_DISMISS_PAUSE_FIX branch's CREATED check all fire
+    // identically, and the pause landed on a button whose entire point
+    // is to KEEP playing. PlayerActivity solves the same ambiguity with
+    // its isIntentionalBackgroundTransition; same idea here, consumed
+    // once by the dismiss-pause branch (and reset on every PIP entry so
+    // a swallowed callback can't leak into a later genuine dismiss).
+    private var pipBackgroundPlayTransition = false
+    // <-- AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX)
+
     init {
         registerSecureActivity(this)
     }
@@ -284,13 +314,37 @@ class MainActivity : BaseActivity() {
             return super.onKeyDown(keyCode, event)
         }
         when (keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> {
-                viewModel.changeVolumeBy(1)
-                viewModel.displayVolumeSlider(true)
-            }
-            KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                viewModel.changeVolumeBy(-1)
-                viewModel.displayVolumeSlider(true)
+            // AM (SYSTEM_VOLUME_PANEL) -->
+            // Dummy pip has no in-player slider, so volume keys there go
+            // to the OS's own panel; fullscreen keeps the custom slider
+            // (the only UI that can show mpv's volume boost past 100%);
+            // casting falls through to the OS entirely. See
+            // PlayerViewModel's SYSTEM_VOLUME_PANEL comment.
+            // <-- AM (SYSTEM_VOLUME_PANEL)
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                val direction = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                    AudioManager.ADJUST_RAISE
+                } else {
+                    AudioManager.ADJUST_LOWER
+                }
+                when {
+                    // Casting: don't consume at all - the system panel
+                    // drives the cast device's volume via the media route.
+                    viewModel.stateData.value.isCasting -> return super.onKeyDown(keyCode, event)
+                    // Dummy pip: the in-player slider doesn't exist here,
+                    // so the OS's own panel shows instead.
+                    holder.isDummyPipActive -> {
+                        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+                        audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
+                        viewModel.syncVolumeFromSystem()
+                    }
+                    // Fullscreen keeps the in-player slider: it's the only
+                    // UI that can show mpv's volume boost past 100%.
+                    else -> {
+                        viewModel.changeVolumeBy(if (direction == AudioManager.ADJUST_RAISE) 1 else -1)
+                        viewModel.displayVolumeSlider(true)
+                    }
+                }
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> viewModel.handleLeftDoubleTap()
             KeyEvent.KEYCODE_DPAD_RIGHT -> viewModel.handleRightDoubleTap()
@@ -552,7 +606,28 @@ class MainActivity : BaseActivity() {
         // Matches PlayerActivity.onConfigurationChanged()'s own existing
         // pattern for the same purpose.
         if (isInPictureInPictureMode) {
-            PlayerMediaHolder.current?.viewModel?.hideControls()
+            // AM (SELF_PIP_ENTRY_CLOSES_MENUS) -->
+            // Was hideControls() only. Ported the rest of PlayerActivity's
+            // pip-entry cleanup: any open sheet/panel/dialog (and the seek/
+            // volume/brightness sliders) belongs to the fullscreen player -
+            // inside the small PIP window it renders cramped or clipped,
+            // and PlayerScreen's own controls aren't composed there at all.
+            // <-- AM (SELF_PIP_ENTRY_CLOSES_MENUS)
+            PlayerMediaHolder.current?.viewModel?.let { vm ->
+                // Closers FIRST: each of setSheet/setPanel/setDialog(None)
+                // calls showControls() as a side effect, so hideControls()
+                // must run LAST to actually win.
+                vm.setSheet(Sheets.None)
+                vm.setPanel(Panels.None)
+                vm.setDialog(Dialogs.None)
+                vm.hideSeekBar()
+                vm.displayBrightnessSlider(false)
+                vm.displayVolumeSlider(false)
+                vm.hideControls()
+            }
+            // AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX) -->
+            pipBackgroundPlayTransition = false
+            // <-- AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX)
         }
         // AM (DUMMY_PIP_FULLSCREEN_RESTORE) -->
         // The window has genuinely finished resizing to PIP size by the
@@ -585,6 +660,45 @@ class MainActivity : BaseActivity() {
                 // Not registered - fine, matches PlayerActivity's own
                 // null-checked unregister for the same reason.
             }
+            // AM (SELF_PIP_DISMISS_PAUSE_FIX) -->
+            // PIP window closed - expand-tap and X/swipe-dismiss both
+            // land here. The distinction is the lifecycle state AT THIS
+            // MOMENT (see the tag comment by the class fields for why the
+            // old armed-flag/onStop version never fired): a dismiss
+            // stops the Activity BEFORE this callback runs, so
+            // currentState is already CREATED; an expand-tap return keeps
+            // it STARTED/RESUMED. Ported from PlayerActivity's
+            // PIP_REOPEN_RACE_FIX + PIP_DISMISS_PAUSE_FIX: the pause is
+            // posted and RE-VALIDATED at execution time, so a concurrent
+            // reopen that already brought this instance back up (state no
+            // longer CREATED) self-cancels instead of pausing a session
+            // the user is actively back in. Screen-off during PIP also
+            // exits pip mode with the Activity stopped (PlayerActivity's
+            // SECURE_LOCK_BACKGROUND_PLAYBACK found that case) - only the
+            // interactive case is a genuine user dismiss. Pausing (not
+            // releasing) keeps the session/notification alive, just not
+            // actively playing audio the user didn't ask to keep hearing.
+            // AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX) -->
+            // Exempt the headphones "Background Play" action: its
+            // moveTaskToBack() produces this exact same callback+state
+            // signature but is an explicit keep-playing request.
+            // <-- AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX)
+            if (pipBackgroundPlayTransition) {
+                pipBackgroundPlayTransition = false
+            } else if (lifecycle.currentState == Lifecycle.State.CREATED) {
+                val powerManager = getSystemService(POWER_SERVICE) as android.os.PowerManager
+                if (powerManager.isInteractive) {
+                    window.decorView.postDelayed(
+                        {
+                            if (lifecycle.currentState == Lifecycle.State.CREATED && !isFinishing) {
+                                PlayerMediaHolder.current?.viewModel?.pause()
+                            }
+                        },
+                        100,
+                    )
+                }
+            }
+            // <-- AM (SELF_PIP_DISMISS_PAUSE_FIX)
         }
         // <-- AM (SELF_PIP_ACTIONS_FIX)
     }
@@ -643,6 +757,12 @@ class MainActivity : BaseActivity() {
                     if (!graph.playerPreferences.backgroundPlayback.get()) {
                         viewModel.pause()
                     }
+                    // AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX) -->
+                    // moveTaskToBack() tears down the PIP window exactly
+                    // like a user dismiss - arm the exemption so the
+                    // dismiss-pause branch skips THIS pip exit.
+                    // <-- AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX)
+                    pipBackgroundPlayTransition = true
                     moveTaskToBack(true)
                     return
                     // <-- AM (SELF_PIP_BACKGROUND_PLAY_FIX)
@@ -1088,27 +1208,17 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         mpvConfig.copyFiles()
-        // AM (DUMMY_PIP_PAUSED_REOPEN_FIX) -->
-        // Leaving the app with the dummy pip PAUSED takes no real-PIP round
-        // trip (enterSelfPipIfEligible() deliberately skips paused content),
-        // so the Activity simply backgrounds with the same long-lived
-        // dummy-pip instance up - and that instance's controls come back
-        // dead on reopen (leaving while PLAYING never shows this: real PIP
-        // restores fullscreen on reopen, so the next pip entry is always a
-        // freshly-initialized instance). Entering real PIP for paused
-        // content was rejected (a floating paused video on the home screen
-        // is worse than the bug), so instead: a paused dummy pip simply
-        // isn't kept across a background stint - reopening lands on the
-        // fullscreen player (paused), and backing into the pip from there
-        // re-initializes its interaction state cleanly.
-        // <-- AM (DUMMY_PIP_PAUSED_REOPEN_FIX)
-        PlayerMediaHolder.current?.let { holder ->
-            if (holder.isDummyPipActive && holder.viewModel?.playbackData?.value?.paused == true) {
-                holder.isDummyPipActive = false
-            }
-        }
+        // AM (DUMMY_PIP_REOPEN_STAYS_PIP_FIX) -->
+        // Was DUMMY_PIP_PAUSED_REOPEN_FIX: a paused dummy pip was
+        // force-expanded to fullscreen on every onResume, because the pip's
+        // controls used to come back dead after a background stint. That
+        // workaround threw away the user's pip session on every reopen -
+        // the pip now simply stays up (activity-surviving backgrounding
+        // never tears the composable down, so its gesture state never dies
+        // in the first place; activity-destroyed reopening re-composes it
+        // fresh, also with working controls).
+        // <-- AM (DUMMY_PIP_REOPEN_STAYS_PIP_FIX)
     }
-    // <-- AM
 
     private fun Intent.isAddExtensionStoreIntent(): Boolean {
         return scheme == "aniyomi" && (data?.host == "add-repo" || data?.host == "extension-store")
@@ -1166,12 +1276,10 @@ class MainActivity : BaseActivity() {
                 // AM (PLAYER_OVERLAY_MIGRATION) -->
                 // "Already showing fullscreen" is no longer a Navigator
                 // question (navigator.lastItem is PlayerHostScreen) -
-                // PlayerHostScreen isn't pushed onto the Navigator anymore.
-                // hasExternalScreenConsumer + !isDummyPipActive is the same
-                // fact, asked the holder directly.
+                // PlayerHostScreen isn't pushed onto the Navigator anymore;
+                // what's live is asked of the holder directly.
                 // <-- AM (PLAYER_OVERLAY_MIGRATION)
                 val holder = PlayerMediaHolder.current
-                val isShowingFullscreen = holder?.hasExternalScreenConsumer == true && holder.isDummyPipActive == false
                 val liveViewModel = holder?.takeIf { it.hasExternalScreenConsumer }?.viewModel
                 val liveState = liveViewModel?.stateData?.value
 
@@ -1181,39 +1289,36 @@ class MainActivity : BaseActivity() {
                     Notifications.ID_NEW_EPISODES,
                 )
 
-                when {
-                    isShowingFullscreen &&
-                        liveViewModel != null &&
-                        liveState?.currentAnime?.id == animeId &&
-                        liveState.currentEpisode?.id == episodeId -> {
-                        // Already exactly this, already showing - nothing to do.
-                    }
-                    liveViewModel != null && liveState?.currentAnime?.id == animeId -> {
-                        // AM (PLAYER_OVERLAY_MIGRATION) -->
-                        // Was gated on isShowingFullscreen too (only handled
-                        // directly if the Navigator's top screen already was
-                        // PlayerHostScreen) - now handles the same-anime case
-                        // regardless of fullscreen/dummy-pip mode, expanding
-                        // out of dummy pip if that's where it currently is,
-                        // since PlayerHostScreen is always the one already-
-                        // live instance either way now, never a second one
-                        // to push.
-                        // <-- AM (PLAYER_OVERLAY_MIGRATION)
-                        liveViewModel.changeEpisode(episodeId)
-                        holder?.isDummyPipActive = false
-                    }
-                    else -> {
-                        PlayerMediaHolder.requestPlayback(
-                            PlaybackRequest(
-                                animeId = animeId,
-                                episodeId = episodeId,
-                                hosterList = hosterList,
-                                hosterIndex = hosterIndex,
-                                videoIndex = videoIndex,
-                                forceResume = forceResume,
-                            ),
-                        )
-                    }
+                // AM (CROSS_ANIME_IN_PLACE_SWITCH) -->
+                // Was a three-case when that called changeEpisode() directly
+                // for the same anime (and, as a side effect, RELOADED the
+                // episode when only the dummy pip was up) and submitted a
+                // request only for a different anime. Requests now drive
+                // every transition: the persistent PlayerHostScreen's
+                // reconciliation effect routes same-episode/same-anime/
+                // cross-anime through its one serialized path, so the whole
+                // session - player, surface, dummy-pip window state -
+                // survives a playlist switch. The only case still handled
+                // here is "already exactly this", where the correct action
+                // is just expanding a floating pip, with NO reload.
+                // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
+                if (liveState?.currentAnime?.id == animeId &&
+                    liveState.currentEpisode?.id == episodeId
+                ) {
+                    // liveState is non-null in this branch, which is only
+                    // reachable when a holder exists - no safe call needed.
+                    holder.isDummyPipActive = false
+                } else {
+                    PlayerMediaHolder.requestPlayback(
+                        PlaybackRequest(
+                            animeId = animeId,
+                            episodeId = episodeId,
+                            hosterList = hosterList,
+                            hosterIndex = hosterIndex,
+                            videoIndex = videoIndex,
+                            forceResume = forceResume,
+                        ),
+                    )
                 }
                 // <-- AM (PLAYER_HOST_SCREEN)
             }

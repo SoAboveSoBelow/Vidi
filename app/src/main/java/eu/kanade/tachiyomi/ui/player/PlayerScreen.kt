@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.ui.player
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,7 +17,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.graphics.toColorInt
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -107,6 +108,12 @@ fun PlayerScreen(
     val showFailedHosters by playerPreferences.showFailedHosters.collectAsState()
     val emptyHosters by playerPreferences.showEmptyHosters.collectAsState()
     val speedPresets by playerPreferences.speedPresets.collectAsState()
+    // AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS) -->
+    // Bar visibility is derived, never independently stored: bars show
+    // iff (controls shown && this preference) or the dummy pip is up.
+    // See PlayerViewModel's comment of the same tag.
+    // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
+    val showStatusBarWithControls by playerPreferences.showSystemStatusBar.collectAsState()
     val relativeTime by uiPreferences.relativeTime.collectAsState()
     val dateFormat by uiPreferences.dateFormat.collectAsState()
 
@@ -219,7 +226,33 @@ fun PlayerScreen(
         handleBackPress()
     }
 
-    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+    // AM (DUMMY_PIP_BACKGROUND_CORNERS_FIX) -->
+    // Inside the dummy pip this root black background is the box-sized
+    // black square that peeked out behind the video's rounded corners
+    // mid-resize: the pip's Compose layer clip (which used to round it)
+    // comes OFF while pinching/tilted, and the TextureView's outline
+    // clip only covers the video view itself. Draw the background as a
+    // ROUNDED rect with the live pip corner radius instead - drawn, not
+    // clipped, so it scales/rotates with the pip layer exactly like the
+    // video. The radius is read at DRAW time (drawBehind): it changes
+    // per frame during a pinch, and a composition read would recompose
+    // this whole screen every frame. Radius 0 (fullscreen / morph, where
+    // the layer clip does the rounding) = the plain square fill exactly
+    // as before.
+    // <-- AM (DUMMY_PIP_BACKGROUND_CORNERS_FIX)
+    val pipCornerRadiusPx = LocalDummyPipCornerRadiusPx.current
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .drawBehind {
+                val r = pipCornerRadiusPx?.floatValue ?: 0f
+                if (r > 0f) {
+                    drawRoundRect(Color.Black, cornerRadius = CornerRadius(r))
+                } else {
+                    drawRect(Color.Black)
+                }
+            },
+    ) {
         OrientationOverlay(
             orientation = playbackData.currentOrientation,
         )
@@ -392,62 +425,69 @@ fun PlayerScreen(
             )
 
             SystemBarOverlay(
-                showStatusBar = uiData.statusBarShown,
+                showStatusBar = (uiData.controlsShown && showStatusBarWithControls) || dummyPipActive,
             )
 
             var resetControls by remember { mutableStateOf(true) }
 
-            // AM (REOPEN_STATUS_BAR_STUCK_FIX) -->
-            // dummyPipActive (hoisted to the top of this composable for
-            // DUMMY_PIP_BACK_PASSTHROUGH_FIX) is also needed for the guard
-            // below: while dummy pip is active the leak-fix deliberately
-            // holds (controlsShown=false, statusBarShown=true), and the
-            // status bar must NOT be hidden on a timer in that state.
+            // AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS) -->
+            // This effect now ONLY auto-hides the controls; bar visibility
+            // follows controlsShown through SystemBarOverlay's derived
+            // input above, so there is no second timer and no stale-bars
+            // branch (the old REOPEN_STATUS_BAR_STUCK_FIX) to keep in
+            // sync. Paused/seeking keeps controls up - and the bars with
+            // them, exactly the tie the setting promises.
+            // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
             LaunchedEffect(
                 uiData.controlsShown,
-                uiData.statusBarShown,
                 playbackData.paused,
                 playbackData.isSeeking,
                 resetControls,
-                dummyPipActive,
             ) {
                 if (uiData.controlsShown && !playbackData.paused && !playbackData.isSeeking) {
                     delay(uiData.playerTimeToDisappearMs.milliseconds)
                     viewModel.hideControls()
-                } else if (uiData.statusBarShown && !dummyPipActive) {
-                    // Reopening the player from the background-playback
-                    // notification resumes with controlsShown already
-                    // false (the pip leak-fix left it so, with the status
-                    // bar deliberately kept) - the branch above never
-                    // fired, so the OS status/nav bars stayed up until
-                    // the next interaction. Paused/seeking playback keeps
-                    // the player controls but should still go immersive
-                    // on the same timer.
-                    delay(uiData.playerTimeToDisappearMs.milliseconds)
-                    viewModel.setControlsAndStatusBarShown(uiData.controlsShown, false)
                 }
             }
-            // <-- AM (REOPEN_STATUS_BAR_STUCK_FIX)
 
             CompositionLocalProvider(
                 LocalRippleConfiguration provides playerRippleConfiguration,
                 LocalPlayerButtonsClickEvent provides { resetControls = !resetControls },
                 LocalContentColor provides Color.White,
             ) {
-                PlayerControls(
-                    stateData = stateData,
-                    uiData = uiData,
-                    playbackData = playbackData,
-                    onBack = handleBackPress,
-                    onPlayerEvent = viewModel::handlePlayerEvent,
-                    mpvVolume = mpvVolume,
-                    pausedForCache = pausedForCache,
-                    coreIdle = coreIdle,
-                    readAhead = readAhead,
-                    remaining = remaining,
-                    playbackSpeed = playbackSpeed,
-                    modifier = Modifier.fillMaxSize(),
-                )
+                // AM (DUMMY_PIP_CONTROLS_MIDSCREEN_FIX) -->
+                // Don't compose the player's own controls at all while the
+                // dummy pip is up - including during the enter/exit morph,
+                // whose fullscreen-layout box is exactly where they used to
+                // flash mid-screen: hiding via uiData.controlsShown=false
+                // still plays PlayerControls' 300ms exit fade, and on entry
+                // that fade runs INSIDE the morphing window (same 300ms),
+                // visibly riding the shrink before the DUMMY_PIP_CONTROLS_
+                // LEAK_FIX collector could even react. Removing the
+                // composable is instant - no fade, nothing to leak - and is
+                // stateless-safe: all control state lives in the ViewModel,
+                // and on expand this recomposes fresh (controls hidden until
+                // a tap, same as before). The LEAK_FIX collector stays as
+                // the guard that keeps the VM-side state honest against
+                // side-effect showControls() calls.
+                if (!dummyPipActive) {
+                    PlayerControls(
+                        stateData = stateData,
+                        uiData = uiData,
+                        playbackData = playbackData,
+                        onBack = handleBackPress,
+                        onPlayerEvent = viewModel::handlePlayerEvent,
+                        mpvVolume = mpvVolume,
+                        pausedForCache = pausedForCache,
+                        coreIdle = coreIdle,
+                        readAhead = readAhead,
+                        remaining = remaining,
+                        playbackSpeed = playbackSpeed,
+                        systemBarsVisible = uiData.controlsShown && showStatusBarWithControls,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                // <-- AM (DUMMY_PIP_CONTROLS_MIDSCREEN_FIX)
 
                 // Sheets
                 val showSubtitles by subtitlePreferences.screenshotSubtitles.collectAsState()

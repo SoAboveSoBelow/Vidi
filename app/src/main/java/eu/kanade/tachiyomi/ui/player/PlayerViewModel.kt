@@ -329,7 +329,6 @@ class PlayerViewModel(
     private val doubleTapToSeekDuration = gesturePreferences.skipLengthPreference.get()
     private val showSeekBar = gesturePreferences.showSeekBar.get()
     private val pipEpisodeToasts = playerPreferences.pipEpisodeToasts.get()
-    private val showStatusBar = playerPreferences.showSystemStatusBar.get()
     private val downloadAheadAmount = downloadPreferences.autoDownloadWhileWatching.get()
     private val progress = playerPreferences.progressPreference.get()
     private val castProxy = playerPreferences.castProxy.get()
@@ -361,12 +360,6 @@ class PlayerViewModel(
             showChapterIndicator = showChapterIndicator,
             enableCast = enableCast,
             bottomPlayerButtons = bottomPlayerButtons,
-            // AM (SYSTEM_BAR_SYNC) -->
-            // controlsShown defaults to true, so statusBarShown must be seeded from the
-            // preference here too - otherwise the system bar stays hidden on first open
-            // until the next showControls()/hideControls() toggle syncs them.
-            statusBarShown = showStatusBar,
-            // <-- AM (SYSTEM_BAR_SYNC)
         ),
     )
     val uiData = _uiData.asStateFlow()
@@ -3309,6 +3302,87 @@ class PlayerViewModel(
         }
     }
 
+    // AM (CROSS_ANIME_IN_PLACE_SWITCH) -->
+    /**
+     * Cross-anime ("playlist") counterpart of [changeEpisode]: switches this LIVE
+     * session to a different anime entirely, in place - same ViewModel, same
+     * player, same surface, same dummy-pip window. mpv only ever sees a new
+     * loadfile, exactly like an episode change. The old teardown-and-relaunch
+     * for this case (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX) predates the
+     * persistent-host architecture and threw away the whole session - holder,
+     * pip window state, auto-enter pip registration - on every playlist switch,
+     * which is also what made recents-button pip entry flaky afterward.
+     *
+     * Prep mirrors changeEpisode() (pause, position save, UI reset, job
+     * cancel); the load itself reuses [init] wholesale - everything init does
+     * per fresh session (source, trackers, episode list, hosters, user-data
+     * props) is exactly the set a cross-anime switch needs. Also serves as the
+     * initial load for a fresh ViewModel (currentAnime == null): routing that
+     * through here too means every load this session ever performs serializes
+     * through episodeChangeJob.
+     */
+    fun changeAnime(
+        animeId: Long,
+        episodeId: Long,
+        hostList: String,
+        hostIndex: Int,
+        vidIndex: Int,
+    ) {
+        if (stateData.value.currentAnime?.id == animeId) {
+            // Same anime is changeEpisode()'s case - never let a caller
+            // route it through the heavier cross-anime path by accident.
+            changeEpisode(episodeId)
+            return
+        }
+        if (stateData.value.isCasting) {
+            castManager.stopRemoteMediaClient()
+            updateCastUiData { it.copy(isLoadingEpisode = true) }
+        } else {
+            pause()
+            clearTracks()
+        }
+
+        rememberRecentEpisodePosition()
+
+        updateStateData { it.copy(hosterList = emptyList()) }
+        updateUiData {
+            it.copy(
+                sheetShown = Sheets.None,
+                panelShown = Panels.None,
+                isLoadingEpisode = true,
+                isLoadingHosters = true,
+                previousPauseState = false,
+                hosterExpandedList = emptyList(),
+                selectedHosterVideoIndex = Pair(-1, -1),
+            )
+        }
+        cancelHosterVideoLinksJob()
+        thumbnailTileCache.clear()
+        thumbnailFetchJob?.cancel()
+        lastThumbnailFetch = 0L
+
+        episodeChangeJob?.cancel()
+        episodeChangeJob = viewModelScope.launch {
+            val (initResult, loadResult) = init(
+                animeId = animeId,
+                initialEpisodeId = episodeId,
+                hostList = hostList,
+                hostIndex = hostIndex,
+                vidIndex = vidIndex,
+            )
+            logcat(LogPriority.INFO) {
+                "CROSS_ANIME_IN_PLACE_SWITCH init() returned initResult=$initResult loadResult=$loadResult"
+            }
+            updateUiData { it.copy(isLoadingHosters = false) }
+            loadHosters(
+                hosterList = initResult.hosterList ?: emptyList(),
+                hosterIndex = initResult.videoIndex.first,
+                videoIndex = initResult.videoIndex.second,
+            )
+        }
+    }
+    // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
+
     // === Controls ===
 
     fun onKey(keyEvent: KeyEvent): Boolean {
@@ -3396,7 +3470,6 @@ class PlayerViewModel(
         updateUiData {
             it.copy(
                 controlsShown = true,
-                statusBarShown = showStatusBar,
             )
         }
     }
@@ -3405,26 +3478,24 @@ class PlayerViewModel(
         updateUiData {
             it.copy(
                 controlsShown = false,
-                statusBarShown = false,
             )
         }
     }
 
-    // AM (DUMMY_PIP_STATUS_BAR_FIX) -->
-    // hideControls() above couples controlsShown and statusBarShown
-    // together - correct for real fullscreen playback (hiding the
-    // player's own controls there should also go immersive), wrong for
-    // the dummy pip case: a small floating window hiding its own controls
-    // should never affect the OS status/nav bars - only genuine fullscreen
-    // playback should. Confirmed on-device: continuously calling
-    // hideControls() to suppress PlayerScreen's own controls while dummy
-    // pip is up was also hiding the system status and nav bars for as
-    // long as it was active. No existing public function can set the one
-    // without the other.
-    fun setControlsAndStatusBarShown(controlsShown: Boolean, statusBarShown: Boolean) {
-        updateUiData { it.copy(controlsShown = controlsShown, statusBarShown = statusBarShown) }
-    }
-    // <-- AM (DUMMY_PIP_STATUS_BAR_FIX)
+    // AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS) -->
+    // statusBarShown no longer exists as independent state. Every past
+    // "player controls visible but system bars not" (and vice versa) bug
+    // - reopen-from-notification stuck bars, dummy-pip expand leaving
+    // bars up, paused-playback timers hiding bars under visible controls
+    // - traced back to some caller setting the two separately and a
+    // later transition only fixing one of them. Bar visibility is now
+    // DERIVED at the single place that applies it (PlayerScreen's
+    // SystemBarOverlay): bars show iff (controlsShown && the
+    // showSystemStatusBar preference) OR the dummy pip is up (it floats
+    // over ordinary app UI, which always has bars). This function keeps
+    // the controls-half for the dummy-pip paths; the bars half needs no
+    // write at all anymore.
+    // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
 
     fun hideSeekBar() {
         updateUiData { it.copy(seekBarShown = false) }
@@ -3502,6 +3573,25 @@ class PlayerViewModel(
 
     fun displayBrightnessSlider(show: Boolean) {
         updateUiData { it.copy(isBrightnessSliderShown = show) }
+    }
+
+    // AM (SYSTEM_VOLUME_PANEL) -->
+    // Volume keys are routed per-surface in MainActivity/PlayerActivity
+    // onKeyDown: dummy pip uses adjustStreamVolume(FLAG_SHOW_UI) (no
+    // in-player slider exists there); casting falls through to the OS
+    // (the system panel drives the CAST DEVICE's volume via the active
+    // media route; adjusting the phone's stream volume mid-cast changes
+    // nothing audible); fullscreen keeps the custom slider, the only UI
+    // that can represent mpv's volume boost past 100%.
+    // <-- AM (SYSTEM_VOLUME_PANEL)
+
+    // Keys handled via adjustStreamVolume() (dummy pip) bypass
+    // changeVolumeTo(), so the app's own copy of the volume (slider
+    // state, persisted restore value) would go stale without this re-read.
+    fun syncVolumeFromSystem() {
+        val volume = audioManager.getVolume()
+        playerPreferences.playerVolumeValue.set(volume)
+        updatePlaybackData { it.copy(currentVolume = volume) }
     }
 
     fun changeVolumeBy(change: Int) {
@@ -4655,7 +4745,6 @@ class PlayerViewModel(
         val mediaTitle: String = "",
         val animeTitle: String = "",
         val controlsShown: Boolean = true,
-        val statusBarShown: Boolean = false,
         val seekBarShown: Boolean = true,
         val isControlsLocked: Boolean = false,
         val playerUpdate: PlayerUpdates = PlayerUpdates.None,

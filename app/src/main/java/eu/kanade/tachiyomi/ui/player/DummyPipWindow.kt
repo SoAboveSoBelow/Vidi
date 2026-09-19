@@ -73,16 +73,12 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateCentroid
-import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -91,10 +87,11 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -105,7 +102,6 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -126,18 +122,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -218,8 +219,9 @@ private const val FALLBACK_ASPECT_RATIO = 16f / 9f
 // larger than real PiP's floor ("real pip can still get a bit smaller");
 // 70dp: landscape min width = 70*1.78 = ~125dp (~37% of screen),
 // portrait min = 70dp (~23%) - still above the 60dp that read as
-// "very small".
-private val PIP_MIN_EDGE = 70.dp
+// "very small". 75dp: midpoint of the two on-device brackets (70 =
+// "still smaller than real pip's min", 80 = "slightly above it").
+private val PIP_MIN_EDGE = 75.dp
 private const val PIP_ASPECT_LIMIT_FOR_MIN_SIZE = 1.777778f
 
 private val PIP_EDGE_MARGIN = 16.dp
@@ -285,6 +287,13 @@ private val PIP_TOP_ROW_SPACING = 16.dp
 // comparison: 250/200ms read as "a lot faster than the real pip".
 private const val ENTER_EXIT_MORPH_MS = 300
 private const val TOGGLE_SIZE_MS = 350
+// AM (DUMMY_PIP_UNIFIED_DISMISS_FADE) -->
+// Real PiP's dismissal (X, swipe-to-dismiss) is a quick in-place FADE,
+// ~150ms - no sliding, no morph. All three dummy-pip exits that tear
+// the window down (close button, swipe-down, hide-to-background) use
+// this one fade now.
+// <-- AM (DUMMY_PIP_UNIFIED_DISMISS_FADE)
+private const val PIP_DISMISS_FADE_MS = 150
 private const val CONTROLS_REVEAL_GROW_MS = 300
 private const val CONTROLS_AUTO_HIDE_MS = 3_000L
 // Taps within this window after a double-tap are treated as finger-bounce
@@ -294,7 +303,12 @@ private const val DOUBLE_TAP_EXTRA_TAP_SUPPRESS_MS = 100L
 // ignored - the finger that just double-tapped tends to linger/land once
 // more, and real PiP doesn't pop controls up right after a resize either.
 private const val POST_RESIZE_TAP_SUPPRESS_MS = 300L
-private const val VOLUME_BAR_AUTO_HIDE_MS = 1_500L
+// AM (DUMMY_PIP_SYSTEM_VOLUME_UI) -->
+// The external volume pill was removed entirely: volume keys while the
+// dummy pip is up now go straight to AudioManager.adjustStreamVolume(
+// FLAG_SHOW_UI) in MainActivity.onKeyDown - the OS's own volume panel,
+// exactly what real PiP shows, with no custom UI to keep in sync.
+// <-- AM (DUMMY_PIP_SYSTEM_VOLUME_UI)
 // Velocity cap for a release fling, px/s. 4000 clipped real fast
 // diagonal swipes - on real PiP a small but fast swipe crosses corner
 // to corner, which needs ~2x that headroom.
@@ -351,6 +365,21 @@ private const val CONTROLS_REVEAL_TARGET_SCALE = 0.78f
 
 private fun coerceInSafe(value: Float, min: Float, max: Float): Float = value.coerceIn(min, max.coerceAtLeast(min))
 
+// AM (DUMMY_PIP_PINCH_ROTATION_ANCHOR_FIX) -->
+// Rotate a vector by the window's tilt. The pinch layer scales AND
+// rotates (Samsung tilt) around the window center, so every local ->
+// screen conversion during a pinch must include the rotation - doing
+// only the scale (the old code) walked the window off the pinch
+// midpoint whenever the gesture added a few degrees of tilt.
+// <-- AM (DUMMY_PIP_PINCH_ROTATION_ANCHOR_FIX)
+private fun Offset.rotatedByDegrees(degrees: Float): Offset {
+    if (degrees == 0f) return this
+    val rad = Math.toRadians(degrees.toDouble())
+    val c = cos(rad).toFloat()
+    val s = sin(rad).toFloat()
+    return Offset(x * c - y * s, x * s + y * c)
+}
+
 @Composable
 fun DummyPipContainer(
     isPipRequested: Boolean,
@@ -359,19 +388,21 @@ fun DummyPipContainer(
     isPaused: Boolean,
     actions: DummyPipActions,
     controller: DummyPipController = rememberDummyPipController(),
-    // Volume indicator shown OUTSIDE the window (above it), like real
-    // PiP's volume UI. PlayerHostScreen increments volumeUiTick every
-    // time the in-player volume slider would have shown (and suppresses
-    // that internal one) - see there for the redirect.
-    volume: Int = 0,
-    maxVolume: Int = 100,
-    volumeUiTick: Int = 0,
     content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    // Live LayoutCoordinates for the pinch gesture math: the overlay's
+    // (captured at the pointerInput's position in the modifier chain,
+    // used to map every finger position to screen space) and the root
+    // container's (centerX/centerY live in container space; the gesture
+    // math runs in screen space and this converts between the two).
+    // Declared here, before BoxWithConstraints, so the container's own
+    // modifier can reference pipRootCoords.
+    var gestureOverlayCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var pipRootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { pipRootCoords = it }) {
         val screenWidthPx = with(density) { maxWidth.toPx() }
         val screenHeightPx = with(density) { maxHeight.toPx() }
         val edgeMarginPx = with(density) { PIP_EDGE_MARGIN.toPx() }
@@ -389,9 +420,53 @@ fun DummyPipContainer(
             WindowInsets.navigationBars.getBottom(density),
             WindowInsets.navigationBarsIgnoringVisibility.getBottom(density),
         ).toFloat()
+        // AM (DUMMY_PIP_LANDSCAPE_NAV_BAR_FIX) -->
+        // In LANDSCAPE the nav bar isn't at the bottom at all - it sits
+        // on the left or right EDGE, where getBottom() reports 0. Every
+        // X clamp/dock that ignored the side insets let the window slide
+        // underneath the bar there. Same ignoringVisibility rule as the
+        // bottom inset: the player hides the bars, but the pip docks
+        // against where they ARE.
+        // <-- AM (DUMMY_PIP_LANDSCAPE_NAV_BAR_FIX)
+        val layoutDirection = LocalLayoutDirection.current
+        val navigationBarLeftPx = maxOf(
+            WindowInsets.navigationBars.getLeft(density, layoutDirection),
+            WindowInsets.navigationBarsIgnoringVisibility.getLeft(density, layoutDirection),
+        ).toFloat()
+        val navigationBarRightPx = maxOf(
+            WindowInsets.navigationBars.getRight(density, layoutDirection),
+            WindowInsets.navigationBarsIgnoringVisibility.getRight(density, layoutDirection),
+        ).toFloat()
+        // AM (DUMMY_PIP_CUTOUT_AVOIDANCE_FIX) -->
+        // The front camera hole. In portrait it lives inside the status
+        // bar's top inset, but in LANDSCAPE it sits on a SIDE edge where
+        // neither the status bar nor the nav bar insets cover it - the
+        // pip could slide right underneath it. AOSP insets the pip's
+        // movement bounds by the display cutout exactly like the system
+        // bars, so the clamps below use the per-side UNION of both.
+        // <-- AM (DUMMY_PIP_CUTOUT_AVOIDANCE_FIX)
+        // safeDrawing = system bars + display cutout (WindowInsets
+        // .displayCutout isn't available in this project's Compose
+        // artifact), so the cutout is the part safeDrawing adds ON TOP
+        // of the bars. Uses ignoringVisibility for the bars side of the
+        // delta so a hidden bar isn't mistaken for cutout space.
+        val safeDrawingInsets = WindowInsets.safeDrawing
+        val systemBarsIgnoringVisibility = WindowInsets.systemBarsIgnoringVisibility
+        val cutoutLeftPx = (
+            safeDrawingInsets.getLeft(density, layoutDirection) -
+                systemBarsIgnoringVisibility.getLeft(density, layoutDirection)
+            ).coerceAtLeast(0).toFloat()
+        val cutoutRightPx = (
+            safeDrawingInsets.getRight(density, layoutDirection) -
+                systemBarsIgnoringVisibility.getRight(density, layoutDirection)
+            ).coerceAtLeast(0).toFloat()
+        val cutoutTopPx = (
+            safeDrawingInsets.getTop(density) -
+                systemBarsIgnoringVisibility.getTop(density)
+            ).coerceAtLeast(0).toFloat()
         // The status bar always draws OVER the window, so the window must
         // never slide underneath it - the top clamp is status-bar-aware
-        // everywhere (drag settle, stash dock, IME push, volume bar).
+        // everywhere (drag settle, stash dock, IME push).
         // NOTE: it's a TOP inset - statusBars.getBottom() returns 0 (that
         // bug let the window rest underneath it). systemBars.getTop as a
         // fallback source, 24dp as a last resort if both report 0.
@@ -427,6 +502,11 @@ fun DummyPipContainer(
         val currentScreenHeight = rememberUpdatedState(screenHeightPx)
         val currentEdgeMargin = rememberUpdatedState(edgeMarginPx)
         val currentNavBarHeight = rememberUpdatedState(navigationBarHeightPx)
+        val currentNavBarLeft = rememberUpdatedState(navigationBarLeftPx)
+        val currentNavBarRight = rememberUpdatedState(navigationBarRightPx)
+        val currentCutoutLeft = rememberUpdatedState(cutoutLeftPx)
+        val currentCutoutRight = rememberUpdatedState(cutoutRightPx)
+        val currentCutoutTop = rememberUpdatedState(cutoutTopPx)
         val currentStatusBarHeight = rememberUpdatedState(statusBarHeightPx)
         val currentImeBottom = rememberUpdatedState(imeBottomPx)
         val currentMinEdge = rememberUpdatedState(minEdgePx)
@@ -437,7 +517,16 @@ fun DummyPipContainer(
         // bottom-right position - must start false even when isPipRequested
         // starts false, or the first later entry would never get positioned.
         var hasPositioned by remember { mutableStateOf(false) }
-        var controlsShown by remember { mutableStateOf(true) }
+        // AM (DUMMY_PIP_ENTRY_NO_CONTROLS_REVEAL) -->
+        // Starts false and stays false through entry: entering pip used to
+        // reveal the controls immediately, which - for any window below the
+        // reveal threshold - also triggered the controls-reveal GROW: the
+        // window visibly expanded on every entry, then shrank back when the
+        // controls auto-hid. Entry is now silent (real PiP's entry doesn't
+        // grow the window either); the first TAP reveals controls + grow as
+        // usual.
+        // <-- AM (DUMMY_PIP_ENTRY_NO_CONTROLS_REVEAL)
+        var controlsShown by remember { mutableStateOf(false) }
         // Extra key so re-tapping while controls are already visible still
         // restarts the auto-hide timer (re-setting true->true wouldn't).
         var controlsRevision by remember { mutableIntStateOf(0) }
@@ -498,6 +587,13 @@ fun DummyPipContainer(
         // 0 = visually fullscreen, 1 = visually the floating window. Only
         // ever driven from LaunchedEffects/normal coroutines.
         val transition = remember { Animatable(if (isPipRequested) 1f else 0f) }
+        // AM (DUMMY_PIP_UNIFIED_DISMISS_FADE) -->
+        // In-place fade for every window teardown (close / swipe-down /
+        // hide-to-background), matching real PiP's dismissal. 1 at rest;
+        // runDismissMorph/runBackgroundMorph drive it to 0, the
+        // entry/exit effect snaps it back for the next session.
+        // <-- AM (DUMMY_PIP_UNIFIED_DISMISS_FADE)
+        val dismissAlpha = remember { Animatable(1f) }
         // The in-flight programmatic movements (settle/stash/unstash/
         // double-tap resize), one job PER AXIS so a fling can land on a
         // wall with a dead-stop X while Y keeps gliding with its own
@@ -517,8 +613,50 @@ fun DummyPipContainer(
         // ("side pull does very little to the pip while mid fling").
         var flightVelocityX = 0f
         var flightVelocityY = 0f
+        // AM (DUMMY_PIP_STALE_SETTLE_FIX) -->
+        // The last settle's TARGET. On a rotation the new screen size
+        // lands a frame BEFORE the new WindowInsets, so a settle launched
+        // right at the rotation computes its dock from the OLD bounds and
+        // lands offset from the edge / over a bar - and the
+        // ENTRY_BOUNDS_FIX clamp used to skip while ANY move was in
+        // flight, so the stale landing was never corrected. The clamp
+        // now validates this target against the CURRENT bounds and
+        // re-settles if it no longer fits.
+        // <-- AM (DUMMY_PIP_STALE_SETTLE_FIX)
+        var settleTargetX by remember { mutableFloatStateOf(Float.NaN) }
+        var settleTargetY by remember { mutableFloatStateOf(Float.NaN) }
 
-        fun windowWidthPx() = currentBaseWidth.value * sizeScale
+        // AM (DUMMY_PIP_ROTATION_FIT_FIX) -->
+        // AOSP PipBoundsAlgorithm.getSizeForAspectRatio() shrinks the
+        // window when it wouldn't FIT the display bounds - the cap is on
+        // BOTH dimensions. The old code only ever capped the WIDTH, so a
+        // window sized in portrait (60% of the tall screen's width) ended
+        // up TALLER than the screen after rotating to landscape, clipped
+        // off the top/bottom. This is the AOSP fit: the largest width
+        // whose height also clears the status bar above and the nav
+        // bar/IME below.
+        // The rect the window's EDGES must stay inside: per side, the
+        // union of whichever bar/cutout actually occupies that edge (so
+        // an offset only exists where something is really there), plus
+        // the edge margin. Every dock/clamp below routes through these.
+        fun boundLeftPx() = maxOf(currentNavBarLeft.value, currentCutoutLeft.value) + currentEdgeMargin.value
+        fun boundRightPx() = currentScreenWidth.value -
+            maxOf(currentNavBarRight.value, currentCutoutRight.value) - currentEdgeMargin.value
+        fun boundTopPx() = maxOf(currentStatusBarHeight.value, currentCutoutTop.value) + currentEdgeMargin.value
+        fun boundBottomPx() = currentScreenHeight.value -
+            maxOf(currentNavBarHeight.value, currentImeBottom.value) - currentEdgeMargin.value
+
+        fun maxWindowWidthPx(): Float {
+            val maxW = boundRightPx() - boundLeftPx()
+            val maxH = (boundBottomPx() - boundTopPx()) * currentAspect.value.coerceAtLeast(0.01f)
+            return minOf(maxW, maxH)
+        }
+
+        // Coerced to the fit so EVERY consumer (settle/stash/toggle dock
+        // math, the layout below) sees a size that can't clip, even in the
+        // frames between a rotation and the sizeScale re-commit in the
+        // rotation effect further down.
+        fun windowWidthPx() = minOf(currentBaseWidth.value * sizeScale, maxWindowWidthPx())
         fun windowHeightPx() = windowWidthPx() / currentAspect.value
 
         // AOSP PipBoundsAlgorithm.getSizeForAspectRatio(): within the
@@ -617,13 +755,12 @@ fun DummyPipContainer(
             val w = widthPx
             val h = heightPx
             val targetX = if (projectedX < currentScreenWidth.value / 2f) {
-                currentEdgeMargin.value + w / 2f
+                boundLeftPx() + w / 2f
             } else {
-                currentScreenWidth.value - currentEdgeMargin.value - w / 2f
+                boundRightPx() - w / 2f
             }
-            val bottomInset = maxOf(currentNavBarHeight.value, currentImeBottom.value)
-            val minY = currentStatusBarHeight.value + currentEdgeMargin.value + h / 2f
-            val maxY = currentScreenHeight.value - bottomInset - currentEdgeMargin.value - h / 2f
+            val minY = boundTopPx() + h / 2f
+            val maxY = boundBottomPx() - h / 2f
             val targetY = coerceInSafe(projectedY, minY, maxY)
             // Per-axis physics (see the spec constants): X always lands on
             // a wall, so it gets the dead-stop spec. Y gets the glide spec
@@ -632,6 +769,8 @@ fun DummyPipContainer(
             // axis dead-stops as well - no bouncing off walls on either
             // axis.
             val yHitsWall = projectedY < minY || projectedY > maxY
+            settleTargetX = targetX
+            settleTargetY = targetY
             animatePosition(
                 targetX,
                 targetY,
@@ -651,10 +790,12 @@ fun DummyPipContainer(
             // still-playing video stays visible at the edge, like real
             // Samsung PiP's stash (and, practically, a partially visible
             // TextureView keeps rendering frames instead of freezing).
+            // Stash sliver also clears a bar/cutout on that edge (the
+            // camera hole is exactly where a left/right stash peeks).
             val targetX = if (left) {
-                -w / 2f + stashPeekPx
+                boundLeftPx() - w / 2f + stashPeekPx
             } else {
-                currentScreenWidth.value + w / 2f - stashPeekPx
+                boundRightPx() + w / 2f - stashPeekPx
             }
             // Dock wherever along the edge the user released - Samsung's
             // edge-panel handle is user-movable, so no fixed screen
@@ -663,8 +804,8 @@ fun DummyPipContainer(
             // placement). Only the status/nav bars bound the dock height.
             val targetY = coerceInSafe(
                 centerY,
-                currentStatusBarHeight.value + currentEdgeMargin.value + h / 2f,
-                currentScreenHeight.value - currentNavBarHeight.value - currentEdgeMargin.value - h / 2f,
+                boundTopPx() + h / 2f,
+                boundBottomPx() - h / 2f,
             )
             animatePosition(
                 targetX,
@@ -678,9 +819,9 @@ fun DummyPipContainer(
             mode = DummyPipMode.Pip
             val w = windowWidthPx()
             val targetX = if (wasLeft) {
-                currentEdgeMargin.value + w / 2f
+                boundLeftPx() + w / 2f
             } else {
-                currentScreenWidth.value - currentEdgeMargin.value - w / 2f
+                boundRightPx() - w / 2f
             }
             if (animated) {
                 animatePosition(targetX, centerY, specX = spring(stiffness = Spring.StiffnessMediumLow))
@@ -713,35 +854,35 @@ fun DummyPipContainer(
             }
         }
 
-        // Suspend - same calling rules as runExitMorph. Real PiP doesn't
-        // vanish instantly on "hide to background": the window slides off
-        // the nearest side edge first, THEN the session UI comes down.
-        suspend fun runBackgroundMorph() {
+        // AM (DUMMY_PIP_UNIFIED_DISMISS_FADE) -->
+        // Suspend - same calling rules as runExitMorph. Real PiP's
+        // dismissal is a quick in-place FADE (no slide, no morph), and
+        // every window teardown routes through it: the close button and
+        // the swipe-down dismiss (onDone = onDismiss), and
+        // hide-to-background below (onDone = onEnterBackground). From a
+        // stash the window is already off-screen - nothing to fade.
+        // <-- AM (DUMMY_PIP_UNIFIED_DISMISS_FADE)
+        suspend fun runDismissMorph(onDone: () -> Unit) {
             if (mode != DummyPipMode.Pip) {
-                currentActions.value.onEnterBackground()
+                onDone()
                 return
             }
             controlsShown = false
-            val w = windowWidthPx()
-            val offLeft = centerX < currentScreenWidth.value / 2f
-            val targetX = if (offLeft) {
-                -w / 2f - currentEdgeMargin.value
-            } else {
-                currentScreenWidth.value + w / 2f + currentEdgeMargin.value
-            }
-            animatePosition(
-                targetX,
-                centerY,
-                specX = tween(ENTER_EXIT_MORPH_MS, easing = FastOutSlowInEasing),
-            )
-            moveJobX?.join()
-            currentActions.value.onEnterBackground()
+            dismissAlpha.animateTo(0f, tween(PIP_DISMISS_FADE_MS))
+            onDone()
+        }
+
+        // Suspend - same calling rules as runDismissMorph.
+        suspend fun runBackgroundMorph() {
+            runDismissMorph { currentActions.value.onEnterBackground() }
         }
 
         fun startToggleSize() {
+            // maxWindowWidthPx() already includes the width-only term
+            // (screenWidth - 2*edgeMargin) AND the height cap.
             val maxScale = minOf(
                 MAX_SIZE_SCALE,
-                (currentScreenWidth.value - 2 * currentEdgeMargin.value) / currentBaseWidth.value,
+                maxWindowWidthPx() / currentBaseWidth.value,
             )
             // Real PiP semantics: expand to max; collapse back to the
             // last user-adjusted size (pinch commits set it - the
@@ -766,16 +907,17 @@ fun DummyPipContainer(
             val targetW = currentBaseWidth.value * targetScale
             val targetH = targetW / currentAspect.value
             val targetX = if (centerX < currentScreenWidth.value / 2f) {
-                currentEdgeMargin.value + targetW / 2f
+                boundLeftPx() + targetW / 2f
             } else {
-                currentScreenWidth.value - currentEdgeMargin.value - targetW / 2f
+                boundRightPx() - targetW / 2f
             }
-            val bottomInset = maxOf(currentNavBarHeight.value, currentImeBottom.value)
             val targetY = coerceInSafe(
                 centerY,
-                currentStatusBarHeight.value + currentEdgeMargin.value + targetH / 2f,
-                currentScreenHeight.value - bottomInset - currentEdgeMargin.value - targetH / 2f,
+                boundTopPx() + targetH / 2f,
+                boundBottomPx() - targetH / 2f,
             )
+            settleTargetX = targetX
+            settleTargetY = targetY
             // Position first (its internal cancelMove clears stale jobs),
             // THEN the size job - launching it first would let
             // animatePosition's cancelMove kill it immediately.
@@ -815,24 +957,27 @@ fun DummyPipContainer(
                 if (!hasPositioned) {
                     val w = windowWidthPx()
                     val h = windowHeightPx()
-                    centerX = currentScreenWidth.value - currentEdgeMargin.value - w / 2f
+                    centerX = boundRightPx() - w / 2f
                     // Bottom inset is max(navBar, ime), matching
                     // settleToEdge() - entering with the keyboard open
                     // must not dock the window underneath it either.
-                    centerY = currentScreenHeight.value - maxOf(currentNavBarHeight.value, currentImeBottom.value) -
-                        currentEdgeMargin.value - h / 2f
+                    centerY = boundBottomPx() - h / 2f
                     hasPositioned = true
                 }
                 if (mode == DummyPipMode.Fullscreen) {
                     mode = DummyPipMode.AnimatingIn
-                    controlsShown = true
-                    controlsRevision++
+                    // AM (DUMMY_PIP_ENTRY_NO_CONTROLS_REVEAL) -->
+                    // No controlsShown=true here - see that flag's own
+                    // comment. Entry plays the morph only.
+                    // <-- AM (DUMMY_PIP_ENTRY_NO_CONTROLS_REVEAL)
                     pipRotation = 0f
                     pinchScale = 1f
+                    dismissAlpha.snapTo(1f)
                     transition.animateTo(1f, tween(ENTER_EXIT_MORPH_MS, easing = FastOutSlowInEasing))
                     if (mode == DummyPipMode.AnimatingIn) mode = DummyPipMode.Pip
                 }
             } else {
+                dismissAlpha.snapTo(1f)
                 transition.snapTo(0f)
                 mode = DummyPipMode.Fullscreen
             }
@@ -865,7 +1010,7 @@ fun DummyPipContainer(
                 pushedUpByIme = false
                 animatePosition(
                     centerX,
-                    screenHeightPx - navigationBarHeightPx - edgeMarginPx - h / 2f,
+                    boundBottomPx() - h / 2f,
                 )
             }
         }
@@ -899,19 +1044,91 @@ fun DummyPipContainer(
             }
         }
 
-        // External volume bar visibility - each tick re-shows it and
-        // restarts the auto-hide, same cadence as the in-player slider.
-        var volumeBarVisible by remember { mutableStateOf(false) }
-        LaunchedEffect(volumeUiTick) {
-            if (volumeUiTick > 0) {
-                volumeBarVisible = true
-                delay(VOLUME_BAR_AUTO_HIDE_MS)
-                volumeBarVisible = false
+        // Fitted size (see maxWindowWidthPx): the layout itself never
+        // exceeds the screen, even mid-rotation.
+        val pipWidthPx = windowWidthPx()
+        val pipHeightPx = windowHeightPx()
+
+        // AM (DUMMY_PIP_ROTATION_FIT_FIX) -->
+        // Device rotation with the window up. AOSP handles this two ways,
+        // both mirrored here:
+        //  1. PipBoundsState stores the window's position NORMALIZED
+        //     (screen fractions), so a config change re-maps it onto the
+        //     new display instead of clipping the old absolute px. Below:
+        //     centerX/centerY are rescaled by new/old dimensions.
+        //  2. PipBoundsAlgorithm.getSizeForAspectRatio() shrinks the
+        //     window when it no longer fits the new bounds. Below: a
+        //     stored sizeScale that now overflows the (shorter) height is
+        //     committed down to the fit, and the double-tap collapse
+        //     target follows so it can't re-grow past it either.
+        // A stash rests legitimately OFF-screen, so the ENTRY_BOUNDS_FIX
+        // clamp below ignores it - rotation instead re-docks the sliver
+        // against the same edge explicitly (the old absolute X pointed
+        // wherever the pre-rotation width put it).
+        var prevScreenWidthPx by remember { mutableFloatStateOf(0f) }
+        var prevScreenHeightPx by remember { mutableFloatStateOf(0f) }
+        LaunchedEffect(screenWidthPx, screenHeightPx) {
+            val oldW = prevScreenWidthPx
+            val oldH = prevScreenHeightPx
+            prevScreenWidthPx = screenWidthPx
+            prevScreenHeightPx = screenHeightPx
+            if (oldW <= 0f || oldH <= 0f) return@LaunchedEffect
+            if (!hasPositioned) return@LaunchedEffect
+            // AM (DUMMY_PIP_REALPIP_SIZE_CLAMP_FIX) -->
+            // Entering REAL PiP shrinks the activity's own window - the
+            // "screen" sizes here collapse to the PiP window's dimensions,
+            // and the fit-clamp below treated that transient tiny surface
+            // like a rotation: it persisted a near-zero sizeScale AND
+            // lastAdjustedScale, so a dummy pip re-entered afterward came
+            // back far below its minimum size. A surface too small to
+            // even host the minimum pip isn't a full-screen surface -
+            // ignore it entirely (split-screen small windows too). The
+            // real screen size restores on return and this re-runs.
+            // Also skip Fullscreen outright: with no pip up there's
+            // nothing to fit, and every sizeScale use clamps against the
+            // live bounds anyway.
+            // <-- AM (DUMMY_PIP_REALPIP_SIZE_CLAMP_FIX)
+            if (minOf(screenWidthPx, screenHeightPx) < minWindowWidthPx()) return@LaunchedEffect
+            if (mode == DummyPipMode.Fullscreen) return@LaunchedEffect
+            // A gesture/animation owns the window right now - never yank
+            // it. The ENTRY_BOUNDS_FIX clamp below re-runs on the same
+            // size change and snaps whatever the gesture leaves behind.
+            if (resizeActive || dragActive || toggleRunning || pullBackRunning) return@LaunchedEffect
+            if (moveJobX?.isActive == true || moveJobY?.isActive == true) return@LaunchedEffect
+            val fittedW = maxWindowWidthPx()
+            if (currentBaseWidth.value * sizeScale > fittedW) {
+                sizeScale = fittedW / currentBaseWidth.value
+                if (lastAdjustedScale > sizeScale) lastAdjustedScale = sizeScale
+            }
+            when (mode) {
+                DummyPipMode.Pip -> {
+                    // Normalized-position remap (AOSP PipBoundsState keeps
+                    // the position as screen fractions across config
+                    // changes), then SETTLE to the nearest edge: real PiP
+                    // never rests mid-screen, and without the re-dock the
+                    // fraction remap alone leaves the window floating in
+                    // the center of the new orientation.
+                    centerX = centerX / oldW * screenWidthPx
+                    centerY = centerY / oldH * screenHeightPx
+                    settleToEdge()
+                }
+                DummyPipMode.AnimatingIn -> {
+                    centerX = centerX / oldW * screenWidthPx
+                    centerY = centerY / oldH * screenHeightPx
+                }
+                DummyPipMode.StashedLeft, DummyPipMode.StashedRight -> {
+                    val w = windowWidthPx()
+                    centerX = if (mode == DummyPipMode.StashedLeft) {
+                        boundLeftPx() - w / 2f + stashPeekPx
+                    } else {
+                        boundRightPx() + w / 2f - stashPeekPx
+                    }
+                    centerY = centerY / oldH * screenHeightPx
+                }
+                else -> Unit
             }
         }
-
-        val pipWidthPx = baseWidthPx * sizeScale
-        val pipHeightPx = pipWidthPx / aspectRatio
+        // <-- AM (DUMMY_PIP_ROTATION_FIT_FIX)
 
         // AM (DUMMY_PIP_ENTRY_BOUNDS_FIX) -->
         // "Dummy pip enters partially below the nav bar": the entry
@@ -933,6 +1150,11 @@ fun DummyPipContainer(
             mode,
             hasPositioned,
             navigationBarHeightPx,
+            navigationBarLeftPx,
+            navigationBarRightPx,
+            cutoutLeftPx,
+            cutoutRightPx,
+            cutoutTopPx,
             imeBottomPx,
             statusBarHeightPx,
             screenWidthPx,
@@ -946,19 +1168,47 @@ fun DummyPipContainer(
             // and a pinch's overshoot legitimately leaves the band
             // mid-gesture. Never fight those.
             if (resizeActive || dragActive || toggleRunning || pullBackRunning) return@LaunchedEffect
-            if (moveJobX?.isActive == true || moveJobY?.isActive == true) return@LaunchedEffect
             val w = windowWidthPx()
             val h = windowHeightPx()
-            val bottomInset = maxOf(navigationBarHeightPx, imeBottomPx)
+            val minX = boundLeftPx() + w / 2f
+            val maxX = boundRightPx() - w / 2f
+            val minY = boundTopPx() + h / 2f
+            val maxY = boundBottomPx() - h / 2f
+            if (moveJobX?.isActive == true || moveJobY?.isActive == true) {
+                // AM (DUMMY_PIP_STALE_SETTLE_FIX) -->
+                // Don't blindly trust an in-flight move: a settle launched
+                // right at a rotation was aimed at the OLD bounds (the new
+                // WindowInsets land a frame after the new size). "Valid"
+                // means DOCKED, not just in-band: a settle always lands X
+                // on a wall, so a target one stale-inset inside the edge
+                // (landscape's side nav bar, still applied on the first
+                // portrait frame) must fail this check and be re-settled
+                // against the live bounds. NaN targets (IME push etc.)
+                // get the same re-settle, which converges to the same
+                // dock anyway.
+                // <-- AM (DUMMY_PIP_STALE_SETTLE_FIX)
+                val targetDocked = minX > maxX ||
+                    settleTargetX <= minX + 1f || settleTargetX >= maxX - 1f
+                val targetInBand = targetDocked && !settleTargetX.isNaN() && !settleTargetY.isNaN() &&
+                    (minY > maxY || settleTargetY in minY..maxY)
+                if (targetInBand) return@LaunchedEffect
+                settleToEdge()
+                return@LaunchedEffect
+            }
+            // A resting pip is ALWAYS docked to a side wall (every drag
+            // release/settle lands there), so a mid-band X at rest is a
+            // stale landing - snap it to the nearest wall, not just into
+            // the band.
+            val dockedX = if (centerX - minX <= maxX - centerX) minX else maxX
             val clampedX = coerceInSafe(
-                centerX,
-                edgeMarginPx + w / 2f,
-                screenWidthPx - edgeMarginPx - w / 2f,
+                if (centerX <= minX + 1f || centerX >= maxX - 1f) centerX else dockedX,
+                minX,
+                maxX,
             )
             val clampedY = coerceInSafe(
                 centerY,
-                statusBarHeightPx + edgeMarginPx + h / 2f,
-                screenHeightPx - bottomInset - edgeMarginPx - h / 2f,
+                minY,
+                maxY,
             )
             if (clampedX != centerX || clampedY != centerY) {
                 centerX = clampedX
@@ -970,30 +1220,23 @@ fun DummyPipContainer(
         // AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) -->
         // Feeds the TextureView's own outline radius - see the
         // LocalDummyPipCornerRadiusPx doc for why the view, not any
-        // Compose clip, has to carry the corners mid-gesture. Active only
-        // WHILE pinching/tilted (covers the pinch itself, the overshoot
-        // pull-back, the tilt level-out, and the double-tap toggle - all
-        // run on pinchScale/pipRotation); at rest the layer clip keeps
-        // doing the corners exactly as before, so a device where the view
-        // outline misbehaves degrades to the pre-fix behavior, not to
-        // permanently square corners. snapshotFlow + a plain state write:
-        // pinchScale changes per frame mid-pinch, and this keeps that
-        // per-frame traffic out of the composition entirely - only
-        // MpvSurface's AndroidView update block re-runs.
-        LaunchedEffect(Unit) {
-            snapshotFlow {
-                val pinching = pinchScale != 1f || pipRotation != 0f
-                val pipLike = mode == DummyPipMode.Pip ||
-                    mode == DummyPipMode.StashedLeft ||
-                    mode == DummyPipMode.StashedRight
-                if (pipLike && pinching) {
-                    cornerRadiusPx / pinchScale.coerceAtLeast(0.01f)
-                } else {
-                    0f
-                }
-            }.collect { pipViewCornerRadiusPx.floatValue = it }
-        }
-        // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
+        // Compose clip, has to carry the corners mid-gesture. The outline
+        // is ALWAYS ON in pip-like modes now (radius divided by the live
+        // total layer scale, so it matches the layer clip's rect exactly
+        // at rest): the old only-while-pinching gate had a clip HANDOFF
+        // gap - the Compose layer clip drops the same frame pinchScale
+        // leaves 1, but the view outline arrived 1-2 frames later via
+        // this snapshotFlow + recomposition, and every resize started and
+        // ended with clip-free frames = the reported square-corner flash.
+        // With the outline permanently on, no frame ever has no clip:
+        // pinch start just changes the radius, and at pinch end the layer
+        // clip is already back before the outline's radius settles.
+        // Moved BELOW the reveal-scale declaration: the radius formula
+        // reads controlsRevealScaleAnim live.
+        // snapshotFlow + a plain state write: pinchScale changes per frame
+        // mid-pinch, and this keeps that per-frame traffic out of the
+        // composition entirely - only MpvSurface's AndroidView update
+        // block re-runs.
 
         // AM (DUMMY_PIP_CONTROLS_REVEAL_GROW_FIX) -->
         // Real PiP grows a small window when its controls are revealed so
@@ -1037,6 +1280,21 @@ fun DummyPipContainer(
         }
         val controlsRevealScale = controlsRevealScaleAnim.value
         // <-- AM (DUMMY_PIP_CONTROLS_REVEAL_GROW_FIX)
+
+        LaunchedEffect(Unit) {
+            snapshotFlow {
+                val pipLike = mode == DummyPipMode.Pip ||
+                    mode == DummyPipMode.StashedLeft ||
+                    mode == DummyPipMode.StashedRight
+                if (pipLike) {
+                    cornerRadiusPx /
+                        (pinchScale * controlsRevealScaleAnim.value).coerceAtLeast(0.01f)
+                } else {
+                    0f
+                }
+            }.collect { pipViewCornerRadiusPx.floatValue = it }
+        }
+        // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
 
         // AM (DUMMY_PIP_CONTROLS_AFTER_GROW_FIX) -->
         // Real PiP's controls don't slide around mid-growth: they appear
@@ -1131,6 +1389,7 @@ fun DummyPipContainer(
                     .graphicsLayer {
                         val t = transition.value
                         val pinching = pinchScale != 1f || pipRotation != 0f
+                        alpha = dismissAlpha.value
                         scaleX = lerp(screenWidthPx / pipWidthPx, 1f, t) * controlsRevealScale * pinchScale
                         scaleY = lerp(screenHeightPx / pipHeightPx, 1f, t) * controlsRevealScale * pinchScale
                         rotationZ = pipRotation
@@ -1172,16 +1431,28 @@ fun DummyPipContainer(
             },
         ) {
             if (mode == DummyPipMode.AnimatingIn || mode == DummyPipMode.AnimatingOut) {
-                // Aspect-preserving counter-scale. The container morphs
-                // between two rects of DIFFERENT aspect (fullscreen vs
-                // window), which forces non-uniform scale - that alone
-                // squished the video into a cube / stretched it into a
-                // rectangle mid-transition. Scaling the content back by
-                // u/s per axis (u = the LARGER morph component) keeps the
-                // video's NET scale uniform at every frame (center-crop,
-                // exactly how real PiP's morph looks), and because the
-                // window's aspect equals the video's, it lands exactly
-                // fitted - no crop, no bars - at both t=0 and t=1.
+                // AM (DUMMY_PIP_MORPH_LETTERBOX_FIX) -->
+                // Aspect-preserving cover-scale, corrected. The old version
+                // treated the WHOLE fullscreen surface as the content
+                // (u = max(sx, sy)) - but mpv letterboxes the video inside
+                // that surface, so mid-morph the transitioning window
+                // (converging to the video's aspect) was mostly filled by
+                // the surface's black bars while the actual video band
+                // shrank ahead of the window: the visible "video gets
+                // compressed/stretched mid-morph, snaps at settle" flicker.
+                // Real PiP center-crops - the video FILLS the window at
+                // every frame of the morph.
+                //
+                // This does that by morphing the EFFECTIVE content rect
+                // from the full surface (t=0: exact identity, the
+                // letterboxed fullscreen as-is) to the centered video band
+                // (t=1: exact cover - pipW/pipH equals the video's aspect,
+                // so cover == fit == the real Pip layout, and the mode flip
+                // lands with zero snap), scaling the content so that rect
+                // always covers the current window. Center-anchored like
+                // before: band center and window center coincide through
+                // the container's own transform, so scale alone suffices.
+                // <-- AM (DUMMY_PIP_MORPH_LETTERBOX_FIX)
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -1189,7 +1460,23 @@ fun DummyPipContainer(
                             val t = transition.value
                             val sx = lerp(1f, pipWidthPx / screenWidthPx, t)
                             val sy = lerp(1f, pipHeightPx / screenHeightPx, t)
-                            val u = maxOf(sx, sy)
+                            val videoAspect = pipWidthPx / pipHeightPx
+                            val screenAspect = screenWidthPx / screenHeightPx
+                            // The rect mpv actually draws the video into
+                            // inside the fullscreen surface (fit = centered,
+                            // letterboxed).
+                            val bandW: Float
+                            val bandH: Float
+                            if (videoAspect >= screenAspect) {
+                                bandW = screenWidthPx
+                                bandH = screenWidthPx / videoAspect
+                            } else {
+                                bandW = screenHeightPx * videoAspect
+                                bandH = screenHeightPx
+                            }
+                            val effW = lerp(screenWidthPx, bandW, t)
+                            val effH = lerp(screenHeightPx, bandH, t)
+                            val u = maxOf(sx * screenWidthPx / effW, sy * screenHeightPx / effH)
                             scaleX = u / sx
                             scaleY = u / sy
                             transformOrigin = TransformOrigin(0.5f, 0.5f)
@@ -1245,23 +1532,27 @@ fun DummyPipContainer(
                             (centerY - pipHeightPx / 2f + oy * pipHeightPx * (1f - s)).roundToInt(),
                         )
                     }
-                    // Same transient pinch/tilt transform as the video
-                    // box, so the (empty-during-pinch) gesture area and
-                    // the clip outline track the video exactly. The clip
-                    // lives INSIDE this layer (not as a standalone
-                    // Modifier.clip before it): clip+shape here apply in
-                    // layer-local space, so the rounded outline rotates
-                    // WITH the window instead of shearing its corners off
-                    // axis-aligned.
-                    .graphicsLayer {
-                        scaleX = pinchScale
-                        scaleY = pinchScale
-                        rotationZ = pipRotation
-                        transformOrigin = TransformOrigin(0.5f, 0.5f)
-                        clip = true
-                        shape = RoundedCornerShape(PIP_CORNER_RADIUS)
-                    }
+                    // AM (DUMMY_PIP_PINCH_UNTRANSFORMED_INPUT_FIX) -->
+                    // pointerInput comes BEFORE the graphicsLayer so the
+                    // gesture area receives positions in the space
+                    // immediately outside the pinch/tilt layer; the
+                    // gesture loop converts them through the overlay's
+                    // own LayoutCoordinates.localToRoot (captured by the
+                    // onGloballyPositioned immediately above, i.e. the
+                    // SAME space), so the math below runs in true screen
+                    // coordinates regardless of how the layer affects
+                    // raw event positions.
+                    // <-- AM (DUMMY_PIP_PINCH_UNTRANSFORMED_INPUT_FIX)
+                    .onGloballyPositioned { gestureOverlayCoords = it }
                     .pointerInput(Unit) {
+                        // Local position -> screen (root) position, using
+                        // the exact same transform hit-testing used for
+                        // this event.
+                        fun Offset.toScreenCoords(): Offset =
+                            gestureOverlayCoords
+                                ?.takeIf { it.isAttached }
+                                ?.localToRoot(this)
+                                ?: this
                         val touchSlop = viewConfiguration.touchSlop
                         val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
                         val iconPx = with(density) { PIP_ICON_SIZE_DP.dp.toPx() }
@@ -1328,6 +1619,10 @@ fun DummyPipContainer(
                         }
 
                         awaitEachGesture {
+                            // Mid-dismiss-fade: the window is on its way
+                            // out - a touch mustn't grab it (or flash its
+                            // controls) for the last ~150ms.
+                            if (dismissAlpha.value != 1f) return@awaitEachGesture
                             // The down event itself is captured here - the
                             // loop below only sees LATER events, so the tap
                             // position and the velocity clock must start from
@@ -1353,6 +1648,23 @@ fun DummyPipContainer(
                             // (dist/downDist), not accumulated per-event.
                             var pinchStartDistScreen = 0f
                             var pinchStartVisualScale = 1f
+                            // AM (DUMMY_PIP_PINCH_REANCHOR_FIX) -->
+                            // Finger count from the PREVIOUS event. AOSP
+                            // PipPinchResizingAlgorithm re-anchors its
+                            // down-distance whenever the pointer count
+                            // changes; without that, lifting and
+                            // re-touching a finger mid-pinch kept the
+                            // STALE anchor - the window jumped or felt
+                            // stuck until both fingers lifted.
+                            // <-- AM (DUMMY_PIP_PINCH_REANCHOR_FIX)
+                            var lastPressedCount = 1
+                            // Previous event's pinch centroid / drag
+                            // position, both in SCREEN space (via
+                            // toScreenCoords) - the pan is the screen
+                            // centroid delta; skipped on finger-count
+                            // changes, where positions jump.
+                            var prevPinchCentroid = Offset.Unspecified
+                            var prevDragScreenPos = down.position.toScreenCoords()
                             var hasExceededSlop = false
                             var accumulatedMovement = 0f
                             val downPosition: Offset = down.position
@@ -1363,6 +1675,14 @@ fun DummyPipContainer(
                             while (true) {
                                 val event = awaitPointerEvent()
                                 val pressed = event.changes.filter { it.pressed }
+                                // Finger-count change mid-gesture: the
+                                // absolute pinch anchor is re-seeded from
+                                // the CURRENT fingers below (AOSP
+                                // re-anchors on every pointer-count
+                                // change), so a lifted/re-touched finger
+                                // continues 1:1 instead of jumping.
+                                val fingerCountChanged = pressed.size != lastPressedCount
+                                lastPressedCount = pressed.size
 
                                 if (pressed.size >= 2) {
                                     // Pinch-to-resize (zoom dead-zone +
@@ -1425,45 +1745,77 @@ fun DummyPipContainer(
                                         // Block background touches for
                                         // the rest of the resize.
                                         resizeActive = true
-                                        // AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX) -->
-                                        // Anchor the ABSOLUTE pinch model:
-                                        // finger distance (converted to
-                                        // screen space - positions are in
-                                        // this overlay's local space, which
-                                        // is itself scaled by pinchScale)
-                                        // and the window's visual scale at
-                                        // this moment. Every later event
-                                        // computes desired scale as
-                                        // startScale * dist/startDist, so
-                                        // the tracking is exactly 1:1 in
-                                        // range like real PiP - no
-                                        // per-event accumulation, no fixed
-                                        // damping eating the first part of
-                                        // every gesture.
-                                        // <-- AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX)
+                                    }
+                                    // AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX) -->
+                                    // Anchor the ABSOLUTE pinch model:
+                                    // finger distance and the window's
+                                    // visual scale at this moment. Every
+                                    // later event computes desired scale as
+                                    // startScale * dist/startDist, so
+                                    // the tracking is exactly 1:1 in
+                                    // range like real PiP - no
+                                    // per-event accumulation, no fixed
+                                    // damping eating the first part of
+                                    // every gesture.
+                                    //
+                                    // Re-seeded not just at pinch start
+                                    // but on EVERY finger-count change
+                                    // (AOSP re-anchors the same way): a
+                                    // lifted and re-touched finger used
+                                    // to keep the stale start-distance,
+                                    // jumping the window the moment it
+                                    // landed again.
+                                    // <-- AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX)
+                                    val reseededPinch = !isResizing || fingerCountChanged
+                                    if (reseededPinch) {
+                                        // Screen-space anchor, re-seeded
+                                        // at pinch start and on every
+                                        // finger-count change (AOSP
+                                        // re-anchors the same way).
                                         pinchStartDistScreen =
-                                            (pressed[0].position - pressed[1].position)
-                                                .getDistance() * pinchScale
+                                            (pressed[0].position.toScreenCoords() -
+                                                pressed[1].position.toScreenCoords())
+                                                .getDistance()
                                         pinchStartVisualScale = sizeScale * pinchScale
                                     }
                                     isResizing = true
                                     hasExceededSlop = true
 
-                                    val centroid = event.calculateCentroid()
-                                    // calculatePan() is reported in THIS
-                                    // overlay's LOCAL coordinate space,
-                                    // and the overlay itself is scaled by
-                                    // pinchScale - so the raw pan is the
-                                    // finger movement DIVIDED by the
-                                    // current scale (at 2x zoom the
-                                    // window moved half as far as the
-                                    // fingers: the "not anchored to your
-                                    // fingers" feel). Multiply back into
-                                    // screen space. Zoom (a ratio) and
-                                    // the centroid FRACTION are
-                                    // scale-invariant, so they need no
-                                    // such correction.
-                                    val pan = event.calculatePan() * pinchScale
+                                    // AM (DUMMY_PIP_PINCH_SCREEN_SPACE_FIX) -->
+                                    // All math in true SCREEN space: every
+                                    // finger position is mapped through the
+                                    // overlay's own LayoutCoordinates
+                                    // (localToRoot - the exact transform
+                                    // hit-testing used, whatever the live
+                                    // pinch layer does to raw positions),
+                                    // and the center is converted through
+                                    // the root container's coordinates.
+                                    //
+                                    // One formula per event covers pan +
+                                    // scale + tilt - keep the window-content
+                                    // point under the centroid glued to the
+                                    // centroid:
+                                    //   C' = O - R(dTilt) * (O_prev - C) * (S'/S)
+                                    // Pure pan (S'=S, dTilt=0) reduces to
+                                    // C' = C + (O - O_prev); pure scale to a
+                                    // focal zoom about the centroid. Fully
+                                    // absolute per event - no deltas, no
+                                    // accumulation, a stationary finger can
+                                    // never push the window.
+                                    // <-- AM (DUMMY_PIP_PINCH_SCREEN_SPACE_FIX)
+                                    val rootOffset = pipRootCoords
+                                        ?.takeIf { it.isAttached }
+                                        ?.localToRoot(Offset.Zero)
+                                        ?: Offset.Zero
+                                    val s0 = pressed[0].position.toScreenCoords()
+                                    val s1 = pressed[1].position.toScreenCoords()
+                                    // Manual centroid of the two pinch
+                                    // fingers - calculateCentroid() can
+                                    // include non-pressed changes.
+                                    val centroid = Offset(
+                                        (s0.x + s1.x) / 2f,
+                                        (s0.y + s1.y) / 2f,
+                                    )
                                     val rotation = event.calculateRotation()
 
                                     if (rotation != 0f) {
@@ -1490,20 +1842,13 @@ fun DummyPipContainer(
                                     // release commit below still clamps
                                     // to [min, max] with the paint-time
                                     // pull-back, unchanged.
-                                    //
-                                    // The centroid anchor compensation
-                                    // keeps the exact point under the
-                                    // fingers stationary while the window
-                                    // grows/shrinks around it.
                                     // <-- AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX)
                                     val maxScaleAbs = minOf(
                                         MAX_SIZE_SCALE,
-                                        (currentScreenWidth.value - 2 * currentEdgeMargin.value) / currentBaseWidth.value,
+                                        maxWindowWidthPx() / currentBaseWidth.value,
                                     )
                                     val minScaleAbs = minWindowWidthPx() / currentBaseWidth.value
-                                    val distScreen =
-                                        (pressed[0].position - pressed[1].position)
-                                            .getDistance() * pinchScale
+                                    val distScreen = (s0 - s1).getDistance()
                                     val rawDesired =
                                         pinchStartVisualScale *
                                             (distScreen / pinchStartDistScreen.coerceAtLeast(1f))
@@ -1514,40 +1859,59 @@ fun DummyPipContainer(
                                             minScaleAbs - (minScaleAbs - rawDesired) * PINCH_OVERRESIZE_DAMP
                                         else -> rawDesired
                                     }
-                                    val oldW = windowWidthPx() * pinchScale
-                                    val oldH = windowHeightPx() * pinchScale
-                                    var newCenterX = centerX + pan.x
-                                    var newCenterY = centerY + pan.y
-                                    if (clampedDesired != sizeScale * pinchScale) {
-                                        // Centroid fraction within THIS
-                                        // overlay's bounds (the visible,
-                                        // possibly grown window) - uniform
-                                        // scaling makes that identical to
-                                        // the fraction within the window
-                                        // itself.
-                                        val fractionX = (centroid.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                        val fractionY = (centroid.y / size.height.toFloat()).coerceIn(0f, 1f)
-                                        val newPinch = coerceInSafe(
-                                            clampedDesired / sizeScale,
-                                            // Allow the damped overshoot
-                                            // below min / above max to be
-                                            // VISIBLE mid-gesture; the
-                                            // release commit pulls it back.
-                                            (minWindowWidthPx() / windowWidthPx()) * 0.5f,
-                                            maxScaleAbs * PINCH_MAX_OVERSHOOT / sizeScale,
-                                        )
-                                        val newW = windowWidthPx() * newPinch
-                                        val newH = windowHeightPx() * newPinch
-                                        pinchScale = newPinch
-                                        newCenterX += (fractionX - 0.5f) * (oldW - newW)
-                                        newCenterY += (fractionY - 0.5f) * (oldH - newH)
+                                    val newPinch = coerceInSafe(
+                                        clampedDesired / sizeScale,
+                                        // Allow the damped overshoot
+                                        // below min / above max to be
+                                        // VISIBLE mid-gesture; the
+                                        // release commit pulls it back.
+                                        (minWindowWidthPx() / windowWidthPx()) * 0.5f,
+                                        maxScaleAbs * PINCH_MAX_OVERSHOOT / sizeScale,
+                                    )
+
+                                    // The unified pan/scale/tilt anchor.
+                                    // Skipped on the event that re-seeded
+                                    // the gesture anchor - the centroid
+                                    // jumps discontinuously on finger-count
+                                    // changes.
+                                    if (!reseededPinch && prevPinchCentroid != Offset.Unspecified) {
+                                        val centerScreen = Offset(centerX, centerY) + rootOffset
+                                        var v = prevPinchCentroid - centerScreen
+                                        if (rotation != 0f) {
+                                            v = v.rotatedByDegrees(rotation)
+                                        }
+                                        val ratio = newPinch / pinchScale
+                                        centerX = centroid.x - v.x * ratio - rootOffset.x
+                                        centerY = centroid.y - v.y * ratio - rootOffset.y
                                     }
-                                    centerX = newCenterX
-                                    centerY = newCenterY
+                                    prevPinchCentroid = centroid
+                                    pinchScale = newPinch
                                     pressed.forEach { it.consume() }
-                                } else if (pressed.size == 1 && !isResizing) {
+                                } else if (pressed.size == 1) {
+                                    // Also during a resize: lifting to one
+                                    // finger mid-pinch becomes a DRAG
+                                    // (real PiP does this - the remaining
+                                    // finger keeps control 1:1). The old
+                                    // !isResizing condition froze the
+                                    // window until BOTH fingers lifted -
+                                    // the "stuck" tracking feel.
                                     val change = pressed[0]
-                                    val delta = change.positionChange()
+                                    // Screen-space delta via the same
+                                    // localToRoot mapping as the pinch -
+                                    // correct even mid-resize while the
+                                    // window is zoomed/tilted (a raw
+                                    // positionChange() would be in
+                                    // whatever space the layer leaves
+                                    // events in).
+                                    val fingerScreen = change.position.toScreenCoords()
+                                    val delta = if (fingerCountChanged) {
+                                        // Just dropped to one finger - no
+                                        // meaningful previous position.
+                                        Offset.Zero
+                                    } else {
+                                        fingerScreen - prevDragScreenPos
+                                    }
+                                    prevDragScreenPos = fingerScreen
                                     if (!hasExceededSlop) {
                                         accumulatedMovement += hypot(delta.x, delta.y)
                                         if (accumulatedMovement > touchSlop) {
@@ -1613,7 +1977,7 @@ fun DummyPipContainer(
                                 // overshot it mid-gesture.
                                 val maxScale = minOf(
                                     MAX_SIZE_SCALE,
-                                    (currentScreenWidth.value - 2 * currentEdgeMargin.value) / currentBaseWidth.value,
+                                    maxWindowWidthPx() / currentBaseWidth.value,
                                 )
                                 val visualScale = sizeScale * pinchScale
                                 val pullBackTarget = coerceInSafe(
@@ -1782,7 +2146,7 @@ fun DummyPipContainer(
                                                 }
                                                 when (region) {
                                                     PipHitRegion.Expand -> runExitMorph()
-                                                    PipHitRegion.Close -> currentActions.value.onDismiss()
+                                                    PipHitRegion.Close -> runDismissMorph { currentActions.value.onDismiss() }
                                                     PipHitRegion.Headphones -> runBackgroundMorph()
                                                     PipHitRegion.Previous -> {
                                                         currentActions.value.onSkipPrevious()
@@ -1810,7 +2174,9 @@ fun DummyPipContainer(
                                 // nav-bar region settles back instead.
                                 centerY + h / 2f - (currentScreenHeight.value - currentNavBarHeight.value) >=
                                     h * DISMISS_BELOW_NAV_FRACTION -> {
-                                    currentActions.value.onDismiss()
+                                    // Restricted gesture scope - launch,
+                                    // like the pull-back below.
+                                    scope.launch { runDismissMorph { currentActions.value.onDismiss() } }
                                 }
                                 // Stash only once MORE THAN HALF the
                                 // window is off the edge (center past the
@@ -1844,6 +2210,24 @@ fun DummyPipContainer(
                                 }
                             }
                         }
+                    }
+                    // Same transient pinch/tilt transform as the video
+                    // box, so the (empty-during-pinch) gesture area and
+                    // the clip outline track the video exactly. The clip
+                    // lives INSIDE this layer (not as a standalone
+                    // Modifier.clip before it): clip+shape here apply in
+                    // layer-local space, so the rounded outline rotates
+                    // WITH the window instead of shearing its corners off
+                    // axis-aligned. Must stay AFTER the pointerInput -
+                    // see DUMMY_PIP_PINCH_UNTRANSFORMED_INPUT_FIX.
+                    .graphicsLayer {
+                        alpha = dismissAlpha.value
+                        scaleX = pinchScale
+                        scaleY = pinchScale
+                        rotationZ = pipRotation
+                        transformOrigin = TransformOrigin(0.5f, 0.5f)
+                        clip = true
+                        shape = RoundedCornerShape(PIP_CORNER_RADIUS)
                     },
             ) {
                 if (controlsShown && controlsSettled) {
@@ -2031,9 +2415,9 @@ fun DummyPipContainer(
                             if (dragged) {
                                 val w = windowWidthPx()
                                 val stashedX = if (isLeft) {
-                                    -w / 2f + stashPeekPx
+                                    boundLeftPx() - w / 2f + stashPeekPx
                                 } else {
-                                    currentScreenWidth.value + w / 2f - stashPeekPx
+                                    boundRightPx() + w / 2f - stashPeekPx
                                 }
                                 if (abs(centerX - stashedX) > pullThresholdPx) {
                                     // Pulled away from the edge: genuinely
@@ -2050,69 +2434,6 @@ fun DummyPipContainer(
                         }
                     },
             )
-        }
-
-        // ---- External volume bar ----
-        // Real PiP renders the volume UI in system space, ABOVE the small
-        // window - never cramped inside it. Same here: a pill floating
-        // just over the window's top edge (clamped on-screen), driven by
-        // the volume/maxVolume/volumeUiTick params PlayerHostScreen feeds
-        // from the player ViewModel while suppressing the in-player slider.
-        if (mode == DummyPipMode.Pip && volumeBarVisible) {
-            val barWidth = 160.dp
-            val barHeight = 32.dp
-            val barWidthPx = with(density) { barWidth.toPx() }
-            val barHeightPx = with(density) { barHeight.toPx() }
-            val gapPx = with(density) { 8.dp.toPx() }
-            val windowH = windowHeightPx()
-            Box(
-                modifier = Modifier
-                    .offset {
-                        val barCenterX = coerceInSafe(
-                            centerX,
-                            edgeMarginPx + barWidthPx / 2f,
-                            screenWidthPx - edgeMarginPx - barWidthPx / 2f,
-                        )
-                        val top = (centerY - windowH / 2f - gapPx - barHeightPx)
-                            .coerceAtLeast(statusBarHeightPx + edgeMarginPx)
-                        IntOffset(
-                            (barCenterX - barWidthPx / 2f).roundToInt(),
-                            top.roundToInt(),
-                        )
-                    }
-                    .size(barWidth, barHeight)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(horizontal = 10.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Filled.VolumeUp,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(1.5.dp))
-                            .background(Color.White.copy(alpha = 0.3f)),
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .fillMaxWidth(
-                                    (volume.toFloat() / maxVolume.coerceAtLeast(1))
-                                        .coerceIn(0f, 1f),
-                                )
-                                .background(Color.White),
-                        )
-                    }
-                }
-            }
         }
     }
 }

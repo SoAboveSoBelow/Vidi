@@ -84,6 +84,7 @@ import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.util.system.copyToClipboard
 import kotlinx.coroutines.delay
 // AM (NOW_PLAYING_INDICATOR) -->
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 // <-- AM (NOW_PLAYING_INDICATOR)
@@ -1301,6 +1302,34 @@ private fun SharedAnimeBottomActionMenu(
  * The episode ID currently playing in the background player (via
  * [PlayerMediaHolder]), scoped to [animeId] - null whenever no session is
  * live, or the live session belongs to a different anime.
+ *
+ * AM (NOW_PLAYING_INDICATOR_DISMISSED_FIX) -->
+ * A live holder alone is NOT sufficient for the indicator: the holder
+ * deliberately outlives the UI showing it. Dismissing the dummy pip (its
+ * close button, or the swipe-down dismiss - see PlayerHostScreen's
+ * DummyPipActions.onDismiss) pauses playback and drops
+ * hasExternalScreenConsumer, but intentionally keeps the holder, Service
+ * and notification alive so the session can be resumed. Keying purely off
+ * holder.state.episodeId, as this did, left the episode highlighted
+ * indefinitely after that - nothing was playing and nothing was on screen.
+ *
+ * What the highlight actually means differs by whether a screen consumer
+ * is live, so both inputs are needed:
+ *  - A live consumer (fullscreen player, or the dummy pip visibly up):
+ *    highlight regardless of pause state. A paused-but-visible player is
+ *    still the episode the user is on, and blinking the indicator off on
+ *    every pause would be wrong.
+ *  - No live consumer (dismissed, or backgrounded via the headphones
+ *    action): highlight only while actually playing. That's the one signal
+ *    left that distinguishes "still listening in the background" from
+ *    "dismissed, session merely retained for resume."
+ *
+ * Reads hasExternalScreenConsumerFlow, not the plain Boolean property, for
+ * the same reason DUMMY_PIP_NOT_OBSERVABLE_FIX converted isDummyPipActive:
+ * currentFlow only re-emits when the holder INSTANCE changes, so a plain
+ * field mutated on the same still-current holder would never recompose
+ * this.
+ * <-- AM (NOW_PLAYING_INDICATOR_DISMISSED_FIX)
  */
 @Composable
 private fun rememberNowPlayingEpisodeId(animeId: Long): Long? {
@@ -1309,10 +1338,23 @@ private fun rememberNowPlayingEpisodeId(animeId: Long): Long? {
         key1 = Unit,
     ) {
         PlayerMediaHolder.currentFlow
-            .flatMapLatest { holder -> holder?.state ?: flowOf(null) }
-            .collect { mediaState ->
-                value = mediaState?.let { it.animeId to it.episodeId }
+            .flatMapLatest { holder ->
+                if (holder == null) {
+                    flowOf(null)
+                } else {
+                    combine(
+                        holder.state,
+                        holder.hasExternalScreenConsumerFlow,
+                    ) { mediaState, hasScreenConsumer ->
+                        if (!hasScreenConsumer && mediaState.paused) {
+                            null
+                        } else {
+                            mediaState.animeId to mediaState.episodeId
+                        }
+                    }
+                }
             }
+            .collect { value = it }
     }
     return nowPlaying?.takeIf { it.first == animeId }?.second
 }

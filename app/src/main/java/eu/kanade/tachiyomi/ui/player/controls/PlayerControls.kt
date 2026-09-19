@@ -103,6 +103,14 @@ fun PlayerControls(
     remaining: Int?,
     playbackSpeed: Float?,
     modifier: Modifier = Modifier,
+    // AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS) -->
+    // Whether the OS status/nav bars are currently visible alongside the
+    // controls - computed by the caller (controlsShown && the
+    // showSystemStatusBar preference); uiData.statusBarShown no longer
+    // exists as separate state. See PlayerViewModel's comment of the
+    // same tag.
+    // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
+    systemBarsVisible: Boolean = false,
 ) {
     val transparentOverlay by animateFloatAsState(
         if (uiData.controlsShown && !uiData.isControlsLocked) .8f else 0f,
@@ -137,12 +145,12 @@ fun PlayerControls(
     // underneath the (now-visible) status/navigation bars. Only add the extra offset
     // while those bars are actually being shown alongside controls - the normal
     // immersive/hidden state shouldn't get any extra padding.
-    val statusBarTopPadding = if (uiData.statusBarShown) {
+    val statusBarTopPadding = if (systemBarsVisible) {
         WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     } else {
         0.dp
     }
-    val navigationBarBottomPadding = if (uiData.statusBarShown) {
+    val navigationBarBottomPadding = if (systemBarsVisible) {
         WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     } else {
         0.dp
@@ -159,12 +167,12 @@ fun PlayerControls(
     // its own) - with no margin against it, so the side nav bar drew right over
     // them. LayoutDirection is pinned to Ltr just below, so start/end here are
     // unambiguously left/right, matching that pin.
-    val navigationBarStartPadding = if (uiData.statusBarShown) {
+    val navigationBarStartPadding = if (systemBarsVisible) {
         WindowInsets.navigationBars.asPaddingValues().calculateStartPadding(LayoutDirection.Ltr)
     } else {
         0.dp
     }
-    val navigationBarEndPadding = if (uiData.statusBarShown) {
+    val navigationBarEndPadding = if (systemBarsVisible) {
         WindowInsets.navigationBars.asPaddingValues().calculateEndPadding(LayoutDirection.Ltr)
     } else {
         0.dp

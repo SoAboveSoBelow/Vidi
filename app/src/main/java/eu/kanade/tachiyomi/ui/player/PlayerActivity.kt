@@ -1714,7 +1714,15 @@ class PlayerActivity : BaseActivity() {
             View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_LOW_PROFILE
-        applySystemBarVisibility(show = viewModel.uiData.value.statusBarShown)
+        // AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS) -->
+        // uiData.statusBarShown no longer exists - bars track the
+        // controls state (gated on the showSystemStatusBar preference)
+        // everywhere, including this restart resync. See PlayerViewModel's
+        // comment of the same tag.
+        // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
+        applySystemBarVisibility(
+            show = viewModel.uiData.value.controlsShown && playerPreferences.showSystemStatusBar.get(),
+        )
         window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode = if (playerPreferences.playerFullscreen.get()) {
@@ -2253,12 +2261,20 @@ class PlayerActivity : BaseActivity() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         when (keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> {
-                viewModel.changeVolumeBy(1)
-                viewModel.displayVolumeSlider(true)
-            }
-            KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                viewModel.changeVolumeBy(-1)
+            // AM (SYSTEM_VOLUME_PANEL) -->
+            // Fullscreen keeps the custom in-player slider (the only UI
+            // that can show mpv's volume boost past 100%). While casting
+            // the keys aren't consumed at all - the system panel then
+            // drives the cast device's volume via the active media
+            // route; adjusting the phone's stream volume mid-cast
+            // changes nothing audible. See PlayerViewModel's
+            // SYSTEM_VOLUME_PANEL comment.
+            // <-- AM (SYSTEM_VOLUME_PANEL)
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                if (viewModel.stateData.value.isCasting) {
+                    return super.onKeyDown(keyCode, event)
+                }
+                viewModel.changeVolumeBy(if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) 1 else -1)
                 viewModel.displayVolumeSlider(true)
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> viewModel.handleLeftDoubleTap()

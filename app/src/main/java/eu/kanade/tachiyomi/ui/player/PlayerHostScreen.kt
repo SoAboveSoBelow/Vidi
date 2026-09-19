@@ -33,11 +33,10 @@ package eu.kanade.tachiyomi.ui.player
 // entirely - Voyager can't show two screens at once, and dummy pip needs the
 // library/episode list underneath to stay visible and interactive, so the
 // player can't be "the active Navigator screen" for either mode anymore).
-// Keyed on PlayerMediaHolder.PlaybackRequest, so it's created fresh for a
-// genuinely new anime/episode (matching the old push-a-new-Screen-instance
-// behavior) but survives, completely unchanged, across every fullscreen<->
-// dummy-pip toggle for the SAME session - PlayerScreen's own MpvSurface call
-// is never disposed, never recreated, for that transition.
+// Survives, completely unchanged, across every fullscreen<->dummy-pip
+// toggle AND across playlist switches (CROSS_ANIME_IN_PLACE_SWITCH - the
+// request is no longer a key()): PlayerScreen's own MpvSurface call is
+// never disposed, never recreated, for either transition.
 //
 // AM (DUMMY_PIP_REAL_SIZE_REVERT) -->
 // Dummy pip is NOT a graphicsLayer scale/translate wrapped around a
@@ -66,8 +65,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -110,16 +107,23 @@ fun PlayerOverlayHost() {
         // <-- AM (APP_WIDE_ORIENTATION_RESET_FIX)
         return
     }
-    key(currentRequest) {
-        PlayerHostScreen(
-            animeId = currentRequest.animeId,
-            episodeId = currentRequest.episodeId,
-            hosterList = currentRequest.hosterList,
-            hosterIndex = currentRequest.hosterIndex,
-            videoIndex = currentRequest.videoIndex,
-            forceResume = currentRequest.forceResume,
-        )
-    }
+    // AM (CROSS_ANIME_IN_PLACE_SWITCH) -->
+    // No longer keyed on the request. The key made "new anime = new
+    // composition", which on every playlist switch threw away the entire
+    // session subtree - including DummyPipContainer's remembered window
+    // state (size/position/stash), which visibly reset to default on the
+    // next pip entry. One persistent host now outlives request changes;
+    // the reconciliation LaunchedEffect inside PlayerHostScreen routes
+    // them (changeEpisode / changeAnime / no-op) instead.
+    // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
+    PlayerHostScreen(
+        animeId = currentRequest.animeId,
+        episodeId = currentRequest.episodeId,
+        hosterList = currentRequest.hosterList,
+        hosterIndex = currentRequest.hosterIndex,
+        videoIndex = currentRequest.videoIndex,
+        forceResume = currentRequest.forceResume,
+    )
 }
 
 // AM (DUMMY_PIP_REBUILD) -->
@@ -144,49 +148,41 @@ fun PlayerHostScreen(
 
     var viewModel by remember { mutableStateOf<PlayerViewModel?>(null) }
 
-    // AM (PLAYER_HOST_SCREEN) -->
-    // Runs once, at this composable instance's first composition - the
-    // key(currentRequest) wrapper in PlayerOverlayHost is what makes "once
-    // per distinct request" hold, the same way Voyager's fresh-instance-
-    // per-push used to.
-    // <-- AM (PLAYER_HOST_SCREEN)
+    // AM (CROSS_ANIME_IN_PLACE_SWITCH) -->
+    // Runs once, at this persistent host's first composition (the host is no
+    // longer keyed on the request - see PlayerOverlayHost). This effect now
+    // owns ONLY session setup: adopt the live ViewModel if one exists
+    // (regardless of which anime it plays - reconciling the CONTENT is the
+    // LaunchedEffect further down, so a playlist switch no longer tears
+    // anything down), or bind the service and create a fresh one. The fresh
+    // branch deliberately does NOT call init() itself anymore: the initial
+    // load goes through the same reconciliation effect as every later
+    // request, so ALL episode/anime loads serialize through the ViewModel's
+    // episodeChangeJob and a rapid A->B switch cancels cleanly instead of
+    // racing a fire-and-forget init.
+    // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
     DisposableEffect(Unit) {
         val existingHolder = PlayerMediaHolder.current
         val existingViewModel = existingHolder?.takeIf { it.hasAdoptedPlayer }?.viewModel
-        val existingState = existingViewModel?.stateData?.value
 
-        if (existingViewModel != null && existingState?.currentAnime?.id == animeId) {
-            // AM (PLAYER_HOST_SCREEN_EPISODE_SWITCH_FIX) -->
-            // Was missing entirely - adopted whatever session was live
-            // unconditionally, with no comparison against this screen's
-            // own target episodeId at all. Confirmed live on-device
-            // (2026-09-06): tapping a different episode after backing
-            // out to the episode list just reopened the same episode that
-            // was already playing, because nothing here ever called
-            // changeEpisode(). Same same-anime/different-episode case
-            // PlayerActivity.onNewIntent() already handles - see that
-            // function's own LIVE_REDELIVERY_TRUST_FIX doc comment.
-            if (existingState.currentEpisode?.id != episodeId) {
-                logcat(LogPriority.INFO) {
-                    "PLAYER_HOST_SCREEN_EPISODE_SWITCH_FIX changeEpisode() " +
-                        "from=${existingState.currentEpisode?.id} to=$episodeId"
-                }
-                existingViewModel.changeEpisode(episodeId)
-            }
-            // <-- AM (PLAYER_HOST_SCREEN_EPISODE_SWITCH_FIX)
+        if (existingViewModel != null) {
             logcat(LogPriority.INFO) {
                 "PLAYER_HOST_SCREEN reusing existing viewModel=${System.identityHashCode(existingViewModel)} " +
                     "for animeId=$animeId episodeId=$episodeId"
             }
             existingHolder.hasExternalScreenConsumer = true
-            // AM (DUMMY_PIP_STALE_ON_REOPEN_FIX) -->
-            // This composable's own request superseding any previous one
-            // (a new episode opened) always supersedes any dummy pip
-            // currently up for this holder too - opening an episode should
-            // always land in fullscreen, regardless of what mode the
-            // previous session was left in.
-            existingHolder.isDummyPipActive = false
-            // <-- AM (DUMMY_PIP_STALE_ON_REOPEN_FIX)
+            // AM (DUMMY_PIP_REOPEN_STAYS_PIP_FIX) -->
+            // Was: existingHolder.isDummyPipActive = false (DUMMY_PIP_STALE_
+            // ON_REOPEN_FIX) - but that fired on EVERY re-adoption of a live
+            // session, including plain app re-entry (activity recreated
+            // while the dummy pip floated, e.g. after being backgrounded
+            // paused): reopening the app snapped the video fullscreen
+            // instead of leaving the pip up. The case that line actually
+            // existed for - "this host's request supersedes what's playing"
+            // - is now the reconciliation effect's job (it expands the pip
+            // only when it genuinely switches content), so adoption itself
+            // leaves the mode untouched and the pip survives a reopen.
+            // <-- AM (DUMMY_PIP_REOPEN_STAYS_PIP_FIX)
             viewModel = existingViewModel
             // AM (PLAYER_OVERLAY_MIGRATION) -->
             // Unconditional now, unlike the old Screen-based version's own
@@ -241,23 +237,10 @@ fun PlayerHostScreen(
                     )
                     // <-- AM (PLAYER_HOST_SCREEN_NOTIFICATION_FIX)
 
-                    scope.launch {
-                        val (initResult, loadResult) = vm.init(
-                            animeId = animeId,
-                            initialEpisodeId = episodeId,
-                            hostList = hosterList?.let { it.serialize() } ?: "",
-                            hostIndex = hosterIndex,
-                            vidIndex = videoIndex,
-                        )
-                        logcat(LogPriority.INFO) {
-                            "PLAYER_HOST_SCREEN init() returned initResult=$initResult loadResult=$loadResult"
-                        }
-                        vm.loadHosters(
-                            hosterList = initResult.hosterList ?: emptyList(),
-                            hosterIndex = initResult.videoIndex.first,
-                            videoIndex = initResult.videoIndex.second,
-                        )
-                    }
+                    // NOTE: no init() call here - the reconciliation effect
+                    // below performs the initial load (via changeAnime ->
+                    // init) once viewModel is set, so every load this host
+                    // ever triggers is serialized through episodeChangeJob.
 
                     viewModel = vm
                 }
@@ -277,6 +260,69 @@ fun PlayerHostScreen(
             onDispose { context.unbindService(connection) }
         }
     }
+
+    // AM (CROSS_ANIME_IN_PLACE_SWITCH) -->
+    // THE single reconciliation point for every playback request against the
+    // live session (this host persists across requests now, so requests must
+    // be APPLIED, not re-composed): identical target = no-op; same anime,
+    // different episode = changeEpisode(); different anime = changeAnime()'s
+    // in-place switch (same player, same surface, same pip window). A first
+    // request on a freshly created ViewModel (nothing loaded yet) also lands
+    // here and performs the initial load. Any actual switch expands the
+    // dummy pip first - opening an episode lands in fullscreen, same as the
+    // same-anime tap behavior already had.
+    //
+    // lastReconciled seeds from what the session is ACTUALLY playing at
+    // adoption time (not from the request): an adopted session that has
+    // drifted from the request (e.g. the episode it started on vs the one
+    // tapped now - the old PLAYER_HOST_SCREEN_EPISODE_SWITCH_FIX case) is
+    // still corrected on this effect's first run, while a fresh ViewModel
+    // seeds null so its initial load always fires exactly once.
+    val reconcilingViewModel = viewModel
+    var lastReconciled by remember(reconcilingViewModel) {
+        mutableStateOf(
+            reconcilingViewModel?.stateData?.value?.let { it.currentAnime?.id to it.currentEpisode?.id },
+        )
+    }
+    LaunchedEffect(reconcilingViewModel, animeId, episodeId) {
+        val vm = reconcilingViewModel ?: return@LaunchedEffect
+        val last = lastReconciled
+        if (last != null && last.first == animeId && last.second == episodeId) return@LaunchedEffect
+        when (last?.first) {
+            null -> {
+                // Fresh ViewModel, nothing loaded - initial load. Guarded by
+                // currentAnime so an adopted-VM race (state not yet read)
+                // can't double-load.
+                if (vm.stateData.value.currentAnime == null) {
+                    vm.changeAnime(
+                        animeId = animeId,
+                        episodeId = episodeId,
+                        hostList = hosterList?.let { it.serialize() } ?: "",
+                        hostIndex = hosterIndex,
+                        vidIndex = videoIndex,
+                    )
+                    lastReconciled = animeId to episodeId
+                }
+            }
+            animeId -> {
+                PlayerMediaHolder.current?.isDummyPipActive = false
+                vm.changeEpisode(episodeId)
+                lastReconciled = animeId to episodeId
+            }
+            else -> {
+                PlayerMediaHolder.current?.isDummyPipActive = false
+                vm.changeAnime(
+                    animeId = animeId,
+                    episodeId = episodeId,
+                    hostList = hosterList?.let { it.serialize() } ?: "",
+                    hostIndex = hosterIndex,
+                    vidIndex = videoIndex,
+                )
+                lastReconciled = animeId to episodeId
+            }
+        }
+    }
+    // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
 
     val currentViewModel = viewModel
     if (currentViewModel == null) {
@@ -324,39 +370,30 @@ fun PlayerHostScreen(
     // unrelated to any tap). This actively fights back: any time controls
     // turn on while dummy pip is active, hide them again immediately.
     //
-    // setControlsAndStatusBarShown(..., statusBarShown = true) instead of
-    // hideControls() - see that function's own doc comment on PlayerViewModel
-    // for why: hideControls() also hides the OS status/nav bars, which should
-    // never happen just because the mini window is hiding its own controls.
+    // Only controlsShown is managed here - system bar visibility is derived
+    // (SYSTEM_BARS_DERIVED_FROM_CONTROLS): bars follow the dummy-pip flag
+    // itself while pip is up, and follow controlsShown again the instant it
+    // clears, so neither the old "bars stuck on after expand" nor the
+    // "controls without bars" desync can occur anymore.
     LaunchedEffect(isDummyPipActive, currentViewModel) {
         if (isDummyPipActive) {
             currentViewModel.uiData.collect { uiData ->
-                if (uiData.controlsShown || !uiData.statusBarShown) {
-                    currentViewModel.setControlsAndStatusBarShown(controlsShown = false, statusBarShown = true)
+                if (uiData.controlsShown) {
+                    currentViewModel.hideControls()
                 }
             }
         }
     }
     // <-- AM (DUMMY_PIP_CONTROLS_LEAK_FIX)
 
-    // AM (DUMMY_PIP_EXTERNAL_VOLUME_BAR) -->
-    // Real PiP shows the volume UI OUTSIDE the small window. While the
-    // dummy pip is active, intercept the in-player volume slider (which
-    // would render inside the window, tiny and clipped): suppress it and
-    // tick pipVolumeUiTick instead - DummyPipContainer shows its own
-    // external volume bar for each tick.
-    var pipVolumeUiTick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(isDummyPipActive, currentViewModel) {
-        if (isDummyPipActive) {
-            currentViewModel.uiData.collect { uiData ->
-                if (uiData.isVolumeSliderShown) {
-                    currentViewModel.handlePlayerEvent(PlayerViewModel.PlayerEvent.ShowVolumeSlider(false))
-                    pipVolumeUiTick++
-                }
-            }
-        }
-    }
-    // <-- AM (DUMMY_PIP_EXTERNAL_VOLUME_BAR)
+    // AM (DUMMY_PIP_SYSTEM_VOLUME_UI) -->
+    // Was DUMMY_PIP_EXTERNAL_VOLUME_BAR: a collector suppressing the
+    // in-player volume slider and ticking a custom pill DummyPipContainer
+    // rendered above the window. Replaced by the OS's own volume panel -
+    // MainActivity.onKeyDown routes volume keys to
+    // AudioManager.adjustStreamVolume(FLAG_SHOW_UI) while dummy pip is
+    // active, so nothing here (or in the window) renders volume UI at all.
+    // <-- AM (DUMMY_PIP_SYSTEM_VOLUME_UI)
 
     // AM (DUMMY_PIP_REBUILD) -->
     // The entire floating-window implementation (gestures, animations,
@@ -408,9 +445,6 @@ fun PlayerHostScreen(
         isPaused = playbackData.paused,
         actions = dummyPipActions,
         controller = dummyPipController,
-        volume = playbackData.currentVolume,
-        maxVolume = videoState.maxVolume,
-        volumeUiTick = pipVolumeUiTick,
     ) {
         PlayerScreen(
             viewModel = currentViewModel,
@@ -425,13 +459,26 @@ fun PlayerHostScreen(
                     // harmless fallback for any non-BackHandler caller.
                     dummyPipController.requestExpand()
                 } else {
+                    // AM (DUMMY_PIP_ENTRY_CLOSES_MENUS) -->
+                    // Any open sheet/panel/dialog belongs to the
+                    // fullscreen player - entering pip with one up left
+                    // it floating fullscreen under/behind the pip window
+                    // with the pip's own gestures swallowing the touches
+                    // meant to dismiss it. Real PiP entry does the same
+                    // (see PlayerActivity.onPictureInPictureModeChanged's
+                    // setSheet(Sheets.None)).
+                    // <-- AM (DUMMY_PIP_ENTRY_CLOSES_MENUS)
+                    currentViewModel.setSheet(Sheets.None)
+                    currentViewModel.setPanel(Panels.None)
+                    currentViewModel.setDialog(Dialogs.None)
                     // Hide PlayerScreen's own controls BEFORE flipping
                     // the flag, not after: the DUMMY_PIP_CONTROLS_LEAK_FIX
                     // collector only reacts once the flag is already true,
                     // so for a frame the player's full-size controls rode
                     // along inside the shrinking window - the visible
-                    // entry flash.
-                    currentViewModel.setControlsAndStatusBarShown(controlsShown = false, statusBarShown = true)
+                    // entry flash. Must come AFTER the closers above -
+                    // each of them calls showControls() as a side effect.
+                    currentViewModel.hideControls()
                     holder?.isDummyPipActive = true
                     // AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX) -->
                     // Without this, the OS keeps whatever auto-enter
