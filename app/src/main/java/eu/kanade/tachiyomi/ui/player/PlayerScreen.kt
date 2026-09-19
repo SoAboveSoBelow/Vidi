@@ -60,6 +60,7 @@ import eu.kanade.tachiyomi.ui.player.controls.components.panels.toColorHexString
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.toFixed
 import eu.kanade.tachiyomi.ui.player.mpv.MpvVideoTrack
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import mihon.app.di.appGraph
 import tachiyomi.core.common.preference.deleteAndGet
 import tachiyomi.core.common.preference.minusAssign
@@ -123,6 +124,21 @@ fun PlayerScreen(
     // <-- AM (SERVICE_OWNED_PLAYER)
 
     var hasNavigatedBack by remember { mutableStateOf(false) }
+
+    // AM (DUMMY_PIP_BACK_PASSTHROUGH_FIX) -->
+    // While the dummy pip is floating, the player must NOT intercept back.
+    // The fullscreen player is an overlay mode of the persistent host, not
+    // a page on the app's backstack - so with the pip up, a back press
+    // belongs to whatever app page is visible UNDERNEATH it. Disabling the
+    // handler lets the press fall through to the Navigator below (and the
+    // pip simply stays up, like real PiP) instead of bouncing between
+    // pip<->fullscreen or dismissing the session.
+    val dummyPipActive by (
+        PlayerMediaHolder.current?.isDummyPipActiveFlow
+            ?: remember { MutableStateFlow(false) }
+        )
+        .collectAsStateWithLifecycle()
+    // <-- AM (DUMMY_PIP_BACK_PASSTHROUGH_FIX)
 
     // AM (BACK_HANDLER_STALE_GUARD_FIX) -->
     // hasNavigatedBack exists to prevent a rapid double-tap of back from firing
@@ -197,7 +213,9 @@ fun PlayerScreen(
         }
     }
 
-    BackHandler {
+    // Disabled while the dummy pip is up - see
+    // DUMMY_PIP_BACK_PASSTHROUGH_FIX above.
+    BackHandler(enabled = !dummyPipActive) {
         handleBackPress()
     }
 
@@ -379,17 +397,37 @@ fun PlayerScreen(
 
             var resetControls by remember { mutableStateOf(true) }
 
+            // AM (REOPEN_STATUS_BAR_STUCK_FIX) -->
+            // dummyPipActive (hoisted to the top of this composable for
+            // DUMMY_PIP_BACK_PASSTHROUGH_FIX) is also needed for the guard
+            // below: while dummy pip is active the leak-fix deliberately
+            // holds (controlsShown=false, statusBarShown=true), and the
+            // status bar must NOT be hidden on a timer in that state.
             LaunchedEffect(
                 uiData.controlsShown,
+                uiData.statusBarShown,
                 playbackData.paused,
                 playbackData.isSeeking,
                 resetControls,
+                dummyPipActive,
             ) {
                 if (uiData.controlsShown && !playbackData.paused && !playbackData.isSeeking) {
                     delay(uiData.playerTimeToDisappearMs.milliseconds)
                     viewModel.hideControls()
+                } else if (uiData.statusBarShown && !dummyPipActive) {
+                    // Reopening the player from the background-playback
+                    // notification resumes with controlsShown already
+                    // false (the pip leak-fix left it so, with the status
+                    // bar deliberately kept) - the branch above never
+                    // fired, so the OS status/nav bars stayed up until
+                    // the next interaction. Paused/seeking playback keeps
+                    // the player controls but should still go immersive
+                    // on the same timer.
+                    delay(uiData.playerTimeToDisappearMs.milliseconds)
+                    viewModel.setControlsAndStatusBarShown(uiData.controlsShown, false)
                 }
             }
+            // <-- AM (REOPEN_STATUS_BAR_STUCK_FIX)
 
             CompositionLocalProvider(
                 LocalRippleConfiguration provides playerRippleConfiguration,

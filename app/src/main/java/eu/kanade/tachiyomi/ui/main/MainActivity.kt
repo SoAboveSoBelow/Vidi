@@ -664,6 +664,34 @@ class MainActivity : BaseActivity() {
 
         super.onCreate(savedInstanceState)
 
+        // AM (DUMMY_PIP_BACK_TO_ROOT_PIP_FIX) -->
+        // PlayerScreen's BackHandler is disabled while the dummy pip is up
+        // (DUMMY_PIP_BACK_PASSTHROUGH_FIX in PlayerScreen.kt), so back
+        // presses navigate the app pages UNDERNEATH the pip. When those
+        // run out, the press would finish the Activity - with a live,
+        // playing pip session that's the wrong default: entering real PiP
+        // keeps playback going instead (same as Home). Registered in
+        // onCreate, i.e. BEFORE every Compose BackHandler, so it has the
+        // LOWEST priority and only ever fires when nothing above it
+        // consumed the press - exactly the "back would leave the app"
+        // case. Paused sessions keep the ordinary finish behavior.
+        // <-- AM (DUMMY_PIP_BACK_TO_ROOT_PIP_FIX)
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : androidx.activity.OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    val holder = PlayerMediaHolder.current
+                    if (holder?.isDummyPipActive == true && holder.viewModel?.playbackData?.value?.paused == false) {
+                        enterSelfPipIfEligible()
+                    } else {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                        isEnabled = true
+                    }
+                }
+            },
+        )
+
         val didMigration = Migrator.awaitAndRelease()
 
         // Do not let the launcher create a new activity http://stackoverflow.com/questions/16283079
@@ -1060,6 +1088,25 @@ class MainActivity : BaseActivity() {
     override fun onResume() {
         super.onResume()
         mpvConfig.copyFiles()
+        // AM (DUMMY_PIP_PAUSED_REOPEN_FIX) -->
+        // Leaving the app with the dummy pip PAUSED takes no real-PIP round
+        // trip (enterSelfPipIfEligible() deliberately skips paused content),
+        // so the Activity simply backgrounds with the same long-lived
+        // dummy-pip instance up - and that instance's controls come back
+        // dead on reopen (leaving while PLAYING never shows this: real PIP
+        // restores fullscreen on reopen, so the next pip entry is always a
+        // freshly-initialized instance). Entering real PIP for paused
+        // content was rejected (a floating paused video on the home screen
+        // is worse than the bug), so instead: a paused dummy pip simply
+        // isn't kept across a background stint - reopening lands on the
+        // fullscreen player (paused), and backing into the pip from there
+        // re-initializes its interaction state cleanly.
+        // <-- AM (DUMMY_PIP_PAUSED_REOPEN_FIX)
+        PlayerMediaHolder.current?.let { holder ->
+            if (holder.isDummyPipActive && holder.viewModel?.playbackData?.value?.paused == true) {
+                holder.isDummyPipActive = false
+            }
+        }
     }
     // <-- AM
 

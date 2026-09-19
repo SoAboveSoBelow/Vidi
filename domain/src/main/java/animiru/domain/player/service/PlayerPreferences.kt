@@ -42,7 +42,13 @@ class PlayerPreferences(
     val progressPreference: Preference<Float> = preferenceStore.getFloat("pref_progress_preference", 0.85F)
     val defaultPlayerOrientationType: Preference<PlayerOrientation> = preferenceStore.getEnum(
         "pref_default_player_orientation_type_key",
-        PlayerOrientation.SensorLandscape,
+        // AM (FREE_ORIENTATION_DEFAULT_FIX) -->
+        // Free (full sensor) instead of SensorLandscape: the player
+        // should allow rotation while it's on screen, not lock to
+        // landscape out of the box. Users who explicitly picked an
+        // orientation keep their stored value.
+        PlayerOrientation.Free,
+        // <-- AM (FREE_ORIENTATION_DEFAULT_FIX)
     )
 
     // Controls

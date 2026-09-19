@@ -1572,7 +1572,15 @@ class PlayerViewModel(
     fun setupPlayerOrientation() {
         if (player.isForegroundSuspended) return
         val orientation = when (playerPreferences.defaultPlayerOrientationType.get()) {
-            PlayerOrientation.Free -> ActivityInfo.SCREEN_ORIENTATION_SENSOR
+            // AM (FREE_ORIENTATION_FULL_SENSOR_FIX) -->
+            // USER: portrait + both landscapes, following the sensor
+            // while the phone's auto-rotate is on, and opening in /
+            // holding the current orientation when the user has rotation
+            // locked - i.e. it respects the PHONE's setting, which plain
+            // SENSOR/FULL_SENSOR do not. Not FULL_USER: reverse portrait
+            // (phone upside down) is atypical for apps to honor.
+            PlayerOrientation.Free -> ActivityInfo.SCREEN_ORIENTATION_USER
+            // <-- AM (FREE_ORIENTATION_FULL_SENSOR_FIX)
             PlayerOrientation.Video -> if ((aspectRatio.value ?: 0.0) > 1.0) {
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             } else {
