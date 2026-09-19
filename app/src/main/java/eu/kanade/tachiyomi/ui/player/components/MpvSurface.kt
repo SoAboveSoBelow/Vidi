@@ -1,14 +1,18 @@
 package eu.kanade.tachiyomi.ui.player.components
 
+import android.graphics.Outline
 import android.graphics.SurfaceTexture
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
+import android.view.ViewOutlineProvider
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import animiru.domain.player.service.DecoderPreferences
+import eu.kanade.tachiyomi.ui.player.LocalDummyPipCornerRadiusPx
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import mihon.app.di.appGraph
 
@@ -35,6 +39,12 @@ fun MpvSurface(
     val context = LocalContext.current
     val decoderPreferences: DecoderPreferences = context.appGraph.decoderPreferences
     val mpv = player.mpv
+    // AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) -->
+    // Non-null only when hosted inside the dummy pip (see DummyPipWindow.kt).
+    // The Local itself never changes, so this read never recomposes us; the
+    // radius floatValue is read in update{} below, which re-runs on change.
+    // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
+    val pipCornerRadiusPx = LocalDummyPipCornerRadiusPx.current
 
     AndroidView(
         modifier = modifier.fillMaxSize(),
@@ -137,6 +147,27 @@ fun MpvSurface(
                 }
             }
             // <-- AM (PERSISTENT_SURFACE_ARCHITECTURE)
+            // AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) -->
+            // Rounded corners DURING a dummy-pip resize/tilt, applied on
+            // the TextureView's OWN render node: an outline lives in the
+            // view's local space, so the ancestor Compose layer's scale/
+            // rotation transforms it together with the video - unlike the
+            // Compose layer clip (applied in a space that doesn't scale
+            // with the layer, cropping the pinch overshoot) and unlike an
+            // offscreen blend mask (never touches a TextureView, whose
+            // content is composited as a separate hardware layer). Radius
+            // 0 = gesture over / not in the pip: clip off, pre-fix
+            // rendering exactly. The floatValue read is what subscribes
+            // this update block to the per-frame radius changes.
+            // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
+            val pipRadius = pipCornerRadiusPx?.floatValue ?: 0f
+            textureView.outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, pipRadius)
+                }
+            }
+            textureView.clipToOutline = pipRadius > 0f
+            textureView.invalidateOutline()
         },
     )
 }
