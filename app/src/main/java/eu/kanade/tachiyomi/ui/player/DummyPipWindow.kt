@@ -76,7 +76,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateRotation
-import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -239,10 +238,12 @@ private const val MAX_PIP_TILT_DEG = 13f
 // multiplier is just a numeric safety net against degenerate scales,
 // not a visible cap.
 private const val PINCH_MAX_OVERSHOOT = 4f
-// Real PiP's pinch resize tracks the finger spread at a slower rate
-// than 1:1 - raw calculateZoom() read as "expansion is a lot faster
-// than the real pip". Damps the per-event zoom factor.
-private const val PINCH_ZOOM_DAMPING = 0.4f
+// AOSP PipPinchResizingAlgorithm: the resize tracks the finger spread
+// EXACTLY 1:1 while the desired size is within [min, max] - there is no
+// in-range damping at all. Only the OVERSHOOT past the limits is damped,
+// at OVERRESIZE_DAMP_FACTOR - that's the "variable dampener" feel: free
+// 1:1 tracking in range, resistance only once you stretch past the edge.
+private const val PINCH_OVERRESIZE_DAMP = 0.25f
 // The overshoot pull-back on pinch release: essentially the expansion
 // played in reverse - a smooth eased tween, NOT a spring, and run on
 // the paint-time pinchScale (see the release handling).
@@ -1188,6 +1189,14 @@ fun DummyPipContainer(
                             pendingTapJob?.cancel()
 
                             var isResizing = false
+                            // AOSP-model pinch state (see
+                            // PINCH_OVERRESIZE_DAMP): the finger distance
+                            // and the window's visual scale at the moment
+                            // the second finger landed - the per-event
+                            // scale is computed ABSOLUTELY from these
+                            // (dist/downDist), not accumulated per-event.
+                            var pinchStartDistScreen = 0f
+                            var pinchStartVisualScale = 1f
                             var hasExceededSlop = false
                             var accumulatedMovement = 0f
                             val downPosition: Offset = down.position
@@ -1260,14 +1269,31 @@ fun DummyPipContainer(
                                         // Block background touches for
                                         // the rest of the resize.
                                         resizeActive = true
+                                        // AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX) -->
+                                        // Anchor the ABSOLUTE pinch model:
+                                        // finger distance (converted to
+                                        // screen space - positions are in
+                                        // this overlay's local space, which
+                                        // is itself scaled by pinchScale)
+                                        // and the window's visual scale at
+                                        // this moment. Every later event
+                                        // computes desired scale as
+                                        // startScale * dist/startDist, so
+                                        // the tracking is exactly 1:1 in
+                                        // range like real PiP - no
+                                        // per-event accumulation, no fixed
+                                        // damping eating the first part of
+                                        // every gesture.
+                                        // <-- AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX)
+                                        pinchStartDistScreen =
+                                            (pressed[0].position - pressed[1].position)
+                                                .getDistance() * pinchScale
+                                        pinchStartVisualScale = sizeScale * pinchScale
                                     }
                                     isResizing = true
                                     hasExceededSlop = true
 
                                     val centroid = event.calculateCentroid()
-                                    // Damped to real PiP's slower resize
-                                    // rate (see PINCH_ZOOM_DAMPING).
-                                    val zoom = 1f + (event.calculateZoom() - 1f) * PINCH_ZOOM_DAMPING
                                     // calculatePan() is reported in THIS
                                     // overlay's LOCAL coordinate space,
                                     // and the overlay itself is scaled by
@@ -1289,32 +1315,54 @@ fun DummyPipContainer(
                                             .coerceIn(-MAX_PIP_TILT_DEG, MAX_PIP_TILT_DEG)
                                     }
 
-                                    // Zoom is applied EVERY event, with
-                                    // no dead-zone: while a threshold
-                                    // accumulated, only the pan went
-                                    // through, so the window drifted
-                                    // instead of growing under the
-                                    // fingers - that was the missing
-                                    // "anchored to your fingers" feel.
-                                    // The centroid anchor compensation
-                                    // below keeps the exact point under
-                                    // the fingers stationary while the
-                                    // window grows/shrinks around it.
+                                    // AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX) -->
+                                    // AOSP PipPinchResizingAlgorithm model:
+                                    // the desired scale is recomputed
+                                    // ABSOLUTELY every event as
+                                    // startScale * (dist / downDist) -
+                                    // exactly 1:1 with the fingers inside
+                                    // [min, max] (real PiP applies NO
+                                    // damping there; the old fixed 0.4
+                                    // per-event damping is what made the
+                                    // resize feel laggy). Only the
+                                    // overshoot PAST a limit is damped,
+                                    // by PINCH_OVERRESIZE_DAMP (AOSP
+                                    // OVERRESIZE_DAMP_FACTOR = 0.25), so
+                                    // pushing beyond the bounds gets
+                                    // progressively stiffer - the
+                                    // "variable dampener" feel. The
+                                    // release commit below still clamps
+                                    // to [min, max] with the paint-time
+                                    // pull-back, unchanged.
                                     //
-                                    // No fixed max mid-gesture (see
-                                    // PINCH_MAX_OVERSHOOT) - the window
-                                    // may grow past the screen edge and
-                                    // the limit is enforced by the
-                                    // pull-back on release only.
-                                    val maxScale = minOf(
+                                    // The centroid anchor compensation
+                                    // keeps the exact point under the
+                                    // fingers stationary while the window
+                                    // grows/shrinks around it.
+                                    // <-- AM (DUMMY_PIP_AOSP_PINCH_DAMP_FIX)
+                                    val maxScaleAbs = minOf(
                                         MAX_SIZE_SCALE,
                                         (currentScreenWidth.value - 2 * currentEdgeMargin.value) / currentBaseWidth.value,
-                                    ) * PINCH_MAX_OVERSHOOT
+                                    )
+                                    val minScaleAbs = minWindowWidthPx() / currentBaseWidth.value
+                                    val distScreen =
+                                        (pressed[0].position - pressed[1].position)
+                                            .getDistance() * pinchScale
+                                    val rawDesired =
+                                        pinchStartVisualScale *
+                                            (distScreen / pinchStartDistScreen.coerceAtLeast(1f))
+                                    val clampedDesired = when {
+                                        rawDesired > maxScaleAbs ->
+                                            maxScaleAbs + (rawDesired - maxScaleAbs) * PINCH_OVERRESIZE_DAMP
+                                        rawDesired < minScaleAbs ->
+                                            minScaleAbs - (minScaleAbs - rawDesired) * PINCH_OVERRESIZE_DAMP
+                                        else -> rawDesired
+                                    }
                                     val oldW = windowWidthPx() * pinchScale
                                     val oldH = windowHeightPx() * pinchScale
                                     var newCenterX = centerX + pan.x
                                     var newCenterY = centerY + pan.y
-                                    if (zoom != 1f) {
+                                    if (clampedDesired != sizeScale * pinchScale) {
                                         // Centroid fraction within THIS
                                         // overlay's bounds (the visible,
                                         // possibly grown window) - uniform
@@ -1324,9 +1372,13 @@ fun DummyPipContainer(
                                         val fractionX = (centroid.x / size.width.toFloat()).coerceIn(0f, 1f)
                                         val fractionY = (centroid.y / size.height.toFloat()).coerceIn(0f, 1f)
                                         val newPinch = coerceInSafe(
-                                            pinchScale * zoom,
-                                            minWindowWidthPx() / windowWidthPx(),
-                                            maxScale / sizeScale,
+                                            clampedDesired / sizeScale,
+                                            // Allow the damped overshoot
+                                            // below min / above max to be
+                                            // VISIBLE mid-gesture; the
+                                            // release commit pulls it back.
+                                            (minWindowWidthPx() / windowWidthPx()) * 0.5f,
+                                            maxScaleAbs * PINCH_MAX_OVERSHOOT / sizeScale,
                                         )
                                         val newW = windowWidthPx() * newPinch
                                         val newH = windowHeightPx() * newPinch
