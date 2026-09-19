@@ -36,7 +36,6 @@ import eu.kanade.tachiyomi.util.system.copyToClipboard
 import eu.kanade.tachiyomi.util.system.isFossBuildType
 import eu.kanade.tachiyomi.util.system.isNightlyBuildType
 import eu.kanade.tachiyomi.util.system.toast
-import eu.kanade.tachiyomi.util.system.updaterEnabled
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -97,44 +96,48 @@ object AboutScreen : Screen() {
                     )
                 }
 
-                if (updaterEnabled) {
-                    item {
-                        TextPreferenceWidget(
-                            title = stringResource(MR.strings.check_for_updates),
-                            widget = {
-                                AnimatedVisibility(visible = isCheckingUpdates) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(28.dp),
-                                        strokeWidth = 3.dp,
+                // AM (UPDATER_MANUAL_CHECK) -->
+                // Was gated on updaterEnabled (BuildConfig.UPDATER_ENABLED, set only by
+                // -Penable-updater), so the manual check was absent from every debug build.
+                // The check itself has no build-type dependency; only installing the
+                // downloaded APK does, and that is already handled downstream.
+                item {
+                    TextPreferenceWidget(
+                        title = stringResource(MR.strings.check_for_updates),
+                        widget = {
+                            AnimatedVisibility(visible = isCheckingUpdates) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(28.dp),
+                                    strokeWidth = 3.dp,
+                                )
+                            }
+                        },
+                        onPreferenceClick = {
+                            if (!isCheckingUpdates) {
+                                scope.launch {
+                                    isCheckingUpdates = true
+
+                                    checkVersion(
+                                        context = context,
+                                        onAvailableUpdate = { result ->
+                                            val updateScreen = NewUpdateScreen(
+                                                versionName = result.release.version,
+                                                changelogInfo = result.release.info,
+                                                releaseLink = result.release.releaseLink,
+                                                downloadLink = result.release.downloadLink,
+                                            )
+                                            navigator.push(updateScreen)
+                                        },
+                                        onFinish = {
+                                            isCheckingUpdates = false
+                                        },
                                     )
                                 }
-                            },
-                            onPreferenceClick = {
-                                if (!isCheckingUpdates) {
-                                    scope.launch {
-                                        isCheckingUpdates = true
-
-                                        checkVersion(
-                                            context = context,
-                                            onAvailableUpdate = { result ->
-                                                val updateScreen = NewUpdateScreen(
-                                                    versionName = result.release.version,
-                                                    changelogInfo = result.release.info,
-                                                    releaseLink = result.release.releaseLink,
-                                                    downloadLink = result.release.downloadLink,
-                                                )
-                                                navigator.push(updateScreen)
-                                            },
-                                            onFinish = {
-                                                isCheckingUpdates = false
-                                            },
-                                        )
-                                    }
-                                }
-                            },
-                        )
-                    }
+                            }
+                        },
+                    )
                 }
+                // <-- AM (UPDATER_MANUAL_CHECK)
 
                 if (!BuildConfig.DEBUG) {
                     item {
@@ -192,7 +195,7 @@ object AboutScreen : Screen() {
                         LinkIcon(
                             label = "GitHub",
                             icon = CustomIcons.Github,
-                            url = "https://github.com/quickdesh/Animiru",
+                            url = "https://github.com/SoAboveSoBelow/Vidi",
                         )
                     }
                 }

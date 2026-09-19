@@ -96,4 +96,100 @@ class GetApplicationReleaseTest {
 
         result shouldBe GetApplicationRelease.Result.NoNewUpdate
     }
+
+    @Test
+    fun `When installed version has more components than tag expect no new update`() = runTest {
+        val release = Release(
+            "v0.19.13",
+            "info",
+            "http://example.com/release_link",
+            "http://example.com/release_link.apk",
+        )
+
+        coEvery { releaseService.latest(any()) } returns release
+
+        val result = getApplicationRelease.await(
+            GetApplicationRelease.Arguments(
+                isFoss = false,
+                isNightly = false,
+                commitCount = 0,
+                versionName = "0.19.13.1",
+                repository = "test",
+            ),
+        )
+
+        result shouldBe GetApplicationRelease.Result.NoNewUpdate
+    }
+
+    @Test
+    fun `When installed version has fewer components than tag expect new update`() = runTest {
+        val release = Release(
+            "v0.19.13.1",
+            "info",
+            "http://example.com/release_link",
+            "http://example.com/release_link.apk",
+        )
+
+        coEvery { releaseService.latest(any()) } returns release
+
+        val result = getApplicationRelease.await(
+            GetApplicationRelease.Arguments(
+                isFoss = false,
+                isNightly = false,
+                commitCount = 0,
+                versionName = "0.19.13",
+                repository = "test",
+            ),
+        )
+
+        (result as GetApplicationRelease.Result.NewUpdate).release shouldBe release
+    }
+
+    @Test
+    fun `When a later component is greater but an earlier one is smaller expect no new update`() = runTest {
+        val release = Release(
+            "v0.19.20",
+            "info",
+            "http://example.com/release_link",
+            "http://example.com/release_link.apk",
+        )
+
+        coEvery { releaseService.latest(any()) } returns release
+
+        val result = getApplicationRelease.await(
+            GetApplicationRelease.Arguments(
+                isFoss = false,
+                isNightly = false,
+                commitCount = 0,
+                versionName = "0.20.1",
+                repository = "test",
+            ),
+        )
+
+        result shouldBe GetApplicationRelease.Result.NoNewUpdate
+    }
+
+    @Test
+    fun `When installed version carries a versionNameSuffix expect it to be ignored`() = runTest {
+        val release = Release(
+            "v0.19.13",
+            "info",
+            "http://example.com/release_link",
+            "http://example.com/release_link.apk",
+        )
+
+        coEvery { releaseService.latest(any()) } returns release
+
+        val result = getApplicationRelease.await(
+            GetApplicationRelease.Arguments(
+                isFoss = false,
+                isNightly = false,
+                commitCount = 0,
+                versionName = "0.19.13-1234",
+                repository = "test",
+            ),
+        )
+
+        result shouldBe GetApplicationRelease.Result.NoNewUpdate
+    }
 }

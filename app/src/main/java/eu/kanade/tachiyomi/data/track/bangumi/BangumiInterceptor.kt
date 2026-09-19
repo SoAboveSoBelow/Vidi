@@ -32,7 +32,7 @@ class BangumiInterceptor(private val bangumi: Bangumi, private val json: Json) :
         return originalRequest.newBuilder()
             .header(
                 "User-Agent",
-                "quickdesh/Animiru/v${BuildConfig.VERSION_NAME} (Android) (https://github.com/Quickdesh/Animiru)",
+                "SoAboveSoBelow/Vidi/v${BuildConfig.VERSION_NAME} (Android) (https://github.com/SoAboveSoBelow/Vidi)",
             )
             .apply {
                 addHeader("Authorization", "Bearer ${currAuth.accessToken}")

@@ -33,25 +33,38 @@ class GetApplicationRelease(
         // Removes prefixes like "r" or "v"
         val newVersion = versionTag.replace("[^\\d.]".toRegex(), "")
         return if (isNightly) {
-            // Nightly builds: based on releases in "quickdesh/Animiru-preview" repo
-            // tagged as something like "r1234"
-            newVersion.toInt() > commitCount
+            // Nightly builds are tagged as something like "r1234"
+            newVersion.toIntOrNull()?.let { it > commitCount } ?: false
         } else {
-            // Release builds: based on releases in "quickdesh/Animiru" repo
-            // tagged as something like "v0.1.2"
-            val oldVersion = versionName.replace("[^\\d.]".toRegex(), "")
+            // Release builds are tagged as something like "v0.1.2".
+            // Drop any versionNameSuffix ("0.19.13-1234") before stripping non-digits,
+            // otherwise the suffix is concatenated onto the last component.
+            val oldVersion = versionName.substringBefore("-").replace("[^\\d.]".toRegex(), "")
 
-            val newSemVer = newVersion.split(".").map { it.toInt() }
-            val oldSemVer = oldVersion.split(".").map { it.toInt() }
-
-            oldSemVer.mapIndexed { index, i ->
-                if (newSemVer[index] > i) {
-                    return true
-                }
-            }
-
-            false
+            compareSemVer(parseSemVer(newVersion), parseSemVer(oldVersion)) > 0
         }
+    }
+
+    private fun parseSemVer(version: String): List<Int> {
+        return version.split(".").mapNotNull { it.toIntOrNull() }
+    }
+
+    /**
+     * Compares two dot-separated version component lists left to right, treating a missing
+     * component as 0 so that lists of differing length compare correctly ("0.19.13" vs
+     * "0.19.13.1"). Returns a negative number, zero, or a positive number as [a] is less
+     * than, equal to, or greater than [b].
+     */
+    private fun compareSemVer(a: List<Int>, b: List<Int>): Int {
+        if (a.isEmpty() || b.isEmpty()) return 0
+
+        repeat(maxOf(a.size, b.size)) { index ->
+            val left = a.getOrElse(index) { 0 }
+            val right = b.getOrElse(index) { 0 }
+            if (left != right) return left.compareTo(right)
+        }
+
+        return 0
     }
 
     data class Arguments(
