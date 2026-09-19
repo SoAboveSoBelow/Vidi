@@ -7,6 +7,14 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+// AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+// <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import kotlinx.coroutines.CoroutineScope
@@ -324,6 +332,88 @@ class PlayerMediaHolder(
     var mediaSession: MediaSession? = null
         private set
 
+    // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
+    // Pausing when the audio output goes away was previously handled ONLY by
+    // PlayerActivity's own noisyReceiver (ACTION_AUDIO_BECOMING_NOISY), which
+    // leaves two genuine gaps rather than one:
+    //
+    //  1. Wrong signal. ACTION_AUDIO_BECOMING_NOISY is the wired-headset-unplug
+    //     broadcast. Whether it also fires for a Bluetooth sink disappearing is
+    //     route- and OEM-dependent and routinely doesn't happen at all - a
+    //     disconnect (headphones powering off, walking out of range, the peer
+    //     dropping the link) is a route change, not an unplug, and the reliable
+    //     signal for a route change is AudioDeviceCallback. That's what this
+    //     observes instead of adding another broadcast filter and hoping.
+    //
+    //  2. Wrong owner. That receiver is registered in PlayerActivity's own
+    //     onServiceConnected and unregistered in its onDestroy, so it only
+    //     exists while a PlayerActivity does. Sessions originated through
+    //     PlayerHostScreen/MainActivity (see PLAYER_OVERLAY_MIGRATION - the
+    //     only kind MainActivity.startPlayerActivity() creates now) never
+    //     register it at all, and no Activity is alive during ordinary
+    //     background playback - which is precisely when headphones dying
+    //     matters most and audio would otherwise keep playing out of the
+    //     phone speaker. This holder's lifetime IS the session's lifetime, so
+    //     it's the correct owner; registered on first real adoption alongside
+    //     the other holder-lifetime observers, unregistered in release().
+    //
+    // Only pauses once NO Bluetooth output remains, rather than on any
+    // Bluetooth device removal: disconnecting one of two connected sinks, or a
+    // handoff between them, is not the user losing audio and must not pause.
+    private val audioManager by lazy {
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    }
+    private var audioDeviceCallback: AudioDeviceCallback? = null
+
+    private fun isBluetoothOutputType(type: Int): Boolean {
+        if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+            return true
+        }
+        // LE Audio sinks are a separate set of types, not reported as A2DP -
+        // omitting them would miss every disconnect on an LE Audio headset.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            (type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLE_SPEAKER)
+        ) {
+            return true
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            type == AudioDeviceInfo.TYPE_BLE_BROADCAST
+        ) {
+            return true
+        }
+        return false
+    }
+
+    private fun hasBluetoothOutput(): Boolean =
+        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .any { isBluetoothOutputType(it.type) }
+
+    private fun registerAudioRouteObserver() {
+        if (audioDeviceCallback != null) return
+        val callback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+                val lostBluetoothSink = removedDevices.any { it.isSink && isBluetoothOutputType(it.type) }
+                if (!lostBluetoothSink) return
+                // Another Bluetooth sink is still connected - audio has moved,
+                // not stopped.
+                if (hasBluetoothOutput()) return
+                // Nothing to pause: no player adopted yet, or already paused
+                // (a redundant setPaused would push a needless MediaSession
+                // state update through pushLiveMediaState()).
+                if (_player == null || state.value.paused) return
+                setPaused(true)
+            }
+        }
+        audioDeviceCallback = callback
+        audioManager.registerAudioDeviceCallback(callback, Handler(Looper.getMainLooper()))
+    }
+
+    private fun unregisterAudioRouteObserver() {
+        audioDeviceCallback?.let { audioManager.unregisterAudioDeviceCallback(it) }
+        audioDeviceCallback = null
+    }
+    // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
+
     // AM (ARTWORK_WIPE_FIX) -->
     // See pushLiveMediaState()'s own doc comment - these track the last artwork the
     // artwork flow successfully resolved so other metadata pushes can preserve it
@@ -387,6 +477,12 @@ class PlayerMediaHolder(
         // <-- SVC_RACE_DEBUG
         if (_player == null) {
             _player = existing
+            // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
+            // First real adoption only, same gate as the observers below - a
+            // later duplicate instance's adopt() call returns the already-adopted
+            // player unchanged and must not register a second callback.
+            registerAudioRouteObserver()
+            // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
             // AM (LIVE_POSITION_TRACKING) -->
             // Started only on the very first, real adoption - never for a later
             // duplicate instance's call, which just returns the already-adopted
@@ -1082,6 +1178,9 @@ class PlayerMediaHolder(
                 "at=${android.os.SystemClock.elapsedRealtime()}"
         }
         // <-- SVC_RACE_DEBUG
+        // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
+        unregisterAudioRouteObserver()
+        // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
         mediaSession?.release()
         mediaSession = null
         // AM (NATIVE_PLAYER_LEAK_FIX) -->
