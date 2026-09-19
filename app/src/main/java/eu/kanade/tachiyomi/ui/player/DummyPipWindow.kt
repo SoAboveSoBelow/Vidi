@@ -1211,6 +1211,46 @@ fun DummyPipContainer(
                                     // tilt zooming: two-finger rotation
                                     // tilts the window, capped.
                                     if (!isResizing) {
+                                        // AM (DUMMY_PIP_PINCH_FROM_GROWN_FIX) -->
+                                        // If the controls reveal-grow had
+                                        // the window visually expanded
+                                        // (pip smaller than the reveal
+                                        // threshold), the pinch must start
+                                        // from that GROWN size - hiding the
+                                        // controls below snaps the reveal
+                                        // scale back to 1, which used to
+                                        // visibly shrink the window to its
+                                        // small layout size the instant the
+                                        // second finger landed. Fold the
+                                        // live reveal scale into pinchScale
+                                        // instead: reveal*pinch is identical
+                                        // before and after the snap, and the
+                                        // release commit (sizeScale *
+                                        // pinchScale) naturally settles at
+                                        // the grown-from size.
+                                        // <-- AM (DUMMY_PIP_PINCH_FROM_GROWN_FIX)
+                                        val revealNow = controlsRevealScaleAnim.value
+                                        if (revealNow != 1f) {
+                                            // The reveal-grow anchors at
+                                            // the nearest screen corner
+                                            // while pinch anchors at the
+                                            // window center - shift the
+                                            // center by the same offset so
+                                            // the grown rect doesn't move
+                                            // when the anchor swaps.
+                                            val w0 = windowWidthPx()
+                                            val h0 = windowHeightPx()
+                                            val ox = if (centerX > currentScreenWidth.value / 2f) 1f else 0f
+                                            val oy = if (centerY > currentScreenHeight.value / 2f) 1f else 0f
+                                            centerX += (0.5f - ox) * w0 * (revealNow - 1f)
+                                            centerY += (0.5f - oy) * h0 * (revealNow - 1f)
+                                            pinchScale = revealNow
+                                        }
+                                        // Flipping this snaps the reveal
+                                        // anim back to 1 via its
+                                        // LaunchedEffect (shrink is
+                                        // instant) in the same frame, so
+                                        // reveal*pinch never double-scales.
                                         controlsShown = false
                                         // The pinch takes over from any
                                         // in-flight move / tilt level-out.
