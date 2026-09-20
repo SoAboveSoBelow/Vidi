@@ -86,7 +86,6 @@ import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.data.player.service.HttpServerService
-import eu.kanade.tachiyomi.data.updater.RELEASE_URL
 import eu.kanade.tachiyomi.extension.api.ExtensionApi
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.ui.base.activity.BaseActivity
@@ -96,18 +95,18 @@ import eu.kanade.tachiyomi.ui.deeplink.DeepLinkScreen
 import eu.kanade.tachiyomi.ui.home.HomeScreen
 import eu.kanade.tachiyomi.ui.more.NewUpdateScreen
 import eu.kanade.tachiyomi.ui.more.OnboardingScreen
+import eu.kanade.tachiyomi.ui.more.WhatsNewScreen
 import eu.kanade.tachiyomi.ui.player.Dialogs
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
-import eu.kanade.tachiyomi.ui.player.Panels
-import eu.kanade.tachiyomi.ui.player.Sheets
 import eu.kanade.tachiyomi.ui.player.PIP_BACKGROUND_PLAY
-import eu.kanade.tachiyomi.ui.player.PIP_INTENT_ACTION
 import eu.kanade.tachiyomi.ui.player.PIP_INTENTS_FILTER
+import eu.kanade.tachiyomi.ui.player.PIP_INTENT_ACTION
 import eu.kanade.tachiyomi.ui.player.PIP_NEXT
 import eu.kanade.tachiyomi.ui.player.PIP_PAUSE
 import eu.kanade.tachiyomi.ui.player.PIP_PLAY
 import eu.kanade.tachiyomi.ui.player.PIP_PREVIOUS
 import eu.kanade.tachiyomi.ui.player.PIP_SKIP
+import eu.kanade.tachiyomi.ui.player.Panels
 import eu.kanade.tachiyomi.ui.player.PlaybackRequest
 import eu.kanade.tachiyomi.ui.player.PlayerActivity
 import eu.kanade.tachiyomi.ui.player.PlayerBackgroundPlaybackService
@@ -115,12 +114,12 @@ import eu.kanade.tachiyomi.ui.player.PlayerFreshStartScreenSpike
 import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.ui.player.PlayerOverlayHost
 import eu.kanade.tachiyomi.ui.player.PlayerVoyagerScreenSpike
+import eu.kanade.tachiyomi.ui.player.Sheets
 import eu.kanade.tachiyomi.ui.player.createPipActions
 import eu.kanade.tachiyomi.ui.setting.SettingsScreen
 import eu.kanade.tachiyomi.util.system.dpToPx
 import eu.kanade.tachiyomi.util.system.isBenchmarkBuildType
 import eu.kanade.tachiyomi.util.system.isNavigationBarNeedsScrim
-import eu.kanade.tachiyomi.util.system.openInBrowser
 import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.system.updaterEnabled
 import eu.kanade.tachiyomi.util.view.setComposeContent
@@ -287,7 +286,12 @@ class MainActivity : BaseActivity() {
             val episodeId = intent.getLongExtra("episodeId", -1L)
             if (animeId != -1L && episodeId != -1L) {
                 lifecycleScope.launch {
-                    startPlayerActivity(context = this@MainActivity, animeId = animeId, episodeId = episodeId, extPlayer = false)
+                    startPlayerActivity(
+                        context = this@MainActivity,
+                        animeId = animeId,
+                        episodeId = episodeId,
+                        extPlayer = false,
+                    )
                 }
             }
         }
@@ -534,7 +538,11 @@ class MainActivity : BaseActivity() {
     // Safe to call whenever relevant state changes; a no-op if nothing's
     // actually eligible.
     fun updateAutoEnterPipParams() {
-        if (lifecycle.currentState != Lifecycle.State.RESUMED && lifecycle.currentState != Lifecycle.State.STARTED) return
+        if (lifecycle.currentState != Lifecycle.State.RESUMED &&
+            lifecycle.currentState != Lifecycle.State.STARTED
+        ) {
+            return
+        }
         val params = buildSelfPipParams(autoEnter = true) ?: return
         try {
             setPictureInPictureParams(params)
@@ -774,7 +782,6 @@ class MainActivity : BaseActivity() {
     // <-- AM (SELF_PIP_ACTIONS_FIX)
     // <-- AM (SELF_PIP_ENTRY)
 
-
     override fun onCreate(savedInstanceState: Bundle?) {
         graph.inject(this)
         val isLaunch = savedInstanceState == null
@@ -950,13 +957,33 @@ class MainActivity : BaseActivity() {
                 }
             }
 
-            var showChangelog by remember { mutableStateOf(didMigration && !BuildConfig.DEBUG) }
+            // AM (WHATS_NEW) -->
+            // The version the user was last shown notes for, captured before it is advanced so
+            // the What's new screen knows the range to fetch. Blank means fresh install: record
+            // the current version and show nothing, since there is nothing new to them yet.
+            val previousVersion = remember {
+                preferences.lastShownChangelogVersion.get().also {
+                    preferences.lastShownChangelogVersion.set(BuildConfig.VERSION_NAME)
+                }
+            }
+            var showChangelog by remember {
+                mutableStateOf(
+                    !BuildConfig.DEBUG &&
+                        previousVersion.isNotBlank() &&
+                        previousVersion != BuildConfig.VERSION_NAME,
+                )
+            }
             if (showChangelog) {
                 AlertDialog(
                     onDismissRequest = { showChangelog = false },
                     title = { Text(text = stringResource(MR.strings.updated_version, BuildConfig.VERSION_NAME)) },
                     dismissButton = {
-                        TextButton(onClick = { openInBrowser(RELEASE_URL) }) {
+                        TextButton(
+                            onClick = {
+                                showChangelog = false
+                                navigator?.push(WhatsNewScreen(sinceVersion = previousVersion))
+                            },
+                        ) {
                             Text(text = stringResource(MR.strings.whats_new))
                         }
                     },
@@ -967,6 +994,7 @@ class MainActivity : BaseActivity() {
                     },
                 )
             }
+            // <-- AM (WHATS_NEW)
         }
 
         val startTime = System.currentTimeMillis()

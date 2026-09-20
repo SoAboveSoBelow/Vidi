@@ -290,4 +290,13 @@
 
     <!-- Episode search -->
     <string name="action_search_episodes">Search episodes…</string>
+
+    <!-- What's new -->
+    <string name="whats_new_load_failed">Couldn\'t load the release notes. Check your connection and try again.</string>
+    <string name="whats_new_unavailable">No release notes are available for this version.</string>
+
+    <!-- Release history -->
+    <string name="release_history">Release history</string>
+    <string name="release_history_installed">Installed</string>
+    <string name="release_history_hint">Long-press to copy debug info</string>
 </resources>

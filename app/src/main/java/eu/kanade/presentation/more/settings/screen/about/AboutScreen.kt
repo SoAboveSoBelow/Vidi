@@ -29,8 +29,9 @@ import eu.kanade.presentation.more.settings.widget.TextPreferenceWidget
 import eu.kanade.presentation.util.LocalBackPress
 import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.BuildConfig
-import eu.kanade.tachiyomi.data.updater.RELEASE_URL
 import eu.kanade.tachiyomi.ui.more.NewUpdateScreen
+import eu.kanade.tachiyomi.ui.more.ReleaseHistoryScreen
+import eu.kanade.tachiyomi.ui.more.WhatsNewScreen
 import eu.kanade.tachiyomi.util.lang.toDateTimestampString
 import eu.kanade.tachiyomi.util.system.copyToClipboard
 import eu.kanade.tachiyomi.util.system.isFossBuildType
@@ -46,6 +47,7 @@ import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.release.interactor.GetApplicationRelease
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.components.LinkIcon
 import tachiyomi.presentation.core.components.ScrollbarLazyColumn
 import tachiyomi.presentation.core.components.material.Scaffold
@@ -86,14 +88,21 @@ object AboutScreen : Screen() {
                 }
 
                 item {
+                    // AM (RELEASE_HISTORY) -->
+                    // Tapping the version now opens the release history. Copying debug info is
+                    // still needed for bug reports, so it moves to long-press and the hint is
+                    // surfaced in the subtitle rather than left undiscoverable.
                     TextPreferenceWidget(
                         title = stringResource(MR.strings.version),
-                        subtitle = getVersionName(withBuildDate = true),
-                        onPreferenceClick = {
+                        subtitle = getVersionName(withBuildDate = true) +
+                            "\n" + stringResource(AMMR.strings.release_history_hint),
+                        onPreferenceClick = { navigator.push(ReleaseHistoryScreen()) },
+                        onPreferenceLongClick = {
                             val deviceInfo = crashLogUtil.getDebugInfo()
                             context.copyToClipboard("Debug information", deviceInfo)
                         },
                     )
+                    // <-- AM (RELEASE_HISTORY)
                 }
 
                 // AM (UPDATER_MANUAL_CHECK) -->
@@ -143,7 +152,9 @@ object AboutScreen : Screen() {
                     item {
                         TextPreferenceWidget(
                             title = stringResource(MR.strings.whats_new),
-                            onPreferenceClick = { uriHandler.openUri(RELEASE_URL) },
+                            // AM (WHATS_NEW) -->
+                            onPreferenceClick = { navigator.push(WhatsNewScreen()) },
+                            // <-- AM (WHATS_NEW)
                         )
                     }
                 }

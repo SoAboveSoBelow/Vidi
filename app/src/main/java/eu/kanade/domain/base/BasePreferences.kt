@@ -45,4 +45,20 @@ class BasePreferences(
     }
 
     val installationId: Preference<String> = preferenceStore.getString(Preference.appStateKey("installation_id"), "")
+
+    // AM (WHATS_NEW) -->
+
+    /**
+     * The versionName the user was last shown release notes for.
+     *
+     * Deliberately separate from the migrator's "last_version_code": that is overwritten as soon
+     * as migrations run, so by the time the UI is up it no longer records where the user came
+     * from. Owning this state here means a user who skips several versions still gets every set
+     * of notes they missed. Blank means "never shown", i.e. a fresh install.
+     */
+    val lastShownChangelogVersion: Preference<String> = preferenceStore.getString(
+        Preference.appStateKey("last_shown_changelog_version"),
+        "",
+    )
+    // <-- AM (WHATS_NEW)
 }

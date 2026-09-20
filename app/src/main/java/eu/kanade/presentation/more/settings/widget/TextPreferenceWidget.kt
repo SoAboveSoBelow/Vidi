@@ -25,6 +25,9 @@ fun TextPreferenceWidget(
     iconTint: Color = MaterialTheme.colorScheme.primary,
     widget: @Composable (() -> Unit)? = null,
     onPreferenceClick: (() -> Unit)? = null,
+    // AM (RELEASE_HISTORY) -->
+    onPreferenceLongClick: (() -> Unit)? = null,
+    // <-- AM (RELEASE_HISTORY)
 ) {
     BasePreferenceWidget(
         modifier = modifier,
@@ -55,6 +58,9 @@ fun TextPreferenceWidget(
             null
         },
         onClick = onPreferenceClick,
+        // AM (RELEASE_HISTORY) -->
+        onLongClick = onPreferenceLongClick,
+        // <-- AM (RELEASE_HISTORY)
         widget = widget,
     )
 }

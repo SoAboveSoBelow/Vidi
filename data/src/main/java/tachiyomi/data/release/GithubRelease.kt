@@ -16,6 +16,12 @@ data class GithubRelease(
     val releaseLink: String,
     @SerialName("assets")
     val assets: List<GitHubAsset>,
+    // AM (WHATS_NEW) -->
+    @SerialName("prerelease")
+    val preRelease: Boolean = false,
+    @SerialName("draft")
+    val draft: Boolean = false,
+    // <-- AM (WHATS_NEW)
 )
 
 /**

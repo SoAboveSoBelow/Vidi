@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.util.system.isFossBuildType
 import eu.kanade.tachiyomi.util.system.isNightlyBuildType
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.domain.release.interactor.GetApplicationRelease
+import tachiyomi.domain.release.model.Release
 
 @Inject
 class AppUpdateChecker(
@@ -33,6 +34,48 @@ class AppUpdateChecker(
             result
         }
     }
+
+    // AM (WHATS_NEW) -->
+
+    /**
+     * Release notes for every version between [sinceVersion] (exclusive) and the installed build
+     * (inclusive). Shares the Arguments assembly with [checkForUpdate] so the repo, channel and
+     * ABI handling cannot drift between the two paths.
+     */
+    suspend fun getReleaseNotes(sinceVersion: String?): List<Release> {
+        return withIOContext {
+            getApplicationRelease.awaitReleaseNotes(
+                GetApplicationRelease.Arguments(
+                    isFossBuildType,
+                    isNightlyBuildType,
+                    BuildConfig.COMMIT_COUNT.toInt(),
+                    BuildConfig.VERSION_NAME,
+                    GITHUB_REPO,
+                ),
+                sinceVersion = sinceVersion,
+            )
+        }
+    }
+    // <-- AM (WHATS_NEW)
+
+    // AM (RELEASE_HISTORY) -->
+
+    /** A page of the full release history, newest first. */
+    suspend fun getReleaseHistory(page: Int): List<Release> {
+        return withIOContext {
+            getApplicationRelease.awaitReleaseHistory(
+                GetApplicationRelease.Arguments(
+                    isFossBuildType,
+                    isNightlyBuildType,
+                    BuildConfig.COMMIT_COUNT.toInt(),
+                    BuildConfig.VERSION_NAME,
+                    GITHUB_REPO,
+                ),
+                page = page,
+            )
+        }
+    }
+    // <-- AM (RELEASE_HISTORY)
 }
 
 val GITHUB_REPO: String by lazy {
