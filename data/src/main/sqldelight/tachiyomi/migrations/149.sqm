@@ -1,0 +1,21 @@
+-- AM (CUSTOM_EPISODE_ORDER) -->
+-- Sparse per-entry episode order overrides. See episode_order.sq.
+CREATE TABLE episode_order(
+    host_anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    season_number INTEGER,
+    sort_key REAL,
+    PRIMARY KEY(host_anime_id, episode_id),
+    FOREIGN KEY(host_anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX episode_order_host_anime_id_index ON episode_order(host_anime_id);
+
+-- merged_episode_overrides (migration 144) pinned an episode NUMBER to a source
+-- for a merged entry. Custom ordering subsumes it and is not restricted to
+-- merged entries, so it never grew a reader - nothing has ever written a row.
+DROP TABLE IF EXISTS merged_episode_overrides;
+-- <-- AM (CUSTOM_EPISODE_ORDER)

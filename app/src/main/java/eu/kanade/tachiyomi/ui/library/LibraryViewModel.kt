@@ -14,6 +14,11 @@ import dev.zacsweers.metrox.viewmodel.ViewModelKey
 import eu.kanade.core.preference.PreferenceMutableState
 import eu.kanade.core.preference.asState
 import eu.kanade.core.util.fastFilterNot
+// AM (MERGED_SOURCES) -->
+import aniyomi.domain.order.interactor.GetEpisodeOrder
+import aniyomi.domain.merge.repository.MergeChildRepository
+import eu.kanade.domain.anime.interactor.MergeAnimeEntries
+// <-- AM (MERGED_SOURCES)
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.episode.interactor.SetSeenStatus
@@ -27,15 +32,24 @@ import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.track.TrackStatus
 import eu.kanade.tachiyomi.data.track.TrackerManager
+// AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.source.MergedSource
+// <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.util.episode.getNextUnseen
 import eu.kanade.tachiyomi.util.removeBackgrounds
 import eu.kanade.tachiyomi.util.removeCovers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+// AM (MERGED_SOURCES) -->
+import kotlinx.coroutines.flow.MutableSharedFlow
+// <-- AM (MERGED_SOURCES)
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.WhileSubscribed
+// AM (MERGED_SOURCES) -->
+import kotlinx.coroutines.flow.asSharedFlow
+// <-- AM (MERGED_SOURCES)
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -55,6 +69,9 @@ import tachiyomi.core.common.preference.TriState
 import tachiyomi.core.common.util.lang.compareToWithCollator
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchNonCancellable
+// AM (MERGED_SOURCES) -->
+import tachiyomi.domain.anime.interactor.GetAnime
+// <-- AM (MERGED_SOURCES)
 import tachiyomi.domain.anime.interactor.GetLibraryAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeUpdate
@@ -88,6 +105,9 @@ import kotlin.time.Duration.Companion.seconds
 @ContributesIntoMap(AppScope::class, binding = binding<ViewModel>())
 class LibraryViewModel(
     private val getLibraryAnime: GetLibraryAnime,
+    // AM (MERGED_SOURCES) -->
+    private val getAnime: GetAnime,
+    // <-- AM (MERGED_SOURCES)
     // AY -->
     private val getVisibleCategories: GetVisibleCategories,
     // <-- AY
@@ -97,6 +117,11 @@ class LibraryViewModel(
     private val getBookmarkedEpisodesByAnimeId: GetBookmarkedEpisodesByAnimeId,
     private val setSeenStatus: SetSeenStatus,
     private val updateAnime: UpdateAnime,
+    // AM (MERGED_SOURCES) -->
+    private val mergeAnimeEntries: MergeAnimeEntries,
+    private val getEpisodeOrder: GetEpisodeOrder,
+    private val mergeChildRepository: MergeChildRepository,
+    // <-- AM (MERGED_SOURCES)
     private val setAnimeCategories: SetAnimeCategories,
     private val preferences: BasePreferences,
     private val libraryPreferences: LibraryPreferences,
@@ -498,21 +523,62 @@ class LibraryViewModel(
             downloadCache.changes,
         ) { libraryAnime, preferences, _ ->
             libraryAnime.map { anime ->
+                // AM (MERGED_SOURCES) -->
+                // A merge parent has no episodes/downloads of its own for
+                // libraryView to count - aggregate the merged union and its
+                // children instead, so counts/badges (and anything sorting or
+                // filtering on them) reflect what you'd actually watch.
+                val isMerged = anime.anime.source == MergedSource.ID
+                val mergedEpisodes = if (isMerged) {
+                    getEpisodeOrder.await(anime.anime)
+                } else {
+                    null
+                }
+                val mergedChildren = if (isMerged) {
+                    mergeChildRepository.getChildrenByMergeParentId(anime.anime.id)
+                } else {
+                    null
+                }
+                val displayAnime = if (mergedEpisodes != null) {
+                    anime.copy(
+                        totalCount = mergedEpisodes.size.toLong(),
+                        seenCount = mergedEpisodes.count { it.seen }.toLong(),
+                        bookmarkCount = mergedEpisodes.count { it.bookmark }.toLong(),
+                        fillermarkCount = mergedEpisodes.count { it.fillermark }.toLong(),
+                        latestUpload = mergedEpisodes.maxOfOrNull { it.dateUpload } ?: 0L,
+                        episodeFetchedAt = mergedEpisodes.maxOfOrNull { it.dateFetch } ?: 0L,
+                    )
+                } else {
+                    anime
+                }
+                val downloadCount = mergedChildren?.sumOf { downloadManager.getDownloadCount(it) }
+                    ?: downloadManager.getDownloadCount(anime.anime)
+                val unseenCount = displayAnime.unseenCount
+                // <-- AM (MERGED_SOURCES)
                 LibraryItem(
-                    libraryAnime = anime,
-                    downloadCount = downloadManager.getDownloadCount(anime.anime),
-                    unseenCount = anime.unseenCount,
+                    // AM (MERGED_SOURCES) -->
+                    // anime -> displayAnime (see above).
+                    // <-- AM (MERGED_SOURCES)
+                    libraryAnime = displayAnime,
+                    downloadCount = downloadCount,
+                    unseenCount = unseenCount,
                     isLocal = anime.anime.isLocal(),
                     sourceName = sourceManager.getOrStub(anime.anime.source).name.lowercase(),
                     sourceLanguage = sourceManager.getOrStub(anime.anime.source).lang,
                     badges = LibraryItem.Badges(
                         downloadCount = if (preferences.downloadBadge) {
-                            downloadManager.getDownloadCount(anime.anime)
+                            // AM (MERGED_SOURCES) -->
+                            // getDownloadCount(anime.anime) -> downloadCount.
+                            // <-- AM (MERGED_SOURCES)
+                            downloadCount
                         } else {
                             0
                         },
                         unseenCount = if (preferences.unseenBadge) {
-                            anime.unseenCount
+                            // AM (MERGED_SOURCES) -->
+                            // anime.unseenCount -> unseenCount.
+                            // <-- AM (MERGED_SOURCES)
+                            unseenCount
                         } else {
                             0
                         },
@@ -599,6 +665,99 @@ class LibraryViewModel(
         clearSelection()
     }
 
+    // AM (MERGED_SOURCES) -->
+    /**
+     * One-off signal that a merge just completed, carrying the new entry's
+     * anime id plus the originals it was built from (for the follow-up
+     * "remove originals?" snackbar).
+     */
+    private val _mergedAnimeEvent = MutableSharedFlow<MergedEntryResult>()
+    val mergedAnimeEvent = _mergedAnimeEvent.asSharedFlow()
+
+    /** One-off signal that the current selection can't be merged, with the reason. */
+    private val _mergeUnavailableEvent = MutableSharedFlow<MergeUnavailableReason>()
+    val mergeUnavailableEvent = _mergeUnavailableEvent.asSharedFlow()
+
+    /**
+     * [selectedAnime] (and state.selectedAnime, which the library screen reads)
+     * both resolve through libraryData.favoritesById, which only contains
+     * whatever's passed the CURRENT search/filter - an anime selected earlier
+     * silently drops out of that map the moment a filter or search query
+     * changes to exclude it, even though it's still genuinely selected. Merge
+     * needs the real selected anime regardless of what's currently filtered,
+     * so this resolves straight from the DB by id instead, here and in
+     * [canMergeSelection] below - both bypass libraryData entirely.
+     */
+    private suspend fun resolveSelectionForMerge(): List<Anime> {
+        return selection.value.mapNotNull { getAnime.await(it) }
+    }
+
+    /**
+     * Reactive, correctly-scoped (see [resolveSelectionForMerge]) signal for
+     * whether the Merge button should be enabled right now - recomputed from
+     * the DB on every selection change, not from the filtered library data.
+     * Season children and entries already in a merge stay valid (membership
+     * is many-to-many), and so are merged entries themselves - see
+     * MergeAnimeEntries.mergeSelection for what selecting them does.
+     */
+    val canMergeSelection: StateFlow<Boolean> = selection
+        .map { ids ->
+            if (ids.size < 2) {
+                false
+            } else {
+                val animes = ids.mapNotNull { getAnime.await(it) }
+                animes.size == ids.size
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5.seconds), false)
+
+    /**
+     * Merge button action: validates the selection and merges immediately - no
+     * confirmation dialog (same flow as Komikku: merge happens, THEN the user
+     * is offered removal of the originals via snackbar).
+     */
+    fun mergeSelectionFromLibrary() {
+        viewModelScope.launchIO {
+            val animes = resolveSelectionForMerge()
+            if (animes.size < 2) {
+                _mergeUnavailableEvent.emit(MergeUnavailableReason.TooFewSelected)
+            } else {
+                mergeSelection(animes)
+            }
+        }
+    }
+
+    private fun mergeSelection(animes: List<Anime>) {
+        viewModelScope.launchNonCancellable {
+            val merged = try {
+                // AM (MERGE_EXISTING) -->
+                mergeAnimeEntries.mergeSelection(animes)
+                // <-- AM (MERGE_EXISTING)
+            } catch (e: IllegalArgumentException) {
+                // Selection went stale between click and execution - fail
+                // gracefully with a snackbar instead of crashing the app.
+                _mergeUnavailableEvent.emit(MergeUnavailableReason.Invalid)
+                return@launchNonCancellable
+            }
+            // Removal of the originals is a follow-up choice, not part of the
+            // merge itself - the library screen offers it via snackbar.
+            _mergedAnimeEvent.emit(MergedEntryResult(merged.id, animes))
+        }
+        clearSelection()
+    }
+
+    /**
+     * Post-merge follow-up: drops the just-merged originals from the library
+     * (keeps downloads, history, and tracking links - same as the delete
+     * dialog's library-only option).
+     */
+    fun removeMergedOriginals(originals: List<Anime>) {
+        removeAnimes(originals, deleteFromLibrary = true, deleteEpisodes = false)
+    }
+
+    data class MergedEntryResult(val mergedAnimeId: Long, val originals: List<Anime>)
+    // <-- AM (MERGED_SOURCES)
+
     private fun downloadNextEpisodes(amount: Int?) {
         val animes = selectedAnime
         viewModelScope.launchNonCancellable {
@@ -682,6 +841,11 @@ class LibraryViewModel(
                     )
                 }
                 updateAnime.awaitAll(toDelete)
+                // AM (MERGED_SOURCES) -->
+                // No merge cleanup here on purpose - see
+                // AnimeViewModel.setFavorite: merge data outlives unfavoriting
+                // and is reaped by cascade when the anime row is deleted.
+                // <-- AM (MERGED_SOURCES)
             }
 
             if (deleteEpisodes) {
@@ -970,6 +1134,13 @@ class LibraryViewModel(
         ) : Dialog
         data class DeleteAnime(val anime: List<Anime>) : Dialog
     }
+
+    // AM (MERGED_SOURCES) -->
+    sealed interface MergeUnavailableReason {
+        data object TooFewSelected : MergeUnavailableReason
+        data object Invalid : MergeUnavailableReason
+    }
+    // <-- AM (MERGED_SOURCES)
 
     @Immutable
     private data class ItemPreferences(

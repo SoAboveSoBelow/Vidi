@@ -1,0 +1,15 @@
+-- AM (MERGED_SOURCES) -->
+-- Exclude merge children from animedeletableView so Clear database can't
+-- delete a row a live merged entry depends on. See animedeletableView.sq.
+DROP VIEW IF EXISTS animedeletableView;
+
+CREATE VIEW animedeletableView AS
+SELECT
+    A._id,
+    A.source,
+    A.fetch_type
+FROM animes AS A
+WHERE A.favorite = 0
+AND A.parent_id IS NULL
+AND A._id NOT IN (SELECT anime_id FROM merge_children);
+-- <-- AM (MERGED_SOURCES)

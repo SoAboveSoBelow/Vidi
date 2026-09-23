@@ -20,22 +20,22 @@ class EpisodeTempPositionRepositoryImpl(
 ) : EpisodeTempPositionRepository {
 
     override suspend fun getAll(): List<EpisodeTempPosition> {
-        return database.episode_temp_positionsQueries.getAll { animeId, episodeId, positionMs, updatedAt ->
-            EpisodeTempPosition(animeId, episodeId, positionMs, updatedAt)
+        return database.episode_temp_positionsQueries.getAll { episodeId, positionMs, updatedAt ->
+            EpisodeTempPosition(episodeId, positionMs, updatedAt)
         }.awaitAsList()
     }
 
-    override suspend fun upsert(animeId: Long, episodeId: Long, positionMs: Long, updatedAt: Long) {
+    override suspend fun upsert(episodeId: Long, positionMs: Long, updatedAt: Long) {
         try {
-            database.episode_temp_positionsQueries.upsert(animeId, episodeId, positionMs, updatedAt)
+            database.episode_temp_positionsQueries.upsert(episodeId, positionMs, updatedAt)
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, throwable = e)
         }
     }
 
-    override suspend fun delete(animeId: Long, episodeId: Long) {
+    override suspend fun delete(episodeId: Long) {
         try {
-            database.episode_temp_positionsQueries.deleteByKey(animeId, episodeId)
+            database.episode_temp_positionsQueries.deleteByKey(episodeId)
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, throwable = e)
         }

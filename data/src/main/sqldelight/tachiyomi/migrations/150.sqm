@@ -1,0 +1,14 @@
+-- AM (NAMED_SEASONS) -->
+-- Names and display order for an entry's seasons. See entry_seasons.sq. Rows
+-- are optional, so nothing is seeded: existing seasons keep their current
+-- order and "Season N" labels until the user manages them.
+CREATE TABLE entry_seasons(
+    host_anime_id INTEGER NOT NULL,
+    season_number INTEGER NOT NULL,
+    name TEXT,
+    sort_order INTEGER NOT NULL,
+    PRIMARY KEY(host_anime_id, season_number),
+    FOREIGN KEY(host_anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+-- <-- AM (NAMED_SEASONS)

@@ -123,6 +123,19 @@ class EpisodeRepositoryImpl(
         ).awaitAsList()
     }
 
+    // AM (MERGED_SOURCES) -->
+    override suspend fun getEpisodesByMergeParentId(
+        mergeParentId: Long,
+        applyScanlatorFilter: Boolean,
+    ): List<Episode> {
+        return database.episodesQueries.getEpisodesByMergeParentId(
+            mergeParentId,
+            applyScanlatorFilter.toLong(),
+            ::mapEpisode,
+        ).awaitAsList()
+    }
+    // <-- AM (MERGED_SOURCES)
+
     override suspend fun getScanlatorsByAnimeId(animeId: Long): List<String> {
         return database.episodesQueries.getScanlatorsByAnimeId(animeId) { it.orEmpty() }.awaitAsList()
     }

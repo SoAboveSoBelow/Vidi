@@ -1,0 +1,139 @@
+-- AM (MERGED_SOURCES) -->
+-- Membership of merged entries, as a proper many-to-many join: which anime
+-- rows contribute to which merge parent, in which priority order, and (since
+-- migration 146) in which internal season. This replaces the pre-145 reuse of
+-- animes.parent_id for merge membership, which collided with the seasons
+-- feature (same column) and structurally prevented one entry from
+-- contributing to more than one merge - both are resolved by keeping merge
+-- membership here and leaving parent_id to seasons only.
+--
+-- season_number groups children into the merged entry's internal seasons:
+-- all children default to one shared season (MERGE_DEFAULT_SEASON_NUMBER) so
+-- a merged entry shows every child's episodes together in one flat list, and
+-- splitting children into separate seasons is a later UI feature. priority
+-- is the merge-order position within a season, which determines the combined
+-- list's watch order (see GetMergedEpisodeList).
+-- Children keep favorite=1; removing originals from the library is a separate
+-- post-merge choice, so normal library updates keep refreshing them.
+CREATE TABLE merge_children(
+    merge_parent_id INTEGER NOT NULL,
+    anime_id INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    season_number INTEGER NOT NULL,
+    PRIMARY KEY(merge_parent_id, anime_id),
+    FOREIGN KEY(merge_parent_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX merge_children_anime_id_index ON merge_children(anime_id);
+
+getChildrenByMergeParentId:
+SELECT animes.*
+FROM animes
+JOIN merge_children ON merge_children.anime_id = animes._id
+WHERE merge_children.merge_parent_id = :mergeParentId
+ORDER BY merge_children.priority ASC;
+
+getMergeParentsByAnimeId:
+SELECT animes.*
+FROM animes
+JOIN merge_children ON merge_children.merge_parent_id = animes._id
+WHERE merge_children.anime_id = :animeId
+ORDER BY merge_children.priority ASC;
+
+-- Child id -> internal season number, for grouping the union by season.
+getChildSeasonsByMergeParentId:
+SELECT anime_id, season_number
+FROM merge_children
+WHERE merge_parent_id = :mergeParentId;
+
+-- AM (CUSTOM_EPISODE_ORDER) -->
+-- Child id -> (season, priority), the stable inputs to a merged host's default
+-- episode order. Deliberately not an index into the computed union: a sparse
+-- custom sort_key has to sit in a key space that survives new episodes
+-- arriving. See aniyomi.domain.order.interactor.GetEpisodeOrder.
+getChildOrderingByMergeParentId:
+SELECT anime_id, season_number, priority
+FROM merge_children
+WHERE merge_parent_id = :mergeParentId;
+-- <-- AM (CUSTOM_EPISODE_ORDER)
+
+-- Children with the same per-entry stats animeseasonsView computes for real
+-- seasons, so a merged entry's seasons render exactly like native ones.
+-- Column order must match AnimeMapper.mapSeasonAnime.
+getSeasonsByMergeParentId:
+SELECT A.*,
+    coalesce(ES.total, 0) AS totalCount,
+    coalesce(ES.seenCount, 0) AS seenCount,
+    coalesce(ES.latestUpload, 0) AS latestUpload,
+    coalesce(ES.fetchedAt, 0) AS episodeFetchedAt,
+    coalesce(HS.lastSeen, 0) AS lastSeen,
+    coalesce(ES.bookmarkCount, 0) AS bookmarkCount,
+    coalesce(ES.fillermarkCount, 0) AS fillermarkCount
+FROM animes A
+JOIN merge_children MC ON MC.anime_id = A._id
+LEFT JOIN episodestatsView AS ES ON A._id = ES.anime_id
+LEFT JOIN historystatsView AS HS ON A._id = HS.anime_id
+WHERE MC.merge_parent_id = :mergeParentId
+ORDER BY MC.season_number ASC, MC.priority ASC;
+
+insert:
+INSERT INTO merge_children(merge_parent_id, anime_id, priority, season_number)
+VALUES (:mergeParentId, :animeId, :priority, :seasonNumber);
+
+delete:
+DELETE FROM merge_children
+WHERE merge_parent_id = :mergeParentId AND anime_id = :animeId;
+
+deleteByMergeParentId:
+DELETE FROM merge_children
+WHERE merge_parent_id = :mergeParentId;
+
+-- Every anime that belongs to at least one merge. Used to protect these rows
+-- from Clear database's season-child recursion, which walks parent_id and
+-- would otherwise delete a row a live merge still depends on.
+getAllChildAnimeIds:
+SELECT DISTINCT anime_id
+FROM merge_children;
+
+-- AM (NAMED_SEASONS) -->
+-- Moves every child in one season into another - used when a season is
+-- deleted and its sources fall back to the default season.
+moveChildrenBetweenSeasons:
+UPDATE merge_children
+SET season_number = :toSeason
+WHERE merge_parent_id = :mergeParentId AND season_number = :fromSeason;
+-- <-- AM (NAMED_SEASONS)
+
+-- AM (MERGE_SETTINGS) -->
+-- Rewrites a child's priority - merge settings' drag order.
+setPriority:
+UPDATE merge_children
+SET priority = :priority
+WHERE merge_parent_id = :mergeParentId AND anime_id = :animeId;
+-- <-- AM (MERGE_SETTINGS)
+
+-- AM (MERGE_SEASONS) -->
+-- Moves one child into a different internal season of its merge.
+setSeasonNumber:
+UPDATE merge_children
+SET season_number = :seasonNumber
+WHERE merge_parent_id = :mergeParentId AND anime_id = :animeId;
+-- <-- AM (MERGE_SEASONS)
+
+maxPriority:
+SELECT priority
+FROM merge_children
+WHERE merge_parent_id = :mergeParentId
+ORDER BY priority DESC
+LIMIT 1;
+
+maxSeasonNumber:
+SELECT season_number
+FROM merge_children
+WHERE merge_parent_id = :mergeParentId
+ORDER BY season_number DESC
+LIMIT 1;
+-- <-- AM (MERGED_SOURCES)

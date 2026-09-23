@@ -32,6 +32,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastMap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+// AM (MERGED_SOURCES) -->
+import aniyomi.domain.merge.repository.MergeChildRepository
+// <-- AM (MERGED_SOURCES)
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metro.AppScope
@@ -237,6 +240,9 @@ class ClearDatabaseViewModel(
     // AY -->
     private val getSourcesWithNonLibraryAnime: GetSourcesWithNonLibraryAnime,
     // <-- AY
+    // AM (MERGED_SOURCES) -->
+    private val mergeChildRepository: MergeChildRepository,
+    // <-- AM (MERGED_SOURCES)
     private val database: Database,
     private val sourceManager: SourceManager,
 ) : ViewModel() {
@@ -248,6 +254,12 @@ class ClearDatabaseViewModel(
         viewModelScope.launchIO {
             getSourcesWithNonLibraryAnime.subscribe()
                 .collectLatest { list ->
+                    // AM (MERGED_SOURCES) -->
+                    // animedeletableView already excludes merge children, but
+                    // the season recursion below walks parent_id and reaches
+                    // rows the view never emitted, so it needs the same guard.
+                    val mergeChildIds = mergeChildRepository.getAllChildAnimeIds()
+                    // <-- AM (MERGED_SOURCES)
                     // AY -->
                     val items = list.groupBy { it.sourceId }
                         .map { (sourceId, deletableAnime) ->
@@ -262,7 +274,8 @@ class ClearDatabaseViewModel(
                             deletableAnime.forEach {
                                 ids.add(it.animeId)
                                 if (it.fetchType == FetchType.Seasons) {
-                                    val (childrenIds, orphanedIds) = getDeletableChildren(it.animeId)
+                                    val (childrenIds, orphanedIds) =
+                                        getDeletableChildren(it.animeId, mergeChildIds)
                                     ids.addAll(childrenIds)
                                     orphaned.addAll(orphanedIds)
                                 }
@@ -290,17 +303,35 @@ class ClearDatabaseViewModel(
      * Children that are favorited needs their parentId removed or else they won't be
      * able to be removed later.
      */
-    private suspend fun getDeletableChildren(animeId: Long): Pair<List<Long>, List<Long>> {
+    // AM (MERGED_SOURCES) -->
+    // mergeChildIds: rows belonging to a merge are undeletable for the same
+    // reason animedeletableView excludes them - deleting one cascades its
+    // merge_children row away and guts a merged entry that may still be in
+    // the library. They're reported as orphaned instead, which detaches them
+    // from the season parent being deleted and leaves the row (and the merge)
+    // intact, exactly as for a favorited child.
+    // <-- AM (MERGED_SOURCES)
+    private suspend fun getDeletableChildren(
+        animeId: Long,
+        // AM (MERGED_SOURCES) -->
+        mergeChildIds: Set<Long>,
+        // <-- AM (MERGED_SOURCES)
+    ): Pair<List<Long>, List<Long>> {
         val ids = mutableListOf<Long>()
         val orphaned = mutableListOf<Long>()
         val children = getSourcesWithNonLibraryAnime.getDeletableChildren(animeId)
         children.forEach { c ->
-            if (c.favorite) {
+            // AM (MERGED_SOURCES) -->
+            // c.favorite -> c.favorite || c.id in mergeChildIds.
+            if (c.favorite || c.id in mergeChildIds) {
+                // <-- AM (MERGED_SOURCES)
                 orphaned.add(c.id)
             } else {
                 ids.add(c.id)
                 if (c.fetchType == FetchType.Seasons) {
-                    val (childrenIds, orphanedIds) = getDeletableChildren(c.id)
+                    // AM (MERGED_SOURCES) -->
+                    val (childrenIds, orphanedIds) = getDeletableChildren(c.id, mergeChildIds)
+                    // <-- AM (MERGED_SOURCES)
                     ids.addAll(childrenIds)
                     orphaned.addAll(orphanedIds)
                 }

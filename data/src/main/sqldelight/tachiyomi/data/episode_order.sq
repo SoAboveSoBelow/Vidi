@@ -1,0 +1,52 @@
+-- AM (CUSTOM_EPISODE_ORDER) -->
+-- Sparse user overrides of an entry's episode order. A row exists only where
+-- the user has actually moved something: no rows means the entry orders
+-- exactly as it always did, with no custom code path taken at read time.
+--
+-- host_anime_id is the entry being VIEWED THROUGH, not the entry that owns the
+-- episode. For an ordinary entry the two are the same; for a merged entry the
+-- host is the merge parent while every episode still belongs to one of its
+-- children (ownership is unchanged - downloads and source resolution still go
+-- through the owning child). The same episode can therefore carry a different
+-- position in each merge it appears in, which is the point.
+--
+-- Both override columns are nullable and independently fall back to the
+-- entry's default ordering, so a row can say "moved to another season, default
+-- position within it" (season_number set, sort_key null) as easily as
+-- "repositioned where it already was" (the reverse).
+--
+-- sort_key is a fractional index in the same space as the default key -
+-- sourceOrder for an ordinary host, priority-and-sourceOrder for a merged one
+-- - so dropping an episode between two others stores the midpoint of their
+-- effective keys and newly fetched episodes still slot in sensibly.
+CREATE TABLE episode_order(
+    host_anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    season_number INTEGER,
+    sort_key REAL,
+    PRIMARY KEY(host_anime_id, episode_id),
+    FOREIGN KEY(host_anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX episode_order_host_anime_id_index ON episode_order(host_anime_id);
+
+getByHostAnimeId:
+SELECT host_anime_id, episode_id, season_number, sort_key
+FROM episode_order
+WHERE host_anime_id = :hostAnimeId;
+
+upsert:
+INSERT OR REPLACE INTO episode_order(host_anime_id, episode_id, season_number, sort_key)
+VALUES (:hostAnimeId, :episodeId, :seasonNumber, :sortKey);
+
+delete:
+DELETE FROM episode_order
+WHERE host_anime_id = :hostAnimeId AND episode_id = :episodeId;
+
+deleteByHostAnimeId:
+DELETE FROM episode_order
+WHERE host_anime_id = :hostAnimeId;
+-- <-- AM (CUSTOM_EPISODE_ORDER)

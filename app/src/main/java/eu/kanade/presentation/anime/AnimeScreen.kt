@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
@@ -25,6 +26,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.DragHandle
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.SmallExtendedFloatingActionButton
 import androidx.compose.material3.SnackbarHost
@@ -56,18 +60,29 @@ import androidx.compose.ui.util.fastAll
 import androidx.compose.ui.util.fastAny
 import androidx.compose.ui.util.fastMap
 import aniyomi.domain.anime.model.SeasonAnime
+// AM (MERGE_SEASONS) -->
+import aniyomi.domain.merge.model.MERGED_SOURCE_ID
+// <-- AM (MERGE_SEASONS)
 import aniyomi.domain.anime.model.SeasonDisplayMode
+import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
 import eu.kanade.presentation.anime.components.AnimeActionRow
 import eu.kanade.presentation.anime.components.AnimeBottomActionMenu
 import eu.kanade.presentation.anime.components.AnimeEpisodeListItem
 import eu.kanade.presentation.anime.components.AnimeInfoBox
 import eu.kanade.presentation.anime.components.AnimeSeasonListItem
 import eu.kanade.presentation.anime.components.AnimeToolbar
+// AM (CUSTOM_EPISODE_ORDER) -->
+import eu.kanade.presentation.anime.components.EpisodeReorderActions
+import eu.kanade.presentation.anime.components.EpisodeReorderBottomBar
+import eu.kanade.presentation.anime.components.EpisodeReorderRow
+import eu.kanade.presentation.anime.components.EpisodeSeasonSwitcher
+// <-- AM (CUSTOM_EPISODE_ORDER)
 import eu.kanade.presentation.anime.components.EpisodeDownloadAction
 import eu.kanade.presentation.anime.components.ExpandableAnimeDescription
 import eu.kanade.presentation.anime.components.ItemHeader
 import eu.kanade.presentation.anime.components.MissingEpisodeCountListItem
 import eu.kanade.presentation.anime.components.NextEpisodeAiringListItem
+import eu.kanade.presentation.anime.components.rememberEpisodeReorder
 import eu.kanade.presentation.components.relativeDateText
 import eu.kanade.presentation.util.formatEpisodeNumber
 import eu.kanade.tachiyomi.animesource.AnimeSource
@@ -89,6 +104,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 // <-- AM (NOW_PLAYING_INDICATOR)
 import mihon.app.di.appGraph
+import sh.calvin.reorderable.ReorderableItem
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.EpisodeViewMode
@@ -98,6 +114,7 @@ import tachiyomi.domain.library.model.LibraryDisplayMode
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.source.model.StubSource
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.FastScrollIrregularLazyVerticalGrid
 import tachiyomi.presentation.core.components.Scroller.EXACT_HEIGHT_KEY_PREFIX
@@ -105,6 +122,7 @@ import tachiyomi.presentation.core.components.TwoPanelBox
 import tachiyomi.presentation.core.components.material.PullRefresh
 import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.util.selectedBackground
 import tachiyomi.presentation.core.util.shouldExpandFAB
 import tachiyomi.source.local.isLocal
 import kotlin.time.Duration.Companion.milliseconds
@@ -165,6 +183,12 @@ fun AnimeScreen(
     // <-- AM (CLEAR_ANIME)
     // AM (CUSTOM_INFORMATION) -->
     onEditInfoClicked: () -> Unit,
+    // AM (MERGE_SEASONS) -->
+    onMergeSettingsClicked: () -> Unit,
+    // <-- AM (MERGE_SEASONS)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    onSeasonSelected: (Long) -> Unit,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
     // <-- AM (CUSTOM_INFORMATION)
     onEditNotesClicked: () -> Unit,
     // AM (LOCAL_THUMBNAIL_LOOKUP) -->
@@ -190,6 +214,12 @@ fun AnimeScreen(
     onEpisodeSelected: (EpisodeList.Item, Boolean, Boolean) -> Unit,
     onAllEpisodeSelected: (Boolean) -> Unit,
     onInvertSelection: () -> Unit,
+    // AM (EPISODE_NAMES) -->
+    onRenameEpisode: () -> Unit,
+    // <-- AM (EPISODE_NAMES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    reorderActions: EpisodeReorderActions,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AY -->
     // Season clicked
@@ -252,6 +282,12 @@ fun AnimeScreen(
             // AM (CUSTOM_INFORMATION) -->
             onClearAnimeClicked = onClearAnimeClicked,
             onEditInfoClicked = onEditInfoClicked,
+            // AM (MERGE_SEASONS) -->
+            onMergeSettingsClicked = onMergeSettingsClicked,
+            // <-- AM (MERGE_SEASONS)
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            onSeasonSelected = onSeasonSelected,
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             // <-- AM (CUSTOM_INFORMATION)
             onEditNotesClicked = onEditNotesClicked,
             // AM (LOCAL_THUMBNAIL_LOOKUP) -->
@@ -269,6 +305,12 @@ fun AnimeScreen(
             onEpisodeSelected = onEpisodeSelected,
             onAllEpisodeSelected = onAllEpisodeSelected,
             onInvertSelection = onInvertSelection,
+            // AM (EPISODE_NAMES) -->
+            onRenameEpisode = onRenameEpisode,
+            // <-- AM (EPISODE_NAMES)
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            reorderActions = reorderActions,
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = onSeasonClicked,
             onClickContinueWatching = onContinueWatchingClicked,
@@ -320,6 +362,12 @@ fun AnimeScreen(
             // AM (CUSTOM_INFORMATION) -->
             onClearAnimeClicked = onClearAnimeClicked,
             onEditInfoClicked = onEditInfoClicked,
+            // AM (MERGE_SEASONS) -->
+            onMergeSettingsClicked = onMergeSettingsClicked,
+            // <-- AM (MERGE_SEASONS)
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            onSeasonSelected = onSeasonSelected,
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             // <-- AM (CUSTOM_INFORMATION)
             onEditNotesClicked = onEditNotesClicked,
             // AM (LOCAL_THUMBNAIL_LOOKUP) -->
@@ -337,6 +385,12 @@ fun AnimeScreen(
             onEpisodeSelected = onEpisodeSelected,
             onAllEpisodeSelected = onAllEpisodeSelected,
             onInvertSelection = onInvertSelection,
+            // AM (EPISODE_NAMES) -->
+            onRenameEpisode = onRenameEpisode,
+            // <-- AM (EPISODE_NAMES)
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            reorderActions = reorderActions,
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = onSeasonClicked,
             onClickContinueWatching = onContinueWatchingClicked,
@@ -402,6 +456,12 @@ private fun AnimeScreenSmallImpl(
     // <-- AM (CLEAR_ANIME)
     // AM (CUSTOM_INFORMATION) -->
     onEditInfoClicked: () -> Unit,
+    // AM (MERGE_SEASONS) -->
+    onMergeSettingsClicked: () -> Unit,
+    // <-- AM (MERGE_SEASONS)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    onSeasonSelected: (Long) -> Unit,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
     // <-- AM (CUSTOM_INFORMATION)
     onEditNotesClicked: () -> Unit,
     // AM (LOCAL_THUMBNAIL_LOOKUP) -->
@@ -427,6 +487,12 @@ private fun AnimeScreenSmallImpl(
     onEpisodeSelected: (EpisodeList.Item, Boolean, Boolean) -> Unit,
     onAllEpisodeSelected: (Boolean) -> Unit,
     onInvertSelection: () -> Unit,
+    // AM (EPISODE_NAMES) -->
+    onRenameEpisode: () -> Unit,
+    // <-- AM (EPISODE_NAMES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    reorderActions: EpisodeReorderActions,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AY -->
     // Season clicked
@@ -456,9 +522,12 @@ private fun AnimeScreenSmallImpl(
 
     // AM (EPISODE_SEARCH) -->
     var episodeSearchQuery by remember { mutableStateOf<String?>(null) }
-    val filteredListItem = remember(listItem, episodeSearchQuery) {
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    // Search is a display layer too: reorder mode edits the whole order.
+    val filteredListItem = remember(listItem, episodeSearchQuery, state.isReordering) {
         val query = episodeSearchQuery
-        if (query.isNullOrBlank()) {
+        if (query.isNullOrBlank() || state.isReordering) {
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             listItem
         } else {
             listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
@@ -469,6 +538,20 @@ private fun AnimeScreenSmallImpl(
     }
     // <-- AM (EPISODE_SEARCH)
 
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    val reorderUi = rememberEpisodeReorder(
+        enabled = state.isReordering,
+        gridState = itemListState,
+        items = remember(filteredListItem) { filteredListItem.filterIsInstance<EpisodeList.Item>() },
+        selectedIds = remember(state.selectedEpisodes) { state.selectedEpisodes.mapTo(HashSet()) { it.id } },
+        mirrored = state.anime.sortDescending(),
+        seasonOf = { id ->
+            state.activeSeasonNumber ?: state.episodeSeasonById[id] ?: MERGE_DEFAULT_SEASON_NUMBER
+        },
+        onMove = reorderActions.onMove,
+    )
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
     // AM (NOW_PLAYING_INDICATOR) -->
     val nowPlayingEpisodeId = rememberNowPlayingEpisodeId(state.anime.id)
     // <-- AM (NOW_PLAYING_INDICATOR)
@@ -476,9 +559,11 @@ private fun AnimeScreenSmallImpl(
     var toolbarHeight by remember { mutableIntStateOf(0) }
     // <-- AY
 
-    BackHandler(enabled = isAnySelected) {
-        onAllEpisodeSelected(false)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    BackHandler(enabled = isAnySelected || state.isReordering) {
+        if (state.isReordering) reorderActions.onExit() else onAllEpisodeSelected(false)
     }
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AY -->
     BoxWithConstraints {
@@ -487,9 +572,9 @@ private fun AnimeScreenSmallImpl(
         // <-- AY
         Scaffold(
             topBar = {
-                val selectedEpisodeCount: Int = remember(episodes) {
-                    episodes.count { it.selected }
-                }
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                val selectedEpisodeCount: Int = state.selectedEpisodes.size
+                // <-- AM (CUSTOM_EPISODE_ORDER)
                 val isFirstItemVisible by remember {
                     derivedStateOf { itemListState.firstVisibleItemIndex == 0 }
                 }
@@ -521,6 +606,11 @@ private fun AnimeScreenSmallImpl(
                     // AM (CUSTOM_INFORMATION) -->
                     onClickClearAnime = onClearAnimeClicked,
                     onClickEditInfo = onEditInfoClicked.takeIf { state.anime.favorite },
+                    // AM (MERGE_SEASONS) -->
+                    onClickMergeSettings = onMergeSettingsClicked.takeIf {
+                        state.anime.source == MERGED_SOURCE_ID
+                    },
+                    // <-- AM (MERGE_SEASONS)
                     // <-- AM (CUSTOM_INFORMATION)
                     onClickEditNotes = onEditNotesClicked,
                     // AM (LOCAL_THUMBNAIL_LOOKUP) -->
@@ -528,9 +618,22 @@ private fun AnimeScreenSmallImpl(
                     onEpisodeViewModeSelected = onEpisodeViewModeSelected,
                     // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
                     actionModeCounter = selectedEpisodeCount,
-                    onCancelActionMode = { onAllEpisodeSelected(false) },
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    onCancelActionMode = {
+                        if (state.isReordering) reorderActions.onExit() else onAllEpisodeSelected(false)
+                    },
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                     onSelectAll = { onAllEpisodeSelected(true) },
                     onInvertSelection = { onInvertSelection() },
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    isReordering = state.isReordering,
+                    // AM (EPISODE_NAMES) -->
+                    onRenameEpisode = onRenameEpisode,
+                    // <-- AM (EPISODE_NAMES)
+                    onToggleReorder = {
+                        if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
+                    }.takeIf { state.anime.fetchType == FetchType.Episodes },
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
                     onEpisodeSearchQueryChange = { episodeSearchQuery = it },
@@ -543,30 +646,45 @@ private fun AnimeScreenSmallImpl(
                 )
             },
             bottomBar = {
-                val selectedEpisodes = remember(episodes) {
-                    episodes.filter { it.selected }
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                val selectedEpisodes = state.selectedEpisodes
+                // <-- AM (CUSTOM_EPISODE_ORDER)
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                if (state.isReordering) {
+                    EpisodeReorderBottomBar(
+                        visible = true,
+                        onChangeSeasonClicked = reorderActions.onChangeSeason
+                            .takeIf { state.selectedEpisodes.isNotEmpty() },
+                        onDiscardClicked = reorderActions.onDiscard
+                            .takeIf { state.reorderSession?.hasChanges == true },
+                        onResetClicked = reorderActions.onReset
+                            .takeIf { state.selectedEpisodes.isNotEmpty() },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    SharedAnimeBottomActionMenu(
+                        selected = selectedEpisodes,
+                        // AY -->
+                        onEpisodeClicked = onEpisodeClicked,
+                        alwaysUseExternalPlayer = alwaysUseExternalPlayer,
+                        // <-- AY
+                        onMultiBookmarkClicked = onMultiBookmarkClicked,
+                        // AY -->
+                        onMultiFillermarkClicked = onMultiFillermarkClicked,
+                        // <-- AY
+                        onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
+                        onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
+                        onDownloadEpisode = onDownloadEpisode,
+                        onMultiDeleteClicked = onMultiDeleteClicked,
+                        fillFraction = 1f,
+                    )
                 }
-                SharedAnimeBottomActionMenu(
-                    selected = selectedEpisodes,
-                    // AY -->
-                    onEpisodeClicked = onEpisodeClicked,
-                    alwaysUseExternalPlayer = alwaysUseExternalPlayer,
-                    // <-- AY
-                    onMultiBookmarkClicked = onMultiBookmarkClicked,
-                    // AY -->
-                    onMultiFillermarkClicked = onMultiFillermarkClicked,
-                    // <-- AY
-                    onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
-                    onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
-                    onDownloadEpisode = onDownloadEpisode,
-                    onMultiDeleteClicked = onMultiDeleteClicked,
-                    fillFraction = 1f,
-                )
+                // <-- AM (CUSTOM_EPISODE_ORDER)
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             floatingActionButton = {
-                val isFABVisible = remember(episodes) {
-                    episodes.fastAny { !it.episode.seen } && !isAnySelected
+                val isFABVisible = remember(episodes, state.isReordering) {
+                    episodes.fastAny { !it.episode.seen } && !isAnySelected && !state.isReordering
                 }
                 SmallExtendedFloatingActionButton(
                     text = {
@@ -737,6 +855,25 @@ private fun AnimeScreenSmallImpl(
                         }
                         // <-- AY
                         FetchType.Episodes -> {
+                            // AM (CUSTOM_EPISODE_ORDER) -->
+                            if (state.hasSeasonSwitcher) {
+                                item(
+                                    // Exact-height: keeps this row out of the fast scroller's
+                                    // average episode-row height, like the airing-time row.
+                                    key = EXACT_HEIGHT_KEY_PREFIX + AnimeScreenItem.SEASON_SWITCHER,
+                                    contentType = AnimeScreenItem.SEASON_SWITCHER,
+                                    span = { GridItemSpan(maxLineSpan) },
+                                ) {
+                                    EpisodeSeasonSwitcher(
+                                        seasons = state.entrySeasons,
+                                        seasonNumbers = state.seasonNumbers,
+                                        activeSeasonNumber = state.activeSeasonNumber,
+                                        onSeasonSelected = onSeasonSelected,
+                                        modifier = Modifier.ignorePadding(offsetGridPaddingPx),
+                                    )
+                                }
+                            }
+                            // <-- AM (CUSTOM_EPISODE_ORDER)
                             // AY -->
                             if (state.airingTime > 0L) {
                                 item(
@@ -777,8 +914,13 @@ private fun AnimeScreenSmallImpl(
                                 // <-- AM (FILE_SIZE)
                                 // AM (MINIMAL_EPISODE_LIST) -->
                                 // <-- AM (MINIMAL_EPISODE_LIST)
-                                episodes = filteredListItem,
-                                isAnyEpisodeSelected = episodes.fastAny { it.selected },
+                                // AM (CUSTOM_EPISODE_ORDER) -->
+                                episodes = if (reorderUi.row != null) reorderUi.items else filteredListItem,
+                                // <-- AM (CUSTOM_EPISODE_ORDER)
+                                // AM (CUSTOM_EPISODE_ORDER) -->
+                                // Reorder mode: a tap always selects, even with nothing selected yet.
+                                isAnyEpisodeSelected = state.isAnySelected || state.isReordering,
+                                // <-- AM (CUSTOM_EPISODE_ORDER)
                                 // AY -->
                                 showSummaries = state.showSummaries,
                                 showPreviews = state.showPreviews,
@@ -786,8 +928,19 @@ private fun AnimeScreenSmallImpl(
                                 // AM (NOW_PLAYING_INDICATOR) -->
                                 nowPlayingEpisodeId = nowPlayingEpisodeId,
                                 // <-- AM (NOW_PLAYING_INDICATOR)
-                                episodeSwipeStartAction = episodeSwipeStartAction,
-                                episodeSwipeEndAction = episodeSwipeEndAction,
+                                // AM (CUSTOM_EPISODE_ORDER) -->
+                                episodeSwipeStartAction = if (state.isReordering) {
+                                    LibraryPreferences.EpisodeSwipeAction.Disabled
+                                } else {
+                                    episodeSwipeStartAction
+                                },
+                                episodeSwipeEndAction = if (state.isReordering) {
+                                    LibraryPreferences.EpisodeSwipeAction.Disabled
+                                } else {
+                                    episodeSwipeEndAction
+                                },
+                                reorder = reorderUi.row,
+                                // <-- AM (CUSTOM_EPISODE_ORDER)
                                 onEpisodeClicked = onEpisodeClicked,
                                 onDownloadEpisode = onDownloadEpisode,
                                 onEpisodeSelected = onEpisodeSelected,
@@ -856,6 +1009,12 @@ fun AnimeScreenLargeImpl(
     // <-- AM (CLEAR_ANIME)
     // AM (CUSTOM_INFORMATION) -->
     onEditInfoClicked: () -> Unit,
+    // AM (MERGE_SEASONS) -->
+    onMergeSettingsClicked: () -> Unit,
+    // <-- AM (MERGE_SEASONS)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    onSeasonSelected: (Long) -> Unit,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
     // <-- AM (CUSTOM_INFORMATION)
     onEditNotesClicked: () -> Unit,
     // AM (LOCAL_THUMBNAIL_LOOKUP) -->
@@ -881,6 +1040,12 @@ fun AnimeScreenLargeImpl(
     onEpisodeSelected: (EpisodeList.Item, Boolean, Boolean) -> Unit,
     onAllEpisodeSelected: (Boolean) -> Unit,
     onInvertSelection: () -> Unit,
+    // AM (EPISODE_NAMES) -->
+    onRenameEpisode: () -> Unit,
+    // <-- AM (EPISODE_NAMES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    reorderActions: EpisodeReorderActions,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AY -->
     // Season clicked
@@ -907,9 +1072,12 @@ fun AnimeScreenLargeImpl(
 
     // AM (EPISODE_SEARCH) -->
     var episodeSearchQuery by remember { mutableStateOf<String?>(null) }
-    val filteredListItem = remember(listItem, episodeSearchQuery) {
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    // Search is a display layer too: reorder mode edits the whole order.
+    val filteredListItem = remember(listItem, episodeSearchQuery, state.isReordering) {
         val query = episodeSearchQuery
-        if (query.isNullOrBlank()) {
+        if (query.isNullOrBlank() || state.isReordering) {
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             listItem
         } else {
             listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
@@ -933,9 +1101,25 @@ fun AnimeScreenLargeImpl(
     val itemListState = rememberLazyGridState()
     // <-- AY
 
-    BackHandler(enabled = isAnySelected) {
-        onAllEpisodeSelected(false)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    val reorderUi = rememberEpisodeReorder(
+        enabled = state.isReordering,
+        gridState = itemListState,
+        items = remember(filteredListItem) { filteredListItem.filterIsInstance<EpisodeList.Item>() },
+        selectedIds = remember(state.selectedEpisodes) { state.selectedEpisodes.mapTo(HashSet()) { it.id } },
+        mirrored = state.anime.sortDescending(),
+        seasonOf = { id ->
+            state.activeSeasonNumber ?: state.episodeSeasonById[id] ?: MERGE_DEFAULT_SEASON_NUMBER
+        },
+        onMove = reorderActions.onMove,
+    )
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    BackHandler(enabled = isAnySelected || state.isReordering) {
+        if (state.isReordering) reorderActions.onExit() else onAllEpisodeSelected(false)
     }
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AY -->
     BoxWithConstraints {
@@ -944,9 +1128,9 @@ fun AnimeScreenLargeImpl(
         // <-- AY
         Scaffold(
             topBar = {
-                val selectedEpisodeCount = remember(episodes) {
-                    episodes.count { it.selected }
-                }
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                val selectedEpisodeCount = state.selectedEpisodes.size
+                // <-- AM (CUSTOM_EPISODE_ORDER)
                 AnimeToolbar(
                     modifier = Modifier.onSizeChanged { topBarHeight = it.height },
                     title = state.anime.title,
@@ -965,16 +1149,34 @@ fun AnimeScreenLargeImpl(
                     // AM (CUSTOM_INFORMATION) -->
                     onClickClearAnime = onClearAnimeClicked,
                     onClickEditInfo = onEditInfoClicked.takeIf { state.anime.favorite },
+                    // AM (MERGE_SEASONS) -->
+                    onClickMergeSettings = onMergeSettingsClicked.takeIf {
+                        state.anime.source == MERGED_SOURCE_ID
+                    },
+                    // <-- AM (MERGE_SEASONS)
                     // <-- AM (CUSTOM_INFORMATION)
                     onClickEditNotes = onEditNotesClicked,
                     // AM (LOCAL_THUMBNAIL_LOOKUP) -->
                     episodeViewMode = state.anime.episodeViewMode(),
                     onEpisodeViewModeSelected = onEpisodeViewModeSelected,
                     // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
-                    onCancelActionMode = { onAllEpisodeSelected(false) },
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    onCancelActionMode = {
+                        if (state.isReordering) reorderActions.onExit() else onAllEpisodeSelected(false)
+                    },
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                     actionModeCounter = selectedEpisodeCount,
                     onSelectAll = { onAllEpisodeSelected(true) },
                     onInvertSelection = { onInvertSelection() },
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    isReordering = state.isReordering,
+                    // AM (EPISODE_NAMES) -->
+                    onRenameEpisode = onRenameEpisode,
+                    // <-- AM (EPISODE_NAMES)
+                    onToggleReorder = {
+                        if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
+                    }.takeIf { state.anime.fetchType == FetchType.Episodes },
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
                     onEpisodeSearchQueryChange = { episodeSearchQuery = it },
@@ -988,31 +1190,46 @@ fun AnimeScreenLargeImpl(
                     modifier = Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.BottomEnd,
                 ) {
-                    val selectedEpisodes = remember(episodes) {
-                        episodes.filter { it.selected }
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    val selectedEpisodes = state.selectedEpisodes
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    if (state.isReordering) {
+                        EpisodeReorderBottomBar(
+                            visible = true,
+                            onChangeSeasonClicked = reorderActions.onChangeSeason
+                                .takeIf { state.selectedEpisodes.isNotEmpty() },
+                            onDiscardClicked = reorderActions.onDiscard
+                                .takeIf { state.reorderSession?.hasChanges == true },
+                            onResetClicked = reorderActions.onReset
+                                .takeIf { state.selectedEpisodes.isNotEmpty() },
+                            modifier = Modifier.fillMaxWidth(0.5f),
+                        )
+                    } else {
+                        SharedAnimeBottomActionMenu(
+                            selected = selectedEpisodes,
+                            // AY -->
+                            onEpisodeClicked = onEpisodeClicked,
+                            alwaysUseExternalPlayer = alwaysUseExternalPlayer,
+                            // <-- AY
+                            onMultiBookmarkClicked = onMultiBookmarkClicked,
+                            // AY -->
+                            onMultiFillermarkClicked = onMultiFillermarkClicked,
+                            // <-- AY
+                            onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
+                            onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
+                            onDownloadEpisode = onDownloadEpisode,
+                            onMultiDeleteClicked = onMultiDeleteClicked,
+                            fillFraction = 0.5f,
+                        )
                     }
-                    SharedAnimeBottomActionMenu(
-                        selected = selectedEpisodes,
-                        // AY -->
-                        onEpisodeClicked = onEpisodeClicked,
-                        alwaysUseExternalPlayer = alwaysUseExternalPlayer,
-                        // <-- AY
-                        onMultiBookmarkClicked = onMultiBookmarkClicked,
-                        // AY -->
-                        onMultiFillermarkClicked = onMultiFillermarkClicked,
-                        // <-- AY
-                        onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
-                        onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
-                        onDownloadEpisode = onDownloadEpisode,
-                        onMultiDeleteClicked = onMultiDeleteClicked,
-                        fillFraction = 0.5f,
-                    )
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                 }
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             floatingActionButton = {
-                val isFABVisible = remember(episodes) {
-                    episodes.fastAny { !it.episode.seen } && !isAnySelected
+                val isFABVisible = remember(episodes, state.isReordering) {
+                    episodes.fastAny { !it.episode.seen } && !isAnySelected && !state.isReordering
                 }
                 SmallExtendedFloatingActionButton(
                     text = {
@@ -1163,6 +1380,24 @@ fun AnimeScreenLargeImpl(
                                 }
                                 // <-- AY
                                 FetchType.Episodes -> {
+                                    // AM (CUSTOM_EPISODE_ORDER) -->
+                                    if (state.hasSeasonSwitcher) {
+                                        item(
+                                            // Exact-height: keeps this row out of the fast scroller's
+                                            // average episode-row height, like the airing-time row.
+                                            key = EXACT_HEIGHT_KEY_PREFIX + AnimeScreenItem.SEASON_SWITCHER,
+                                            contentType = AnimeScreenItem.SEASON_SWITCHER,
+                                        ) {
+                                            EpisodeSeasonSwitcher(
+                                                seasons = state.entrySeasons,
+                                                seasonNumbers = state.seasonNumbers,
+                                                activeSeasonNumber = state.activeSeasonNumber,
+                                                onSeasonSelected = onSeasonSelected,
+                                                modifier = Modifier.ignorePadding(offsetGridPaddingPx),
+                                            )
+                                        }
+                                    }
+                                    // <-- AM (CUSTOM_EPISODE_ORDER)
                                     // AY -->
                                     if (state.airingTime > 0L) {
                                         item(
@@ -1202,8 +1437,13 @@ fun AnimeScreenLargeImpl(
                                         // <-- AM (FILE_SIZE)
                                         // AM (MINIMAL_EPISODE_LIST) -->
                                         // <-- AM (MINIMAL_EPISODE_LIST)
-                                        episodes = filteredListItem,
-                                        isAnyEpisodeSelected = episodes.fastAny { it.selected },
+                                        // AM (CUSTOM_EPISODE_ORDER) -->
+                                        episodes = if (reorderUi.row != null) reorderUi.items else filteredListItem,
+                                        // <-- AM (CUSTOM_EPISODE_ORDER)
+                                        // AM (CUSTOM_EPISODE_ORDER) -->
+                                        // Reorder mode: a tap always selects, even with nothing selected yet.
+                                        isAnyEpisodeSelected = state.isAnySelected || state.isReordering,
+                                        // <-- AM (CUSTOM_EPISODE_ORDER)
                                         // AY -->
                                         showSummaries = state.showSummaries,
                                         showPreviews = state.showPreviews,
@@ -1211,8 +1451,19 @@ fun AnimeScreenLargeImpl(
                                         // AM (NOW_PLAYING_INDICATOR) -->
                                         nowPlayingEpisodeId = nowPlayingEpisodeId,
                                         // <-- AM (NOW_PLAYING_INDICATOR)
-                                        episodeSwipeStartAction = episodeSwipeStartAction,
-                                        episodeSwipeEndAction = episodeSwipeEndAction,
+                                        // AM (CUSTOM_EPISODE_ORDER) -->
+                                        episodeSwipeStartAction = if (state.isReordering) {
+                                            LibraryPreferences.EpisodeSwipeAction.Disabled
+                                        } else {
+                                            episodeSwipeStartAction
+                                        },
+                                        episodeSwipeEndAction = if (state.isReordering) {
+                                            LibraryPreferences.EpisodeSwipeAction.Disabled
+                                        } else {
+                                            episodeSwipeEndAction
+                                        },
+                                        reorder = reorderUi.row,
+                                        // <-- AM (CUSTOM_EPISODE_ORDER)
                                         onEpisodeClicked = onEpisodeClicked,
                                         onDownloadEpisode = onDownloadEpisode,
                                         onEpisodeSelected = onEpisodeSelected,
@@ -1411,6 +1662,9 @@ private fun LazyGridScope.sharedEpisodeItems(
     // AY -->
     itemModifier: Modifier = Modifier,
     // <-- AY
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    reorder: EpisodeReorderRow? = null,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 ) {
     items(
         items = episodes,
@@ -1459,6 +1713,11 @@ private fun LazyGridScope.sharedEpisodeItems(
                     }
                 }
                 // <-- AM (FILE_SIZE)
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                // Local so reorder mode can wrap it with a drag handle without
+                // duplicating the call.
+                val episodeRow: @Composable (Modifier) -> Unit = { rowModifier ->
+                // <-- AM (CUSTOM_EPISODE_ORDER)
                 AnimeEpisodeListItem(
                     title = if (anime.displayMode == Anime.EPISODE_DISPLAY_NUMBER) {
                         stringResource(
@@ -1466,7 +1725,9 @@ private fun LazyGridScope.sharedEpisodeItems(
                             formatEpisodeNumber(item.episode.episodeNumber),
                         )
                     } else {
-                        item.episode.name
+                        // AM (EPISODE_NAMES) -->
+                        item.displayName
+                        // <-- AM (EPISODE_NAMES)
                     },
                     date = relativeDateText(item.episode.dateUpload),
                     watchProgress = item.episode.lastSecondSeen
@@ -1530,10 +1791,50 @@ private fun LazyGridScope.sharedEpisodeItems(
                     // AM (NOW_PLAYING_INDICATOR) -->
                     isCurrentlyPlaying = item.episode.id == nowPlayingEpisodeId,
                     // <-- AM (NOW_PLAYING_INDICATOR)
-                    // AY -->
-                    modifier = itemModifier,
-                    // <-- AY
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    modifier = rowModifier,
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                 )
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                }
+
+                if (reorder == null) {
+                    episodeRow(itemModifier)
+                } else {
+                    ReorderableItem(reorder.state, key = "episode-${item.id}") { isDragging ->
+                        // Handle on the leading edge, sharing the row's selected
+                        // highlight. Long-press on the row itself stays
+                        // range-select; only the handle drags.
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = itemModifier.selectedBackground(item.selected),
+                        ) {
+                            BadgedBox(
+                                badge = {
+                                    // How many episodes this drag carries, once
+                                    // the rest of the selection has folded into
+                                    // the dragged row.
+                                    if (isDragging && reorder.draggingGroupSize > 1) {
+                                        Badge { Text(reorder.draggingGroupSize.toString()) }
+                                    }
+                                },
+                                modifier = Modifier
+                                    .draggableHandle(
+                                        onDragStarted = { reorder.onDragStarted(item.id) },
+                                        onDragStopped = { reorder.onDragStopped(item.id) },
+                                    )
+                                    .padding(start = 12.dp, top = 16.dp, bottom = 16.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.DragHandle,
+                                    contentDescription = stringResource(AMMR.strings.am_episode_drag_handle),
+                                )
+                            }
+                            episodeRow(Modifier.weight(1f))
+                        }
+                    }
+                }
+                // <-- AM (CUSTOM_EPISODE_ORDER)
             }
         }
     }

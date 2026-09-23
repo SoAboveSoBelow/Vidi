@@ -12,9 +12,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FlipToBack
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LocalContentColor
@@ -83,6 +85,9 @@ fun AnimeToolbar(
     // AM (CUSTOM_INFORMATION) -->
     onClickEditInfo: (() -> Unit)?,
     // <-- AM (CUSTOM_INFORMATION)
+    // AM (MERGE_SETTINGS) -->
+    onClickMergeSettings: (() -> Unit)?,
+    // <-- AM (MERGE_SETTINGS)
     // AM (EPISODE_VIEW_MODE) -->
     episodeViewMode: EpisodeViewMode,
     onEpisodeViewModeSelected: (EpisodeViewMode) -> Unit,
@@ -93,6 +98,13 @@ fun AnimeToolbar(
     onCancelActionMode: () -> Unit,
     onSelectAll: () -> Unit,
     onInvertSelection: () -> Unit,
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    isReordering: Boolean,
+    onToggleReorder: (() -> Unit)?,
+    // AM (EPISODE_NAMES) -->
+    onRenameEpisode: (() -> Unit)?,
+    // <-- AM (EPISODE_NAMES)
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AM (EPISODE_SEARCH) -->
     episodeSearchQuery: String?,
@@ -103,7 +115,11 @@ fun AnimeToolbar(
     backgroundAlphaProvider: () -> Float,
     modifier: Modifier = Modifier,
 ) {
-    val isActionMode = actionModeCounter > 0
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    // Reorder mode keeps the action bar up with nothing selected: it is its
+    // own mode, not a function of the selection count.
+    val isActionMode = actionModeCounter > 0 || isReordering
+    // <-- AM (CUSTOM_EPISODE_ORDER)
     val isSearching = episodeSearchQuery != null
     // AM (EPISODE_VIEW_MODE) -->
     var episodeViewModeDialogShown by remember { mutableStateOf(false) }
@@ -111,7 +127,11 @@ fun AnimeToolbar(
     val searchFocusRequester = remember { FocusRequester() }
     AppBar(
         titleContent = {
-            if (isActionMode) {
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            if (isReordering && actionModeCounter == 0) {
+                AppBarTitle(stringResource(AMMR.strings.am_action_reorder_episodes))
+            } else if (isActionMode) {
+                // <-- AM (CUSTOM_EPISODE_ORDER)
                 AppBarTitle(actionModeCounter.toString())
             } else if (!isSearching) {
                 AppBarTitle(title, modifier = Modifier.alpha(titleAlphaProvider()))
@@ -191,6 +211,36 @@ fun AnimeToolbar(
             AppBarActions(
                 actions = buildList {
                     if (isActionMode) {
+                        // AM (CUSTOM_EPISODE_ORDER) -->
+                        // First of the three, so it sits third from the right.
+                        // AM (EPISODE_NAMES) -->
+                        // Renaming targets one episode, so it appears only
+                        // when exactly one is selected.
+                        if (onRenameEpisode != null && actionModeCounter == 1) {
+                            add(
+                                AppBar.Action(
+                                    title = stringResource(AMMR.strings.am_action_rename_episode),
+                                    icon = Icons.Outlined.Edit,
+                                    onClick = onRenameEpisode,
+                                ),
+                            )
+                        }
+                        // <-- AM (EPISODE_NAMES)
+                        // A true toggle, tinted while on. Turning it off returns
+                        // to plain selection mode with the selection kept; X or
+                        // back leave entirely. Either way edits were already
+                        // written as they were made, so there's no "done".
+                        if (onToggleReorder != null) {
+                            add(
+                                AppBar.Action(
+                                    title = stringResource(AMMR.strings.am_action_reorder_episodes),
+                                    icon = Icons.Outlined.SwapVert,
+                                    iconTint = if (isReordering) MaterialTheme.colorScheme.active else null,
+                                    onClick = onToggleReorder,
+                                ),
+                            )
+                        }
+                        // <-- AM (CUSTOM_EPISODE_ORDER)
                         add(
                             AppBar.Action(
                                 title = stringResource(MR.strings.action_select_all),
@@ -312,6 +362,16 @@ fun AnimeToolbar(
                         )
                     }
                     // <-- AM (CUSTOM_INFORMATION)
+                    // AM (MERGE_SETTINGS) -->
+                    if (onClickMergeSettings != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(AMMR.strings.am_action_merge_settings),
+                                onClick = onClickMergeSettings,
+                            ),
+                        )
+                    }
+                    // <-- AM (MERGE_SETTINGS)
                     add(
                         AppBar.OverflowAction(
                             title = stringResource(MR.strings.action_notes),

@@ -27,10 +27,14 @@ import androidx.compose.material.icons.automirrored.outlined.Input
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkRemove
+import androidx.compose.material.icons.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DoneAll
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NewLabel
@@ -243,6 +247,90 @@ fun AnimeBottomActionMenu(
     }
 }
 
+// AM (CUSTOM_EPISODE_ORDER) -->
+/**
+ * Replaces AnimeBottomActionMenu while reordering. None of the normal bulk
+ * actions belong here: each clears the selection when it finishes, which would
+ * end the mode mid-edit. Lives in this file to share Button, so it looks and
+ * behaves (long-press labels) exactly like the menu it replaces.
+ *
+ * A null action is omitted, matching the menu's own convention: Change season
+ * and Reset order act on the selection so need one, and Discard only appears
+ * once something has changed.
+ */
+@Composable
+fun EpisodeReorderBottomBar(
+    visible: Boolean,
+    onChangeSeasonClicked: (() -> Unit)?,
+    onDiscardClicked: (() -> Unit)?,
+    onResetClicked: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = expandVertically(expandFrom = Alignment.Bottom),
+        exit = shrinkVertically(shrinkTowards = Alignment.Bottom),
+    ) {
+        val scope = rememberCoroutineScope()
+        Surface(
+            modifier = modifier,
+            shape = MaterialTheme.shapes.large.copy(bottomEnd = ZeroCornerSize, bottomStart = ZeroCornerSize),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            val haptic = LocalHapticFeedback.current
+            val confirm = remember { mutableStateListOf(false, false, false) }
+            var resetJob by remember { mutableStateOf<Job?>(null) }
+            val onLongClickItem: (Int) -> Unit = { toConfirmIndex ->
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                confirm.indices.forEach { i -> confirm[i] = i == toConfirmIndex }
+                resetJob?.cancel()
+                resetJob = scope.launch {
+                    delay(1.seconds)
+                    if (isActive) confirm[toConfirmIndex] = false
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .padding(
+                        WindowInsets.navigationBars
+                            .only(WindowInsetsSides.Bottom)
+                            .asPaddingValues(),
+                    )
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+            ) {
+                if (onChangeSeasonClicked != null) {
+                    Button(
+                        title = stringResource(AMMR.strings.am_action_change_episode_season),
+                        icon = Icons.Default.Layers,
+                        toConfirm = confirm[0],
+                        onLongClick = { onLongClickItem(0) },
+                        onClick = onChangeSeasonClicked,
+                    )
+                }
+                if (onDiscardClicked != null) {
+                    Button(
+                        title = stringResource(AMMR.strings.am_action_discard_order_changes),
+                        icon = Icons.Outlined.History,
+                        toConfirm = confirm[1],
+                        onLongClick = { onLongClickItem(1) },
+                        onClick = onDiscardClicked,
+                    )
+                }
+                if (onResetClicked != null) {
+                    Button(
+                        title = stringResource(AMMR.strings.am_action_reset_episode_order),
+                        icon = Icons.Default.RestartAlt,
+                        toConfirm = confirm[2],
+                        onLongClick = { onLongClickItem(2) },
+                        onClick = onResetClicked,
+                    )
+                }
+            }
+        }
+    }
+}
+// <-- AM (CUSTOM_EPISODE_ORDER)
+
 @Composable
 private fun RowScope.Button(
     title: String,
@@ -303,6 +391,9 @@ fun LibraryBottomActionMenu(
     onDownloadClicked: ((DownloadAction) -> Unit)?,
     onDeleteClicked: () -> Unit,
     onMigrateClicked: () -> Unit,
+    // AM (MERGED_SOURCES) -->
+    onMergeClicked: (() -> Unit)? = null,
+    // <-- AM (MERGED_SOURCES)
     modifier: Modifier = Modifier,
 ) {
     AnimatedVisibility(
@@ -317,7 +408,7 @@ fun LibraryBottomActionMenu(
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
         ) {
             val haptic = LocalHapticFeedback.current
-            val confirm = remember { mutableStateListOf(false, false, false, false, false, false) }
+            val confirm = remember { mutableStateListOf(false, false, false, false, false, false, false) }
             var resetJob by remember { mutableStateOf<Job?>(null) }
             val onLongClickItem: (Int) -> Unit = { toConfirmIndex ->
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -383,6 +474,17 @@ fun LibraryBottomActionMenu(
                         onLongClick = { onLongClickItem(4) },
                         onClick = onMigrateClicked,
                     )
+                    // AM (MERGED_SOURCES) -->
+                    if (onMergeClicked != null) {
+                        Button(
+                            title = stringResource(AMMR.strings.am_action_merge),
+                            icon = Icons.Outlined.CallMerge,
+                            toConfirm = confirm[6],
+                            onLongClick = { onLongClickItem(6) },
+                            onClick = onMergeClicked,
+                        )
+                    }
+                    // <-- AM (MERGED_SOURCES)
                     Button(
                         title = stringResource(MR.strings.action_delete),
                         icon = Icons.Outlined.Delete,
@@ -408,6 +510,14 @@ fun LibraryBottomActionMenu(
                                 text = { Text(stringResource(MR.strings.migrate)) },
                                 onClick = onMigrateClicked,
                             )
+                            // AM (MERGED_SOURCES) -->
+                            if (onMergeClicked != null) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(AMMR.strings.am_action_merge)) },
+                                    onClick = onMergeClicked,
+                                )
+                            }
+                            // <-- AM (MERGED_SOURCES)
                             DropdownMenuItem(
                                 text = { Text(stringResource(MR.strings.action_delete)) },
                                 onClick = onDeleteClicked,

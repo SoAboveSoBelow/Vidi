@@ -1,0 +1,12 @@
+CREATE TABLE merged_episode_overrides(
+    merge_parent_id INTEGER NOT NULL,
+    episode_number REAL NOT NULL,
+    source_anime_id INTEGER NOT NULL,
+    PRIMARY KEY(merge_parent_id, episode_number),
+    FOREIGN KEY(merge_parent_id) REFERENCES animes (_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(source_anime_id) REFERENCES animes (_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX merged_episode_overrides_parent_id_index ON merged_episode_overrides(merge_parent_id);

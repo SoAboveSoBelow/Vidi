@@ -66,6 +66,24 @@ SELECT *
 FROM episodes
 WHERE _id = :id;
 
+-- AM (MERGED_SOURCES) -->
+-- Every episode of a merged entry in one round trip, instead of one query per
+-- source. The caller groups by anime_id using the merge's child ordering.
+getEpisodesByMergeParentId:
+SELECT EP.*
+FROM episodes EP
+JOIN merge_children MC
+ON MC.anime_id = EP.anime_id
+LEFT JOIN excluded_scanlators ES
+ON EP.anime_id = ES.anime_id
+AND EP.scanlator = ES.scanlator
+WHERE MC.merge_parent_id = :mergeParentId
+AND (
+    :applyScanlatorFilter = 0
+    OR ES.scanlator IS NULL
+);
+-- <-- AM (MERGED_SOURCES)
+
 getEpisodesByAnimeId:
 SELECT EP.*
 FROM episodes EP

@@ -28,6 +28,9 @@ import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.data.track.TrackStatus
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.util.nullIfBlank
+// AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.source.MergedSource
+// <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.util.storage.getUriCompat
 import eu.kanade.tachiyomi.util.system.isConnectedToWifi
 import eu.kanade.tachiyomi.util.system.isRunning
@@ -195,6 +198,15 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
         // <-- AM (GROUPING)
     ) {
         val libraryAnime = getLibraryAnime.await()
+            // AM (MERGED_SOURCES) -->
+            // Merge parents have no fetchable source of their own -
+            // MergedSource's fetch methods throw by design (see its doc
+            // comment), which surfaced as an "update error" on every library
+            // update. Their children stay favorited, so they're updated
+            // directly as ordinary entries and the merged entry needs no
+            // special handling here at all.
+            .filterNot { it.anime.source == MergedSource.ID }
+            // <-- AM (MERGED_SOURCES)
 
         // AM (GROUPING) -->
         val groupLibraryUpdateType = libraryPreferences.groupLibraryUpdateType.get()

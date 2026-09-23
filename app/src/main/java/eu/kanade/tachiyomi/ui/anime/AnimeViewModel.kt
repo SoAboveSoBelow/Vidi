@@ -16,6 +16,24 @@ import aniyomi.domain.anime.interactor.GetRelatedAnime
 import aniyomi.domain.anime.model.AnimeRelationGroup
 import aniyomi.domain.anime.model.SeasonAnime
 import aniyomi.domain.anime.model.SeasonDisplayMode
+// AM (MERGED_SOURCES) -->
+import aniyomi.domain.episode.repository.EpisodeNameRepository
+import aniyomi.domain.merge.interactor.RemoveFromMerge
+import aniyomi.domain.merge.interactor.SyncMergedEntryInfo
+import aniyomi.domain.merge.model.DedupeMode
+import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
+import aniyomi.domain.merge.model.MergeSettings
+import aniyomi.domain.merge.repository.MergeChildRepository
+// <-- AM (MERGED_SOURCES)
+// AM (CUSTOM_EPISODE_ORDER) -->
+import aniyomi.domain.merge.repository.MergeSettingsRepository
+import aniyomi.domain.order.interactor.GetEpisodeOrder
+import aniyomi.domain.order.interactor.MoveEpisodesInOrder
+import aniyomi.domain.order.model.EpisodeOrderOverride
+import aniyomi.domain.order.model.ResolvedEpisodeOrder
+import aniyomi.domain.order.repository.EpisodeOrderRepository
+import aniyomi.domain.season.model.EntrySeason
+// <-- AM (CUSTOM_EPISODE_ORDER)
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
@@ -59,7 +77,11 @@ import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.data.torrent.service.TorrentServerService
 import eu.kanade.tachiyomi.data.track.EnhancedTracker
 import eu.kanade.tachiyomi.data.track.TrackerManager
+// AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.source.MergedSource
+// <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.source.isSourceForTorrents
+import eu.kanade.tachiyomi.ui.anime.merged.MergeSettingsResult
 import eu.kanade.tachiyomi.ui.anime.track.TrackItem
 import eu.kanade.tachiyomi.util.AniChartApi
 import eu.kanade.tachiyomi.util.episode.getNextUnseen
@@ -179,6 +201,22 @@ class AnimeViewModel(
     private val addTracks: AddTracks,
     private val setAnimeCategories: SetAnimeCategories,
     private val animeRepository: AnimeRepository,
+    // AM (MERGED_SOURCES) -->
+    private val mergeChildRepository: MergeChildRepository,
+    // <-- AM (MERGED_SOURCES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    private val getEpisodeOrder: GetEpisodeOrder,
+    private val moveEpisodesInOrder: MoveEpisodesInOrder,
+    private val episodeOrderRepository: EpisodeOrderRepository,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+    // AM (EPISODE_NAMES) -->
+    private val episodeNameRepository: EpisodeNameRepository,
+    // <-- AM (EPISODE_NAMES)
+    // AM (MERGE_SETTINGS) -->
+    private val mergeSettingsRepository: MergeSettingsRepository,
+    private val syncMergedEntryInfo: SyncMergedEntryInfo,
+    private val removeFromMerge: RemoveFromMerge,
+    // <-- AM (MERGE_SETTINGS)
     // AY -->
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
     private val torrentServerUtils: TorrentServerUtils,
@@ -239,6 +277,66 @@ class AnimeViewModel(
     private val selectedPositions: Array<Int> = arrayOf(-1, -1) // first and last selected index in list
     private val selectedEpisodeIds: HashSet<Long> = HashSet()
 
+    // AM (MERGED_SOURCES) -->
+    /**
+     * Child ids of the currently displayed merged entry, cached for
+     * [observeDownloads]' non-suspending filter. Empty for normal entries.
+     */
+    private var mergedChildIds: Set<Long> = emptySet()
+
+    /**
+     * Merged entries display their children's episodes, but downloads live
+     * under each child's own source/title folder - so download state, the
+     * downloaded filter, and live download updates all need the episode's
+     * real owner child, not the merged parent. Empty map for normal entries.
+     */
+    private suspend fun mergedChildrenById(anime: Anime): Map<Long, Anime> {
+        if (anime.source != MergedSource.ID) return emptyMap()
+        val children = mergeChildRepository.getChildrenByMergeParentId(anime.id)
+        mergedChildIds = children.mapTo(HashSet()) { it.id }
+        return children.associateBy { it.id }
+    }
+
+    /** An owning entry and the subset of [episodesByOwner]'s input that belongs to it. */
+    private data class EpisodeOwner(
+        val anime: Anime,
+        val source: AnimeSource,
+        val episodes: List<Episode>,
+    )
+
+    /**
+     * Splits [episodes] by the entry that actually owns them, which is what
+     * every download-manager call has to be dispatched against.
+     *
+     * The merge parent is not a usable target: downloads are stored under the
+     * owning entry's own source/title directory, and Downloader.queueEpisodes
+     * resolves the source with `as? AnimeHttpSource ?: return`, which
+     * MergedSource is not - so queueing against the parent silently does
+     * nothing and deleting looks in a directory that never exists.
+     *
+     * A normal entry yields exactly one group (itself), so callers need no
+     * branch of their own. Episodes with no resolvable owner are dropped
+     * rather than falling back to the parent, since the parent target is
+     * precisely what's broken.
+     */
+    private suspend fun episodesByOwner(episodes: List<Episode>): List<EpisodeOwner> {
+        val state = successState ?: return emptyList()
+        if (state.anime.source != MergedSource.ID) {
+            return listOf(EpisodeOwner(state.anime, state.source, episodes))
+        }
+        val childrenById = mergedChildrenById(state.anime)
+        return episodes
+            .groupBy { childrenById[it.animeId] }
+            .mapNotNull { (owner, owned) ->
+                if (owner == null) {
+                    null
+                } else {
+                    EpisodeOwner(owner, sourceManager.getOrStub(owner.source), owned)
+                }
+            }
+    }
+    // <-- AM (MERGED_SOURCES)
+
     // AY -->
     val showNextEpisodeAirTime = trackPreferences.showNextEpisodeAiringTime.get()
     val alwaysUseExternalPlayer = playerPreferences.alwaysUseExternalPlayer.get()
@@ -275,11 +373,35 @@ class AnimeViewModel(
                 downloadCache.changes,
                 downloadManager.queueState,
             ) { animeAndEpisodesAndSeasons, _, _ -> animeAndEpisodesAndSeasons }
-                .collectLatest { (anime, episodes, seasons) ->
+                .collectLatest { (anime, order, seasons) ->
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    val mergedChildren = mergedChildrenById(anime)
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                     updateSuccessState {
                         it.copy(
                             anime = anime,
-                            episodes = episodes.toEpisodeListItems(anime),
+                            episodes = order.episodes.toEpisodeListItems(
+                                anime,
+                                mergedChildren,
+                                order.isPreordered,
+                                order.displayNameByEpisodeId,
+                            ),
+                            // AM (CUSTOM_EPISODE_ORDER) -->
+                            isPreordered = order.isPreordered,
+                            // AM (NAMED_SEASONS) -->
+                            // Pickers left open across a trip to the season
+                            // manager must offer seasons added there.
+                            dialog = when (val dialog = it.dialog) {
+                                is Dialog.MergeSettings -> dialog.copy(seasons = order.seasons)
+                                is Dialog.ChangeEpisodeSeason -> dialog.copy(seasons = order.seasons)
+                                else -> dialog
+                            },
+                            // <-- AM (NAMED_SEASONS)
+                            episodeSeasonById = order.seasonByEpisodeId,
+                            seasonNumbers = order.seasonNumbers,
+                            entrySeasons = order.seasons,
+                            canonicalEpisodeIds = order.canonicalEpisodes.map { e -> e.id },
+                            // <-- AM (CUSTOM_EPISODE_ORDER)
                             // AY -->
                             seasons = seasons.toAnimeSeasonItems(),
                             // <-- AY
@@ -315,12 +437,19 @@ class AnimeViewModel(
             val anime = getAnimeAndEpisodesAndSeasons.awaitAnime(animeId)
             val source = sourceManager.getOrStub(anime.source)
 
-            val episodes = if (anime.fetchType == FetchType.Seasons) {
-                emptyList()
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            val order = if (anime.fetchType == FetchType.Seasons) {
+                ResolvedEpisodeOrder.EMPTY
             } else {
-                getAnimeAndEpisodesAndSeasons.awaitEpisodes(animeId)
-                    .toEpisodeListItems(anime)
+                getEpisodeOrder.awaitResolved(anime)
             }
+            val episodes = order.episodes.toEpisodeListItems(
+                anime,
+                mergedChildrenById(anime),
+                order.isPreordered,
+                order.displayNameByEpisodeId,
+            )
+            // <-- AM (CUSTOM_EPISODE_ORDER)
 
             val seasons = if (anime.fetchType == FetchType.Episodes) {
                 emptyList()
@@ -358,6 +487,14 @@ class AnimeViewModel(
                     // <-- AY
                     dialog = null,
                     hideMissingEpisodes = libraryPreferences.hideMissingEpisodes.get(),
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    isPreordered = order.isPreordered,
+                    episodeSeasonById = order.seasonByEpisodeId,
+                    seasonNumbers = order.seasonNumbers,
+                    entrySeasons = order.seasons,
+                    selectedSeasonNumber = initialSeasonFor(order),
+                    canonicalEpisodeIds = order.canonicalEpisodes.map { it.id },
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                     episodeShuffleSeed = episodeShufflePreferences.seed(animeId).get(),
                 )
             }
@@ -466,6 +603,13 @@ class AnimeViewModel(
     ) {
         val state = successState ?: return
 
+        // AM (MERGED_SOURCES) -->
+        if (state.anime.source == MergedSource.ID) {
+            refreshMergeChildren(state.anime.id, manualFetch)
+            return
+        }
+        // <-- AM (MERGED_SOURCES)
+
         // AY -->
         startTorrentServer(state.source)
 
@@ -527,6 +671,46 @@ class AnimeViewModel(
             }
         }
     }
+
+    // AM (MERGED_SOURCES) -->
+    /**
+     * "Refresh from source" for a merged entry means refreshing each
+     * contributing child from its own real source instead - the merge parent
+     * itself is MergedSource, which has nothing to fetch (see its doc
+     * comment). Each child keeps its own fetchType (episodes vs seasons), same
+     * as any normal entry. One child failing doesn't stop the others.
+     */
+    private suspend fun refreshMergeChildren(mergeParentId: Long, manualFetch: Boolean) {
+        val children = mergeChildRepository.getChildrenByMergeParentId(mergeParentId)
+        withUIContext {
+            children.forEach { child ->
+                when (child.fetchType) {
+                    FetchType.Episodes -> {
+                        updateAnimeFromRemote.awaitEpisodesUpdate(
+                            anime = child,
+                            fetchDetails = true,
+                            fetchEpisodes = true,
+                            manualFetch = manualFetch,
+                        )
+                    }
+                    FetchType.Seasons -> {
+                        updateAnimeFromRemote.awaitSeasonsUpdate(
+                            anime = child,
+                            fetchDetails = true,
+                            fetchSeasons = true,
+                            manualFetch = manualFetch,
+                        )
+                    }
+                }
+            }
+        }
+        // AM (MERGE_SETTINGS) -->
+        // Sources' details may have changed on refresh; the merged entry's
+        // come from them.
+        syncMergedEntryInfo.await(mergeParentId)
+        // <-- AM (MERGE_SETTINGS)
+    }
+    // <-- AM (MERGED_SOURCES)
 
     // Anime info - start
 
@@ -627,6 +811,16 @@ class AnimeViewModel(
             if (isFavorited) {
                 // Remove from library
                 if (updateAnime.awaitUpdateFavorite(anime.id, false)) {
+                    // AM (MERGED_SOURCES) -->
+                    // Merge membership and episode overrides deliberately
+                    // SURVIVE unfavoriting: the anime row itself survives, so
+                    // a misclicked "remove from library" must be undoable by
+                    // simply re-adding the entry. Merge data is destroyed only
+                    // when the row is - the merge_children /
+                    // merged_episode_overrides foreign keys cascade on delete,
+                    // so Settings > Advanced > Clear database (the app's only
+                    // row-deleting cleanup) is what actually reaps it.
+                    // <-- AM (MERGED_SOURCES)
                     // Remove covers and update last modified in db
                     if (anime.removeCovers(coverCache) != anime) {
                         updateAnime.awaitUpdateCoverLastModified(anime.id)
@@ -824,7 +1018,15 @@ class AnimeViewModel(
     private fun observeDownloads() {
         viewModelScope.launchIO {
             downloadManager.statusFlow()
-                .filter { it.anime.id == successState?.anime?.id }
+                // AM (MERGED_SOURCES) -->
+                // A merged entry's episodes belong to its children - download
+                // events carry the child's anime, so match those ids too.
+                .filter {
+                    val anime = successState?.anime
+                    it.anime.id == anime?.id ||
+                        (anime?.source == MergedSource.ID && it.anime.id in mergedChildIds)
+                }
+                // <-- AM (MERGED_SOURCES)
                 .catch { error -> logcat(LogPriority.ERROR, error) }
                 .collect {
                     withUIContext {
@@ -835,7 +1037,13 @@ class AnimeViewModel(
 
         viewModelScope.launchIO {
             downloadManager.progressFlow()
-                .filter { it.anime.id == successState?.anime?.id }
+                // AM (MERGED_SOURCES) -->
+                .filter {
+                    val anime = successState?.anime
+                    it.anime.id == anime?.id ||
+                        (anime?.source == MergedSource.ID && it.anime.id in mergedChildIds)
+                }
+                // <-- AM (MERGED_SOURCES)
                 .catch { error -> logcat(LogPriority.ERROR, error) }
                 .collect {
                     withUIContext {
@@ -859,9 +1067,25 @@ class AnimeViewModel(
         }
     }
 
-    private fun List<Episode>.toEpisodeListItems(anime: Anime): List<EpisodeList.Item> {
-        val isLocal = anime.isLocal()
+    // AM (MERGED_SOURCES) -->
+    // mergedChildrenById: owner lookup for merged entries - downloads are
+    // stored under each child's own source/title, never the merged parent's.
+    // <-- AM (MERGED_SOURCES)
+    private fun List<Episode>.toEpisodeListItems(
+        anime: Anime,
+        mergedChildrenById: Map<Long, Anime> = emptyMap(),
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        isPreordered: Boolean = false,
+        // <-- AM (CUSTOM_EPISODE_ORDER)
+        // AM (EPISODE_NAMES) -->
+        displayNames: Map<Long, String> = emptyMap(),
+        // <-- AM (EPISODE_NAMES)
+    ): List<EpisodeList.Item> {
         return map { episode ->
+            // AM (MERGED_SOURCES) -->
+            val owner = mergedChildrenById[episode.animeId] ?: anime
+            val isLocal = owner.isLocal()
+            // <-- AM (MERGED_SOURCES)
             val activeDownload = if (isLocal) {
                 null
             } else {
@@ -875,9 +1099,9 @@ class AnimeViewModel(
                     episode.scanlator,
                     episode.url,
                     // AM (CUSTOM_INFORMATION) -->
-                    anime.ogTitle,
+                    owner.ogTitle,
                     // <-- AM (CUSTOM_INFORMATION)
-                    anime.source,
+                    owner.source,
                 )
             }
             val downloadState = when {
@@ -888,11 +1112,24 @@ class AnimeViewModel(
 
             EpisodeList.Item(
                 episode = episode,
+                // AM (EPISODE_NAMES) -->
+                displayName = displayNames[episode.id] ?: episode.name,
+                // <-- AM (EPISODE_NAMES)
                 downloadState = downloadState,
                 downloadProgress = activeDownload?.progress ?: 0,
                 selected = episode.id in selectedEpisodeIds,
             )
         }
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            // A preordered list arrives in watch order; apply the descending
+            // toggle here at ingestion instead of in applyFilters. A reversal
+            // inside applyFilters isn't idempotent - toggleSelection writes the
+            // processed list back into `episodes`, so it would flip the order
+            // on every selection.
+            .let { items ->
+                if (isPreordered && anime.sortDescending()) items.asReversed() else items
+            }
+            // <-- AM (CUSTOM_EPISODE_ORDER)
     }
 
     // AY -->
@@ -1019,8 +1256,43 @@ class AnimeViewModel(
      * (episodeListItems) instead of the normal persisted sort, so
      * "Continue" picks up wherever the shuffled sequence actually is.
      */
-    fun getNextUnseenEpisode(): Episode? {
+    // AM (MERGED_SOURCES) -->
+    // suspend: the merged branch below queries the union.
+    // <-- AM (MERGED_SOURCES)
+    suspend fun getNextUnseenEpisode(): Episode? {
         val successState = successState ?: return null
+        // AM (MERGED_SOURCES) -->
+        // A merge parent has no episodes of its own - continue picks the next
+        // unseen from the merged union, keeping the union's watch order (the
+        // shared getNextUnseen util would number-sort and interleave children,
+        // and its downloaded check would look under the parent's nonexistent
+        // download folder).
+        if (successState.anime.source == MergedSource.ID) {
+            val anime = successState.anime
+            val childrenById = mergedChildrenById(anime)
+            val episodes = getEpisodeOrder.await(anime)
+                .filter { episode -> applyFilter(anime.unseenFilter) { !episode.seen } }
+                .filter { episode -> applyFilter(anime.bookmarkedFilter) { episode.bookmark } }
+                .filter { episode -> applyFilter(anime.fillermarkedFilter) { episode.fillermark } }
+                .filter { episode ->
+                    applyFilter(anime.downloadedFilter) {
+                        val owner = childrenById[episode.animeId] ?: anime
+                        owner.isLocal() || downloadManager.isEpisodeDownloaded(
+                            episode.name,
+                            episode.scanlator,
+                            episode.url,
+                            owner.ogTitle,
+                            owner.source,
+                        )
+                    }
+                }
+            return if (anime.sortDescending()) {
+                episodes.findLast { !it.seen }
+            } else {
+                episodes.find { !it.seen }
+            }
+        }
+        // <-- AM (MERGED_SOURCES)
         return if (successState.isShuffleEnabled) {
             successState.episodeListItems
                 .filterIsInstance<EpisodeList.Item>()
@@ -1031,22 +1303,55 @@ class AnimeViewModel(
         }
     }
 
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /**
+     * A preordered entry's whole episode list in ascending WATCH order, or null
+     * for an entry that isn't preordered.
+     *
+     * For episode-set actions that aren't driven by a selection - "download
+     * next N", "mark previous as seen" - the season switcher only changes what
+     * is listed, not what comes next: the playlist runs across seasons, so
+     * these must too. Reading the visible list would make "mark previous as
+     * seen" on a season-2 episode skip every earlier season.
+     *
+     * `episodes` for a preordered entry was reversed at ingestion when the
+     * descending toggle is on (see toEpisodeListItems), so it is flipped back
+     * here. Reading it un-flipped is the bug this also fixes: "download next 5"
+     * on a descending merged entry used to take the last five in watch order.
+     *
+     * Only preordered entries can be season-scoped (a split needs either a
+     * merge or season overrides, both of which make an entry preordered), so
+     * everything else keeps its existing filtered-list behaviour unchanged.
+     */
+    private fun preorderedWatchOrder(): List<EpisodeList.Item>? {
+        val state = successState ?: return null
+        if (!state.isPreordered) return null
+        return if (state.anime.sortDescending()) state.episodes.asReversed() else state.episodes
+    }
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
     private fun getUnseenEpisodes(): List<Episode> {
-        return filteredEpisodes
-            .orEmpty()
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        return (preorderedWatchOrder() ?: filteredEpisodes.orEmpty())
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             .filter { (episode, dlStatus) -> !episode.seen && dlStatus == Download.State.NOT_DOWNLOADED }
             .map { it.episode }
     }
 
     private fun getUnseenEpisodesSorted(): List<Episode> {
         val anime = successState?.anime ?: return emptyList()
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        // Already in ascending watch order - see preorderedWatchOrder.
+        if (successState?.isPreordered == true) return getUnseenEpisodes()
+        // <-- AM (CUSTOM_EPISODE_ORDER)
         val episodesSorted = getUnseenEpisodes().sortedWith(getEpisodeSort(anime))
         return if (anime.sortDescending()) episodesSorted.reversed() else episodesSorted
     }
 
     private fun getBookmarkedEpisodes(): List<Episode> {
-        return filteredEpisodes
-            .orEmpty()
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        return (preorderedWatchOrder() ?: filteredEpisodes.orEmpty())
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             .filter { (episode, dlStatus) -> episode.bookmark && dlStatus == Download.State.NOT_DOWNLOADED }
             .map { it.episode }
     }
@@ -1137,6 +1442,15 @@ class AnimeViewModel(
 
     fun markPreviousEpisodeSeen(pointer: Episode) {
         val anime = successState?.anime ?: return
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        // "Previous" is previous in the watch order, across seasons.
+        preorderedWatchOrder()?.let { watchOrder ->
+            val ordered = watchOrder.map { it.episode }
+            val pointerPos = ordered.indexOf(pointer)
+            if (pointerPos != -1) markEpisodesSeen(ordered.take(pointerPos), true)
+            return
+        }
+        // <-- AM (CUSTOM_EPISODE_ORDER)
         val episodes = filteredEpisodes.orEmpty().map { it.episode }
         val prevEpisodes = if (anime.sortDescending()) episodes.asReversed() else episodes
         val pointerPos = prevEpisodes.indexOf(pointer)
@@ -1233,15 +1547,22 @@ class AnimeViewModel(
      * Downloads the given list of episodes with the manager.
      * @param episodes the list of episodes to download.
      */
-    private fun downloadEpisodes(
+    // AM (MERGED_SOURCES) -->
+    // Now suspend, and dispatches per owning entry (see episodesByOwner).
+    // Both callers already run inside launchNonCancellable.
+    // <-- AM (MERGED_SOURCES)
+    private suspend fun downloadEpisodes(
         episodes: List<Episode>,
         // AY -->
         alt: Boolean = false,
         video: Video? = null,
         // <-- AY
     ) {
-        val anime = successState?.anime ?: return
-        downloadManager.downloadEpisodes(anime, episodes, true, alt, video)
+        // AM (MERGED_SOURCES) -->
+        episodesByOwner(episodes).forEach { owner ->
+            downloadManager.downloadEpisodes(owner.anime, owner.episodes, true, alt, video)
+        }
+        // <-- AM (MERGED_SOURCES)
         toggleAllSelection(false)
     }
 
@@ -1284,13 +1605,15 @@ class AnimeViewModel(
     fun deleteEpisodes(episodes: List<Episode>) {
         viewModelScope.launchNonCancellable {
             try {
-                successState?.let { state ->
+                // AM (MERGED_SOURCES) -->
+                episodesByOwner(episodes).forEach { owner ->
                     downloadManager.deleteEpisodes(
-                        episodes,
-                        state.anime,
-                        state.source,
+                        owner.episodes,
+                        owner.anime,
+                        owner.source,
                     )
                 }
+                // <-- AM (MERGED_SOURCES)
             } catch (e: Throwable) {
                 logcat(LogPriority.ERROR, e)
             }
@@ -1714,7 +2037,17 @@ class AnimeViewModel(
         fromLongPress: Boolean = false,
     ) {
         updateSuccessState { successState ->
-            val newEpisodes = successState.processedEpisodes.toMutableList().apply {
+            // AM (SELECTION_WRITEBACK_FIX) -->
+            // Range-select below works on positions in the VISIBLE list, so it
+            // still operates on processedEpisodes - but the result is merged
+            // back into the full list by id rather than replacing it. This used
+            // to write the filtered list straight into `episodes`, silently
+            // dropping every episode the current filters hide (e.g. all seen
+            // episodes under the unseen filter) until the next DB emission
+            // happened to refill them. The season switcher filters too, so
+            // left as-is it would have erased every other season on one tap.
+            val visibleEpisodes = successState.processedEpisodes.toMutableList().apply {
+            // <-- AM (SELECTION_WRITEBACK_FIX)
                 val selectedIndex = successState.processedEpisodes.indexOfFirst { it.id == item.episode.id }
                 if (selectedIndex < 0) return@apply
 
@@ -1767,13 +2100,28 @@ class AnimeViewModel(
                     }
                 }
             }
+            // AM (SELECTION_WRITEBACK_FIX) -->
+            val selectedById = visibleEpisodes.associate { it.id to it.selected }
+            val newEpisodes = successState.episodes.map { episode ->
+                val selected = selectedById[episode.id]
+                if (selected == null || selected == episode.selected) episode else episode.copy(selected = selected)
+            }
+            // <-- AM (SELECTION_WRITEBACK_FIX)
             successState.copy(episodes = newEpisodes)
         }
     }
 
     fun toggleAllSelection(selected: Boolean) {
         updateSuccessState { successState ->
+            // AM (SELECTION_WRITEBACK_FIX) -->
+            // Select-all means everything VISIBLE - hidden episodes (filtered,
+            // or in another season) must not ride along into a bulk action the
+            // user can't see. Deselect-all still clears everything, which is
+            // always safe and is what the post-action cleanups rely on.
+            val visibleIds = successState.processedEpisodes.mapTo(HashSet()) { it.id }
             val newEpisodes = successState.episodes.map {
+                if (selected && it.id !in visibleIds) return@map it
+                // <-- AM (SELECTION_WRITEBACK_FIX)
                 selectedEpisodeIds.addOrRemove(it.id, selected)
                 it.copy(selected = selected)
             }
@@ -1785,7 +2133,12 @@ class AnimeViewModel(
 
     fun invertSelection() {
         updateSuccessState { successState ->
+            // AM (SELECTION_WRITEBACK_FIX) -->
+            // Visible only, for the same reason as toggleAllSelection.
+            val visibleIds = successState.processedEpisodes.mapTo(HashSet()) { it.id }
             val newEpisodes = successState.episodes.map {
+                if (it.id !in visibleIds) return@map it
+                // <-- AM (SELECTION_WRITEBACK_FIX)
                 selectedEpisodeIds.addOrRemove(it.id, !it.selected)
                 it.copy(selected = !it.selected)
             }
@@ -1923,11 +2276,271 @@ class AnimeViewModel(
         // AM (CLEAR_ANIME) -->
         data object ClearAnime : Dialog
         // <-- AM (CLEAR_ANIME)
+
+        // AM (MERGE_SETTINGS) -->
+        /** Merge settings' loaded data; edits are staged in MergeSettingsState until Save. */
+        data class MergeSettings(
+            val sources: List<MergeSource>,
+            val dedupeMode: DedupeMode,
+            val infoAnimeId: Long?,
+            val seasons: List<EntrySeason>,
+        ) : Dialog
+        // <-- AM (MERGE_SETTINGS)
+
+        // AM (EPISODE_NAMES) -->
+        data class RenameEpisode(val episodeId: Long, val currentName: String) : Dialog
+        // <-- AM (EPISODE_NAMES)
+
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        /** [seasons] every season in display order; new ones are added in the season manager. */
+        data class ChangeEpisodeSeason(val seasons: List<EntrySeason>) : Dialog
+        // <-- AM (CUSTOM_EPISODE_ORDER)
     }
+
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /**
+     * An open reorder mode. Edits are written through as they're made, so
+     * nothing here needs saving; [snapshot] is the entry's stored order from
+     * when the mode was entered, which is what "discard changes" restores.
+     */
+    data class ReorderSession(
+        val snapshot: List<EpisodeOrderOverride>,
+        val hasChanges: Boolean = false,
+    )
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
+    // AM (MERGE_SETTINGS) -->
+    /** One source of a merged entry, in priority order. */
+    data class MergeSource(val anime: Anime, val sourceName: String, val seasonNumber: Long)
+    // <-- AM (MERGE_SETTINGS)
 
     fun dismissDialog() {
         updateSuccessState { it.copy(dialog = null) }
     }
+
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /**
+     * Where the list opens when an entry spans several seasons: the season
+     * holding the next unseen episode, so it lands on where you are in the
+     * watch rather than always on season 1. Null when there's nothing to
+     * switch between.
+     */
+    private fun initialSeasonFor(order: ResolvedEpisodeOrder): Long? {
+        if (order.seasonNumbers.size <= 1) return null
+        val nextUnseen = order.episodes.firstOrNull { !it.seen }
+        return nextUnseen?.let { order.seasonByEpisodeId[it.id] } ?: order.seasonNumbers.first()
+    }
+
+    fun selectSeason(seasonNumber: Long) {
+        // Selection deliberately survives the switch - it is owned by the full
+        // list and shown whole by the action bar (see State.selectedEpisodes).
+        // What must NOT survive are the long-press range anchors - see
+        // resetRangeAnchors.
+        resetRangeAnchors()
+        updateSuccessState { it.copy(selectedSeasonNumber = seasonNumber) }
+    }
+
+    /**
+     * Long-press range anchors are indices into the VISIBLE list. Anything
+     * that replaces or rearranges that list - switching seasons, entering or
+     * leaving reorder mode, moving episodes - leaves them pointing at
+     * different episodes, so a later range-select would span the wrong ones.
+     */
+    private fun resetRangeAnchors() {
+        selectedPositions[0] = -1
+        selectedPositions[1] = -1
+    }
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /**
+     * Enters reorder mode, keeping the current selection. The snapshot taken
+     * here is the only state the mode needs: every edit is written through
+     * immediately, so leaving - by X, back, or the screen simply going away -
+     * never has anything left to save.
+     */
+    fun enterReorderMode() {
+        val anime = successState?.anime ?: return
+        if (successState?.isReordering == true) return
+        viewModelScope.launchIO {
+            val snapshot = episodeOrderRepository.getByHostAnimeId(anime.id)
+            resetRangeAnchors()
+            updateSuccessState { it.copy(reorderSession = ReorderSession(snapshot)) }
+        }
+    }
+
+    /**
+     * Turns reorder mode off but stays in selection mode, keeping the
+     * selection - the toggle's "off". Leaving entirely is exitReorderMode (X
+     * or back). With nothing selected, selection mode simply ends too.
+     */
+    fun leaveReorderMode() {
+        resetRangeAnchors()
+        updateSuccessState { it.copy(reorderSession = null) }
+    }
+
+    fun exitReorderMode() {
+        // Clear the selection first: with the session still set, the action
+        // bar stays up at zero selected, so this ends the mode in one step.
+        toggleAllSelection(false)
+        resetRangeAnchors()
+        updateSuccessState { it.copy(reorderSession = null) }
+    }
+
+    /** Moves [episodeIds] as a group - see MoveEpisodesInOrder. No-op outside reorder mode. */
+    fun moveEpisodes(episodeIds: List<Long>, targetSeason: Long, placement: MoveEpisodesInOrder.Placement) {
+        val anime = successState?.anime ?: return
+        if (successState?.isReordering != true || episodeIds.isEmpty()) return
+        viewModelScope.launchIO {
+            moveEpisodesInOrder.await(anime, episodeIds, targetSeason, placement)
+            markReorderChanged()
+        }
+    }
+
+    fun showChangeEpisodeSeasonDialog() {
+        val state = successState ?: return
+        if (!state.isReordering || state.selectedEpisodes.isEmpty()) return
+        updateSuccessState { it.copy(dialog = Dialog.ChangeEpisodeSeason(seasons = state.entrySeasons)) }
+    }
+
+    /**
+     * Moves the whole selection - across every season it spans - to the end
+     * of [targetSeason], keeping its relative order. The selection is kept, so
+     * the moved episodes can be dragged into place once there.
+     */
+    fun moveSelectionToSeason(targetSeason: Long) {
+        val ids = successState?.selectedEpisodes?.map { it.id } ?: return
+        moveEpisodes(ids, targetSeason, MoveEpisodesInOrder.Placement.AtEnd)
+    }
+
+    /** Restores the stored order to how it was when reorder mode was entered - including undoing resets. */
+    fun discardReorderChanges() {
+        val anime = successState?.anime ?: return
+        val session = successState?.reorderSession ?: return
+        viewModelScope.launchIO {
+            episodeOrderRepository.replaceAll(anime.id, session.snapshot)
+            updateSuccessState { state ->
+                state.reorderSession?.let { state.copy(reorderSession = it.copy(hasChanges = false)) } ?: state
+            }
+        }
+    }
+
+    /**
+     * Returns the selected episodes to their default position and season by
+     * dropping their overrides - across every season the selection spans, so
+     * selecting everything resets everything. No confirmation: like every
+     * reorder edit it is undone by "discard changes" until the mode is left.
+     */
+    fun resetSelectedEpisodeOrder() {
+        val anime = successState?.anime ?: return
+        if (successState?.isReordering != true) return
+        val ids = successState?.selectedEpisodes?.map { it.id }.orEmpty()
+        if (ids.isEmpty()) return
+        viewModelScope.launchIO {
+            episodeOrderRepository.deleteAll(anime.id, ids)
+            markReorderChanged()
+        }
+    }
+
+    private fun markReorderChanged() {
+        resetRangeAnchors()
+        updateSuccessState { state ->
+            state.reorderSession?.let { state.copy(reorderSession = it.copy(hasChanges = true)) } ?: state
+        }
+    }
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
+    // AM (EPISODE_NAMES) -->
+    /** Only meaningful for a single episode, so the action is offered only then. */
+    fun showRenameEpisodeDialog() {
+        val selected = successState?.selectedEpisodes?.singleOrNull() ?: return
+        updateSuccessState {
+            it.copy(dialog = Dialog.RenameEpisode(selected.id, selected.displayName))
+        }
+    }
+
+    /**
+     * Sets an episode's display name, or clears it when blank. Global to the
+     * episode, so it reads the same in every entry it appears in and in the
+     * player; episodes.name is untouched, so downloads keep resolving.
+     */
+    fun renameEpisode(episodeId: Long, name: String?) {
+        viewModelScope.launchIO {
+            episodeNameRepository.set(episodeId, name)
+            toggleAllSelection(false)
+        }
+    }
+    // <-- AM (EPISODE_NAMES)
+
+    // AM (MERGE_SETTINGS) -->
+    fun showMergeSettingsDialog() {
+        val anime = successState?.anime ?: return
+        if (anime.source != MergedSource.ID) return
+        viewModelScope.launchIO {
+            val seasonById = mergeChildRepository.getChildOrderingByMergeParentId(anime.id)
+                .associate { it.animeId to it.seasonNumber }
+            val sources = mergeChildRepository.getChildrenByMergeParentId(anime.id).map {
+                MergeSource(
+                    anime = it,
+                    sourceName = sourceManager.getOrStub(it.source).name,
+                    seasonNumber = seasonById[it.id] ?: MERGE_DEFAULT_SEASON_NUMBER,
+                )
+            }
+            val settings = mergeSettingsRepository.get(anime.id)
+            updateSuccessState { state ->
+                state.copy(
+                    dialog = Dialog.MergeSettings(
+                        sources = sources,
+                        dedupeMode = settings.dedupeMode,
+                        infoAnimeId = settings.infoAnimeId,
+                        seasons = state.entrySeasons,
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Applies merge settings' Save, writing only what changed. A season deleted
+     * in the season manager while the dialog was open falls back to the default
+     * instead of resurrecting it. Details are resynced when anything that feeds
+     * them changed.
+     */
+    fun applyMergeSettings(result: MergeSettingsResult) {
+        val anime = successState?.anime ?: return
+        val dialog = successState?.dialog as? Dialog.MergeSettings ?: return
+        val savedOrder = dialog.sources.map { it.anime.id }
+        val savedSeasons = dialog.sources.associate { it.anime.id to it.seasonNumber }
+        updateSuccessState { it.copy(dialog = null) }
+        viewModelScope.launchIO {
+            if (result.order != savedOrder) {
+                mergeChildRepository.setPriorities(anime.id, result.order)
+            }
+            val existingSeasons = successState?.entrySeasons.orEmpty().mapTo(HashSet()) { it.number }
+            result.seasonByChild.forEach { (childId, season) ->
+                if (season == savedSeasons[childId]) return@forEach
+                val target = season.takeIf { it in existingSeasons } ?: MERGE_DEFAULT_SEASON_NUMBER
+                mergeChildRepository.setSeasonNumber(anime.id, childId, target)
+            }
+            if (result.dedupeMode != dialog.dedupeMode || result.infoAnimeId != dialog.infoAnimeId) {
+                mergeSettingsRepository.set(
+                    anime.id,
+                    MergeSettings(dedupeMode = result.dedupeMode, infoAnimeId = result.infoAnimeId),
+                )
+            }
+            if (result.infoAnimeId != dialog.infoAnimeId || result.order != savedOrder) {
+                syncMergedEntryInfo.await(anime.id)
+            }
+        }
+    }
+
+    /** Immediate, not staged, and closes the dialog - as in Komikku. */
+    fun removeSourceFromMerge(child: Anime) {
+        val anime = successState?.anime ?: return
+        updateSuccessState { it.copy(dialog = null) }
+        viewModelScope.launchIO { removeFromMerge.await(anime.id, child) }
+    }
+    // <-- AM (MERGE_SETTINGS)
 
     fun showDeleteEpisodeDialog(episodes: List<Episode>) {
         updateSuccessState { it.copy(dialog = Dialog.DeleteEpisodes(episodes)) }
@@ -2022,6 +2635,35 @@ class AnimeViewModel(
             val dialog: Dialog? = null,
             val hasPromptedToAddBefore: Boolean = false,
             val hideMissingEpisodes: Boolean = false,
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            /**
+             * The episode list arrived already ordered by GetEpisodeOrder and
+             * must not be re-sorted here - true for a merged entry, whose
+             * union order re-sorting would destroy, and for any entry the user
+             * has given a custom order. Carried in state because the ordering
+             * decision is a suspending query and these are pure computed
+             * properties. Shuffle still layers on top of it.
+             */
+            val isPreordered: Boolean = false,
+            /** Each episode's resolved season (see GetEpisodeOrder). */
+            val episodeSeasonById: Map<Long, Long> = emptyMap(),
+            /** Seasons holding episodes, in display order - what the switcher offers. */
+            val seasonNumbers: List<Long> = emptyList(),
+            // AM (NAMED_SEASONS) -->
+            /** Every season in display order, empty ones included - what labels and pickers use. */
+            val entrySeasons: List<EntrySeason> = emptyList(),
+            // <-- AM (NAMED_SEASONS)
+            /**
+             * The season the list is scoped to. Only a preference: see
+             * [activeSeasonNumber] for what is actually shown, which survives
+             * this season disappearing (its last child moved elsewhere).
+             */
+            val selectedSeasonNumber: Long? = null,
+            /** The stored order, unaffected by display layers - see ResolvedEpisodeOrder.canonicalEpisodes. */
+            val canonicalEpisodeIds: List<Long> = emptyList(),
+            /** Non-null while in reorder mode. */
+            val reorderSession: ReorderSession? = null,
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             val episodeShuffleSeed: Long = 0L,
             // AY -->
             val trackItems: List<TrackItem> = emptyList(),
@@ -2037,18 +2679,76 @@ class AnimeViewModel(
             }
             // <-- AY
 
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            /** The switcher only exists once an entry actually spans more than one season. */
+            val hasSeasonSwitcher: Boolean
+                get() = seasonNumbers.size > 1
+
+            /**
+             * The season the episode list is scoped to, or null for no scoping.
+             * Falls back to the first season when the selected one no longer
+             * exists, so the list never goes blank because a season emptied out
+             * under it.
+             */
+            val activeSeasonNumber: Long?
+                get() = if (!hasSeasonSwitcher) {
+                    null
+                } else {
+                    selectedSeasonNumber?.takeIf { it in seasonNumbers } ?: seasonNumbers.first()
+                }
+            // <-- AM (CUSTOM_EPISODE_ORDER)
+
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            val isReordering: Boolean
+                get() = reorderSession != null
+            // <-- AM (CUSTOM_EPISODE_ORDER)
+
             val processedEpisodes by lazy {
-                episodes.applyFilters(anime).toList()
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                // Reorder mode edits the STORED order, so the layers that
+                // change what or which episodes are shown come off: filters
+                // and, in episodeListItems, shuffle. Descending stays - it is
+                // a pure mirror of the same order, so dragging in a mirrored
+                // list is still unambiguous (see rememberEpisodeReorder) and
+                // entering the mode doesn't flip the list under the user. The
+                // season scope stays too: seasons are part of the order.
+                if (isReordering) {
+                    val byId = episodes.associateBy { it.id }
+                    val activeSeason = activeSeasonNumber
+                    val ordered = canonicalEpisodeIds
+                        .mapNotNull { byId[it] }
+                        .filter { activeSeason == null || episodeSeasonById[it.id] == activeSeason }
+                    return@lazy if (anime.sortDescending()) ordered.asReversed() else ordered
+                }
+                // <-- AM (CUSTOM_EPISODE_ORDER)
+                episodes.applyFilters(anime, isPreordered).toList()
             }
 
             val isAnySelected by lazy {
                 episodes.fastAny { it.selected }
             }
 
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            /**
+             * Every selected episode, from the FULL list rather than the
+             * visible one. Selection survives switching seasons (and changing
+             * filters), so the counter, the bottom action bar and bulk actions
+             * all have to see the whole selection - reading the visible list
+             * would leave selected episodes uncounted and silently skipped.
+             */
+            val selectedEpisodes by lazy {
+                episodes.filter { it.selected }
+            }
+            // <-- AM (CUSTOM_EPISODE_ORDER)
+
             val isShuffleEnabled: Boolean
                 get() = episodeShuffleSeed != 0L
 
             val episodeListItems by lazy {
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                // Ahead of shuffle: a shuffled view is not what's being edited.
+                if (isReordering) return@lazy processedEpisodes
+                // <-- AM (CUSTOM_EPISODE_ORDER)
                 if (isShuffleEnabled) {
                     return@lazy processedEpisodes.sortedBy {
                         episodeShuffleSortKey(episodeShuffleSeed, it.id)
@@ -2058,6 +2758,15 @@ class AnimeViewModel(
                 if (hideMissingEpisodes) {
                     return@lazy processedEpisodes
                 }
+
+                // AM (MERGED_SOURCES) -->
+                // Merged entries legitimately repeat/restart episode numbers
+                // across children - gap separators computed from numbers would
+                // be nonsense, and the union list is already in watch order.
+                if (isPreordered) {
+                    return@lazy processedEpisodes
+                }
+                // <-- AM (MERGED_SOURCES)
 
                 processedEpisodes.insertSeparators { before, after ->
                     val (lowerEpisode, higherEpisode) = if (anime.sortDescending()) {
@@ -2118,7 +2827,12 @@ class AnimeViewModel(
              * Applies the view filters to the list of episodes obtained from the database.
              * @return an observable of the list of episodes filtered and sorted.
              */
-            private fun List<EpisodeList.Item>.applyFilters(anime: Anime): Sequence<EpisodeList.Item> {
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            private fun List<EpisodeList.Item>.applyFilters(
+                anime: Anime,
+                isPreordered: Boolean,
+            ): Sequence<EpisodeList.Item> {
+            // <-- AM (CUSTOM_EPISODE_ORDER)
                 val isLocalAnime = anime.isLocal()
                 val unseenFilter = anime.unseenFilter
                 val downloadedFilter = anime.downloadedFilter
@@ -2126,14 +2840,36 @@ class AnimeViewModel(
                 // AY -->
                 val fillermarkedFilter = anime.fillermarkedFilter
                 // <-- AY
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                val activeSeason = activeSeasonNumber
+                // <-- AM (CUSTOM_EPISODE_ORDER)
                 return asSequence()
+                    // AM (CUSTOM_EPISODE_ORDER) -->
+                    // Seasons are a view over one host's order, not separate
+                    // entries: this scopes what's LISTED, while the playlist
+                    // still runs across season boundaries.
+                    .filter { activeSeason == null || episodeSeasonById[it.id] == activeSeason }
+                    // <-- AM (CUSTOM_EPISODE_ORDER)
                     .filter { (episode) -> applyFilter(unseenFilter) { !episode.seen } }
                     .filter { (episode) -> applyFilter(bookmarkedFilter) { episode.bookmark } }
                     // AY -->
                     .filter { (episode) -> applyFilter(fillermarkedFilter) { episode.fillermark } }
                     // <-- AY
                     .filter { applyFilter(downloadedFilter) { it.isDownloaded || isLocalAnime } }
-                    .sortedWith { (episode1), (episode2) -> getEpisodeSort(anime).invoke(episode1, episode2) }
+                    // AM (MERGED_SOURCES) -->
+                    // Merged unions are already in watch order (season -> merge
+                    // order -> episode number, descending applied at ingestion
+                    // in toEpisodeListItems). Sorting by number would
+                    // interleave children, and reversing here would flip the
+                    // order every selection (see toEpisodeListItems).
+                    .let { items ->
+                        if (isPreordered) {
+                            items
+                        } else {
+                            items.sortedWith { (episode1), (episode2) -> getEpisodeSort(anime).invoke(episode1, episode2) }
+                        }
+                    }
+                    // <-- AM (MERGED_SOURCES)
             }
 
             // AY -->
@@ -2192,6 +2928,10 @@ sealed class EpisodeList {
         val episode: Episode,
         val downloadState: Download.State,
         val downloadProgress: Int,
+        // AM (EPISODE_NAMES) -->
+        /** What to show as the episode's name - see ResolvedEpisodeOrder.displayNameByEpisodeId. */
+        val displayName: String = episode.name,
+        // <-- AM (EPISODE_NAMES)
         // AM (FILE_SIZE) -->
         var fileSize: Long? = null,
         // <-- AM (FILE_SIZE)

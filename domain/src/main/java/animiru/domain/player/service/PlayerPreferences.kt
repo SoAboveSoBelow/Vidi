@@ -91,6 +91,18 @@ class PlayerPreferences(
         true,
     )
 
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /**
+     * When autoplay reaches the end of a season, ask before rolling into the
+     * next one instead of continuing automatically. Only meaningful for
+     * entries split into seasons; manual next is never gated by this.
+     */
+    val askBeforeNextSeason: Preference<Boolean> = preferenceStore.getBoolean(
+        "pref_ask_before_next_season",
+        true,
+    )
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
     // PiP
 
     val enablePip: Preference<Boolean> = preferenceStore.getBoolean("pref_enable_pip", true)

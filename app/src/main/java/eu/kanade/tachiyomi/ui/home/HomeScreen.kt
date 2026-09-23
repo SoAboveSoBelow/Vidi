@@ -4,6 +4,9 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -21,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -107,6 +111,11 @@ object HomeScreen : Screen() {
                     NavigationSuiteType.NavigationBar
                 }
                 val navigationSuiteState = rememberNavigationSuiteScaffoldState()
+                // AM (NAV_INSET_FIX) -->
+                // Tracked here, where every show/hide decision is made, rather
+                // than read back from the suite state.
+                var isNavigationBarShown by remember { mutableStateOf(true) }
+                // <-- AM (NAV_INSET_FIX)
                 LaunchedEffect(navigationSuiteState, tabletUi) {
                     if (tabletUi) navigationSuiteState.show()
                     showBottomNavEvent.receiveAsFlow().collectLatest { show ->
@@ -115,6 +124,9 @@ object HomeScreen : Screen() {
                         } else {
                             navigationSuiteState.hide()
                         }
+                        // AM (NAV_INSET_FIX) -->
+                        isNavigationBarShown = tabletUi || show
+                        // <-- AM (NAV_INSET_FIX)
                     }
                 }
 
@@ -147,6 +159,25 @@ object HomeScreen : Screen() {
                 ) {
                     AnimatedContent(
                         targetState = tabNavigator.current,
+                        // AM (NAV_INSET_FIX) -->
+                        // The pill pads itself by the navigation-bar inset, but
+                        // windowInsetsPadding only consumes it for the pill's
+                        // own children - not for this sibling. Tab content sat
+                        // above the pill yet still counted the full inset as its
+                        // own, so a tab Scaffold with no bottom bar lifted its
+                        // snackbar by that inset again (the merge snackbars
+                        // floating well above the pill). Consumed only while
+                        // the bar is shown and actually at the bottom: when it
+                        // hides (selection mode) the content reaches the screen
+                        // edge and needs the inset, and a rail sits at the side.
+                        modifier = Modifier.consumeWindowInsets(
+                            if (navigationSuiteType == NavigationSuiteType.NavigationBar && isNavigationBarShown) {
+                                WindowInsets.navigationBars
+                            } else {
+                                WindowInsets(0)
+                            },
+                        ),
+                        // <-- AM (NAV_INSET_FIX)
                         transitionSpec = {
                             materialFadeThroughIn(
                                 initialScale = 1f,

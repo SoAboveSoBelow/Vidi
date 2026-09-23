@@ -1,0 +1,24 @@
+-- AM (MERGED_SOURCES) -->
+-- Re-key episode_temp_positions on episode_id alone. See its .sq file: the old
+-- (anime_id, episode_id) key let one episode hold a separate position per
+-- library entry it was opened from, so a merged entry and its child drifted
+-- apart. Collapsing duplicates keeps the most recently updated row - SQLite
+-- takes the bare columns from the row that produced MAX(), which is what the
+-- historystatsView migrations already rely on.
+CREATE TABLE episode_temp_positions_new(
+    episode_id INTEGER NOT NULL PRIMARY KEY,
+    position_ms INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+INSERT INTO episode_temp_positions_new(episode_id, position_ms, updated_at)
+SELECT episode_id, position_ms, MAX(updated_at)
+FROM episode_temp_positions
+GROUP BY episode_id;
+
+DROP TABLE episode_temp_positions;
+
+ALTER TABLE episode_temp_positions_new RENAME TO episode_temp_positions;
+
+CREATE INDEX episode_temp_positions_updated_at_index ON episode_temp_positions(updated_at);
+-- <-- AM (MERGED_SOURCES)

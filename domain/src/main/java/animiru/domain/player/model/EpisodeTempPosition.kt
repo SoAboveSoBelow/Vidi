@@ -8,7 +8,6 @@ package animiru.domain.player.model
  * updated rows, where N is [animiru.domain.player.service.PlayerPreferences.recentEpisodePositionSlots].
  */
 data class EpisodeTempPosition(
-    val animeId: Long,
     val episodeId: Long,
     val positionMs: Long,
     val updatedAt: Long,

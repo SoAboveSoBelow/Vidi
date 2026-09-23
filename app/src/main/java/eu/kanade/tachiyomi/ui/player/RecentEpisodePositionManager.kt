@@ -43,7 +43,7 @@ class RecentEpisodePositionManager(
 
     private data class Entry(val positionMs: Long, val updatedAt: Long)
 
-    private val cache = ConcurrentHashMap<Pair<Long, Long>, Entry>()
+    private val cache = ConcurrentHashMap<Long, Entry>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val hydrationMutex = Mutex()
 
@@ -71,7 +71,7 @@ class RecentEpisodePositionManager(
                     // Don't clobber a newer in-memory entry with a stale DB row if
                     // something was already written (e.g. two rapid switches) before
                     // hydration finished.
-                    cache.merge(saved.animeId to saved.episodeId, Entry(saved.positionMs, saved.updatedAt)) { existing, fromDb ->
+                    cache.merge(saved.episodeId, Entry(saved.positionMs, saved.updatedAt)) { existing, fromDb ->
                         if (existing.updatedAt >= fromDb.updatedAt) existing else fromDb
                     }
                 }
@@ -80,41 +80,48 @@ class RecentEpisodePositionManager(
         }
     }
 
+    // AM (MERGED_SOURCES) -->
     /**
-     * Removes and returns the temp position for (animeId, episodeId), if one exists -
+     * Removes and returns the temp position for [episodeId], if one exists -
      * consumed once, on the assumption the caller is about to resume live playback of
      * it, at which point live position-tracking takes over.
+     *
+     * Keyed on the episode alone, not (anime, episode): the same episode reached
+     * through two different library entries - a merged entry and one of its children -
+     * is the same episode, and used to keep two positions that reverted to a stale one
+     * on switching back.
      */
-    fun consume(animeId: Long, episodeId: Long): Long? {
-        val removed = cache.remove(animeId to episodeId)?.positionMs
+    fun consume(episodeId: Long): Long? {
+        val removed = cache.remove(episodeId)?.positionMs
         if (removed != null) {
-            scope.launch { repository.delete(animeId, episodeId) }
+            scope.launch { repository.delete(episodeId) }
         }
         return removed
     }
+    // <-- AM (MERGED_SOURCES)
 
     /**
-     * Remembers a temp position for (animeId, episodeId), or clears any existing one if
+     * Remembers a temp position for [episodeId] (see [consume] on the key), or clears
+     * any existing one if
      * [positionMs] is at or past [durationMs] minus a one-second buffer. That buffer is
      * deliberate: the same tick that crosses the true final second is also the one
      * deciding whether to transition to the next episode, so wiping exactly on that
      * boundary races the transition. Settling the wipe a second early means it's always
      * done before a transition can even start.
      */
-    fun remember(animeId: Long, episodeId: Long, positionMs: Long, durationMs: Long) {
-        val key = animeId to episodeId
+    fun remember(episodeId: Long, positionMs: Long, durationMs: Long) {
         if (durationMs > 0L && positionMs >= durationMs - 1000L) {
-            if (cache.remove(key) != null) {
-                scope.launch { repository.delete(animeId, episodeId) }
+            if (cache.remove(episodeId) != null) {
+                scope.launch { repository.delete(episodeId) }
             }
             return
         }
         if (positionMs <= 0L) return
 
         val updatedAt = System.currentTimeMillis()
-        cache[key] = Entry(positionMs, updatedAt)
+        cache[episodeId] = Entry(positionMs, updatedAt)
         scope.launch {
-            repository.upsert(animeId, episodeId, positionMs, updatedAt)
+            repository.upsert(episodeId, positionMs, updatedAt)
             pruneToCurrentLimit()
         }
     }

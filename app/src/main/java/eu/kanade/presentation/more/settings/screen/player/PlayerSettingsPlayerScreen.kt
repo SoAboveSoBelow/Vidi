@@ -227,6 +227,12 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
         val enableAniSkip = playerPreferences.aniSkipEnabled
         val disableAniSkipChapters = playerPreferences.disableAniSkipOnChapters
         val isAniSkipEnabled by enableAniSkip.collectAsState()
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        val askBeforeNextSeason = playerPreferences.askBeforeNextSeason
+        // The prompt interrupts autoplay's end-of-season advance, so with
+        // autoplay off there is nothing for it to interrupt.
+        val isAutoplayEnabled by playerPreferences.autoplayEnabled.collectAsState()
+        // <-- AM (CUSTOM_EPISODE_ORDER)
 
         return Preference.PreferenceGroup(
             title = stringResource(AYMR.strings.pref_category_intro_skip),
@@ -272,6 +278,14 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                     title = stringResource(AYMR.strings.pref_category_player_aniskip_info),
                     enabled = isIntroSkipEnabled,
                 ),
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = askBeforeNextSeason,
+                    title = stringResource(AMMR.strings.am_pref_ask_before_next_season),
+                    subtitle = stringResource(AMMR.strings.am_pref_ask_before_next_season_summary),
+                    enabled = isAutoplayEnabled,
+                ),
+                // <-- AM (CUSTOM_EPISODE_ORDER)
             ),
         )
     }

@@ -1,0 +1,31 @@
+-- AM (MERGED_SOURCES) -->
+-- Move merge membership off animes.parent_id into the merge_children join
+-- table (see merge_children.sq for why). -1 is MergedSource's reserved
+-- pseudo-source id (aniyomi.domain.merge.model.MERGED_SOURCE_ID).
+CREATE TABLE merge_children(
+    merge_parent_id INTEGER NOT NULL,
+    anime_id INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    PRIMARY KEY(merge_parent_id, anime_id),
+    FOREIGN KEY(merge_parent_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX merge_children_anime_id_index ON merge_children(anime_id);
+
+-- Children of merge parents created before this migration were linked through
+-- parent_id, with their merge priority in season_source_order.
+INSERT INTO merge_children(merge_parent_id, anime_id, priority)
+SELECT parent_id, _id, season_source_order
+FROM animes
+WHERE parent_id IN (SELECT _id FROM animes WHERE source = -1);
+
+-- Free parent_id/season_source_order back to seasons-only use, and restore
+-- the children to the library: pre-145 merges force-unfavorited them, but
+-- removal of originals is now an explicit post-merge choice.
+UPDATE animes
+SET parent_id = NULL, season_source_order = 0, favorite = 1
+WHERE parent_id IN (SELECT _id FROM animes WHERE source = -1);
+-- <-- AM (MERGED_SOURCES)

@@ -11,6 +11,9 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.data.notification.Notifications
+// AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.source.MergedSource
+// <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.util.system.isRunning
 import eu.kanade.tachiyomi.util.system.setForegroundSafely
 import kotlinx.coroutines.CancellationException
@@ -92,7 +95,12 @@ class MetadataUpdateJob(private val context: Context, workerParams: WorkerParame
      * Adds list of anime to be updated.
      */
     private suspend fun addAnimeToQueue() {
+        // AM (MERGED_SOURCES) -->
+        // See LibraryUpdateJob - merge parents have no fetchable source of
+        // their own; their children are updated directly as favorites.
         animeToUpdate = getLibraryAnime.await()
+            .filterNot { it.anime.source == MergedSource.ID }
+        // <-- AM (MERGED_SOURCES)
         notifier.showQueueSizeWarningNotificationIfNeeded(animeToUpdate)
     }
 

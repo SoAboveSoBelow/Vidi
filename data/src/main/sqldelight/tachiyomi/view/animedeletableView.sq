@@ -6,7 +6,17 @@ SELECT
     A.fetch_type
 FROM animes AS A
 WHERE A.favorite = 0
-AND A.parent_id IS NULL;
+AND A.parent_id IS NULL
+-- AM (MERGED_SOURCES) -->
+-- A merge child is never independently deletable: a merged entry displays its
+-- children's episodes, so deleting a child cascades its merge_children row
+-- away and silently guts a merge that may still be in the library. This
+-- matters most right after merging, since the post-merge "Remove original
+-- entries from library?" prompt unfavorites exactly these rows. Once the last
+-- merge referencing a child is deleted, the cascade drops its merge_children
+-- row and the child becomes deletable again on this view's next emission.
+AND A._id NOT IN (SELECT anime_id FROM merge_children);
+-- <-- AM (MERGED_SOURCES)
 
 getDeletableParentAnime:
 SELECT *

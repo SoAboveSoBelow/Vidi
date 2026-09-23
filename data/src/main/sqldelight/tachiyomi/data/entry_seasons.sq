@@ -1,0 +1,40 @@
+-- AM (NAMED_SEASONS) -->
+-- User-managed seasons of one library entry (merged or not).
+--
+-- season_number is the season's STABLE identity within its entry: it is what
+-- merge_children.season_number and episode_order.season_number point at, and
+-- it is never renumbered. Renaming or reordering a season touches only its row
+-- here, never the sources or episodes in it.
+--
+-- A row is optional. A season that is referenced but has no row still exists,
+-- unnamed and ordered after every season that has one (by number), so an entry
+-- nobody has managed behaves exactly as before this table existed. Season 1 is
+-- the entry's default: everything falls back to it, so it always exists and is
+-- never deleted, only renamed or moved.
+--
+-- name NULL means "unnamed": the label is then derived from the season's
+-- display position ("Season 3"), so unnamed seasons renumber themselves as
+-- they're reordered rather than showing their internal number.
+CREATE TABLE entry_seasons(
+    host_anime_id INTEGER NOT NULL,
+    season_number INTEGER NOT NULL,
+    name TEXT,
+    sort_order INTEGER NOT NULL,
+    PRIMARY KEY(host_anime_id, season_number),
+    FOREIGN KEY(host_anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+
+getByHostAnimeId:
+SELECT host_anime_id, season_number, name, sort_order
+FROM entry_seasons
+WHERE host_anime_id = :hostAnimeId;
+
+upsert:
+INSERT OR REPLACE INTO entry_seasons(host_anime_id, season_number, name, sort_order)
+VALUES (:hostAnimeId, :seasonNumber, :name, :sortOrder);
+
+delete:
+DELETE FROM entry_seasons
+WHERE host_anime_id = :hostAnimeId AND season_number = :seasonNumber;
+-- <-- AM (NAMED_SEASONS)

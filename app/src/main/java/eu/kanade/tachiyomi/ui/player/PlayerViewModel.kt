@@ -35,6 +35,13 @@ import animiru.feature.cast.CastProxyServerService
 import aniyomi.core.common.torrent.TorrentPreferences
 import aniyomi.core.common.torrent.TorrentServerApi
 import aniyomi.core.common.torrent.TorrentServerUtils
+// AM (MERGED_SOURCES) -->
+import aniyomi.domain.merge.repository.MergeChildRepository
+// <-- AM (MERGED_SOURCES)
+// AM (CUSTOM_EPISODE_ORDER) -->
+import aniyomi.domain.order.interactor.GetEpisodeOrder
+import aniyomi.domain.season.model.EntrySeason
+// <-- AM (CUSTOM_EPISODE_ORDER)
 import com.yubyf.truetypeparser.TTFFile
 import dev.icerock.moko.resources.StringResource
 import dev.vivvvek.seeker.Segment
@@ -80,6 +87,9 @@ import eu.kanade.tachiyomi.data.torrent.service.TorrentServerService
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.data.track.anilist.Anilist
 import eu.kanade.tachiyomi.data.track.myanimelist.MyAnimeList
+// AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.source.MergedSource
+// <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.ui.anime.EpisodeShufflePreferences
 import eu.kanade.tachiyomi.ui.anime.episodeShuffleSortKey
 import eu.kanade.tachiyomi.ui.main.MainActivity
@@ -196,6 +206,12 @@ class PlayerViewModel(
     private val getAnime: GetAnime,
     private val getNextEpisodes: GetNextEpisodes,
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
+    // AM (MERGED_SOURCES) -->
+    private val mergeChildRepository: MergeChildRepository,
+    // <-- AM (MERGED_SOURCES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    private val getEpisodeOrder: GetEpisodeOrder,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
     private val getCategories: GetCategories,
     private val getTracks: GetTracks,
     private val getIncognitoState: GetIncognitoState,
@@ -678,7 +694,7 @@ class PlayerViewModel(
             animeId = anime.id,
             episodeId = episodeId,
             animeTitle = anime.title,
-            episodeTitle = episode.name,
+            episodeTitle = displayNameOf(episode),
             animeThumbnailUrl = anime.thumbnailUrl,
             episodePreviewUrl = episode.preview_url,
         )
@@ -1106,12 +1122,14 @@ class PlayerViewModel(
      */
 
     private fun rememberRecentEpisodePosition() {
-        val anime = stateData.value.currentAnime ?: return
         val episode = stateData.value.currentEpisode ?: return
         val episodeId = episode.id ?: return
         val positionMs = (episodePosition ?: 0L) * 1000L
         val durationMs = playbackData.value.duration.toLong() * 1000L
-        recentEpisodePositionManager.remember(anime.id, episodeId, positionMs, durationMs)
+        // AM (MERGED_SOURCES) -->
+        // Keyed on the episode alone - see RecentEpisodePositionManager.consume.
+        recentEpisodePositionManager.remember(episodeId, positionMs, durationMs)
+        // <-- AM (MERGED_SOURCES)
     }
     // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
 
@@ -1368,6 +1386,13 @@ class PlayerViewModel(
 
                 val episode = stateData.value.currentPlaylist.firstOrNull { it.id == episodeId }
                     ?: throw ExceptionWithStringResource("No episode loaded", AYMR.strings.no_episode_loaded)
+
+                // AM (MERGED_SOURCES) -->
+                val (episodeAnime, episodeSource) = resolveEpisodeAnimeAndSource(anime, episode)
+                    ?: throw ExceptionWithStringResource("No episode loaded", AYMR.strings.no_episode_loaded)
+                updateStateData { it.copy(currentEpisodeAnime = episodeAnime, currentEpisodeSource = episodeSource) }
+                // <-- AM (MERGED_SOURCES)
+
                 setupEpisode(episode)
 
                 val skipIntroLength = getAnimeSkipIntroLength()
@@ -1396,7 +1421,9 @@ class PlayerViewModel(
                     }
                     qualityIndex = Pair(hostIndex, vidIndex)
                 } else {
-                    episodeLoader.getHosters(episode.toDomainEpisode()!!, anime, source)
+                    // AM (MERGED_SOURCES) -->
+                    episodeLoader.getHosters(episode.toDomainEpisode()!!, episodeAnime, episodeSource)
+                    // <-- AM (MERGED_SOURCES)
                         .takeIf { it.isNotEmpty() }
                         ?.also { currentHosterList = it }
                         ?: run {
@@ -1440,11 +1467,53 @@ class PlayerViewModel(
     }
 
     private suspend fun setupEpisodeList(anime: Anime) {
-        val episodes = getEpisodesByAnimeId.await(anime.id)
-            .sortedWith(getEpisodeSort(anime, sortDescending = false))
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        // One source of truth for playlist order - the merged union, an
+        // ordinary entry's own episodes, and any custom order the user has
+        // set, all resolved in GetEpisodeOrder. The playlist plays what it is
+        // handed, in the order it is handed: re-sorting by plain episode
+        // number would interleave a merged entry's seasons back together
+        // (S1E1, S2E1, ...) and would discard a custom order outright.
+        val isMerged = anime.source == MergedSource.ID
+        val resolvedOrder = getEpisodeOrder.awaitResolved(anime)
+        val rawEpisodes = resolvedOrder.episodes
+        val isPreordered = resolvedOrder.isPreordered
+        // Each episode of a merged entry belongs to a child, so download
+        // checks must resolve the episode's real entry, not the merge parent.
+        val ownerById = if (isMerged) {
+            mergeChildRepository.getChildrenByMergeParentId(anime.id).associateBy { it.id }
+        } else {
+            emptyMap()
+        }
+        // <-- AM (CUSTOM_EPISODE_ORDER)
+
+        val episodes = rawEpisodes
+            .let {
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                if (isPreordered) it else it.sortedWith(getEpisodeSort(anime, sortDescending = false))
+                // <-- AM (CUSTOM_EPISODE_ORDER)
+            }
             .run {
                 if (basePreferences.downloadedOnly.get()) {
-                    filterDownloaded(anime, downloadCache)
+                    // AM (MERGED_SOURCES) -->
+                    if (isMerged) {
+                        filter {
+                            val owner = ownerById[it.animeId] ?: anime
+                            downloadCache.isEpisodeDownloaded(
+                                it.name,
+                                it.scanlator,
+                                it.url,
+                                // AM (CUSTOM_INFORMATION) -->
+                                owner.ogTitle,
+                                // <-- AM (CUSTOM_INFORMATION)
+                                owner.source,
+                                false,
+                            )
+                        }
+                    } else {
+                        filterDownloaded(anime, downloadCache)
+                    }
+                    // <-- AM (MERGED_SOURCES)
                 } else {
                     this
                 }
@@ -1465,6 +1534,9 @@ class PlayerViewModel(
             ?: error("Requested episode of id $episodeId not found in episode list")
 
         val filtered = episodes.filterNot {
+            // AM (MERGED_SOURCES) -->
+            val owner = ownerById[it.anime_id] ?: anime
+            // <-- AM (MERGED_SOURCES)
             (anime.unseenFilterRaw == Anime.EPISODE_SHOW_SEEN && !it.seen) ||
                 (anime.unseenFilterRaw == Anime.EPISODE_SHOW_UNSEEN && it.seen) ||
                 (
@@ -1474,9 +1546,9 @@ class PlayerViewModel(
                             it.scanlator,
                             it.url,
                             // AM (CUSTOM_INFORMATION) -->
-                            anime.ogTitle,
+                            owner.ogTitle,
                             // <-- AM (CUSTOM_INFORMATION)
-                            anime.source,
+                            owner.source,
                         )
                     ) ||
                 (
@@ -1486,9 +1558,9 @@ class PlayerViewModel(
                             it.scanlator,
                             it.url,
                             // AM (CUSTOM_INFORMATION) -->
-                            anime.ogTitle,
+                            owner.ogTitle,
                             // <-- AM (CUSTOM_INFORMATION)
-                            anime.source,
+                            owner.source,
                         )
                     ) ||
                 (
@@ -1513,14 +1585,38 @@ class PlayerViewModel(
             filtered += listOf(selectedEpisode)
         }
 
-        updateStateData { it.copy(currentPlaylist = filtered.toList()) }
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        // Season boundaries only mean something while the playlist runs in
+        // watch order: a shuffled playlist crosses seasons on nearly every
+        // step, so it carries no season map and never prompts at one.
+        val isShuffled = episodeShufflePreferences.seed(anime.id).get() != 0L
+        val playlistSeasonById = if (isShuffled || resolvedOrder.seasonNumbers.size <= 1) {
+            emptyMap()
+        } else {
+            resolvedOrder.seasonByEpisodeId
+        }
+        updateStateData {
+            it.copy(
+                currentPlaylist = filtered.toList(),
+                playlistSeasonById = playlistSeasonById,
+                // AM (NAMED_SEASONS) -->
+                playlistSeasons = resolvedOrder.seasons,
+                // <-- AM (NAMED_SEASONS)
+                // AM (EPISODE_NAMES) -->
+                playlistEpisodeNames = resolvedOrder.displayNameByEpisodeId,
+                // <-- AM (EPISODE_NAMES)
+            )
+        }
+        // <-- AM (CUSTOM_EPISODE_ORDER)
     }
 
     private fun isEpisodeOnline(episode: Episode): Boolean? {
         val currentState = stateData.value
 
-        val anime = currentState.currentAnime ?: return null
-        val source = currentState.currentSource ?: return null
+        // AM (MERGED_SOURCES) -->
+        val anime = currentState.currentEpisodeAnime ?: return null
+        val source = currentState.currentEpisodeSource ?: return null
+        // <-- AM (MERGED_SOURCES)
         return source is AnimeHttpSource &&
             !episodeLoader.isDownload(
                 episode.toDomainEpisode()!!,
@@ -1528,7 +1624,23 @@ class PlayerViewModel(
             )
     }
 
+    // AM (EPISODE_NAMES) -->
+    /** The episode's name as the list shows it - custom name, or a single-episode source's title. */
+    fun displayNameOf(episode: Episode): String {
+        return episode.id?.let { stateData.value.playlistEpisodeNames[it] } ?: episode.name
+    }
+    // <-- AM (EPISODE_NAMES)
+
     private fun setupEpisode(episode: Episode) {
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        // Whatever made this episode current - confirming the prompt, a manual
+        // next/previous, picking from the list, a playlist rehost - resolves
+        // any pending season prompt; it described a step that no longer
+        // applies.
+        if (uiData.value.seasonAdvancePrompt != null) {
+            updateUiData { it.copy(seasonAdvancePrompt = null) }
+        }
+        // <-- AM (CUSTOM_EPISODE_ORDER)
         val currentState = stateData.value
 
         val currentEpisodeIndex = currentState.currentPlaylist.indexOfFirst {
@@ -1638,8 +1750,10 @@ class PlayerViewModel(
 
     private fun startCasting(startPosition: Long = 0) {
         var video = stateData.value.currentVideo ?: return
-        val source = stateData.value.currentSource ?: return
-        val anime = stateData.value.currentAnime ?: return
+        // AM (MERGED_SOURCES) -->
+        val source = stateData.value.currentEpisodeSource ?: return
+        val anime = stateData.value.currentEpisodeAnime ?: return
+        // <-- AM (MERGED_SOURCES)
         val episode = stateData.value.currentEpisode ?: return
 
         if (!player.isReleased) {
@@ -1802,7 +1916,7 @@ class PlayerViewModel(
                 subtitleId = preferredSubtitle?.index,
                 audioId = preferredAudio?.index,
                 anime = anime,
-                episodeTitle = episode.name,
+                episodeTitle = displayNameOf(episode),
                 startPosition = startPosition,
                 playbackRate = mpv.getPropertyDouble("speed") ?: 1.0,
             )
@@ -1999,8 +2113,10 @@ class PlayerViewModel(
         updateStateData { it.copy(hosterList = hosterList) }
         updateUiData { it.copy(hosterExpandedList = List(hosterList.size) { true }) }
 
-        val source = stateData.value.currentSource
+        // AM (MERGED_SOURCES) -->
+        val source = stateData.value.currentEpisodeSource
             ?: throw Exception("No source available")
+        // <-- AM (MERGED_SOURCES)
 
         getHosterVideoLinksJob?.cancel()
         getHosterVideoLinksJob = viewModelScope.launchIO {
@@ -2104,8 +2220,10 @@ class PlayerViewModel(
 
     /** Loads [video]; returns true if successful. */
     private suspend fun loadVideo(video: Video, hosterIndex: Int, videoIndex: Int): Boolean {
-        val source = stateData.value.currentSource
+        // AM (MERGED_SOURCES) -->
+        val source = stateData.value.currentEpisodeSource
             ?: throw Exception("No source loaded")
+        // <-- AM (MERGED_SOURCES)
         val currentUi = uiData.value
         val selectedHosterState = (stateData.value.hosterState[hosterIndex] as? HosterState.Ready)
             ?: return false
@@ -2237,11 +2355,10 @@ class PlayerViewModel(
                 // cross-series reopen, even with a correct, present cache entry sitting
                 // right there. This matches the original design intent: any live/temp
                 // position wins outright, no matter what else is going on.
-                val tempFromManager = stateData.value.currentAnime?.id?.let { animeId ->
-                    episode.id?.let { episodeId ->
-                        recentEpisodePositionManager.consume(animeId, episodeId)
-                    }
-                }
+                // AM (MERGED_SOURCES) -->
+                // Keyed on the episode alone - see RecentEpisodePositionManager.consume.
+                val tempFromManager = episode.id?.let { recentEpisodePositionManager.consume(it) }
+                // <-- AM (MERGED_SOURCES)
                 val tempPositionMs = when {
                     tempFromManager != null -> tempFromManager
                     // <-- AM (TEMP_MEMORY_PRIORITY_FIX)
@@ -2339,7 +2456,9 @@ class PlayerViewModel(
             }
         } else {
             launchIO {
-                val httpSource = stateData.value.currentSource as? AnimeHttpSource
+                // AM (MERGED_SOURCES) -->
+                val httpSource = stateData.value.currentEpisodeSource as? AnimeHttpSource
+                // <-- AM (MERGED_SOURCES)
                 var videoUrl: String = video.videoUrl
                 if (video.usesHttpServer() && httpSource != null) {
                     val port = try {
@@ -2450,8 +2569,10 @@ class PlayerViewModel(
 
     private fun setHttpOptions(video: Video) {
         if (!stateData.value.isEpisodeOnline) return
-        val source = stateData.value.currentSource as? AnimeHttpSource
+        // AM (MERGED_SOURCES) -->
+        val source = stateData.value.currentEpisodeSource as? AnimeHttpSource
             ?: return
+        // <-- AM (MERGED_SOURCES)
 
         val headers = (video.headers ?: source.headers)
             .toMultimap()
@@ -2466,9 +2587,56 @@ class PlayerViewModel(
 
     private fun eofReached(eofReached: Boolean) {
         if (eofReached && uiData.value.autoPlayEnabled) {
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            seasonBoundaryAhead()?.let { prompt ->
+                if (playerPreferences.askBeforeNextSeason.get()) {
+                    updateUiData { it.copy(seasonAdvancePrompt = prompt) }
+                    return
+                }
+            }
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             nextEpisode(next = true, autoplay = true)
         }
     }
+
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /**
+     * The next-season prompt, if the upcoming playlist step crosses a season
+     * boundary; null when it stays within the season or there is no next
+     * episode.
+     *
+     * Only the AUTOMATIC end-of-episode advance consults this. Every other
+     * route onto the next episode - the next button, gestures, media keys,
+     * PiP controls - is the user choosing to move, so asking would just be
+     * friction.
+     */
+    private fun seasonBoundaryAhead(): SeasonAdvancePrompt? {
+        val state = stateData.value
+        if (state.playlistSeasonById.isEmpty()) return null
+        val current = state.currentPlaylist.getOrNull(state.currentPlaylistIndex) ?: return null
+        val next = state.currentPlaylist.getOrNull(state.currentPlaylistIndex + 1) ?: return null
+        val currentId = current.id ?: return null
+        val nextId = next.id ?: return null
+        val currentSeason = state.playlistSeasonById[currentId] ?: return null
+        val nextSeason = state.playlistSeasonById[nextId] ?: return null
+        if (currentSeason == nextSeason) return null
+        return SeasonAdvancePrompt(
+            nextEpisodeId = nextId,
+            finishedSeason = currentSeason,
+            nextSeason = nextSeason,
+        )
+    }
+
+    fun confirmSeasonAdvance() {
+        val prompt = uiData.value.seasonAdvancePrompt ?: return
+        updateUiData { it.copy(seasonAdvancePrompt = null) }
+        changeEpisode(prompt.nextEpisodeId, autoPlay = true)
+    }
+
+    fun dismissSeasonAdvance() {
+        updateUiData { it.copy(seasonAdvancePrompt = null) }
+    }
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     private fun endFile(node: MPVNode) {
         val errorNode = node.asMap()?.get("file_error") ?: return
@@ -2551,8 +2719,10 @@ class PlayerViewModel(
                 }
             }
             is HosterState.Idle -> {
-                val source = stateData.value.currentSource
+                // AM (MERGED_SOURCES) -->
+                val source = stateData.value.currentEpisodeSource
                     ?: throw Exception("Source not loaded")
+                // <-- AM (MERGED_SOURCES)
 
                 val hosterName = stateData.value.hosterList[index].hosterName
                 updateHosterStateAt(index, HosterState.Loading(hosterName))
@@ -2628,7 +2798,9 @@ class PlayerViewModel(
      * folder to save alongside).
      */
     private fun generateEpisodeThumbnailIfMissing() {
-        val anime = stateData.value.currentAnime ?: return
+        // AM (MERGED_SOURCES) -->
+        val anime = stateData.value.currentEpisodeAnime ?: return
+        // <-- AM (MERGED_SOURCES)
         val episode = stateData.value.currentEpisode ?: return
         val episodeId = episode.id ?: return
         if (!anime.isLocal()) return
@@ -3164,12 +3336,16 @@ class PlayerViewModel(
 
     /** Loads an episode, returning its hoster list and title. */
     private suspend fun loadEpisode(episodeId: Long?): EpisodeLoadResult? {
-        val anime = stateData.value.currentAnime ?: return null
-        val source = sourceManager.getOrStub(anime.source)
+        val displayAnime = stateData.value.currentAnime ?: return null
 
         val chosenEpisode = stateData.value.currentPlaylist.firstOrNull { ep ->
             ep.id == episodeId
         } ?: return null
+
+        // AM (MERGED_SOURCES) -->
+        val (anime, source) = resolveEpisodeAnimeAndSource(displayAnime, chosenEpisode) ?: return null
+        updateStateData { it.copy(currentEpisodeAnime = anime, currentEpisodeSource = source) }
+        // <-- AM (MERGED_SOURCES)
 
         setupEpisode(chosenEpisode)
 
@@ -3188,10 +3364,34 @@ class PlayerViewModel(
 
             EpisodeLoadResult(
                 hosterList = currentHosterList,
-                episodeTitle = "${anime.title} - ${chosenEpisode.name}",
+                episodeTitle = "${displayAnime.title} - ${displayNameOf(chosenEpisode)}",
             )
         }
     }
+
+    // AM (MERGED_SOURCES) -->
+    /**
+     * Resolves the real anime/source [episode] actually belongs to, given the
+     * session's library entry [displayAnime]. For a normal session this is
+     * just currentAnime/currentSource re-used as-is (episode.animeId already
+     * equals displayAnime.id there, so no extra lookup happens); for a merged
+     * session, episode.animeId points at the real child anime instead of the
+     * merge parent, so this is what makes hoster/video fetching, HTTP
+     * headers, thumbnail tiles, and download/local checks land on the right
+     * source per episode instead of MergedSource (which never fetches
+     * anything itself - see MergedSource's doc comment).
+     */
+    private suspend fun resolveEpisodeAnimeAndSource(displayAnime: Anime, episode: Episode): Pair<Anime, AnimeSource>? {
+        val episodeAnimeId = episode.anime_id ?: return null
+        if (episodeAnimeId == displayAnime.id) {
+            val source = stateData.value.currentSource ?: sourceManager.getOrStub(displayAnime.source)
+            return displayAnime to source
+        }
+        val anime = getAnime.await(episodeAnimeId) ?: return null
+        val source = sourceManager.getOrStub(anime.source)
+        return anime to source
+    }
+    // <-- AM (MERGED_SOURCES)
 
     fun nextEpisode(next: Boolean, autoplay: Boolean = false) {
         val currentIndex = stateData.value.currentPlaylistIndex
@@ -3334,6 +3534,44 @@ class PlayerViewModel(
             changeEpisode(episodeId)
             return
         }
+        // AM (MERGED_SOURCES) -->
+        // Different entry, but the episode ALREADY PLAYING. A merged entry and
+        // its children share episodes, so opening the one that's on screen from
+        // the other entry is not a content switch at all - only the surrounding
+        // playlist differs. Reloading it would restart the video from the
+        // resume position and drop the live position, so re-host in place
+        // instead. hostList guards an explicit hoster/quality request, which
+        // does need a real reload.
+        if (hostList.isBlank() && stateData.value.currentEpisode?.id == episodeId) {
+            episodeChangeJob?.cancel()
+            episodeChangeJob = viewModelScope.launch {
+                if (!rehostPlaylist(animeId)) {
+                    switchToAnime(animeId, episodeId, hostList, hostIndex, vidIndex)
+                }
+            }
+            return
+        }
+        episodeChangeJob?.cancel()
+        episodeChangeJob = viewModelScope.launch {
+            switchToAnime(animeId, episodeId, hostList, hostIndex, vidIndex)
+        }
+    }
+
+    /**
+     * The original body of [changeAnime] - a genuine cross-anime switch, which
+     * always reloads the episode. Extracted so [changeAnime] can fall back to
+     * it from inside episodeChangeJob when [rehostPlaylist] turns out not to
+     * apply, without re-entering changeAnime() and cancelling the very job it
+     * is running on.
+     */
+    private suspend fun switchToAnime(
+        animeId: Long,
+        episodeId: Long,
+        hostList: String,
+        hostIndex: Int,
+        vidIndex: Int,
+    ) {
+        // <-- AM (MERGED_SOURCES)
         if (stateData.value.isCasting) {
             castManager.stopRemoteMediaClient()
             updateCastUiData { it.copy(isLoadingEpisode = true) }
@@ -3361,27 +3599,85 @@ class PlayerViewModel(
         thumbnailFetchJob?.cancel()
         lastThumbnailFetch = 0L
 
-        episodeChangeJob?.cancel()
-        episodeChangeJob = viewModelScope.launch {
-            val (initResult, loadResult) = init(
-                animeId = animeId,
-                initialEpisodeId = episodeId,
-                hostList = hostList,
-                hostIndex = hostIndex,
-                vidIndex = vidIndex,
-            )
-            logcat(LogPriority.INFO) {
-                "CROSS_ANIME_IN_PLACE_SWITCH init() returned initResult=$initResult loadResult=$loadResult"
-            }
-            updateUiData { it.copy(isLoadingHosters = false) }
-            loadHosters(
-                hosterList = initResult.hosterList ?: emptyList(),
-                hosterIndex = initResult.videoIndex.first,
-                videoIndex = initResult.videoIndex.second,
-            )
+        // AM (MERGED_SOURCES) -->
+        // episodeChangeJob is now owned by changeAnime()/the caller - this runs
+        // inside it rather than starting its own.
+        val (initResult, loadResult) = init(
+            animeId = animeId,
+            initialEpisodeId = episodeId,
+            hostList = hostList,
+            hostIndex = hostIndex,
+            vidIndex = vidIndex,
+        )
+        logcat(LogPriority.INFO) {
+            "CROSS_ANIME_IN_PLACE_SWITCH init() returned initResult=$initResult loadResult=$loadResult"
         }
+        updateUiData { it.copy(isLoadingHosters = false) }
+        loadHosters(
+            hosterList = initResult.hosterList ?: emptyList(),
+            hosterIndex = initResult.videoIndex.first,
+            videoIndex = initResult.videoIndex.second,
+        )
+        // <-- AM (MERGED_SOURCES)
     }
     // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
+
+    // AM (MERGED_SOURCES) -->
+    /**
+     * Moves the live session under a different library entry WITHOUT touching
+     * playback: same player, same loaded file, same position, same
+     * currentEpisodeAnime/currentEpisodeSource (the episode's real owner hasn't
+     * changed - only the entry it's being browsed through has). Rebuilds the
+     * playlist so next/previous, the seekbar's episode context and the entry's
+     * own filters/sort come from the new host, and repoints everything scoped
+     * to the library entry - trackers, skip-intro length, incognito, the mpv
+     * user-data props - at it.
+     *
+     * Returns false without mutating anything if [animeId] can't host the
+     * current episode, so the caller can fall back to a real switch. The one
+     * post-mutation false is a genuine invariant break (setupEpisodeList
+     * guarantees the selected episode is in the list it builds); falling back
+     * there is still correct, since switchToAnime() overwrites all of it.
+     */
+    private suspend fun rehostPlaylist(animeId: Long): Boolean {
+        val currentEpisodeId = stateData.value.currentEpisode?.id ?: return false
+        val anime = getAnime.await(animeId) ?: return false
+        sourceManager.isInitialized.first { it }
+
+        val canHost = getEpisodeOrder.await(anime).any { it.id == currentEpisodeId }
+        if (!canHost) return false
+
+        val source = sourceManager.getOrStub(anime.source)
+        val incognito = getIncognitoState.await(anime.source)
+        updateStateData { it.copy(currentAnime = anime, currentSource = source, incognitoMode = incognito) }
+        updateUiData { it.copy(animeTitle = anime.title) }
+        episodeId = currentEpisodeId
+
+        setupTrackers(anime.id)
+        setupEpisodeList(anime)
+
+        val episode = stateData.value.currentPlaylist.firstOrNull { it.id == currentEpisodeId }
+        if (episode == null) {
+            logcat(LogPriority.ERROR) {
+                "MERGED_SOURCES rehostPlaylist lost episode=$currentEpisodeId in anime=$animeId playlist"
+            }
+            return false
+        }
+        setupEpisode(episode)
+
+        val skipIntroLength = getAnimeSkipIntroLength()
+        updateCastUiData { it.copy(skipIntroLength = skipIntroLength.toLong()) }
+        val parentTitle = anime.parentId?.let { getAnime.await(it)?.title } ?: ""
+        setPropertyString("user-data/current-anime/anime-title", anime.title)
+        setPropertyString("user-data/current-anime/parent-title", parentTitle)
+        setPropertyInt("user-data/current-anime/intro-length", skipIntroLength)
+        setPropertyString(
+            "user-data/current-anime/category",
+            getCategories.await(anime.id).joinToString { it.name },
+        )
+        return true
+    }
+    // <-- AM (MERGED_SOURCES)
 
     // === Controls ===
 
@@ -4055,7 +4351,9 @@ class PlayerViewModel(
 
                 thumbnailFetchJob?.cancel()
                 thumbnailFetchJob = viewModelScope.launchIO {
-                    val source = stateData.value.currentSource as? AnimeHttpSource ?: return@launchIO
+                    // AM (MERGED_SOURCES) -->
+                    val source = stateData.value.currentEpisodeSource as? AnimeHttpSource ?: return@launchIO
+                    // <-- AM (MERGED_SOURCES)
 
                     try {
                         val tileUrl = thumbInfo.imageTileUrls[info.imageIndex]
@@ -4709,12 +5007,47 @@ class PlayerViewModel(
         val incognitoMode: Boolean = false,
         val currentPlaylist: List<Episode> = emptyList(),
         val currentPlaylistIndex: Int = -1,
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        /**
+         * Season of each playlist episode, or empty when the playlist has no
+         * season boundaries to stop at (single season, or shuffled). See
+         * setupEpisodeList and the season-advance prompt in eofReached.
+         */
+        val playlistSeasonById: Map<Long, Long> = emptyMap(),
+        // <-- AM (CUSTOM_EPISODE_ORDER)
+        // AM (NAMED_SEASONS) -->
+        /** The entry's seasons in display order, for labelling them. */
+        val playlistSeasons: List<EntrySeason> = emptyList(),
+        // <-- AM (NAMED_SEASONS)
+        // AM (EPISODE_NAMES) -->
+        /** Display names for the playlist - custom names and single-episode source titles. */
+        val playlistEpisodeNames: Map<Long, String> = emptyMap(),
+        // <-- AM (EPISODE_NAMES)
         val hasPreviousEpisode: Boolean = false,
         val hasNextEpisode: Boolean = false,
         val isEpisodeOnline: Boolean = false,
         val currentEpisode: Episode? = null,
         val currentAnime: Anime? = null,
         val currentSource: AnimeSource? = null,
+        // AM (MERGED_SOURCES) -->
+        /**
+         * The real anime/source the CURRENTLY LOADED episode actually belongs
+         * to - resolved fresh in loadEpisode() from the episode's own animeId.
+         * Equal to currentAnime/currentSource for a normal (non-merged)
+         * session, since every episode there already belongs to that same
+         * anime; only diverges for a merged entry, where currentAnime stays
+         * the stable library parent (MergedSource) throughout while this
+         * tracks whichever child source the playing episode actually came
+         * from. Anything that needs the CONTENT source for the episode on
+         * screen right now - hoster/video fetching, HTTP headers, thumbnail
+         * tiles, isDownload/isLocal checks - reads these, not
+         * currentAnime/currentSource. Anything scoped to the library entry
+         * itself - trackers, skip-intro length, the changeAnime() same-session
+         * check - keeps reading currentAnime/currentSource unchanged.
+         */
+        val currentEpisodeAnime: Anime? = null,
+        val currentEpisodeSource: AnimeSource? = null,
+        // <-- AM (MERGED_SOURCES)
         val currentVideo: Video? = null,
         val videoHeight: Int = 0,
         val videoWidth: Int = 0,
@@ -4770,11 +5103,24 @@ class PlayerViewModel(
         val invertDuration: Boolean = false,
         val smoothSeeking: Boolean = false,
         val autoPlayEnabled: Boolean = false,
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        /** Pending "continue to next season?" decision - see eofReached. */
+        val seasonAdvancePrompt: SeasonAdvancePrompt? = null,
+        // <-- AM (CUSTOM_EPISODE_ORDER)
         val showChapterIndicator: Boolean = true,
         val playerSpeedPref: Float = 1f,
         val bottomPlayerButtons: List<BottomPlayerButton?> = emptyList(),
         val enableCast: Boolean = false,
     )
+
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    @Stable
+    data class SeasonAdvancePrompt(
+        val nextEpisodeId: Long,
+        val finishedSeason: Long,
+        val nextSeason: Long,
+    )
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 
     @Stable
     data class PlayerPlaybackData(

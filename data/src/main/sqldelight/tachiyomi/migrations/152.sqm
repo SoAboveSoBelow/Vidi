@@ -1,0 +1,16 @@
+-- AM (CUSTOM_EPISODE_ORDER) -->
+-- Merged entries now interleave their sources by episode number instead of
+-- listing them in per-source blocks, so episode-order keys are plain episode
+-- numbers. Keys written under the old scheme sit in a per-source band of
+-- priority * 1000000 + episode number; this removes the band so existing
+-- custom orders keep their positions relative to their episodes.
+--
+-- The band is taken from key + 1 because an unrecognised episode (number -1)
+-- sat one below its band's boundary. Keys under 999999 carry no band (priority
+-- 0, or an ordinary entry) and are left alone.
+UPDATE episode_order
+SET sort_key = sort_key - CAST((sort_key + 1) / 1000000 AS INTEGER) * 1000000
+WHERE sort_key IS NOT NULL
+AND sort_key >= 999999
+AND host_anime_id IN (SELECT _id FROM animes WHERE source = -1);
+-- <-- AM (CUSTOM_EPISODE_ORDER)

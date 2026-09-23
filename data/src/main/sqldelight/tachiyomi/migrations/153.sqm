@@ -1,0 +1,9 @@
+-- AM (EPISODE_NAMES) -->
+-- Display-only custom episode names. See episode_names.sq.
+CREATE TABLE episode_names(
+    episode_id INTEGER NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+-- <-- AM (EPISODE_NAMES)

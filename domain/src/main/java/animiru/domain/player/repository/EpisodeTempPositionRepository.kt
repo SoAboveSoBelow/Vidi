@@ -7,9 +7,9 @@ interface EpisodeTempPositionRepository {
 
     suspend fun getAll(): List<EpisodeTempPosition>
 
-    suspend fun upsert(animeId: Long, episodeId: Long, positionMs: Long, updatedAt: Long)
+    suspend fun upsert(episodeId: Long, positionMs: Long, updatedAt: Long)
 
-    suspend fun delete(animeId: Long, episodeId: Long)
+    suspend fun delete(episodeId: Long)
 
     /** Deletes everything except the [keepCount] most-recently-updated rows. */
     suspend fun pruneToMostRecent(keepCount: Int)

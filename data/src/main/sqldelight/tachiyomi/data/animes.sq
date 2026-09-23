@@ -228,6 +228,12 @@ FROM animes
 WHERE parent_id = :parentId;
 -- <-- AY
 
+-- AM (MERGED_SOURCES) -->
+-- Second keepSeenAnime guard below: a merge parent owns no episodes, so the
+-- first guard can never match it and the exclude-seen-entries toggle would
+-- silently drop a fully watched merged entry. Its watch progress lives on its
+-- children, so protect it when any child has progress.
+-- <-- AM (MERGED_SOURCES)
 deleteAnimesNotInLibraryByAnimeIds:
 DELETE FROM animes
 WHERE favorite = 0
@@ -239,6 +245,19 @@ AND (
         FROM episodes
         WHERE seen = 1
         OR last_second_seen != 0
+    )
+)
+AND (
+    :keepSeenAnime = 0
+    OR _id NOT IN (
+        SELECT merge_parent_id
+        FROM merge_children
+        WHERE anime_id IN (
+            SELECT DISTINCT anime_id
+            FROM episodes
+            WHERE seen = 1
+            OR last_second_seen != 0
+        )
     )
 );
 

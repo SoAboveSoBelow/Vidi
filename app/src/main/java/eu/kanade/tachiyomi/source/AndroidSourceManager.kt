@@ -32,6 +32,9 @@ class AndroidSourceManager(
     private val extensionManager: ExtensionManager,
     private val sourceRepository: StubSourceRepository,
     private val localSource: LocalSource,
+    // AM (MERGED_SOURCES) -->
+    private val mergedSource: MergedSource,
+    // <-- AM (MERGED_SOURCES)
     private val downloadManager: Lazy<DownloadManager>,
 ) : SourceManager {
 
@@ -51,7 +54,12 @@ class AndroidSourceManager(
             extensionManager.installedExtensionsFlow
                 .collectLatest { extensions ->
                     val mutableMap = ConcurrentHashMap<Long, AnimeSource>(
-                        mapOf(LocalSource.ID to localSource),
+                        mapOf(
+                            LocalSource.ID to localSource,
+                            // AM (MERGED_SOURCES) -->
+                            MergedSource.ID to mergedSource,
+                            // <-- AM (MERGED_SOURCES)
+                        ),
                     )
                     extensions.forEach { extension ->
                         extension.sources.forEach {

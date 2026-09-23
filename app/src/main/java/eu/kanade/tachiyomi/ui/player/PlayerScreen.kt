@@ -52,6 +52,9 @@ import eu.kanade.tachiyomi.ui.player.controls.GestureHandler
 import eu.kanade.tachiyomi.ui.player.controls.LocalPlayerButtonsClickEvent
 import eu.kanade.tachiyomi.ui.player.controls.PlayerControls
 import eu.kanade.tachiyomi.ui.player.controls.PlayerDialogs
+// AM (CUSTOM_EPISODE_ORDER) -->
+import eu.kanade.tachiyomi.ui.player.controls.components.dialogs.SeasonAdvanceDialog
+// <-- AM (CUSTOM_EPISODE_ORDER)
 import eu.kanade.tachiyomi.ui.player.controls.PlayerPanels
 import eu.kanade.tachiyomi.ui.player.controls.PlayerSheets
 import eu.kanade.tachiyomi.ui.player.controls.components.panels.SubColorType
@@ -830,6 +833,25 @@ fun PlayerScreen(
                     },
                     onDismissRequest = { viewModel.setDialog(Dialogs.None) },
                 )
+
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                // Separate from the Dialogs slot on purpose: this is a pending
+                // playback decision, not a transient UI dialog - opening the
+                // episode list must not discard it. Held back while in PiP,
+                // where it can't be answered; the prompt stays pending in the
+                // ViewModel and appears on return.
+                val seasonAdvancePrompt = uiData.seasonAdvancePrompt
+                if (seasonAdvancePrompt != null && !dummyPipActive) {
+                    SeasonAdvanceDialog(
+                        prompt = seasonAdvancePrompt,
+                        // AM (NAMED_SEASONS) -->
+                        seasons = stateData.playlistSeasons,
+                        // <-- AM (NAMED_SEASONS)
+                        onContinue = viewModel::confirmSeasonAdvance,
+                        onDismissRequest = viewModel::dismissSeasonAdvance,
+                    )
+                }
+                // <-- AM (CUSTOM_EPISODE_ORDER)
             }
         }
     }

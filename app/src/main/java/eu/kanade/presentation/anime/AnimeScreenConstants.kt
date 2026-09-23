@@ -24,4 +24,8 @@ enum class AnimeScreenItem {
     // AY -->
     AIRING_TIME,
     // <-- AY
+
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    SEASON_SWITCHER,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 }

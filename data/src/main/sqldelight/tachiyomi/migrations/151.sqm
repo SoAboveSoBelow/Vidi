@@ -1,0 +1,12 @@
+-- AM (MERGE_SETTINGS) -->
+-- Per-merge dedupe and info-entry settings. See merge_settings.sq.
+CREATE TABLE merge_settings(
+    merge_parent_id INTEGER NOT NULL PRIMARY KEY,
+    dedupe_mode INTEGER NOT NULL DEFAULT 0,
+    info_anime_id INTEGER,
+    FOREIGN KEY(merge_parent_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(info_anime_id) REFERENCES animes(_id)
+    ON DELETE SET NULL
+);
+-- <-- AM (MERGE_SETTINGS)

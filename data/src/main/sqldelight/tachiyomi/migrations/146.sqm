@@ -1,0 +1,8 @@
+-- AM (MERGED_SOURCES) -->
+-- Internal season assignment for merge children. Every child starts in the
+-- same shared default season (1) so a merged entry shows all of its
+-- children's episodes together in one flat list; splitting children into
+-- separate seasons is a later UI feature. See
+-- aniyomi.domain.merge.interactor.GetMergedEpisodeList.
+ALTER TABLE merge_children ADD COLUMN season_number INTEGER NOT NULL DEFAULT 1;
+-- <-- AM (MERGED_SOURCES)

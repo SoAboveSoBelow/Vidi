@@ -32,8 +32,14 @@ import eu.kanade.presentation.anime.EpisodeOptionsDialogScreen
 import eu.kanade.presentation.anime.EpisodeSettingsDialog
 import eu.kanade.presentation.anime.SeasonSettingsDialog
 import eu.kanade.presentation.anime.components.AnimeImagesDialog
+import eu.kanade.presentation.anime.components.ChangeEpisodeSeasonDialog
 import eu.kanade.presentation.anime.components.ClearAnimeDialog
+// AM (MERGE_SEASONS) -->
+import eu.kanade.presentation.anime.components.RenameEpisodeDialog
+import eu.kanade.tachiyomi.ui.anime.merged.MergeSettingsDialog
+// <-- AM (MERGE_SEASONS)
 import eu.kanade.presentation.anime.components.DeleteEpisodesDialog
+import eu.kanade.presentation.anime.components.EpisodeReorderActions
 import eu.kanade.presentation.anime.components.ScanlatorFilterDialog
 import eu.kanade.presentation.anime.components.SetIntervalDialog
 import eu.kanade.presentation.category.components.ChangeCategoryDialog
@@ -48,9 +54,13 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.FetchType
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.data.torrent.service.TorrentServerService
+// AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.source.MergedSource
+// <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.source.isLocalOrStub
 import eu.kanade.tachiyomi.source.isSourceForTorrents
 import eu.kanade.tachiyomi.ui.anime.notes.AnimeNotesScreen
+import eu.kanade.tachiyomi.ui.anime.season.EntrySeasonsScreen
 import eu.kanade.tachiyomi.ui.anime.track.TrackInfoDialogHomeScreen
 import eu.kanade.tachiyomi.ui.browse.extension.details.SourcePreferencesScreen
 import eu.kanade.tachiyomi.ui.browse.migration.season.MigrateSeasonSelectScreen
@@ -149,7 +159,7 @@ class AnimeScreen(
                         TorrentServerService.start(context)
                     }
                     val extPlayer = viewModel.alwaysUseExternalPlayer != alt
-                    openEpisode(context, episode, extPlayer)
+                    openEpisode(context, successState.anime, episode, extPlayer)
                 }
                 // <-- AY
             },
@@ -191,7 +201,7 @@ class AnimeScreen(
                 // AY -->
                 scope.launchIO {
                     val extPlayer = viewModel.alwaysUseExternalPlayer
-                    continueWatching(context, viewModel.getNextUnseenEpisode(), extPlayer)
+                    continueWatching(context, successState.anime, viewModel.getNextUnseenEpisode(), extPlayer)
                 }
                 // <-- AY
             },
@@ -222,6 +232,12 @@ class AnimeScreen(
             // <-- AY
             // AM (CUSTOM_INFORMATION) -->
             onEditInfoClicked = viewModel::showEditAnimeInfoDialog,
+            // AM (MERGE_SEASONS) -->
+            onMergeSettingsClicked = viewModel::showMergeSettingsDialog,
+            // <-- AM (MERGE_SEASONS)
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            onSeasonSelected = viewModel::selectSeason,
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             // <-- AM (CUSTOM_INFORMATION)
             // AM (CLEAR_ANIME) -->
             onClearAnimeClicked = viewModel::showClearAnimeDialog,
@@ -242,6 +258,22 @@ class AnimeScreen(
             onEpisodeSelected = viewModel::toggleSelection,
             onAllEpisodeSelected = viewModel::toggleAllSelection,
             onInvertSelection = viewModel::invertSelection,
+            // AM (EPISODE_NAMES) -->
+            onRenameEpisode = viewModel::showRenameEpisodeDialog,
+            // <-- AM (EPISODE_NAMES)
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            reorderActions = remember(viewModel) {
+                EpisodeReorderActions(
+                    onEnter = viewModel::enterReorderMode,
+                    onLeave = viewModel::leaveReorderMode,
+                    onExit = viewModel::exitReorderMode,
+                    onMove = viewModel::moveEpisodes,
+                    onChangeSeason = viewModel::showChangeEpisodeSeasonDialog,
+                    onDiscard = viewModel::discardReorderChanges,
+                    onReset = viewModel::resetSelectedEpisodeOrder,
+                )
+            },
+            // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = {
                 navigator.push(AnimeScreen(it.id))
@@ -250,7 +282,7 @@ class AnimeScreen(
                 scope.launchIO {
                     val episode = viewModel.getNextUnseenEpisode(it.anime)
                     episode?.let { ep ->
-                        openEpisode(context, ep, viewModel.alwaysUseExternalPlayer)
+                        openEpisode(context, it.anime, ep, viewModel.alwaysUseExternalPlayer)
                     }
                 }
             },
@@ -481,6 +513,41 @@ class AnimeScreen(
                 )
             }
             // <-- AM (CLEAR_ANIME)
+            // AM (EPISODE_NAMES) -->
+            is AnimeViewModel.Dialog.RenameEpisode -> {
+                RenameEpisodeDialog(
+                    currentName = dialog.currentName,
+                    onConfirm = { viewModel.renameEpisode(dialog.episodeId, it) },
+                    onDismissRequest = onDismissRequest,
+                )
+            }
+            // <-- AM (EPISODE_NAMES)
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            is AnimeViewModel.Dialog.ChangeEpisodeSeason -> {
+                ChangeEpisodeSeasonDialog(
+                    seasons = dialog.seasons,
+                    onSeasonSelected = viewModel::moveSelectionToSeason,
+                    // AM (NAMED_SEASONS) -->
+                    onEditSeasons = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
+                    // <-- AM (NAMED_SEASONS)
+                    onDismissRequest = onDismissRequest,
+                )
+            }
+            // <-- AM (CUSTOM_EPISODE_ORDER)
+            // AM (MERGE_SETTINGS) -->
+            is AnimeViewModel.Dialog.MergeSettings -> {
+                MergeSettingsDialog(
+                    dialog = dialog,
+                    onDismissRequest = onDismissRequest,
+                    onDeleteClick = viewModel::removeSourceFromMerge,
+                    onPositiveClick = viewModel::applyMergeSettings,
+                    // Pushed without dismissing, as in Komikku: the dialog is
+                    // ViewModel state, so it's back on returning.
+                    onOpenEntryClick = { navigator.push(AnimeScreen(it.id)) },
+                    onEditSeasonsClick = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
+                )
+            }
+            // <-- AM (MERGE_SETTINGS)
         }
 
         if (showScanlatorsDialog) {
@@ -493,16 +560,26 @@ class AnimeScreen(
         }
     }
 
-    private suspend fun continueWatching(context: Context, unseenEpisode: Episode?, useExternalPlayer: Boolean) {
+    private suspend fun continueWatching(
+        context: Context,
+        // AM (MERGED_SOURCES) -->
+        hostAnime: Anime,
+        // <-- AM (MERGED_SOURCES)
+        unseenEpisode: Episode?,
+        useExternalPlayer: Boolean,
+    ) {
         // AM (CONTINUE_BUTTON_RESUME_FIX) -->
         // forceResume = true: this is specifically the "Continue" action, not an
         // ordinary episode-list tap - see openEpisode()'s forceResume param.
-        if (unseenEpisode != null) openEpisode(context, unseenEpisode, useExternalPlayer, forceResume = true)
+        if (unseenEpisode != null) openEpisode(context, hostAnime, unseenEpisode, useExternalPlayer, forceResume = true)
         // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
     }
 
     private suspend fun openEpisode(
         context: Context,
+        // AM (MERGED_SOURCES) -->
+        hostAnime: Anime,
+        // <-- AM (MERGED_SOURCES)
         episode: Episode,
         useExternalPlayer: Boolean,
         // AM (CONTINUE_BUTTON_RESUME_FIX) -->
@@ -535,12 +612,27 @@ class AnimeScreen(
         forceResume: Boolean = false,
         // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
     ) {
+        // AM (MERGED_SOURCES) -->
+        // A merged entry's displayed episodes are the union of its children's
+        // episodes, so episode.animeId points at the child that owns it, not
+        // the entry the user is looking at. Launching the player with
+        // episode.animeId would initialize the session on that child and trap
+        // next/previous inside the child's native playlist; launching with the
+        // merged entry's own id makes the player build its playlist from the
+        // merged union and resolve each episode's real source at load time
+        // (PlayerViewModel.setupEpisodeList / resolveEpisodeAnimeAndSource).
+        val targetAnimeId = if (hostAnime.source == MergedSource.ID) hostAnime.id else episode.animeId
+        // <-- AM (MERGED_SOURCES)
         // AM (CONTINUE_BUTTON_RESUME_FIX) -->
         if (forceResume) {
             val holder = PlayerMediaHolder.current
             val liveState = holder?.state?.value
             if (holder != null && holder.hasAdoptedPlayer &&
-                liveState?.animeId == episode.animeId && liveState.episodeId == episode.id
+                // AM (MERGED_SOURCES) -->
+                // episode.animeId -> targetAnimeId: the session's anime is what
+                // we launch with, not necessarily the episode's owning child.
+                // <-- AM (MERGED_SOURCES)
+                liveState?.animeId == targetAnimeId && liveState.episodeId == episode.id
             ) {
                 holder.setPaused(false)
             }
@@ -550,7 +642,10 @@ class AnimeScreen(
         withIOContext {
             MainActivity.startPlayerActivity(
                 context,
-                episode.animeId,
+                // AM (MERGED_SOURCES) -->
+                // episode.animeId -> targetAnimeId (see above).
+                // <-- AM (MERGED_SOURCES)
+                targetAnimeId,
                 episode.id,
                 useExternalPlayer,
                 forceResume = forceResume,

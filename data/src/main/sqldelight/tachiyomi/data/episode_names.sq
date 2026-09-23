@@ -1,0 +1,30 @@
+-- AM (EPISODE_NAMES) -->
+-- User-chosen episode names, global to the episode: the same episode reads the
+-- same everywhere it appears, including inside any merge it belongs to.
+--
+-- Deliberately NOT a rewrite of episodes.name. Downloads are located on disk by
+-- a folder name derived from the source's episode name, so changing that would
+-- orphan existing downloads and misfile new ones. Only display reads this, and
+-- clearing the row restores the source's name.
+CREATE TABLE episode_names(
+    episode_id INTEGER NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+getByAnimeIds:
+SELECT EN.episode_id, EN.name
+FROM episode_names EN
+JOIN episodes EP
+ON EP._id = EN.episode_id
+WHERE EP.anime_id IN :animeIds;
+
+upsert:
+INSERT OR REPLACE INTO episode_names(episode_id, name)
+VALUES (:episodeId, :name);
+
+delete:
+DELETE FROM episode_names
+WHERE episode_id = :episodeId;
+-- <-- AM (EPISODE_NAMES)

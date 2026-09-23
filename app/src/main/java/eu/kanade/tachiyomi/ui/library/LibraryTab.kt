@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,6 +60,9 @@ import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.library.model.LibraryAnime
 import tachiyomi.domain.library.model.LibraryGroup
 import tachiyomi.i18n.MR
+// AM (MERGED_SOURCES) -->
+import tachiyomi.i18n.animiru.AMMR
+// <-- AM (MERGED_SOURCES)
 import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.EmptyScreen
@@ -100,6 +104,9 @@ data object LibraryTab : Tab {
         val viewModel = metroViewModel<LibraryViewModel>()
         val settingsViewModel = metroViewModel<LibrarySettingsViewModel>()
         val state by viewModel.state.collectAsStateWithLifecycle()
+        // AM (MERGED_SOURCES) -->
+        val canMergeSelection by viewModel.canMergeSelection.collectAsStateWithLifecycle()
+        // <-- AM (MERGED_SOURCES)
 
         val snackbarHostState = remember { SnackbarHostState() }
 
@@ -192,6 +199,9 @@ data object LibraryTab : Tab {
                         viewModel.clearSelection()
                         navigator.push(MigrationConfigScreen(selection))
                     },
+                    // AM (MERGED_SOURCES) -->
+                    onMergeClicked = viewModel::mergeSelectionFromLibrary.takeIf { canMergeSelection },
+                    // <-- AM (MERGED_SOURCES)
                 )
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -301,6 +311,37 @@ data object LibraryTab : Tab {
         LaunchedEffect(state.selectionMode, state.dialog) {
             HomeScreen.showBottomNav(!state.selectionMode)
         }
+
+        // AM (MERGED_SOURCES) -->
+        LaunchedEffect(Unit) {
+            // Komikku-style post-merge flow: "Entry merged!" first, then an
+            // actionable "Remove original entries from library?" snackbar
+            // (Remove action / X dismiss), then open the merged entry.
+            viewModel.mergedAnimeEvent.collect { result ->
+                snackbarHostState.showSnackbar(context.stringResource(AMMR.strings.am_merge_entry_merged))
+                val removeResult = snackbarHostState.showSnackbar(
+                    message = context.stringResource(AMMR.strings.am_merge_remove_originals),
+                    actionLabel = context.stringResource(MR.strings.action_remove),
+                    withDismissAction = true,
+                )
+                if (removeResult == SnackbarResult.ActionPerformed) {
+                    viewModel.removeMergedOriginals(result.originals)
+                    navigator.push(AnimeScreen(result.mergedAnimeId))
+                }
+            }
+        }
+        LaunchedEffect(Unit) {
+            viewModel.mergeUnavailableEvent.collect { reason ->
+                val message = when (reason) {
+                    LibraryViewModel.MergeUnavailableReason.TooFewSelected ->
+                        context.stringResource(AMMR.strings.am_merge_requires_valid_selection)
+                    LibraryViewModel.MergeUnavailableReason.Invalid ->
+                        context.stringResource(AMMR.strings.am_merge_failed)
+                }
+                snackbarHostState.showSnackbar(message)
+            }
+        }
+        // <-- AM (MERGED_SOURCES)
 
         LaunchedEffect(state.isLoading) {
             if (!state.isLoading) {
