@@ -310,13 +310,6 @@ class PlayerActivity : BaseActivity() {
 
             val bound = binder.getMediaHolder()
             mediaHolder = bound
-            // SVC_RACE_DEBUG -->
-            logcat {
-                "SVC_RACE_DEBUG Activity.onServiceConnected() activity=${System.identityHashCode(this@PlayerActivity)} " +
-                    "service=${System.identityHashCode(binder.getService())} holder=${System.identityHashCode(bound)} " +
-                    "holderHasAdoptedPlayer=${bound.hasAdoptedPlayer} at=${android.os.SystemClock.elapsedRealtime()}"
-            }
-            // <-- SVC_RACE_DEBUG
             logcat { "PlayerActivity bound to PlayerMediaHolder: $bound (viewModel.player=${viewModel.player})" }
             viewModel.bindToService(bound)
 
@@ -469,13 +462,6 @@ class PlayerActivity : BaseActivity() {
             forceResume: Boolean = false,
             // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
         ): Intent {
-            // SVC_RACE_DEBUG -->
-            logcat {
-                "SVC_RACE_DEBUG PlayerActivity.newIntent() called animeId=$animeId episodeId=$episodeId " +
-                    "hasLiveInstance=$hasLiveInstance liveInstanceCount=$liveInstanceCount " +
-                    "at=${android.os.SystemClock.elapsedRealtime()}"
-            }
-            // <-- SVC_RACE_DEBUG
             return Intent(context, PlayerActivity::class.java).apply {
                 putExtra("animeId", animeId)
                 putExtra("episodeId", episodeId)
@@ -812,15 +798,6 @@ class PlayerActivity : BaseActivity() {
         liveInstanceCount++
         // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
 
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG Activity.onCreate() liveInstanceCount=$liveInstanceCount " +
-                "activity=${System.identityHashCode(this)} isTaskRoot=$isTaskRoot " +
-                "currentHolder=${PlayerMediaHolder.current?.let { System.identityHashCode(it) }} " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
-
         // AM (DUPLICATE_INSTANCE_SELF_TERMINATE) -->
         // As early as possible, before anything below touches viewModel (which would
         // construct its own, throwaway MPVPlayer/native mpv instance for an Activity
@@ -828,13 +805,6 @@ class PlayerActivity : BaseActivity() {
         // isDuplicateInstanceSelfTerminating's doc comment for why this exists at all.
         if (liveInstanceCount > 1) {
             isDuplicateInstanceSelfTerminating = true
-            // SVC_RACE_DEBUG -->
-            logcat {
-                "SVC_RACE_DEBUG Activity.onCreate() SELF-TERMINATING as duplicate " +
-                    "activity=${System.identityHashCode(this)} liveInstanceCount=$liveInstanceCount " +
-                    "isTaskRoot=$isTaskRoot at=${android.os.SystemClock.elapsedRealtime()}"
-            }
-            // <-- SVC_RACE_DEBUG
             finish()
             return
         }
@@ -862,12 +832,6 @@ class PlayerActivity : BaseActivity() {
         // call startForeground() - essentially immediately after this. Using a plain
         // start() here just means the Service surviving isn't ITSELF gated on that
         // 5s deadline if binding is ever slower than expected.
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG Activity.onCreate() about to startService+bindService activity=${System.identityHashCode(this)} " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         startService(PlayerBackgroundPlaybackService.newIntent(this))
         bindService(
             PlayerBackgroundPlaybackService.newIntent(this),
@@ -1132,13 +1096,6 @@ class PlayerActivity : BaseActivity() {
                             // relies on, so MainActivity lands back on the anime being
                             // watched instead of an empty stack.
                             if (isTaskRoot) {
-                                // SVC_RACE_DEBUG -->
-                                logcat {
-                                    "SVC_RACE_DEBUG onBack() BACK_FALLBACK_TO_ANIME firing isTaskRoot=true " +
-                                        "activity=${System.identityHashCode(this@PlayerActivity)} " +
-                                        "at=${android.os.SystemClock.elapsedRealtime()}"
-                                }
-                                // <-- SVC_RACE_DEBUG
                                 viewModel.stateData.value.currentAnime?.id?.let { animeId ->
                                     startActivity(
                                         Intent(this, MainActivity::class.java)
@@ -1176,13 +1133,6 @@ class PlayerActivity : BaseActivity() {
                                     )
                                 }
                             } else {
-                                // SVC_RACE_DEBUG -->
-                                logcat {
-                                    "SVC_RACE_DEBUG onBack() isTaskRoot=false, plain finish() " +
-                                        "activity=${System.identityHashCode(this@PlayerActivity)} " +
-                                        "at=${android.os.SystemClock.elapsedRealtime()}"
-                                }
-                                // <-- SVC_RACE_DEBUG
                             }
                             // <-- AM (BACK_FALLBACK_TO_ANIME)
                             finish()
@@ -1246,13 +1196,6 @@ class PlayerActivity : BaseActivity() {
             if (isFinishing && !isBackgroundPlayTransitionFinish && mediaHolder?.hasExternalScreenConsumer != true) {
                 // <-- AM (PIP_FINISH_NOT_MOVETASKTOBACK)
                 // Genuine end of this playback session - tear everything down.
-                // SVC_RACE_DEBUG -->
-                logcat {
-                    "SVC_RACE_DEBUG Activity.onDestroy() genuine-teardown-start activity=${System.identityHashCode(this)} " +
-                        "holder=${mediaHolder?.let { System.identityHashCode(it) }} " +
-                        "player=${System.identityHashCode(viewModel.player)} at=${android.os.SystemClock.elapsedRealtime()}"
-                }
-                // <-- SVC_RACE_DEBUG
                 stopBackgroundPlayback()
                 viewModel.player.release()
                 viewModel.stopHttpServer()
@@ -1272,12 +1215,6 @@ class PlayerActivity : BaseActivity() {
                 // a player already released two lines above.
                 mediaHolder?.release()
                 // <-- AM (STALE_HOLDER_STATE_FIX)
-                // SVC_RACE_DEBUG -->
-                logcat {
-                    "SVC_RACE_DEBUG Activity.onDestroy() about to stopService+unbindService " +
-                        "activity=${System.identityHashCode(this)} at=${android.os.SystemClock.elapsedRealtime()}"
-                }
-                // <-- SVC_RACE_DEBUG
                 stopService(PlayerBackgroundPlaybackService.newIntent(this))
                 // AM (CROSS_SERIES_TEARDOWN_RELAUNCH_FIX) -->
                 // After teardown above
@@ -1289,15 +1226,6 @@ class PlayerActivity : BaseActivity() {
                 // continue - leave the Service, its player, its notification (if active), and
                 // the MediaSession running. A future reattach adopts the same player via
                 // PlayerMediaHolder.adopt() instead of these being torn down out from under it.
-                // SVC_RACE_DEBUG -->
-                logcat {
-                    "SVC_RACE_DEBUG Activity.onDestroy() PRESERVE-session branch activity=${System.identityHashCode(this)} " +
-                        "holder=${mediaHolder?.let { System.identityHashCode(it) }} " +
-                        "isFinishing=$isFinishing isBackgroundPlayTransitionFinish=$isBackgroundPlayTransitionFinish " +
-                        "hasExternalScreenConsumer=${mediaHolder?.hasExternalScreenConsumer} " +
-                        "at=${android.os.SystemClock.elapsedRealtime()}"
-                }
-                // <-- SVC_RACE_DEBUG
 
                 // AM (BACKGROUND_HANDOFF_NOTIFY_FIX_REMOVED) -->
                 // Removed: this duplicated what PlayerBackgroundPlaybackService's own
@@ -1313,12 +1241,6 @@ class PlayerActivity : BaseActivity() {
             }
 
             unbindService(mediaHolderConnection)
-            // SVC_RACE_DEBUG -->
-            logcat {
-                "SVC_RACE_DEBUG Activity.onDestroy() unbindService() returned activity=${System.identityHashCode(this)} " +
-                    "at=${android.os.SystemClock.elapsedRealtime()}"
-            }
-            // <-- SVC_RACE_DEBUG
             mediaHolder = null
             // <-- AM (SERVICE_OWNED_PLAYER)
         }
@@ -1352,13 +1274,6 @@ class PlayerActivity : BaseActivity() {
         // window exists right now, not whether the underlying session is preserved.
         liveInstanceCount--
         // <-- AM (LIVE_INSTANCE_REOPEN_FIX)
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG Activity.onDestroy() liveInstanceCount-- -> $liveInstanceCount " +
-                "activity=${System.identityHashCode(this)} isDuplicateInstanceSelfTerminating=$isDuplicateInstanceSelfTerminating " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
 
         super.onDestroy()
     }
@@ -1375,7 +1290,6 @@ class PlayerActivity : BaseActivity() {
         SecureActivityDelegate.setBackgroundServiceActive(this, true)
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     }
-
 
     private fun stopBackgroundPlayback() {
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->

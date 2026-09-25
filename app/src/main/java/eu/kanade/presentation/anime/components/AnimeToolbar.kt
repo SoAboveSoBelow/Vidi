@@ -109,6 +109,11 @@ fun AnimeToolbar(
     // AM (EPISODE_SEARCH) -->
     episodeSearchQuery: String?,
     onEpisodeSearchQueryChange: (String?) -> Unit,
+    // AM (EPISODE_SEARCH_MIN_COUNT) -->
+    // The unfiltered episode count, so the search action can be left out of
+    // entries small enough to scan by eye.
+    episodeCount: Int,
+    // <-- AM (EPISODE_SEARCH_MIN_COUNT)
     // <-- AM (EPISODE_SEARCH)
 
     titleAlphaProvider: () -> Float,
@@ -258,7 +263,12 @@ fun AnimeToolbar(
                         return@buildList
                     }
                     // AM (EPISODE_SEARCH) -->
-                    if (!isSearching) {
+                    // AM (EPISODE_SEARCH_MIN_COUNT) -->
+                    // isSearching stays in the condition on its own for the reset
+                    // branch below: if a query is somehow already active on a short
+                    // entry, clearing it must still be reachable.
+                    if (!isSearching && episodeCount >= MIN_EPISODES_FOR_SEARCH) {
+                    // <-- AM (EPISODE_SEARCH_MIN_COUNT)
                         add(
                             AppBar.Action(
                                 title = stringResource(MR.strings.action_search),
@@ -458,3 +468,8 @@ private fun EpisodeViewModeDialog(
     )
 }
 // <-- AM (EPISODE_VIEW_MODE)
+
+// AM (EPISODE_SEARCH_MIN_COUNT) -->
+/** Below this many episodes the list is short enough to scan without searching. */
+private const val MIN_EPISODES_FOR_SEARCH = 10
+// <-- AM (EPISODE_SEARCH_MIN_COUNT)

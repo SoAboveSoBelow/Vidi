@@ -637,6 +637,12 @@ private fun AnimeScreenSmallImpl(
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
                     onEpisodeSearchQueryChange = { episodeSearchQuery = it },
+                    // AM (EPISODE_SEARCH_MIN_COUNT) -->
+                    // listItem, not the filtered list: filtering down to a handful
+                    // of results must not make the control that did the filtering
+                    // disappear.
+                    episodeCount = listItem.size,
+                    // <-- AM (EPISODE_SEARCH_MIN_COUNT)
                     // <-- AM (EPISODE_SEARCH)
                     titleAlphaProvider = { titleAlpha },
                     backgroundAlphaProvider = { backgroundAlpha },
@@ -1180,6 +1186,12 @@ fun AnimeScreenLargeImpl(
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
                     onEpisodeSearchQueryChange = { episodeSearchQuery = it },
+                    // AM (EPISODE_SEARCH_MIN_COUNT) -->
+                    // listItem, not the filtered list: filtering down to a handful
+                    // of results must not make the control that did the filtering
+                    // disappear.
+                    episodeCount = listItem.size,
+                    // <-- AM (EPISODE_SEARCH_MIN_COUNT)
                     // <-- AM (EPISODE_SEARCH)
                     titleAlphaProvider = { 1f },
                     backgroundAlphaProvider = { 1f },

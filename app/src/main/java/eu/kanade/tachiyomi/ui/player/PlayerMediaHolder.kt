@@ -239,6 +239,61 @@ class PlayerMediaHolder(
             private set(value) { _current.value = value }
             // <-- AM (NOW_PLAYING_INDICATOR)
 
+        // AM (STREAMING_PLAYBACK_SIGNAL) -->
+        /**
+         * Whether a session is currently PLAYING media that is coming off the
+         * network - streamed, or served through a source's local HTTP server,
+         * which still fetches remotely. False while paused, while playing a
+         * downloaded or local file, and whenever no session exists.
+         *
+         * Exists so the downloader can yield to playback (see Downloader's own
+         * note). Written by PlayerViewModel, which is the only thing that knows
+         * both what is loaded and whether it is actually running.
+         */
+        private val _streamingPlaybackActive = MutableStateFlow(false)
+        val streamingPlaybackActive = _streamingPlaybackActive.asStateFlow()
+
+        fun setStreamingPlaybackActive(active: Boolean) {
+            _streamingPlaybackActive.value = active
+        }
+        // <-- AM (STREAMING_PLAYBACK_SIGNAL)
+
+        // AM (PLAYBACK_STARVED_SIGNAL) -->
+        /**
+         * Whether playback is currently stopped waiting for its own buffer - mpv's
+         * `paused-for-cache`. Distinct from [streamingPlaybackActive], which only
+         * says the player is pulling from the network: this says it has run out and
+         * the picture is frozen, which is the point at which anything else sharing
+         * the connection should yield almost entirely.
+         */
+        private val _playbackStarved = MutableStateFlow(false)
+        val playbackStarved = _playbackStarved.asStateFlow()
+
+        fun setPlaybackStarved(starved: Boolean) {
+            _playbackStarved.value = starved
+        }
+        // <-- AM (PLAYBACK_STARVED_SIGNAL)
+
+        // AM (MEASURED_BANDWIDTH_SHARE) -->
+        /**
+         * How full the player's read-ahead buffer is against its own target, 0f to
+         * 1f, or null when nothing is streaming.
+         *
+         * This is the signal a bandwidth split should key on, rather than "is
+         * something playing". A stream the connection comfortably outruns - a lower
+         * quality than the link can carry - sits pegged at 1f, which means playback
+         * has headroom and a download competing for it costs nothing. A stream that
+         * cannot keep up sits low. The number says how much trouble playback is in,
+         * which is the only thing that should decide what a download is allowed.
+         */
+        private val _playbackBufferFill = MutableStateFlow<Float?>(null)
+        val playbackBufferFill = _playbackBufferFill.asStateFlow()
+
+        fun setPlaybackBufferFill(fill: Float?) {
+            _playbackBufferFill.value = fill
+        }
+        // <-- AM (MEASURED_BANDWIDTH_SHARE)
+
         // AM (PLAYER_OVERLAY_MIGRATION) -->
         // What used to be "push a PlayerHostScreen onto the Navigator" is
         // now "submit a request here" - PlayerOverlay (hosted once, at
@@ -276,12 +331,6 @@ class PlayerMediaHolder(
     // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
 
     init {
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG PlayerMediaHolder.init setting current: newHolder=${System.identityHashCode(this)} " +
-                "previousCurrent=${current?.let { System.identityHashCode(it) }} at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
         current = this
         // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
@@ -468,13 +517,6 @@ class PlayerMediaHolder(
      * whether their own instance was accepted or discarded.
      */
     fun adopt(existing: MPVPlayer): MPVPlayer {
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG PlayerMediaHolder.adopt() holder=${System.identityHashCode(this)} " +
-                "incomingPlayer=${System.identityHashCode(existing)} currentPlayer=${System.identityHashCode(_player)} " +
-                "willAccept=${_player == null} at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         if (_player == null) {
             _player = existing
             // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
@@ -1171,13 +1213,6 @@ class PlayerMediaHolder(
 
     /** Tears down the player and MediaSession. Only called when playback genuinely ends. */
     fun release() {
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG PlayerMediaHolder.release() holder=${System.identityHashCode(this)} " +
-                "player=${System.identityHashCode(_player)} hasAdoptedPlayer=$hasAdoptedPlayer " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
         unregisterAudioRouteObserver()
         // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
@@ -1233,15 +1268,20 @@ class PlayerMediaHolder(
         // self-registered (an unlikely but possible ordering during rapid
         // Service restarts) must never wipe out that newer, genuinely live
         // registration.
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG PlayerMediaHolder.release() clearing current: holder=${System.identityHashCode(this)} " +
-                "current===this=${current === this} currentIs=${current?.let { System.identityHashCode(it) }} " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         if (current === this) {
             current = null
+            // AM (STREAMING_PLAYBACK_SIGNAL) -->
+            // The session is over; nothing is streaming. Cleared here rather than
+            // only in the ViewModel so an abrupt teardown can't leave the
+            // downloader permanently throttled.
+            setStreamingPlaybackActive(false)
+            // <-- AM (STREAMING_PLAYBACK_SIGNAL)
+            // AM (PLAYBACK_STARVED_SIGNAL) -->
+            setPlaybackStarved(false)
+            // <-- AM (PLAYBACK_STARVED_SIGNAL)
+            // AM (MEASURED_BANDWIDTH_SHARE) -->
+            setPlaybackBufferFill(null)
+            // <-- AM (MEASURED_BANDWIDTH_SHARE)
         }
         // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
     }

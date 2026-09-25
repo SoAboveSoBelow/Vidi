@@ -70,6 +70,10 @@ import eu.kanade.tachiyomi.animesource.model.TileInfo
 import eu.kanade.tachiyomi.animesource.model.TimeStamp
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
+import eu.kanade.tachiyomi.data.media.MediaCache
+import eu.kanade.tachiyomi.data.media.ResolvedVideoCache
+import eu.kanade.tachiyomi.data.media.MediaProxyServer
+import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.data.cache.BackgroundCache
 import eu.kanade.tachiyomi.data.cache.CoverCache
 import eu.kanade.tachiyomi.data.connection.syncmiru.SyncDataJob
@@ -230,6 +234,9 @@ class PlayerViewModel(
 
     private val imageSaver: ImageSaver,
     private val downloadManager: DownloadManager,
+    // AM (MEDIA_CACHE) -->
+    private val networkService: NetworkHelper,
+    // <-- AM (MEDIA_CACHE)
     private val sourceManager: SourceManager,
     private val storageManager: StorageManager,
     private val trackerManager: TrackerManager,
@@ -421,13 +428,6 @@ class PlayerViewModel(
         }
 
     init {
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG PlayerViewModel.init reusableHolder=${reusableHolder?.let { System.identityHashCode(it) }} " +
-                "resolvedPlayer=${System.identityHashCode(_player)} " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         viewModelScope.launchIO {
             getCustomButtons.subscribeAll().collectLatest { buttons ->
                 setupCustomButtons(buttons)
@@ -780,10 +780,46 @@ class PlayerViewModel(
                 .onEach { onSecondReached(it) }
                 .launchIn(viewModelScope)
 
+            // AM (PLAYBACK_STARVED_SIGNAL) -->
+            // mpv's own buffering state, published for MediaProxyServer's throttle.
+            // "Is a session streaming" was the wrong thing for it to watch: it says
+            // the player is using the network, not that the player is in trouble.
+            // This one says the player has run dry and is waiting, which is when a
+            // download should get out of the way completely.
+            propFlow<Boolean>("paused-for-cache")
+                .onEach { PlayerMediaHolder.setPlaybackStarved(it == true) }
+                .launchIn(viewModelScope)
+
+            // AM (MEASURED_BANDWIDTH_SHARE) -->
+            // demuxer-cache-time is how many seconds ahead the demuxer has read.
+            // Against the configured target it becomes a fill fraction, which is
+            // what the proxy's rate limiter allocates from. Local playback
+            // publishes null - there is no stream to protect.
+            propFlow<Float>("demuxer-cache-time")
+                .onEach { readAhead ->
+                    val target = playerPreferences.networkBufferSeconds.get().toFloat()
+                    val streaming = PlayerMediaHolder.streamingPlaybackActive.value
+                    PlayerMediaHolder.setPlaybackBufferFill(
+                        if (!streaming || readAhead == null || target <= 0f) {
+                            null
+                        } else {
+                            (readAhead / target).coerceIn(0f, 1f)
+                        },
+                    )
+                }
+                .launchIn(viewModelScope)
+            // <-- AM (MEASURED_BANDWIDTH_SHARE)
+            // <-- AM (PLAYBACK_STARVED_SIGNAL)
+
             propFlow<Boolean>("pause")
                 .filterNotNull()
                 .onEach { v ->
                     updatePlaybackData { it.copy(paused = v) }
+                    // AM (STREAMING_PLAYBACK_SIGNAL) -->
+                    // mpv's own property, so this covers every pause source -
+                    // UI, MediaSession, PIP action, the freeze around a switch.
+                    publishStreamingPlaybackState()
+                    // <-- AM (STREAMING_PLAYBACK_SIGNAL)
                     _eventFlow.emit(Event.UpdateDiscordRPC(v))
                 }
                 .launchIn(viewModelScope)
@@ -839,9 +875,34 @@ class PlayerViewModel(
         _castUiData.update { update(it) }
     }
 
+    // AM (PROP_FLOW_CACHED) -->
+    /**
+     * One flow per property name, for the life of this ViewModel.
+     *
+     * All 32 call sites are inside composables and none of them remember the
+     * result, so propFlow() ran on every recomposition - and every call went
+     * through to the mpv layer to build a new flow and register a new property
+     * observer for a property that was already being observed. Playing for a while
+     * therefore accumulated observers that nothing ever removes, and every mpv
+     * property change had to fan out across all of them: the app getting slower
+     * the longer it ran, rather than a single allocation leaking.
+     *
+     * Cached here rather than by wrapping each call site in remember(), because
+     * this fixes every existing call site and every future one, and a composable
+     * that forgets the wrapper cannot reintroduce the problem.
+     *
+     * Safe to key on the name alone: no property in this codebase is requested at
+     * two different types, so a cached flow's element type always matches what the
+     * caller asks for.
+     */
+    @PublishedApi
+    internal val propFlowCache = java.util.concurrent.ConcurrentHashMap<String, StateFlow<*>>()
+
     inline fun <reified T> propFlow(name: String): StateFlow<T?> {
-        return mpv.propFlow<T>(name)
+        @Suppress("UNCHECKED_CAST")
+        return propFlowCache.getOrPut(name) { mpv.propFlow<T>(name) } as StateFlow<T?>
     }
+    // <-- AM (PROP_FLOW_CACHED)
 
     fun setPropertyBoolean(property: String, value: Boolean) {
         mpv.setPropertyBoolean(property, value)
@@ -1632,6 +1693,14 @@ class PlayerViewModel(
     // <-- AM (EPISODE_NAMES)
 
     private fun setupEpisode(episode: Episode) {
+        // AM (PERSIST_ON_CADENCE) -->
+        // Reset the backstop for the new episode. Without this a switch from late
+        // in one episode to the start of another leaves the counter far ahead of
+        // the new position, and the difference stays negative until playback
+        // passes the old timestamp - the first several minutes of the new episode
+        // would never reach a backstop write.
+        lastPersistedPositionSeconds = 0
+        // <-- AM (PERSIST_ON_CADENCE)
         // AM (CUSTOM_EPISODE_ORDER) -->
         // Whatever made this episode current - confirming the prompt, a manual
         // next/previous, picking from the list, a playlist rehost - resolves
@@ -2107,6 +2176,134 @@ class PlayerViewModel(
         getHosterVideoLinksJob?.cancel()
     }
 
+    // AM (NEXT_EPISODE_PREFETCH) -->
+    /**
+     * A next episode whose hosters and best video have already been resolved, so
+     * the transition onto it is a loadfile instead of three sequential network
+     * round trips (getHosters -> loadHosterVideos -> resolveVideo) against a
+     * frozen frame.
+     *
+     * [hosterState] holds the chosen video already marked READY, which is what
+     * makes loadVideo() skip resolution entirely and go straight to setVideo().
+     */
+    private data class PrefetchedEpisode(
+        val episodeId: Long,
+        val hosterList: List<Hoster>,
+        val hosterState: List<HosterState>,
+        val selectedIndex: Pair<Int, Int>,
+        val fetchedAt: Long,
+    )
+
+    private var prefetchedEpisode: PrefetchedEpisode? = null
+    private var prefetchStartedForEpisodeId: Long? = null
+    private var prefetchJob: Job? = null
+
+    /** The prefetch for [episodeId], or null if there is none or it has aged out. */
+    private fun prefetchedFor(episodeId: Long?): PrefetchedEpisode? {
+        val prefetch = prefetchedEpisode ?: return null
+        if (episodeId == null || prefetch.episodeId != episodeId) return null
+        if (System.currentTimeMillis() - prefetch.fetchedAt > PREFETCH_TTL_MS) {
+            prefetchedEpisode = null
+            return null
+        }
+        return prefetch
+    }
+
+    private fun clearPrefetch() {
+        prefetchJob?.cancel()
+        prefetchJob = null
+        prefetchedEpisode = null
+        prefetchStartedForEpisodeId = null
+    }
+
+    /**
+     * Resolves the next episode shortly before this one ends. Deliberately close to
+     * the transition rather than early in the episode: resolved hoster links are
+     * usually time-limited, so a prefetch taken minutes ahead would be stale by the
+     * time it was used (and [PREFETCH_TTL_MS] discards one that sat too long anyway).
+     *
+     * Hosters are walked one at a time and the walk stops at the first video that
+     * resolves, rather than fanning out across all of them - this runs while the
+     * current episode is still streaming, and the point is to spend as little
+     * bandwidth as possible alongside playback.
+     */
+    private fun prefetchNextEpisode() {
+        val displayAnime = stateData.value.currentAnime ?: return
+        val state = stateData.value
+        val next = state.currentPlaylist.getOrNull(state.currentPlaylistIndex + 1) ?: return
+        val nextId = next.id ?: return
+        if (prefetchStartedForEpisodeId == nextId) return
+        prefetchStartedForEpisodeId = nextId
+
+        prefetchJob?.cancel()
+        prefetchJob = viewModelScope.launchIO {
+            try {
+                val (episodeAnime, episodeSource) = resolveEpisodeAnimeAndSource(displayAnime, next)
+                    ?: return@launchIO
+                val hosterList = episodeLoader.getHosters(next.toDomainEpisode()!!, episodeAnime, episodeSource)
+                if (hosterList.isEmpty()) return@launchIO
+
+                val states = MutableList<HosterState>(hosterList.size) { HosterState.Idle(hosterList[it].hosterName) }
+                hosterList.forEachIndexed { hosterIdx, hoster ->
+                    states[hosterIdx] = episodeLoader.loadHosterVideos(episodeSource, hoster)
+
+                    val (bestHosterIdx, bestVideoIdx) = hosterLoader.selectBestVideo(states)
+                    if (bestHosterIdx == -1) return@forEachIndexed
+
+                    val ready = states[bestHosterIdx] as? HosterState.Ready ?: return@forEachIndexed
+                    val video = ready.videoList.getOrNull(bestVideoIdx) ?: return@forEachIndexed
+                    val resolved = hosterLoader.getResolvedVideo(episodeSource, video)
+                    if (resolved == null || resolved.videoUrl.isEmpty()) return@forEachIndexed
+
+                    states[bestHosterIdx] = ready.getChangedAt(bestVideoIdx, resolved, Video.State.READY)
+                    prefetchedEpisode = PrefetchedEpisode(
+                        episodeId = nextId,
+                        hosterList = hosterList,
+                        hosterState = states.toList(),
+                        selectedIndex = bestHosterIdx to bestVideoIdx,
+                        fetchedAt = System.currentTimeMillis(),
+                    )
+                    return@launchIO
+                }
+            } catch (e: Throwable) {
+                if (e is CancellationException) throw e
+                // A prefetch is an optimisation - a failure just means the normal
+                // load path runs, exactly as it did before.
+                logcat(LogPriority.INFO, e) { "NEXT_EPISODE_PREFETCH failed for episodeId=$nextId" }
+            }
+        }
+    }
+    // <-- AM (NEXT_EPISODE_PREFETCH)
+
+    // AM (STOP_RESOLVING_UNUSED_HOSTERS) -->
+    /**
+     * Raised by the first hoster whose video actually starts playing, to cancel the
+     * sibling loads still in flight.
+     *
+     * Not a CancellationException on purpose: loadHosters()'s own catch treats one
+     * of those as "the whole load was abandoned" and resets every hoster to Idle,
+     * which would throw away the Ready state of the hoster now playing.
+     */
+    private class PlaybackStartedEarly : Exception()
+
+    /**
+     * Returns every hoster still mid-load to Idle after an early stop. Idle is the
+     * state onHosterClicked() already loads on demand (it is what a `lazy` hoster
+     * gets), so the quality sheet keeps working - it just resolves a hoster when
+     * the user asks for it instead of resolving all of them next to a video that
+     * is trying to start.
+     */
+    private fun markLoadingHostersIdle() {
+        updateStateData { data ->
+            data.copy(
+                hosterState = data.hosterState.map { state ->
+                    if (state is HosterState.Loading) HosterState.Idle(state.name) else state
+                },
+            )
+        }
+    }
+    // <-- AM (STOP_RESOLVING_UNUSED_HOSTERS)
+
     fun loadHosters(hosterList: List<Hoster>, hosterIndex: Int, videoIndex: Int) {
         val hasFoundPreferredVideo = AtomicBoolean(false)
 
@@ -2117,6 +2314,29 @@ class PlayerViewModel(
         val source = stateData.value.currentEpisodeSource
             ?: throw Exception("No source available")
         // <-- AM (MERGED_SOURCES)
+
+        // AM (NEXT_EPISODE_PREFETCH) -->
+        // Identity check, not equality: this list is the one loadEpisode() handed
+        // back, which is the prefetched list itself when a prefetch was used. Any
+        // other caller (a genuine fresh load, a rehost) takes the normal path.
+        val prefetch = prefetchedFor(stateData.value.currentEpisode?.id)
+        if (prefetch != null && hosterList === prefetch.hosterList) {
+            clearPrefetch()
+            updateStateData { it.copy(hosterState = prefetch.hosterState) }
+
+            val (prefetchedHosterIdx, prefetchedVideoIdx) = prefetch.selectedIndex
+            val prefetchedVideo = (prefetch.hosterState[prefetchedHosterIdx] as HosterState.Ready)
+                .videoList[prefetchedVideoIdx]
+
+            getHosterVideoLinksJob?.cancel()
+            getHosterVideoLinksJob = viewModelScope.launchIO {
+                // Already READY in the seeded state, so this resolves nothing and
+                // goes straight to the loadfile.
+                loadVideo(prefetchedVideo, prefetchedHosterIdx, prefetchedVideoIdx)
+            }
+            return
+        }
+        // <-- AM (NEXT_EPISODE_PREFETCH)
 
         getHosterVideoLinksJob?.cancel()
         getHosterVideoLinksJob = viewModelScope.launchIO {
@@ -2155,6 +2375,9 @@ class PlayerViewModel(
                                         if (!success) {
                                             hasFoundPreferredVideo.set(false)
                                         }
+                                        // AM (STOP_RESOLVING_UNUSED_HOSTERS) -->
+                                        if (success) throw PlaybackStartedEarly()
+                                        // <-- AM (STOP_RESOLVING_UNUSED_HOSTERS)
                                     }
                                 }
 
@@ -2171,6 +2394,9 @@ class PlayerViewModel(
                                             if (!success) {
                                                 hasFoundPreferredVideo.set(false)
                                             }
+                                            // AM (STOP_RESOLVING_UNUSED_HOSTERS) -->
+                                            if (success) throw PlaybackStartedEarly()
+                                            // <-- AM (STOP_RESOLVING_UNUSED_HOSTERS)
                                         }
                                     }
                                 }
@@ -2194,6 +2420,19 @@ class PlayerViewModel(
                         }
                     }
                 }
+            } catch (_: PlaybackStartedEarly) {
+                // AM (STOP_RESOLVING_UNUSED_HOSTERS) -->
+                // The fan-out above stays parallel - that is what keeps startup
+                // latency low when the first hoster is slow or dead. What changes
+                // is that it no longer runs to completion: once a video is actually
+                // playing, the other hosters' resolution is work whose result
+                // nothing reads, competing for bandwidth with the video that just
+                // started. Throwing from the winning child cancels its siblings
+                // through coroutineScope's own semantics; whatever was still
+                // loading goes back to Idle, which onHosterClicked() loads on
+                // demand.
+                markLoadingHostersIdle()
+                // <-- AM (STOP_RESOLVING_UNUSED_HOSTERS)
             } catch (e: CancellationException) {
                 updateStateData {
                     it.copy(
@@ -2213,13 +2452,32 @@ class PlayerViewModel(
         if (hosterIdx == -1) return false
         val newVideo = (stateData.value.hosterState[hosterIdx] as HosterState.Ready).videoList[videoIdx]
         viewModelScope.launchIO {
-            loadVideo(newVideo, hosterIdx, videoIdx)
+            // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
+            // A mid-playback failover to another hoster is the same operation as a
+            // manual quality switch as far as position goes: the episode did not
+            // change, so playback resumes where it stopped. On an initial load that
+            // never started, the live position is 0 anyway.
+            loadVideo(newVideo, hosterIdx, videoIdx, keepPosition = true)
+            // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
         }
         return true
     }
 
+    // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
+    // keepPosition states the CALLER'S INTENT, which is the only thing that can
+    // distinguish the two operations sharing this function: starting an episode
+    // (position comes from the resume policy - temp memory, then the DB, then 0)
+    // versus swapping the file under an episode that is already playing (position
+    // is simply where playback currently is). It is not inferable from
+    // isLoadingEpisode, which loadVideo sets true for both.
+    // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
     /** Loads [video]; returns true if successful. */
-    private suspend fun loadVideo(video: Video, hosterIndex: Int, videoIndex: Int): Boolean {
+    private suspend fun loadVideo(
+        video: Video,
+        hosterIndex: Int,
+        videoIndex: Int,
+        keepPosition: Boolean = false,
+    ): Boolean {
         // AM (MERGED_SOURCES) -->
         val source = stateData.value.currentEpisodeSource
             ?: throw Exception("No source loaded")
@@ -2247,7 +2505,36 @@ class PlayerViewModel(
         }
 
         // Pause until everything has loaded
-        pause()
+        // AM (SWITCH_PAUSES_LATE) -->
+        // Only freeze up front when the EPISODE is changing: there the old file's
+        // audio would otherwise keep playing over the new episode's load. A
+        // same-episode swap (quality change, hoster failover) has nothing to hide -
+        // the current file is still perfectly playable, and resolving the new URL
+        // is a network round trip. Pausing before that turned every quality change
+        // into a frozen frame for the length of the resolve; the pause for those
+        // moves down to just before the loadfile that actually replaces the file.
+        if (!keepPosition) pauseInternal()
+        // <-- AM (SWITCH_PAUSES_LATE)
+
+        // AM (SHARED_LINK_RESOLUTION) -->
+        // A link the downloader already resolved for this episode and quality is
+        // the same link this would go and fetch, so take it rather than hitting the
+        // hoster a second time.
+        val sharedKey = ResolvedVideoCache.key(
+            stateData.value.currentEpisode?.id,
+            video.videoTitle,
+        )
+        ResolvedVideoCache.get(sharedKey)?.let { shared ->
+            updateHosterStateAt(
+                hosterIndex,
+                selectedHosterState.getChangedAt(videoIndex, shared, Video.State.READY),
+            )
+            qualityIndex = Pair(hosterIndex, videoIndex)
+            if (keepPosition) pauseInternal()
+            setVideo(shared, keepPosition)
+            return true
+        }
+        // <-- AM (SHARED_LINK_RESOLUTION)
 
         val resolvedVideo = if (selectedHosterState.videoState[videoIndex] != Video.State.READY) {
             hosterLoader.getResolvedVideo(source, video)
@@ -2270,7 +2557,9 @@ class PlayerViewModel(
                 }
 
                 val newVideo = (stateData.value.hosterState[newHosterIdx] as HosterState.Ready).videoList[newVideoIdx]
-                return loadVideo(newVideo, newHosterIdx, newVideoIdx)
+                // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
+                return loadVideo(newVideo, newHosterIdx, newVideoIdx, keepPosition)
+                // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
             } else {
                 updateStateData {
                     it.copy(
@@ -2304,12 +2593,20 @@ class PlayerViewModel(
             loadThumbnails(resolvedVideo, source)
         }
 
+        // AM (SHARED_LINK_RESOLUTION) -->
+        ResolvedVideoCache.put(sharedKey, resolvedVideo)
+        // <-- AM (SHARED_LINK_RESOLUTION)
         qualityIndex = Pair(hosterIndex, videoIndex)
-        setVideo(resolvedVideo)
+        // AM (SWITCH_PAUSES_LATE) -->
+        if (keepPosition) pauseInternal()
+        // <-- AM (SWITCH_PAUSES_LATE)
+        // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
+        setVideo(resolvedVideo, keepPosition)
+        // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
         return true
     }
 
-    private fun setVideo(video: Video?) {
+    private fun setVideo(video: Video?, keepPosition: Boolean = false) {
         if (player.isReleased) return
         if (video == null) return
         stopHttpServer()
@@ -2328,7 +2625,15 @@ class PlayerViewModel(
         } else {
             uiData.value.isLoadingEpisode
         }
-        val resumePosition = if (isLoadingEpisode) {
+        // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
+        // isLoadingEpisode alone used to pick this branch, and loadVideo sets it
+        // true for a quality switch as well as an episode load - so switching
+        // quality mid-episode resumed from the DB's last tick, or from 0 outright
+        // once the episode had passed the seen threshold with
+        // preserveWatchingPosition off. That 0 is what made a quality change
+        // re-fetch the new file from the first byte.
+        // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
+        val resumePosition = if (isLoadingEpisode && !keepPosition) {
             stateData.value.currentEpisode?.let { episode ->
                 val preservePos = playerPreferences.preserveWatchingPosition.get()
                 val liveHolderState = mediaHolder?.state?.value
@@ -2476,14 +2781,69 @@ class PlayerViewModel(
                     updateStateData { it.copy(currentVideo = newVideo) }
                 }
 
-                loadFile(parseVideoUrl(videoUrl)!!, videoOptions)
+                // AM (MEDIA_CACHE) -->
+                // Read through MediaProxyServer under the same (episode, quality)
+                // key the downloader uses, so an episode being downloaded while it
+                // is watched is fetched once and read twice instead of pulled twice
+                // over the same connection.
+                //
+                // Only for a remote URL: a downloaded file, a local source and the
+                // source's own localhost server all stay exactly as they were, and
+                // a proxy that cannot start falls through to the direct URL.
+                val playbackUrl = proxiedPlaybackUrl(videoUrl, video) ?: videoUrl
+                loadFile(parseVideoUrl(playbackUrl)!!, videoOptions)
+                // <-- AM (MEDIA_CACHE)
             }
         }
 
         viewModelScope.launch {
             _eventFlow.emit(Event.UpdateDiscordRPC(false))
         }
+        // AM (STREAMING_PLAYBACK_SIGNAL) -->
+        // The loaded file just changed, which is the other half of the signal -
+        // a downloaded episode and a streamed one are the same "playing" state.
+        publishStreamingPlaybackState()
+        // <-- AM (STREAMING_PLAYBACK_SIGNAL)
     }
+
+    // AM (MEDIA_CACHE) -->
+    /**
+     * Registers [url] with the loopback proxy under this episode's cache key, or
+     * returns null to play it directly.
+     *
+     * The registration is never released: mpv reopens the URL on its own for seeks
+     * and reconnects, so the mapping has to outlive any single request. The entries
+     * are a handful of strings and the session drops them when the process ends.
+     */
+    private fun proxiedPlaybackUrl(url: String, video: Video): String? {
+        if (!url.startsWith("http")) return null
+        if (url.contains("127.0.0.1") || url.contains("localhost")) return null
+
+        val episodeId = stateData.value.currentEpisode?.id ?: return null
+        val headers = video.headers ?: (stateData.value.currentEpisodeSource as? AnimeHttpSource)?.headers
+            ?: return null
+
+        MediaProxyServer.attachCache(
+            MediaCache.get(
+                context,
+                // Zero allowance is the off state - see the preference's own note.
+                playerPreferences.retainRecentEpisodeMediaMaxBytes.get() > 0,
+                playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
+            ),
+        )
+        return MediaProxyServer.proxyUrlFor(
+            url = url,
+            headers = headers,
+            httpClient = networkService.client,
+            cacheKey = MediaProxyServer.cacheKeyFor(episodeId, video.videoTitle),
+            // AM (RELEASE_PREVIOUS_REGISTRATION) -->
+            // One registration per session, replaced on each load rather than
+            // added alongside the last one.
+            owner = "player-${System.identityHashCode(this)}",
+            // <-- AM (RELEASE_PREVIOUS_REGISTRATION)
+        )?.second
+    }
+    // <-- AM (MEDIA_CACHE)
 
     private suspend fun torrentLinkHandler(videoUrl: String, title: String, videoOptions: String) {
         val videoTorrentUrl = getTorrentUrl(videoUrl, title)
@@ -2585,7 +2945,85 @@ class PlayerViewModel(
         mpv.setOptionString("http-header-fields", httpHeaderString)
     }
 
+    // AM (EOF_REPLAY_NO_RELOAD) -->
+    /**
+     * Latched copy of mpv's own `eof-reached` for the currently loaded file.
+     *
+     * A latch rather than a live read because of WHEN it gets consulted: [endFile]
+     * runs on MPV_EVENT_END_FILE, which for a failed post-EOF re-read arrives after
+     * the seek that triggered the re-read has already cleared mpv's own property.
+     * Cleared in [fileLoaded] - i.e. exactly once per genuine file load - so it can
+     * never describe a file other than the one currently open.
+     */
+    private var currentFileReachedEof = false
+    // <-- AM (EOF_REPLAY_NO_RELOAD)
+
+    // AM (COMPLETION_RUNS_ONCE) -->
+    /**
+     * The episode whose completion work has already SUCCEEDED this session.
+     *
+     * Keyed on the episode rather than cleared on file load, deliberately: a
+     * quality switch reloads the file without changing the episode, and completion
+     * should not run a second time for it.
+     */
+    private var completedEpisodeId: Long? = null
+
+    /**
+     * The episode whose completion work is running right now.
+     *
+     * Two flags rather than one, because they answer different questions and a
+     * single flag gets one of them wrong. Marking "done" when the work STARTS makes
+     * a failure permanent - a tracker call that throws during a network drop meant
+     * the episode was never marked seen and never retried, which is exactly what
+     * happened on device. Marking it only when the work SUCCEEDS fixes that but
+     * leaves nothing to stop the next tick, a second later, launching its own copy
+     * while the first is still waiting on the network - the pile-up this guard
+     * exists to prevent. This one blocks that, is cleared in a finally, and so a
+     * genuine failure is retried on the following tick.
+     */
+    private var completionInFlightEpisodeId: Long? = null
+
+    /**
+     * Runs the completion work for [episode] at most once, from whichever trigger
+     * gets there first.
+     */
+    private fun runEpisodeCompletion(episode: Episode) {
+        val id = episode.id ?: return
+        if (completedEpisodeId == id || completionInFlightEpisodeId == id) return
+        // Same gate the tick path applies, repeated here because the EOF trigger
+        // reaches this function without passing through it.
+        if (stateData.value.incognitoMode && !stateData.value.hasTrackers) return
+
+        completionInFlightEpisodeId = id
+        viewModelScope.launchNonCancellable {
+            try {
+                updateEpisodeProgressOnComplete(episode)
+                completedEpisodeId = id
+            } catch (e: Throwable) {
+                if (e is CancellationException) throw e
+                logcat(LogPriority.ERROR, e) { "COMPLETION_RUNS_ONCE failed for episodeId=$id" }
+            } finally {
+                if (completionInFlightEpisodeId == id) completionInFlightEpisodeId = null
+            }
+        }
+    }
+    // <-- AM (COMPLETION_RUNS_ONCE)
+
     private fun eofReached(eofReached: Boolean) {
+        // AM (EOF_REPLAY_NO_RELOAD) -->
+        currentFileReachedEof = eofReached
+        // <-- AM (EOF_REPLAY_NO_RELOAD)
+        // AM (COMPLETION_RUNS_ONCE) -->
+        // EOF is a completion trigger in its own right, and the only one that can
+        // catch a skip to the very end. onSecondReached samples `time-pos`, which
+        // is an Int: a seek landing in the same whole second the flow last emitted
+        // produces no new value, and with keep-open=yes no further ticks ever
+        // arrive - so the episode stayed unwatched permanently. The file ending is
+        // unambiguous where a position sample is not.
+        if (eofReached) {
+            stateData.value.currentEpisode?.let { runEpisodeCompletion(it) }
+        }
+        // <-- AM (COMPLETION_RUNS_ONCE)
         if (eofReached && uiData.value.autoPlayEnabled) {
             // AM (CUSTOM_EPISODE_ORDER) -->
             seasonBoundaryAhead()?.let { prompt ->
@@ -2653,6 +3091,31 @@ class PlayerViewModel(
             _eventFlow.emit(Event.ToastString(errorMessage))
         }
 
+        // AM (EOF_REPLAY_NO_RELOAD) -->
+        // A read failure that happens AFTER the file already played through is not
+        // evidence that this video is bad - the far likelier cause is a hoster link
+        // that expired somewhere during playback, which only shows up once the
+        // demuxer has to go back to the network (its cache is capped at 64MB, so
+        // replaying from the start always does). Routing that through
+        // setCurrentVideoError() marks a perfectly good video ERROR and hands
+        // switchOnFailure a hoster list it has just poisoned. Re-resolve THIS video
+        // once instead; if that attempt fails too the latch is already cleared, so
+        // the second pass falls through to the normal error handling below.
+        if (currentFileReachedEof) {
+            currentFileReachedEof = false
+            // AM (SHARED_LINK_RESOLUTION) -->
+            // This link just failed, so the downloader must not pick it up.
+            ResolvedVideoCache.invalidate(
+                ResolvedVideoCache.key(
+                    stateData.value.currentEpisode?.id,
+                    stateData.value.currentVideo?.videoTitle.orEmpty(),
+                ),
+            )
+            // <-- AM (SHARED_LINK_RESOLUTION)
+            if (reloadCurrentVideo()) return
+        }
+        // <-- AM (EOF_REPLAY_NO_RELOAD)
+
         setCurrentVideoError()
 
         if (playerPreferences.switchOnFailure.get()) {
@@ -2681,6 +3144,27 @@ class PlayerViewModel(
         }
     }
 
+    // AM (EOF_REPLAY_NO_RELOAD) -->
+    /**
+     * Re-resolves and reloads the video that is already selected, leaving its
+     * hoster/video selection untouched. Setting the slot back to LOAD_VIDEO is what
+     * makes [loadVideo] call getResolvedVideo() again rather than reuse the stale
+     * (expired) URL it still holds. Returns false when there is no selected video to
+     * reload, so the caller can fall back to its normal failure handling.
+     */
+    private fun reloadCurrentVideo(): Boolean {
+        val (hosterIdx, videoIdx) = uiData.value.selectedHosterVideoIndex
+        val hosterState = stateData.value.hosterState.getOrNull(hosterIdx) as? HosterState.Ready ?: return false
+        val video = hosterState.videoList.getOrNull(videoIdx) ?: return false
+
+        updateHosterStateAt(hosterIdx, hosterState.getChangedAt(videoIdx, video, Video.State.LOAD_VIDEO))
+        viewModelScope.launchIO {
+            loadVideo(video, hosterIdx, videoIdx)
+        }
+        return true
+    }
+    // <-- AM (EOF_REPLAY_NO_RELOAD)
+
     fun onVideoClicked(hosterIndex: Int, videoIndex: Int) {
         val hosterState = stateData.value.hosterState[hosterIndex] as? HosterState.Ready
         val video = hosterState?.videoList
@@ -2696,7 +3180,9 @@ class PlayerViewModel(
         }
 
         viewModelScope.launchIO {
-            val success = loadVideo(video, hosterIndex, videoIndex)
+            // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
+            val success = loadVideo(video, hosterIndex, videoIndex, keepPosition = true)
+            // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
             if (success) {
                 if (uiData.value.sheetShown == Sheets.QualityTracks ||
                     castUiData.value.sheetShown == CastSheet.Quality
@@ -2756,6 +3242,10 @@ class PlayerViewModel(
 
     private fun fileLoaded() {
         if (player.isReleased) return
+
+        // AM (EOF_REPLAY_NO_RELOAD) -->
+        currentFileReachedEof = false
+        // <-- AM (EOF_REPLAY_NO_RELOAD)
 
         setMpvOptions()
         setMpvMediaTitle()
@@ -3351,11 +3841,14 @@ class PlayerViewModel(
 
         return withIOContext {
             try {
-                currentHosterList = episodeLoader.getHosters(
-                    episode = chosenEpisode.toDomainEpisode()!!,
-                    anime,
-                    source,
-                )
+                // AM (NEXT_EPISODE_PREFETCH) -->
+                currentHosterList = prefetchedFor(chosenEpisode.id)?.hosterList
+                    ?: episodeLoader.getHosters(
+                        episode = chosenEpisode.toDomainEpisode()!!,
+                        anime,
+                        source,
+                    )
+                // <-- AM (NEXT_EPISODE_PREFETCH)
                 this@PlayerViewModel.episodeId = chosenEpisode.id!!
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -3582,6 +4075,12 @@ class PlayerViewModel(
 
         rememberRecentEpisodePosition()
 
+        // AM (NEXT_EPISODE_PREFETCH) -->
+        // The playlist itself is about to be replaced, so any prefetched "next"
+        // belongs to a playlist that no longer applies.
+        clearPrefetch()
+        // <-- AM (NEXT_EPISODE_PREFETCH)
+
         updateStateData { it.copy(hosterList = emptyList()) }
         updateUiData {
             it.copy(
@@ -3713,9 +4212,56 @@ class PlayerViewModel(
             castManager.handleCastManagerEvent(CastManagerEvent.PlayPause)
             return
         }
+        // AM (EOF_REPLAY_NO_RELOAD) -->
+        if (restartIfAtEof()) return
+        // <-- AM (EOF_REPLAY_NO_RELOAD)
         mpvCommand("cycle", "pause")
     }
+
+    // AM (EOF_REPLAY_NO_RELOAD) -->
+    /**
+     * Handles a play request made while playback is sitting at EOF - the last
+     * episode in a playlist finishing is the common way to get there, since nothing
+     * advances past it.
+     *
+     * The file is STILL LOADED at that point (keep-open=yes), so playing it again is
+     * a seek, never a reload: no changeEpisode(), no loadEpisode(), no hoster
+     * re-resolution. It also can't be left to the plain `cycle pause` below, because
+     * mpv's own handle_keep_open() re-pauses immediately at EOF unless the position
+     * actually moves first - so an unpause alone visibly does nothing.
+     *
+     * Returns true when it handled the request.
+     */
+    private fun restartIfAtEof(): Boolean {
+        if (player.isReleased) return false
+        if (mpv.getPropertyBoolean("eof-reached") != true) return false
+
+        mpvCommand("seek", "0", "absolute")
+        setPropertyBoolean("pause", false)
+        updatePlaybackData { it.copy(paused = false, position = 0) }
+        return true
+    }
+    // <-- AM (EOF_REPLAY_NO_RELOAD)
     fun pause() {
+        pauseInternal()
+        // AM (PAUSE_DURING_LOAD_WINS) -->
+        recordPauseIntentDuringLoad(shouldPause = true)
+        // <-- AM (PAUSE_DURING_LOAD_WINS)
+    }
+
+    // AM (PAUSE_DURING_LOAD_WINS) -->
+    /**
+     * Pauses without expressing an intent about what should happen after the
+     * current load - for loadVideo()'s own freeze, which pauses precisely BECAUSE
+     * a load is starting. Routing that through pause() would have it record
+     * "paused" as the post-load answer and leave every episode paused on arrival.
+     */
+    // AM (PERSIST_ON_CADENCE) -->
+    // Every pause routes through here, including the freeze before a load and the
+    // one before PIP entry, so persisting on it covers the moments where the app is
+    // most likely to be killed next.
+    // <-- AM (PERSIST_ON_CADENCE)
+    private fun pauseInternal() {
         if (stateData.value.isCasting) {
             if (castManager.castState.value.playing) {
                 castManager.handleCastManagerEvent(CastManagerEvent.PlayPause)
@@ -3726,7 +4272,34 @@ class PlayerViewModel(
 
         // PiP needs the state immediately
         updatePlaybackData { it.copy(paused = true) }
+
+        // AM (PERSIST_ON_CADENCE) -->
+        persistPositionNow()
+        // <-- AM (PERSIST_ON_CADENCE)
     }
+    // <-- AM (PAUSE_DURING_LOAD_WINS)
+
+    // AM (PAUSE_DURING_LOAD_WINS) -->
+    /**
+     * Keeps [PlayerUiData.previousPauseState] in step with the most recent
+     * explicitly expressed intent while a load is in flight.
+     *
+     * That field is not a record of the past - it is the answer to "what should the
+     * pause state be once this file finishes loading", captured when the load
+     * starts and applied by [checkFileLoaded]. Nothing updated it afterwards, so a
+     * pause arriving DURING the load wrote through to mpv and was then undone the
+     * moment the file loaded and the stale pre-load answer was applied. Dismissing
+     * a video before it had loaded therefore started it playing.
+     *
+     * Updating the slot is the fix rather than ordering the two events: whoever
+     * expressed an intent last is the one the load should honour, whenever it
+     * happens to finish.
+     */
+    private fun recordPauseIntentDuringLoad(shouldPause: Boolean) {
+        if (!uiData.value.isLoadingEpisode) return
+        updateUiData { it.copy(previousPauseState = shouldPause) }
+    }
+    // <-- AM (PAUSE_DURING_LOAD_WINS)
     fun unpause() {
         if (stateData.value.isCasting) {
             if (!castManager.castState.value.playing) {
@@ -3734,8 +4307,20 @@ class PlayerViewModel(
             }
             return
         }
+        // AM (EOF_REPLAY_NO_RELOAD) -->
+        // Every non-toggle play entry point lands here - the PIP play action, the
+        // MediaSession callback, the dummy-pip button - so the EOF case has to be
+        // handled here too, not just in pauseUnpause() above.
+        if (restartIfAtEof()) return
+        // <-- AM (EOF_REPLAY_NO_RELOAD)
         setPropertyBoolean("pause", false)
         updatePlaybackData { it.copy(paused = false) }
+
+        // AM (PAUSE_DURING_LOAD_WINS) -->
+        // Symmetric: hitting play while a file is still loading should survive the
+        // load too, not be reverted to a pre-load paused snapshot.
+        recordPauseIntentDuringLoad(shouldPause = false)
+        // <-- AM (PAUSE_DURING_LOAD_WINS)
     }
     // <-- AM (UNIFIED_CAST_PLAY_PAUSE)
 
@@ -3754,6 +4339,25 @@ class PlayerViewModel(
         updatePlaybackData { it.copy(paused = actuallyPaused) }
     }
     // <-- AM (MEDIA_SESSION_FALLBACK_CALLBACK)
+
+    // AM (STREAMING_PLAYBACK_SIGNAL) -->
+    /**
+     * Publishes whether this session is currently pulling media off the network,
+     * so the downloader can yield to it (see Downloader's launchDownloaderJob).
+     *
+     * A local file is a path, a content:// or a file:// URI; everything else -
+     * including a source's own localhost HTTP server, which proxies a remote
+     * fetch - is network traffic competing with whatever the downloader is doing.
+     */
+    private fun publishStreamingPlaybackState() {
+        val url = stateData.value.currentVideo?.videoUrl
+        val isLocal = url == null ||
+            url.startsWith("/") ||
+            url.startsWith("content://") ||
+            url.startsWith("file://")
+        PlayerMediaHolder.setStreamingPlaybackActive(!isLocal && !playbackData.value.paused)
+    }
+    // <-- AM (STREAMING_PLAYBACK_SIGNAL)
 
     fun showControls() {
         val currentUi = uiData.value
@@ -4320,6 +4924,15 @@ class PlayerViewModel(
         if (position !in 0..playbackData.value.duration) return
         mpvCommand("seek", position.toString(), if (smoothSeeking) "absolute" else "absolute+keyframes")
 
+        // AM (PERSIST_ON_CADENCE) -->
+        // A seek is the other moment the stored position becomes wrong in a way
+        // the user would notice if the app died before the next backstop write.
+        // Passing the target explicitly: playbackData still holds the pre-seek
+        // position at this point, so the default would persist the place the user
+        // just left rather than the one they jumped to.
+        persistPositionNow(position)
+        // <-- AM (PERSIST_ON_CADENCE)
+
         viewModelScope.launch {
             if (!playbackData.value.paused) {
                 _eventFlow.emit(Event.UpdateDiscordRPC(false, position))
@@ -4334,6 +4947,34 @@ class PlayerViewModel(
     }
 
     private var lastThumbnailFetch = 0L
+
+    // AM (PERSIST_ON_CADENCE) -->
+    /** Position, in seconds, at the last database write - see onSecondReached. */
+    private var lastPersistedPositionSeconds = 0
+
+    /** The episode whose history row has been written this session. */
+    private var historyWrittenForEpisodeId: Long? = null
+
+    /**
+     * Writes the current position now, for the moments where durability actually
+     * matters. Resets the cadence so an event-driven save and the backstop never
+     * double up.
+     */
+    private fun persistPositionNow(positionSeconds: Int = playbackData.value.position) {
+        val episode = stateData.value.currentEpisode ?: return
+        if (uiData.value.isLoadingEpisode) return
+
+        // The caller may know a position the tick loop has not caught up to yet -
+        // a seek target, most obviously - so the episode's own field is brought up
+        // to date here rather than persisting whatever the last tick left behind.
+        // Same seen/preserveWatchingPosition rule onSecondReached applies.
+        if (!episode.seen || playerPreferences.preserveWatchingPosition.get()) {
+            episode.last_second_seen = positionSeconds.toLong() * 1000L
+        }
+        lastPersistedPositionSeconds = positionSeconds
+        saveWatchingProgress(episode)
+    }
+    // <-- AM (PERSIST_ON_CADENCE)
 
     fun updateSeekPos(pos: Float) {
         updatePlaybackData { it.copy(seekPosition = pos, isSeeking = true) }
@@ -4481,18 +5122,57 @@ class PlayerViewModel(
 
         episodePosition = position.toLong()
         val shouldTrack = !stateData.value.incognitoMode || stateData.value.hasTrackers
+        // AM (COMPLETION_RUNS_ONCE) -->
+        // This condition stays true for every remaining tick of the episode once
+        // the threshold is crossed - roughly the last 15% - and had no guard, so
+        // updateEpisodeProgressOnComplete() re-ran once a second: a getTracks DB
+        // read plus (until the tracker's own lastEpisodeSeen catches up) a refresh
+        // and update over the network per tracker, a full playlist scan for
+        // duplicate episode numbers with an updateEpisode.awaitAll() on the result,
+        // a pending-deleter write, and a seen-state save. It is a once-per-episode
+        // transition; make it run once.
         if (position >= duration * progress && shouldTrack) {
-            viewModelScope.launchNonCancellable {
-                updateEpisodeProgressOnComplete(currentEpisode)
-            }
+            runEpisodeCompletion(currentEpisode)
         }
+        // <-- AM (COMPLETION_RUNS_ONCE)
 
-        saveWatchingProgress(currentEpisode)
+        // AM (PERSIST_ON_CADENCE) -->
+        // The in-memory episode fields above are updated every tick, because that
+        // is the live truth the UI and the position table read. Writing them to
+        // the database every tick is a different question, and the answer was
+        // never "every second": each save is a getEpisode read, an updateEpisode
+        // write and a history upsert, so a 24-minute episode performed roughly
+        // 1400 reads and 2800 writes to record a number that only has to survive
+        // the app dying.
+        //
+        // Durability is event-shaped, not tick-shaped. Pause, seek, episode change
+        // and teardown all persist explicitly; this is only the crash backstop
+        // between those moments.
+        if (position - lastPersistedPositionSeconds >= PERSIST_INTERVAL_SECONDS) {
+            lastPersistedPositionSeconds = position
+            saveWatchingProgress(currentEpisode)
+        }
+        // <-- AM (PERSIST_ON_CADENCE)
 
+        // AM (NEXT_EPISODE_PREFETCH) -->
+        if (duration > 0 && duration - position <= PREFETCH_LEAD_SECONDS) {
+            prefetchNextEpisode()
+        }
+        // <-- AM (NEXT_EPISODE_PREFETCH)
+
+        // AM (DOWNLOAD_AHEAD_ONCE) -->
+        // Was re-evaluated on every tick past the 35% mark. downloadNextEpisodes()
+        // ran two isDownload() checks synchronously before its own launchIO, and
+        // this function runs on Main (propFlow("time-pos").launchIn(viewModelScope)),
+        // so that was two SAF directory walks a second on the main thread for the
+        // back two-thirds of every episode. Nothing it checks can change from one
+        // second to the next in a way that matters.
         val inDownloadRange = position.toDouble() / duration > 0.35
-        if (inDownloadRange) {
+        if (inDownloadRange && downloadAheadEpisodeId != currentEpisode.id) {
+            downloadAheadEpisodeId = currentEpisode.id
             downloadNextEpisodes()
         }
+        // <-- AM (DOWNLOAD_AHEAD_ONCE)
     }
 
     private suspend fun updateEpisodeProgressOnComplete(currentEp: Episode) {
@@ -4639,6 +5319,15 @@ class PlayerViewModel(
     private suspend fun saveEpisodeHistory(episode: Episode) {
         if (!stateData.value.incognitoMode) {
             val episodeId = episode.id!!
+            // AM (PERSIST_ON_CADENCE) -->
+            // History records WHEN an episode was last watched, which changes once
+            // per viewing, not continuously - but this ran on every progress save,
+            // so it was upserting the same row with a slightly newer timestamp
+            // over and over. Once per episode per session says the same thing; the
+            // teardown save refreshes it on the way out.
+            if (historyWrittenForEpisodeId == episodeId) return
+            historyWrittenForEpisodeId = episodeId
+            // <-- AM (PERSIST_ON_CADENCE)
             val seenAt = Date()
             upsertHistory.await(
                 HistoryUpdate(episodeId, seenAt),
@@ -4680,11 +5369,18 @@ class PlayerViewModel(
         val currentEpisode = stateData.value.currentEpisode ?: return
 
         val nextEpisode = currentPlaylist[currentPlaylistIndex + 1]
-        val episodesAreDownloaded =
-            episodeLoader.isDownload(currentEpisode.toDomainEpisode()!!, anime) &&
-                episodeLoader.isDownload(nextEpisode.toDomainEpisode()!!, anime)
 
         viewModelScope.launchIO {
+            // AM (DOWNLOAD_AHEAD_ONCE) -->
+            // Both checks moved inside launchIO (they were above it, on Main) and
+            // onto the DownloadCache rather than a fresh SAF directory listing -
+            // skipCache exists for the load path, which has to be certain before
+            // choosing downloaded-vs-stream. This one only decides whether to queue
+            // more downloads, where the cache is authoritative enough.
+            val episodesAreDownloaded =
+                episodeLoader.isDownload(currentEpisode.toDomainEpisode()!!, anime, skipCache = false) &&
+                    episodeLoader.isDownload(nextEpisode.toDomainEpisode()!!, anime, skipCache = false)
+            // <-- AM (DOWNLOAD_AHEAD_ONCE)
             if (!episodesAreDownloaded) {
                 return@launchIO
             }
@@ -4693,6 +5389,11 @@ class PlayerViewModel(
             downloadManager.downloadEpisodes(anime, episodesToDownload)
         }
     }
+
+    // AM (DOWNLOAD_AHEAD_ONCE) -->
+    /** The episode whose download-ahead pass has already run - see onSecondReached. */
+    private var downloadAheadEpisodeId: Long? = null
+    // <-- AM (DOWNLOAD_AHEAD_ONCE)
 
     /** Enqueues the nth-back episode for deletion if the delete-after-seen option is enabled. */
     private fun deleteEpisodeIfNeeded(chosenEpisode: Episode) {
@@ -5175,6 +5876,21 @@ class PlayerViewModel(
         data object SkipIntro : PlayerEvent
         data object ToggleDurationTimer : PlayerEvent
     }
+
+    // AM (NEXT_EPISODE_PREFETCH) -->
+    companion object {
+        // AM (PERSIST_ON_CADENCE) -->
+        /** Backstop write interval between the event-driven saves. */
+        private const val PERSIST_INTERVAL_SECONDS = 5
+        // <-- AM (PERSIST_ON_CADENCE)
+
+        /** How close to the end of an episode the next one is resolved, in seconds. */
+        private const val PREFETCH_LEAD_SECONDS = 30
+
+        /** How long a prefetched, resolved hoster link is trusted. */
+        private const val PREFETCH_TTL_MS = 5L * 60L * 1000L
+    }
+    // <-- AM (NEXT_EPISODE_PREFETCH)
 
     sealed interface Event {
         data object EnterPip : Event

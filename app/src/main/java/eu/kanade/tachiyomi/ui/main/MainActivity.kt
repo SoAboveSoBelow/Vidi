@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
 import android.media.AudioManager
@@ -185,15 +186,6 @@ class MainActivity : BaseActivity() {
     // <-- AM (PLAYER_HOST_SCREEN)
     internal var navigator: Navigator? = null
 
-    // AM (DUMMY_PIP_FULLSCREEN_RESTORE) -->
-    // Set right before enterPictureInPictureMode() when leaving the app
-    // from dummy-pip mode, consumed once in onPictureInPictureModeChanged()
-    // - see enterSelfPipIfEligible()'s own doc comment for why the
-    // fullscreen swap happens there, after the window has actually resized,
-    // rather than before.
-    private var pendingDummyPipFullscreenRestore = false
-    // <-- AM (DUMMY_PIP_FULLSCREEN_RESTORE)
-
     // AM (SELF_PIP_DISMISS_PAUSE_FIX) -->
     // No state field here - see onPictureInPictureModeChanged()'s else
     // branch. An earlier version armed a flag there and consumed it in
@@ -218,6 +210,11 @@ class MainActivity : BaseActivity() {
     // once by the dismiss-pause branch (and reset on every PIP entry so
     // a swallowed callback can't leak into a later genuine dismiss).
     private var pipBackgroundPlayTransition = false
+
+    // AM (PIP_DROPS_ORIENTATION_LOCK) -->
+    /** The player's orientation lock, held while pinned so it can be restored. */
+    private var orientationBeforePip: Int? = null
+    // <-- AM (PIP_DROPS_ORIENTATION_LOCK)
     // <-- AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX)
 
     init {
@@ -512,10 +509,38 @@ class MainActivity : BaseActivity() {
             // updateAutoEnterPipParams() once immediately on entry)
             // actively pushes the correct false registration instead of
             // silently skipping the update.
+            // AM (DUMMY_PIP_AUTO_ENTER_RESTORED) -->
+            // isDummyPipActive removed from this value again - but NOT back to
+            // the original bail-out (see the DUMMY_PIP_STALE_AUTO_ENTER_FIX
+            // note above for why that was wrong; this function must keep being
+            // called and keep pushing a value either way).
+            //
+            // Suppressing auto-enter during dummy pip fixed the visual symptom
+            // by giving up the only mechanism that can enter PIP at all on a
+            // Recents press: onUserLeaveHint() is documented not to fire for
+            // Recents, and the legacy pause-driven path is closed there too -
+            // AOSP's Task.enableEnterPipOnTaskSwitch() sets the activity's
+            // supportsEnterPipOnTaskSwitch false for a transient launch, which
+            // is what a Recents press is, and Transition.checkEnterPipOnFinish()
+            // only force-enables it once that transient launch commits. The
+            // auto-enter path is the one that survives this, and it reads
+            // exactly one thing: whatever isAutoEnterEnabled() was last
+            // registered. Registering false for the entire time the mini player
+            // is up - which includes all of browsing a new source - is
+            // therefore the direct cause of "PIP is reset by opening a new
+            // source".
+            //
+            // The visual concern it was guarding is now handled where the
+            // explicit path already handles it: onPictureInPictureModeChanged()
+            // clears isDummyPipActive unconditionally on PIP entry. That
+            // callback fires AFTER the window has genuinely resized, so the
+            // fullscreen player simply fills whatever small window now exists -
+            // the same reasoning DUMMY_PIP_FULLSCREEN_RESTORE already relied
+            // on, just no longer gated on a flag only the explicit path sets.
             val shouldAutoEnter = autoEnter &&
-                !holder.isDummyPipActive &&
                 !viewModel.playbackData.value.paused &&
                 graph.playerPreferences.pipOnExit.get()
+            // <-- AM (DUMMY_PIP_AUTO_ENTER_RESTORED)
             // <-- AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX)
             builder.setAutoEnterEnabled(shouldAutoEnter)
         }
@@ -578,25 +603,25 @@ class MainActivity : BaseActivity() {
         // Changed() is a real completion callback for exactly the moment
         // the resize has happened, not an estimate.
         //
-        // Same real, narrower gap as before, honestly: this only covers the
-        // path WE trigger explicitly and control (Home press, via
-        // onUserLeaveHint()). Auto-enter (setAutoEnterEnabled, still
-        // suppressed below and in buildSelfPipParams()) is the OS acting on
-        // a pre-registered flag on its own, with no callback for us to
-        // intervene on either side of - Recents/Overview still won't
-        // restore fullscreen this way.
-        if (holder.isDummyPipActive) {
-            val params = buildSelfPipParams(autoEnter = false) ?: return
-            try {
-                enterPictureInPictureMode(params)
-                pendingDummyPipFullscreenRestore = true
-            } catch (e: Exception) {
-                logcat(LogPriority.ERROR) { "DUMMY_PIP_FULLSCREEN_RESTORE enterPictureInPictureMode failed: $e" }
-            }
-            return
-        }
+        // AM (DUMMY_PIP_AUTO_ENTER_RESTORED) -->
+        // The dummy-pip branch that used to sit here is gone, along with the
+        // pendingDummyPipFullscreenRestore flag it armed: the restore it was
+        // arming now runs unconditionally for every PIP entry in
+        // onPictureInPictureModeChanged(), which is what makes the auto-enter
+        // (Recents) path restore fullscreen too - the gap the paragraph above
+        // described. One entry path, one restore, no flag in between.
+        //
+        // autoEnter = true, not false. enterPictureInPictureMode(params) is not
+        // a read-only use of these params: ActivityTaskManagerService hands them
+        // to ActivityRecord.setPictureInPictureParams(), whose copyOnlySet()
+        // makes every explicitly-set field REPLACE the registered one. Passing
+        // false therefore left auto-enter registered false after every Home
+        // press, and nothing re-registered it on expand-back (the playbackData
+        // collector that pushes params only fires on a state CHANGE, and
+        // expanding isn't one) - so PIP worked exactly once per session.
+        val params = buildSelfPipParams(autoEnter = true) ?: return
+        // <-- AM (DUMMY_PIP_AUTO_ENTER_RESTORED)
         // <-- AM (DUMMY_PIP_FULLSCREEN_RESTORE)
-        val params = buildSelfPipParams(autoEnter = false) ?: return
         try {
             enterPictureInPictureMode(params)
         } catch (e: Exception) {
@@ -621,6 +646,27 @@ class MainActivity : BaseActivity() {
             // inside the small PIP window it renders cramped or clipped,
             // and PlayerScreen's own controls aren't composed there at all.
             // <-- AM (SELF_PIP_ENTRY_CLOSES_MENUS)
+            // AM (PIP_DROPS_ORIENTATION_LOCK) -->
+            // A pinned activity must not be holding a fixed-orientation
+            // request. OrientationOverlay writes MainActivity's
+            // requestedOrientation from inside PlayerScreen, via an effect that
+            // re-runs whenever that subtree re-enters composition - and entering
+            // PIP is exactly such a moment (isDummyPipActive flips, the window
+            // resizes, PlayerScreen recomposes). So the app could issue an
+            // orientation request while the task was being pinned, which forces
+            // WindowManager to re-evaluate display rotation and lands a
+            // configuration change on the task - visible in logs as
+            // "Checking to restart ... MainActivity: changed=0xd80"
+            // (orientation|screenLayout|screenSize|smallestScreenSize) right
+            // after the pin, while the launcher is snapshotting that same task
+            // and laying out its Overview card.
+            //
+            // The player's lock belongs to the fullscreen player, not to a
+            // 100x60 window the OS sizes itself. Drop it on entry, restore it on
+            // exit from the session's own current value.
+            orientationBeforePip = requestedOrientation
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            // <-- AM (PIP_DROPS_ORIENTATION_LOCK)
             PlayerMediaHolder.current?.viewModel?.let { vm ->
                 // Closers FIRST: each of setSheet/setPanel/setDialog(None)
                 // calls showControls() as a side effect, so hideControls()
@@ -636,19 +682,18 @@ class MainActivity : BaseActivity() {
             // AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX) -->
             pipBackgroundPlayTransition = false
             // <-- AM (SELF_PIP_BACKGROUND_PLAY_NO_PAUSE_FIX)
-        }
-        // AM (DUMMY_PIP_FULLSCREEN_RESTORE) -->
-        // The window has genuinely finished resizing to PIP size by the
-        // time this fires - see enterSelfPipIfEligible()'s own doc comment
-        // for why the fullscreen swap belongs here rather than before
-        // enterPictureInPictureMode() was called. Under the PLAYER_OVERLAY_MIGRATION
-        // architecture, PlayerHostScreen is already persistently mounted -
-        // restoring fullscreen is just clearing the flag, no push needed.
-        if (isInPictureInPictureMode && pendingDummyPipFullscreenRestore) {
-            pendingDummyPipFullscreenRestore = false
+            // AM (DUMMY_PIP_AUTO_ENTER_RESTORED) -->
+            // Unconditional, and the reason auto-enter no longer has to be
+            // suppressed while the mini player is up: whichever path got us
+            // into PIP - our own enterPictureInPictureMode() on Home, or the
+            // OS acting on the registered auto-enter flag on Recents - the
+            // window has finished resizing by the time this fires, so clearing
+            // the flag here hands the small window to the fullscreen player,
+            // which fills it. The OS gives no callback before an auto-enter,
+            // which is exactly why the restore belongs on this side of it.
             PlayerMediaHolder.current?.isDummyPipActive = false
+            // <-- AM (DUMMY_PIP_AUTO_ENTER_RESTORED)
         }
-        // <-- AM (DUMMY_PIP_FULLSCREEN_RESTORE)
         // AM (SELF_PIP_ACTIONS_FIX) -->
         // Registered/unregistered exactly when PlayerActivity's own
         // pipReceiver is - only while actually in PIP. See
@@ -707,6 +752,30 @@ class MainActivity : BaseActivity() {
                 }
             }
             // <-- AM (SELF_PIP_DISMISS_PAUSE_FIX)
+            // AM (PIP_DROPS_ORIENTATION_LOCK) -->
+            // Back to the session's own orientation. Taken from the live
+            // ViewModel rather than the saved value where possible, since the
+            // session may have changed episode - and therefore video aspect,
+            // under the Video orientation mode - while pinned. The saved value
+            // is the fallback for a session that has since ended.
+            val sessionOrientation = PlayerMediaHolder.current?.viewModel
+                ?.playbackData?.value?.currentOrientation
+            requestedOrientation = sessionOrientation
+                ?: orientationBeforePip
+                ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            orientationBeforePip = null
+            // <-- AM (PIP_DROPS_ORIENTATION_LOCK)
+            // AM (DUMMY_PIP_AUTO_ENTER_RESTORED) -->
+            // Re-register on the way out of PIP. AOSP clears the activity's
+            // supportsEnterPipOnTaskSwitch as part of moving it into the pinned
+            // task (RootWindowContainer), and an expand-tap changes no playback
+            // state, so the collector that normally pushes params never fires -
+            // without this the session comes back from PIP with whatever was
+            // registered on the way in. Self-limiting on a genuine dismiss: the
+            // Activity is already CREATED there, so updateAutoEnterPipParams()
+            // returns early on its own lifecycle guard.
+            updateAutoEnterPipParams()
+            // <-- AM (DUMMY_PIP_AUTO_ENTER_RESTORED)
         }
         // <-- AM (SELF_PIP_ACTIONS_FIX)
     }

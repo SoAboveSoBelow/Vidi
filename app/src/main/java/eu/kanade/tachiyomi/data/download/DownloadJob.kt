@@ -80,7 +80,27 @@ class DownloadJob(context: Context, workerParams: WorkerParameters) : CoroutineW
                 downloadPreferences.downloadOnlyOverWifi.changes(),
                 transform = { a, b -> emit(checkNetworkState(a, b)) },
             )
-                .onEach { networkCheck = it }
+                // AM (RESUME_DOWNLOADS_ON_RECONNECT) -->
+                // Losing the network calls downloaderStop(reason), which flips every
+                // DOWNLOADING entry to ERROR and cancels the job - but nothing ever
+                // started it again, so the queue sat in ERROR until the user
+                // retried by hand, even though this worker is still alive and
+                // watching the very flow that says the network came back.
+                //
+                // downloaderStart() is the whole fix: Downloader.start() already
+                // resets everything that is not DOWNLOADED back to QUEUE, so the
+                // errored entries requeue themselves. Guarded on the transition
+                // rather than the value, so an unrelated network change (wifi to
+                // wifi, a metered flag flipping) does not restart a queue the user
+                // deliberately paused.
+                .onEach { ok ->
+                    val wasBlocked = !networkCheck
+                    networkCheck = ok
+                    if (ok && wasBlocked) {
+                        downloadManager.downloaderStart()
+                    }
+                }
+                // <-- AM (RESUME_DOWNLOADS_ON_RECONNECT)
                 .launchIn(this)
         }
 

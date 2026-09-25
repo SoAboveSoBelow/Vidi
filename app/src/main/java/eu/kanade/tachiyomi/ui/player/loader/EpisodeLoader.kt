@@ -52,7 +52,7 @@ class EpisodeLoader(
      * @param episode the episode being parsed.
      * @param anime the anime of the episode.
      */
-    fun isDownload(episode: Episode, anime: Anime): Boolean {
+    fun isDownload(episode: Episode, anime: Anime, skipCache: Boolean = true): Boolean {
         return downloadManager.isEpisodeDownloaded(
             episode.name,
             episode.scanlator,
@@ -61,7 +61,7 @@ class EpisodeLoader(
             anime.ogTitle,
             // <-- AM (CUSTOM_INFORMATION)
             anime.source,
-            skipCache = true,
+            skipCache = skipCache,
         )
     }
 

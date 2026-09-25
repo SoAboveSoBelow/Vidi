@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.ui.player
 
 import animiru.domain.player.repository.EpisodeTempPositionRepository
 import animiru.domain.player.service.PlayerPreferences
+import eu.kanade.tachiyomi.data.media.MediaCache
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -98,6 +99,21 @@ class RecentEpisodePositionManager(
         }
         return removed
     }
+
+    // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
+    /**
+     * Called when the retention setting changes, so turning it off frees the disk
+     * immediately rather than at the next prune.
+     */
+    fun onRetainMediaPreferenceChanged() {
+        scope.launch {
+            // AM (RETAIN_MEDIA_SIZE_LIMIT) -->
+            MediaCache.peek()?.setMaxBytes(playerPreferences.retainRecentEpisodeMediaMaxBytes.get())
+            // <-- AM (RETAIN_MEDIA_SIZE_LIMIT)
+            syncRetainedMedia()
+        }
+    }
+    // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
     // <-- AM (MERGED_SOURCES)
 
     /**
@@ -135,7 +151,32 @@ class RecentEpisodePositionManager(
                 .forEach { cache.remove(it.key) }
         }
         repository.pruneToMostRecent(maxSlots)
+        // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
+        syncRetainedMedia()
+        // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
     }
+
+    // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
+    /**
+     * Keeps the media cache's contents in step with this table.
+     *
+     * This table is what "recent" means for the retention setting, so an episode
+     * losing its slot - by being consumed, or pruned when the limit shrinks - is
+     * precisely when its cached bytes stop being worth disk space. Doing it here
+     * rather than on a timer or a size trigger means the two never disagree.
+     *
+     * Nothing happens when no media has been proxied yet (no cache exists), and an
+     * entry being read right now is never dropped.
+     */
+    private fun syncRetainedMedia() {
+        val mediaCache = MediaCache.peek() ?: return
+        if (playerPreferences.retainRecentEpisodeMediaMaxBytes.get() <= 0) {
+            mediaCache.retainOnly(emptySet())
+            return
+        }
+        mediaCache.retainOnly(cache.keys.toSet())
+    }
+    // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
 
     /**
      * Called when the user changes the "temporary position memory" setting, so a

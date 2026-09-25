@@ -197,9 +197,49 @@ class MPVPlayer(
         mpv.setOptionString("aid", "no")
 
         // Limit demuxer cache since the defaults are too high for mobile devices
+        // AM (NETWORK_BUFFER_SECONDS) -->
+        // These two are now a MEMORY GUARD, not the buffer policy. They were the
+        // only limit that actually bound before: cache defaults to auto (on for
+        // network streams), cache-secs defaults to a deliberately huge value, and
+        // demuxer-readahead-secs is mostly ignored once the cache is active - so
+        // how far ahead the player buffered was 64MB divided by the bitrate.
+        // That is backwards: the buffer came out smallest (~7s on an 80 Mbps 4K
+        // file, ~13s at 40 Mbps) exactly where a dropout hurts most, and ran to
+        // several minutes on a low-bitrate stream that never needed it.
+        //
+        // cache-secs below makes the target a duration; this stays as the ceiling
+        // that stops a high-bitrate file from turning that duration into an
+        // unbounded heap allocation. It clips the 30s target above roughly
+        // 17 Mbps, which is the intended trade on a phone - RAM is the scarcer
+        // resource, and mpv's cache is in memory unless cache-on-disk is set.
+        // <-- AM (NETWORK_BUFFER_SECONDS)
         val cacheMegs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 else 32
         setSafeOptionString("demuxer-max-bytes", "${cacheMegs * 1024 * 1024}")
         setSafeOptionString("demuxer-max-back-bytes", "${cacheMegs * 1024 * 1024}")
+
+        // AM (NETWORK_BUFFER_SECONDS) -->
+        // How far ahead to buffer, in seconds, for network streams. Has no effect
+        // on downloaded or local playback: cache=auto only turns the cache on for
+        // streams, and cache-secs only applies while the cache is active.
+        //
+        // The back buffer deliberately has no counterpart here - mpv has no
+        // seconds-based control for it, so it stays byte-bound at the value above.
+        setSafeOptionString("cache-secs", playerPreferences.networkBufferSeconds.get().toString())
+
+        // How much has to be re-buffered before playback resumes after an
+        // underrun. This was set to 3s to stop the resume-stall-resume loop on a
+        // weak connection, on the assumption that refilling is fast relative to
+        // playback. On-device logs showed what happens when it is not: a 4K stream
+        // arriving at a fraction of its bitrate took 67 seconds to reach the 3s
+        // mark, so the setting converted a series of short stalls into one long
+        // freeze - and then stalled again seven seconds later anyway, because 3s
+        // of buffer does not survive a connection that far behind.
+        //
+        // 1.5s keeps some of the anti-loop margin over mpv's own 1s default while
+        // keeping the worst case proportionate. The real answer for a connection
+        // that cannot sustain the bitrate is a lower quality, not a longer wait.
+        setSafeOptionString("cache-pause-wait", "1.5")
+        // <-- AM (NETWORK_BUFFER_SECONDS)
 
         val screenshotDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES).also {
             it.mkdirs()

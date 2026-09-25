@@ -31,7 +31,6 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 // <-- AM (BACKGROUND_SKIP_FIX)
 import tachiyomi.core.common.i18n.stringResource
-import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -53,12 +52,6 @@ class PlayerBackgroundPlaybackService : Service() {
     // driving playback until step 2 cuts call sites over.
     private val mediaHolderLazy = lazy {
         PlayerMediaHolder(this).also { holder ->
-            // SVC_RACE_DEBUG -->
-            logcat {
-                "SVC_RACE_DEBUG PlayerMediaHolder constructed service=${System.identityHashCode(this)} " +
-                    "holder=${System.identityHashCode(holder)} at=${android.os.SystemClock.elapsedRealtime()}"
-            }
-            // <-- SVC_RACE_DEBUG
             // AM (BACKGROUND_SKIP_FIX) -->
             // Drives the notification directly off the holder's own state, rather
             // than relying solely on PlayerActivity's REOPEN_TARGET_STALENESS_FIX
@@ -168,12 +161,6 @@ class PlayerBackgroundPlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG Service.onCreate() service=${System.identityHashCode(this)} " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         ContextCompat.registerReceiver(
             this,
             dismissReceiver,
@@ -185,12 +172,6 @@ class PlayerBackgroundPlaybackService : Service() {
     // <-- AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX)
 
     override fun onBind(intent: Intent?): IBinder {
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG Service.onBind() service=${System.identityHashCode(this)} " +
-                "mediaHolderInitialized=${mediaHolderLazy.isInitialized()} at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         return binder
     }
 
@@ -235,7 +216,10 @@ class PlayerBackgroundPlaybackService : Service() {
             buildNotification(),
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
         )
-        acquireWakeLock()
+        // AM (WAKE_LOCK_TRACKS_PLAYBACK) -->
+        // Only when the session actually starts playing - see updatePlaybackState.
+        if (isPlaying) acquireWakeLock()
+        // <-- AM (WAKE_LOCK_TRACKS_PLAYBACK)
         // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
         // Step 4a: the app-lock exemption used to be set here, tied to "the
         // notification is showing." That stops being a valid proxy once the
@@ -267,6 +251,22 @@ class PlayerBackgroundPlaybackService : Service() {
     /** Reflects the current pause state in the notification. */
     fun updatePlaybackState(isPlaying: Boolean) {
         this.isPlaying = isPlaying
+        // AM (WAKE_LOCK_TRACKS_PLAYBACK) -->
+        // The lock used to be taken when the session STARTED and released only when
+        // the Service stopped, so a paused session held a PARTIAL_WAKE_LOCK
+        // indefinitely - confirmed on-device at 2h 27m held with nothing playing,
+        // flagged LONG by the system, and the reason an idle phone drained
+        // overnight: a partial lock keeps the CPU from suspending even when the app
+        // is doing nothing at all.
+        //
+        // What the lock is actually for (per acquireWakeLock's own comment) is
+        // keeping decode, EOF handling and episode loading running with the screen
+        // off. None of that happens while paused. Resuming does not need the lock
+        // to already be held either - whatever delivers the play action, a
+        // notification button or a MediaSession command, wakes the CPU to deliver
+        // it, and this runs before playback resumes.
+        if (isPlaying) acquireWakeLock() else releaseWakeLock()
+        // <-- AM (WAKE_LOCK_TRACKS_PLAYBACK)
         // AM (NOTIFICATION_REPOST_FIX) -->
         // Was a bare NotificationManagerCompat.notify() call, which assumes the
         // foreground-service/notification association is already intact - if the
@@ -312,12 +312,6 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG Service.onStartCommand() service=${System.identityHashCode(this)} " +
-                "action=${intent?.action} startId=$startId at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         when (intent?.action) {
             ACTION_TOGGLE_PLAY_PAUSE -> onTogglePlayPause?.invoke()
             ACTION_STOP -> {
@@ -329,14 +323,6 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     override fun onDestroy() {
-        // SVC_RACE_DEBUG -->
-        logcat {
-            "SVC_RACE_DEBUG Service.onDestroy() service=${System.identityHashCode(this)} " +
-                "mediaHolderInitialized=${mediaHolderLazy.isInitialized()} " +
-                "holder=${if (mediaHolderLazy.isInitialized()) System.identityHashCode(mediaHolder) else "n/a"} " +
-                "at=${android.os.SystemClock.elapsedRealtime()}"
-        }
-        // <-- SVC_RACE_DEBUG
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()

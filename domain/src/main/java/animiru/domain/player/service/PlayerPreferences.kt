@@ -30,7 +30,46 @@ class PlayerPreferences(
         2,
     )
 
+    // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
+    /**
+     * Disk allowance, in bytes, for keeping the raw stream bytes of episodes that
+     * hold a temporary position slot, so returning to one replays from disk instead
+     * of re-fetching.
+     *
+     * ZERO MEANS OFF - it is the whole switch, not a degenerate size. A separate
+     * boolean alongside this would allow "keeping enabled, with no room to keep
+     * anything", a state with no meaning; an allowance of nothing says it once.
+     * Nothing survives a restart at 0, though the cache still de-duplicates a
+     * download and a playback of the same episode within one session, which costs
+     * no lasting disk.
+     *
+     * How MANY episodes are kept is not set here - that follows
+     * [recentEpisodePositionSlots], since the position table is what defines
+     * "recent" for this feature. This only bounds how much space those episodes are
+     * allowed to occupy, because episode sizes differ by an order of magnitude
+     * between a 480p stream and a 4K one.
+     */
+    val retainRecentEpisodeMediaMaxBytes: Preference<Long> = preferenceStore.getLong(
+        "pref_retain_recent_episode_media_max_bytes",
+        2L * 1024 * 1024 * 1024,
+    )
+    // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
+
     // <-- AM (RECENT_EPISODE_POSITIONS)
+
+    // AM (NETWORK_BUFFER_SECONDS) -->
+    /**
+     * How many seconds of a network stream to buffer ahead (mpv's `cache-secs`).
+     * Still capped by `demuxer-max-bytes`, which is a memory guard rather than a
+     * buffer policy - see MPVPlayer's own note. No effect on downloaded or local
+     * playback, where mpv's cache is off entirely.
+     */
+    val networkBufferSeconds: Preference<Int> = preferenceStore.getInt(
+        "pref_network_buffer_seconds",
+        30,
+    )
+    // <-- AM (NETWORK_BUFFER_SECONDS)
+
     val backgroundPlayback: Preference<Boolean> = preferenceStore.getBoolean(
         "pref_player_background_playback",
         true,

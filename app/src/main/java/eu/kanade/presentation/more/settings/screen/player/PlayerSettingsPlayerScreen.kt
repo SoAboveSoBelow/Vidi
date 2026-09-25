@@ -45,7 +45,6 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
         val playerPreferences = remember { context.appGraph.playerPreferences }
         val basePreferences = remember { context.appGraph.basePreferences }
         val deviceSupportsPip = basePreferences.deviceHasPip()
-
         return listOfNotNull(
             Preference.PreferenceItem.ListPreference(
                 preference = playerPreferences.progressPreference,
@@ -76,11 +75,55 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                     true
                 },
             ),
+            // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
+            // One control, not a toggle plus a size: an allowance of nothing is
+            // the off state, and a separate switch would allow "on, with no room",
+            // which means nothing. How many episodes are kept has no control of
+            // its own either - it follows the temporary-position slots above.
+            Preference.PreferenceItem.ListPreference(
+                preference = playerPreferences.retainRecentEpisodeMediaMaxBytes,
+                entries = listOf(
+                    0L,
+                    512L * 1024 * 1024,
+                    1L * 1024 * 1024 * 1024,
+                    2L * 1024 * 1024 * 1024,
+                    5L * 1024 * 1024 * 1024,
+                    10L * 1024 * 1024 * 1024,
+                ).associateWith { bytes ->
+                    when {
+                        bytes == 0L -> stringResource(AMMR.strings.player_pref_retain_recent_episode_media_off)
+                        bytes < 1024L * 1024 * 1024 -> "${bytes / (1024 * 1024)} MB"
+                        else -> "${bytes / (1024 * 1024 * 1024)} GB"
+                    }
+                },
+                title = stringResource(AMMR.strings.player_pref_retain_recent_episode_media_size),
+                onValueChanged = {
+                    // Lowering it - to Off or otherwise - should free the disk now,
+                    // not at the next prune.
+                    context.appGraph.recentEpisodePositionManager.onRetainMediaPreferenceChanged()
+                    true
+                },
+            ),
+            // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
             // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
             Preference.PreferenceItem.SwitchPreference(
                 preference = playerPreferences.switchOnFailure,
                 title = stringResource(AMMR.strings.player_pref_switch_on_failure),
             ),
+            // AM (NETWORK_BUFFER_SECONDS) -->
+            // A short fixed list rather than a free number: the trade isn't
+            // guessable from a seconds value (more buffer costs RAM and wastes
+            // data on an episode the user drops after two minutes, less costs
+            // rebuffering), and an open field invites a value that turns the app
+            // into a memory hog. Streaming only - downloaded playback ignores it.
+            Preference.PreferenceItem.ListPreference(
+                preference = playerPreferences.networkBufferSeconds,
+                entries = listOf(15, 30, 60).associateWith {
+                    stringResource(AYMR.strings.player_seek_n_seconds, it)
+                },
+                title = stringResource(AMMR.strings.player_pref_network_buffer_seconds),
+            ),
+            // <-- AM (NETWORK_BUFFER_SECONDS)
             Preference.PreferenceItem.ListPreference(
                 preference = playerPreferences.defaultPlayerOrientationType,
                 entries = PlayerOrientation.entries.associateWith {
