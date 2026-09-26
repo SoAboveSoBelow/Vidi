@@ -40,6 +40,19 @@ data class ResolvedEpisodeOrder(
      * downloads still resolve by it.
      */
     val displayNameByEpisodeId: Map<Long, String>,
+    // AM (SINGLE_EPISODE_THUMBNAIL) -->
+    /**
+     * Cover to draw for an episode whose source contributes only that one
+     * episode, by the same rule as [displayNameByEpisodeId]: with one episode a
+     * source's cover IS the episode's thumbnail, and there is nothing else on
+     * the row identifying which source it came from. Resolved here rather than
+     * beside the name so the two rules cannot disagree about what "single
+     * episode" means. Absent for every other episode - those resolve a
+     * thumbnail of their own, and a multi-episode source's cover repeated down
+     * its rows would say nothing.
+     */
+    val thumbnailUrlByEpisodeId: Map<Long, String>,
+    // <-- AM (SINGLE_EPISODE_THUMBNAIL)
     val isPreordered: Boolean,
 ) {
     /** Display rank of each season number - what episodes are ordered by, rather than the number itself. */
@@ -76,6 +89,9 @@ data class ResolvedEpisodeOrder(
     companion object {
         val EMPTY = ResolvedEpisodeOrder(
             emptyList(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyList(), emptyMap(), emptyMap(),
+            // AM (SINGLE_EPISODE_THUMBNAIL) -->
+            emptyMap(),
+            // <-- AM (SINGLE_EPISODE_THUMBNAIL)
             isPreordered = false,
         )
     }

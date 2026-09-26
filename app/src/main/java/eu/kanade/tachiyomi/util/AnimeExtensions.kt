@@ -13,6 +13,24 @@ import tachiyomi.source.local.isLocal
 import java.io.InputStream
 import kotlin.time.Clock
 
+// AM (ART_SURVIVES_UNFAVORITE) -->
+// Was called from every unfavorite path, deleting the custom cover outright the
+// moment an entry left the library - so a misclicked "remove from library" lost
+// a hand-set cover permanently, with no undo, even though the anime row itself
+// survives and re-adding the entry restores everything else about it.
+//
+// Merge membership and episode overrides already made the opposite call
+// deliberately (see AnimeViewModel.toggleFavorite): they outlive unfavoriting
+// and are reaped by foreign-key cascade when the row is actually deleted, which
+// today only happens via Settings > Advanced > Clear database. Custom art is
+// user-authored data in exactly the same sense, so it now follows the same
+// policy - the file stays, keyed to a row that still exists, and goes when that
+// row goes.
+//
+// Kept (rather than deleted along with its call sites) for the paths that
+// genuinely destroy art on purpose: a user clearing a custom cover, and the
+// cache-wide cleanups in Settings > Advanced.
+// <-- AM (ART_SURVIVES_UNFAVORITE)
 fun Anime.removeCovers(coverCache: CoverCache): Anime {
     if (isLocal()) return this
     return if (coverCache.deleteFromCache(this, true) > 0) {

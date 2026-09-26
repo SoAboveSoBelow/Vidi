@@ -70,6 +70,7 @@ import okhttp3.Request
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.storage.extension
 import tachiyomi.core.common.util.lang.launchIO
+import tachiyomi.core.common.util.lang.launchNonCancellable
 import tachiyomi.core.common.util.lang.launchNow
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.lang.withUIContext
@@ -78,11 +79,14 @@ import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.episode.model.Episode
+import tachiyomi.domain.episode.model.EpisodeUpdate
+import tachiyomi.domain.episode.repository.EpisodeRepository
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import java.io.BufferedReader
+import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.time.Duration.Companion.milliseconds
@@ -114,6 +118,9 @@ class Downloader(
     // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
     private val playerPreferences: PlayerPreferences,
     // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
+    // AM (DOWNLOAD_THUMBNAIL) -->
+    private val episodeRepository: EpisodeRepository,
+    // <-- AM (DOWNLOAD_THUMBNAIL)
 ) {
 
     /**
@@ -438,6 +445,28 @@ class Downloader(
             DiskUtil.createNoMediaFile(tmpDir, context)
 
             download.status = Download.State.DOWNLOADED
+
+            // AM (DOWNLOAD_THUMBNAIL) -->
+            // The file is final and local now, so a frame costs one decode off
+            // disk with no seek into a remote stream and no second fetch - which
+            // is why this happens here rather than lazily when a row scrolls into
+            // view, where it would be a decode per row on the scroll path with
+            // nowhere to report a failure. Deliberately after the DOWNLOADED
+            // status and in its own non-cancellable job: a thumbnail that fails
+            // to extract must never fail or delay the download itself.
+            // <-- AM (DOWNLOAD_THUMBNAIL)
+            // AM (DOWNLOAD_THUMBNAIL_DIR_FIX) -->
+            // tmpDir, not animeDir.findFile(episodeDirname): renameTo() updates the
+            // UniFile in place, so tmpDir already IS the finished episode folder -
+            // which is why the createNoMediaFile() call above uses it too. Looking
+            // the folder back up by name instead went through the parent's SAF
+            // children listing, which had just been invalidated by that very
+            // rename, so it returned null and the extraction bailed before it
+            // started.
+            // <-- AM (DOWNLOAD_THUMBNAIL_DIR_FIX)
+            scope.launchNonCancellable {
+                generateDownloadThumbnail(download, tmpDir)
+            }
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
             // If the video threw, it will resume here
@@ -722,6 +751,63 @@ class Downloader(
         video.videoUrl = torrentUrl
         ffmpegDownload(download, tmpDir, videoFile, filename)
     }
+
+    // AM (DOWNLOAD_THUMBNAIL) -->
+    /**
+     * Extracts a frame from a freshly downloaded episode and stores it alongside the
+     * video as the episode's preview.
+     *
+     * Skipped when the episode already has a thumbnail the user or the local-source
+     * pipeline owns (anything under the anime's own ".thumbnails" folder): a custom
+     * thumbnail always wins. An extension-supplied preview url IS replaced, on
+     * purpose - a local frame keeps working offline and in downloaded-only mode,
+     * which is exactly the state a downloaded episode is most likely viewed in, and
+     * the next library sync restores the source's url if the download is removed.
+     */
+    private suspend fun generateDownloadThumbnail(download: Download, episodeDir: UniFile) {
+        val episodeId = download.episode.id
+        if (!episodeDir.isDirectory) return
+        val existing = download.episode.previewUrl
+        if (!existing.isNullOrBlank() && existing.contains(LOCAL_THUMBNAILS_DIR_MARKER)) return
+        if (episodeDir.findFile(DOWNLOAD_THUMBNAIL_NAME) != null) return
+
+        val videoFile = episodeDir.listFiles().orEmpty()
+            .filter { it.isFile && it.name != DOWNLOAD_THUMBNAIL_NAME && it.name != ".nomedia" }
+            .maxByOrNull { it.length() }
+            ?: return
+
+        val tempFile = File.createTempFile("tmp_", "_${episodeId}_thumbnail.jpg")
+        try {
+            val videoPath = videoFile.uri.toFFmpegString(context)
+            val probe = FFprobeKit.execute(
+                "-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 " +
+                    "\"$videoPath\"",
+            )
+            val duration = probe.allLogsAsString.trim().toFloatOrNull() ?: return
+            // Midpoint, same as the local-source extractor: the opening seconds are
+            // routinely a black frame, a logo or a title card.
+            val second = (duration / 2f).toInt()
+
+            FFmpegKit.execute(
+                "-ss $second -i \"$videoPath\" -frames:v 1 -update true \"${tempFile.path}\" -y",
+            )
+            if (tempFile.length() <= 0L) return
+
+            val target = episodeDir.createFile(DOWNLOAD_THUMBNAIL_NAME) ?: return
+            tempFile.inputStream().use { input ->
+                target.openOutputStream().use { output -> input.copyTo(output) }
+            }
+            episodeRepository.update(
+                EpisodeUpdate(id = episodeId, previewUrl = target.uri.toString()),
+            )
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            logcat(LogPriority.ERROR, e) { "Couldn't extract a thumbnail for episode $episodeId" }
+        } finally {
+            tempFile.delete()
+        }
+    }
+    // <-- AM (DOWNLOAD_THUMBNAIL)
 
     // ffmpeg is always on safe mode
     private suspend fun ffmpegDownload(
@@ -1203,6 +1289,18 @@ class Downloader(
         /** How much of the expected duration a finished download must cover. */
         private const val MIN_COMPLETE_DURATION_RATIO = 0.98
         // <-- AM (VERIFY_DOWNLOAD_COMPLETE)
+
+        // AM (DOWNLOAD_THUMBNAIL) -->
+        /** Filename of the frame extracted from a finished download, stored beside it. */
+        const val DOWNLOAD_THUMBNAIL_NAME = "thumbnail.jpg"
+
+        /**
+         * Marks a preview url as owned by the local-source/custom thumbnail pipeline
+         * (LocalEpisodeThumbnailManager writes into this folder) - those always win
+         * over a generated one.
+         */
+        const val LOCAL_THUMBNAILS_DIR_MARKER = ".thumbnails"
+        // <-- AM (DOWNLOAD_THUMBNAIL)
 
         const val TMP_DIR_SUFFIX = "_tmp"
         const val WARNING_NOTIF_TIMEOUT_MS = 30_000L

@@ -26,6 +26,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
@@ -861,11 +862,36 @@ class PlayerMediaHolder(
             // overall timeout so this can't wait forever if the anime genuinely has no
             // cover at all.
             // <-- AM (ARTWORK_REACTIVE_WAIT_FIX)
-            state
-                .map { it.animeId to it.episodeId }
-                .distinctUntilChanged()
-                .onEach { (animeId, episodeId) ->
-                    if (animeId == null || episodeId == null) return@onEach
+            // AM (ARTWORK_FIRST_EPISODE_INPUT_FIX) -->
+            // Was keyed on (animeId, episodeId) alone, so resolution ran exactly
+            // once per episode, against whatever animeThumbnailUrl/episodePreviewUrl
+            // happened to be in state at that instant. syncSessionState() writes
+            // those from the anime/episode objects the session is starting on, and
+            // on the FIRST episode of a session it can legitimately run before
+            // either url is populated - a later sync for the same episode filled
+            // them in, but distinctUntilChanged saw the same ids and never
+            // re-resolved, so that episode kept the artwork-less result for the
+            // rest of the session while every later switch (whose sync always
+            // carries fully resolved urls) worked. The urls are part of the input
+            // now, so a corrected url re-resolves on its own. collectLatest, not
+            // onEach: a newer input cancels the in-flight resolution (including the
+            // 2-minute reactive wait) instead of queueing behind it.
+            // <-- AM (ARTWORK_FIRST_EPISODE_INPUT_FIX)
+            holderScope.launch {
+                state
+                    .map {
+                        ArtworkInputs(
+                            animeId = it.animeId,
+                            episodeId = it.episodeId,
+                            animeThumbnailUrl = it.animeThumbnailUrl,
+                            episodePreviewUrl = it.episodePreviewUrl,
+                        )
+                    }
+                    .distinctUntilChanged()
+                    .collectLatest { inputs ->
+                    val animeId = inputs.animeId
+                    val episodeId = inputs.episodeId
+                    if (animeId == null || episodeId == null) return@collectLatest
                     val current = state.value
 
                     // AM (RESOLUTION_EXCEPTION_FIX) -->
@@ -907,7 +933,7 @@ class PlayerMediaHolder(
                         preDecodedArtwork = null
                         previewUrl
                     } else {
-                        val anime = getAnime.await(animeId) ?: return@onEach
+                        val anime = getAnime.await(animeId) ?: return@collectLatest
 
                         // AM (EPISODE_THUMBNAIL_MISSING_FIX) -->
                         // episodeThumbnailManager was injected but never actually called
@@ -1095,7 +1121,7 @@ class PlayerMediaHolder(
                     // in-flight work when a new value arrives, only queues it for
                     // after this returns.
                     val latest = state.value
-                    if (latest.animeId != animeId || latest.episodeId != episodeId) return@onEach
+                    if (latest.animeId != animeId || latest.episodeId != episodeId) return@collectLatest
                     // AM (ARTWORK_WIPE_FIX) -->
                     // Cache this before pushing - see pushLiveMediaState()'s doc comment
                     // for why other pushes need this to avoid wiping the artwork back out.
@@ -1116,13 +1142,20 @@ class PlayerMediaHolder(
                     // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
                     updateState { it.copy(resolvedEpisodeKey = animeId to episodeId) }
                     pushLiveMediaState()
+                    } catch (e: CancellationException) {
+                        // AM (ARTWORK_FIRST_EPISODE_INPUT_FIX) -->
+                        // collectLatest cancels this body when newer inputs arrive -
+                        // rethrown so the cancellation completes normally instead of
+                        // being swallowed (and logged) as a resolution failure.
+                        // <-- AM (ARTWORK_FIRST_EPISODE_INPUT_FIX)
+                        throw e
                     } catch (e: Throwable) {
                         logcat(LogPriority.ERROR, e) {
                             "Artwork resolution threw for animeId=$animeId episodeId=$episodeId"
                         }
                     }
                 }
-                .launchIn(holderScope)
+            }
             // <-- AM (BACKGROUND_ARTWORK_FIX)
         }
         return _player!!
@@ -1189,6 +1222,16 @@ class PlayerMediaHolder(
     // this same update; the foreground path has its own separate, continuous
     // position-tracking timer and was never touching this field here at all.
     // <-- AM (SHARED_SESSION_SYNC_FIX)
+    // AM (ARTWORK_FIRST_EPISODE_INPUT_FIX) -->
+    /** Everything the artwork flow resolves from - a change in any of it re-resolves. */
+    private data class ArtworkInputs(
+        val animeId: Long?,
+        val episodeId: Long?,
+        val animeThumbnailUrl: String?,
+        val episodePreviewUrl: String?,
+    )
+    // <-- AM (ARTWORK_FIRST_EPISODE_INPUT_FIX)
+
     fun syncSessionState(
         animeId: Long,
         episodeId: Long,

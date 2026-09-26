@@ -27,6 +27,7 @@ import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.episode.model.Episode
+import tachiyomi.domain.episode.repository.EpisodeRepository
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.storage.service.StorageManager
 import tachiyomi.i18n.aniyomi.AYMR
@@ -55,6 +56,9 @@ class DownloadManager(
     private val downloadPreferences: DownloadPreferences,
     private val downloader: Downloader,
     private val pendingDeleter: DownloadPendingDeleter,
+    // AM (DOWNLOAD_THUMBNAIL) -->
+    private val episodeRepository: EpisodeRepository,
+    // <-- AM (DOWNLOAD_THUMBNAIL)
 ) {
 
     val isRunning: Boolean
@@ -288,8 +292,24 @@ class DownloadManager(
             removeFromDownloadQueue(filteredEpisodes)
 
             val (animeDir, episodeDirs) = provider.findEpisodeDirs(filteredEpisodes, anime, source)
+            // AM (DOWNLOAD_THUMBNAIL) -->
+            // A thumbnail generated at download time lives inside the episode's own
+            // download folder, so deleting the download takes the image with it -
+            // the episode's preview url has to stop pointing at it in the same
+            // breath, or the row keeps asking for a file that is gone. Matched by
+            // path so ONLY generated thumbnails are cleared: a custom thumbnail
+            // (under the anime's ".thumbnails") and an extension-supplied url both
+            // live outside these folders and survive untouched.
+            val deletedDirUris = episodeDirs.map { it.uri.toString() }
+            val episodesLosingThumbnail = filteredEpisodes.filter { episode ->
+                episode.previewUrl?.let { url -> deletedDirUris.any(url::startsWith) } == true
+            }
+            // <-- AM (DOWNLOAD_THUMBNAIL)
             episodeDirs.forEach { it.delete() }
             cache.removeEpisodes(filteredEpisodes, anime)
+            // AM (DOWNLOAD_THUMBNAIL) -->
+            episodeRepository.clearPreviewUrls(episodesLosingThumbnail.map { it.id })
+            // <-- AM (DOWNLOAD_THUMBNAIL)
 
             // Delete anime directory if empty
             if (animeDir?.listFiles()?.isEmpty() == true) {
@@ -310,10 +330,25 @@ class DownloadManager(
             if (removeQueued) {
                 downloader.removeFromQueue(anime)
             }
+            // AM (DOWNLOAD_THUMBNAIL) -->
+            // Same reasoning as deleteEpisodes(): the whole anime folder goes, so
+            // every generated thumbnail inside it goes with it. Resolved BEFORE the
+            // delete, while the folder's uri is still knowable.
+            val animeDirUri = provider.findAnimeDir(anime.ogTitle, source)?.uri?.toString()
+            val episodesLosingThumbnail = if (animeDirUri == null) {
+                emptyList()
+            } else {
+                episodeRepository.getEpisodeByAnimeId(anime.id)
+                    .filter { it.previewUrl?.startsWith(animeDirUri) == true }
+            }
+            // <-- AM (DOWNLOAD_THUMBNAIL)
             // AM (CUSTOM_INFORMATION) -->
             provider.findAnimeDir(anime.ogTitle, source)?.delete()
             // <-- AM (CUSTOM_INFORMATION)
             cache.removeAnime(anime)
+            // AM (DOWNLOAD_THUMBNAIL) -->
+            episodeRepository.clearPreviewUrls(episodesLosingThumbnail.map { it.id })
+            // <-- AM (DOWNLOAD_THUMBNAIL)
 
             // Delete source directory if empty
             val sourceDir = provider.findSourceDir(source)

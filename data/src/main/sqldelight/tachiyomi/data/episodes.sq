@@ -164,3 +164,13 @@ SET anime_id = coalesce(:animeId, anime_id),
     -- <-- AY
     memo = coalesce(:memo, memo)
 WHERE _id = :episodeId;
+
+-- AM (DOWNLOAD_THUMBNAIL) -->
+-- update's preview_url uses coalesce, so it can only ever SET a value, never
+-- clear one. Deleting a download has to clear the generated thumbnail it
+-- points at, hence a dedicated statement.
+clearPreviewUrls:
+UPDATE episodes
+SET preview_url = NULL
+WHERE _id IN :episodeIds;
+-- <-- AM (DOWNLOAD_THUMBNAIL)

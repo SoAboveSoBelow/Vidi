@@ -80,6 +80,27 @@ class MediaCache(private val cacheDir: File) {
             if (playerOffset < 0L) return false
             return System.nanoTime() - playerActiveAtNanos <= windowNanos
         }
+
+        /**
+         * Whether playback will plausibly reach [offset] soon enough to be worth
+         * waiting for.
+         *
+         * "Playback is fetching" alone was not enough, and the case that proved it
+         * is the first thing every download does: ffmpeg reads the head of the
+         * file, then seeks to the END for the index before it starts reading
+         * sequentially. A linear stream is never going to produce those tail bytes,
+         * so a download deferring on them waited for something that could not
+         * arrive - with no timeout left to rescue it, until playback stopped
+         * altogether. No bytes, no statistics, a progress spinner that never moved.
+         *
+         * Waiting is only ever right for bytes just ahead of where playback already
+         * is. Anything behind it, or far enough ahead to be a different part of the
+         * file, is the download's own to fetch.
+         */
+        fun playbackWillReach(offset: Long, lookaheadBytes: Long): Boolean {
+            if (playerOffset < 0L) return false
+            return offset >= playerOffset && offset - playerOffset <= lookaheadBytes
+        }
         // <-- AM (PLAYER_LEADS_DOWNLOAD_FOLLOWS)
 
         val inUse: Boolean get() = readers.get() > 0

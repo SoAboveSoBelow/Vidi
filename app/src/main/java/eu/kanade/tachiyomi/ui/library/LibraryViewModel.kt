@@ -26,8 +26,6 @@ import eu.kanade.presentation.anime.DownloadAction
 import eu.kanade.presentation.library.components.LibraryToolbarTitle
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
-import eu.kanade.tachiyomi.data.cache.BackgroundCache
-import eu.kanade.tachiyomi.data.cache.CoverCache
 import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.track.TrackStatus
@@ -36,8 +34,6 @@ import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.source.MergedSource
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.util.episode.getNextUnseen
-import eu.kanade.tachiyomi.util.removeBackgrounds
-import eu.kanade.tachiyomi.util.removeCovers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 // AM (MERGED_SOURCES) -->
@@ -125,10 +121,6 @@ class LibraryViewModel(
     private val setAnimeCategories: SetAnimeCategories,
     private val preferences: BasePreferences,
     private val libraryPreferences: LibraryPreferences,
-    private val coverCache: CoverCache,
-    // AY -->
-    private val backgroundCache: BackgroundCache,
-    // <-- AY
     private val sourceManager: SourceManager,
     private val downloadManager: DownloadManager,
     private val downloadCache: DownloadCache,
@@ -831,10 +823,11 @@ class LibraryViewModel(
         viewModelScope.launchNonCancellable {
             if (deleteFromLibrary) {
                 val toDelete = animes.map {
-                    it.removeCovers(coverCache)
-                    // AY -->
-                    it.removeBackgrounds(backgroundCache)
-                    // <-- AY
+                    // AM (ART_SURVIVES_UNFAVORITE) -->
+                    // Was removeCovers()/removeBackgrounds() here - the
+                    // multi-select version of the same instant, undoable-by-
+                    // nothing deletion. See removeCovers' own doc comment.
+                    // <-- AM (ART_SURVIVES_UNFAVORITE)
                     AnimeUpdate(
                         favorite = false,
                         id = it.id,

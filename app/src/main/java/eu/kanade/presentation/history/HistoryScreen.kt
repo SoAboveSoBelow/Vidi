@@ -108,7 +108,23 @@ private fun HistoryScreenContent(
     ) {
         items(
             items = history,
-            key = { "history-${it.hashCode()}" },
+            // AM (HISTORY_STABLE_ITEM_KEY) -->
+            // Was "history-${it.hashCode()}": the data class hash covers seenAt,
+            // episodeId and episodeNumber, so every playback progress write gave
+            // the currently-watched entry a NEW key - the LazyColumn saw it as a
+            // removal plus an insertion and animateItem() faded it out and back in
+            // on every save. Keyed by identity instead: the history query returns
+            // exactly one row per anime (maxSeenAtEpisodeId), and separators are
+            // only inserted between differing dates in a seenAt-sorted list, so
+            // both are unique. An entry now updates in place, and only an actual
+            // reorder animates (as a placement slide).
+            key = {
+                when (it) {
+                    is HistoryUiModel.Header -> "history-header-${it.date}"
+                    is HistoryUiModel.Item -> "history-item-${it.item.animeId}"
+                }
+            },
+            // <-- AM (HISTORY_STABLE_ITEM_KEY)
             contentType = {
                 when (it) {
                     is HistoryUiModel.Header -> "header"

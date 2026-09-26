@@ -41,8 +41,8 @@ package eu.kanade.tachiyomi.ui.player
 // AwaitPointerEventScope: awaitEachGesture's block may NOT call arbitrary
 // suspend functions (no Animatable.snapTo/stop in there - confirmed at
 // compile time). So:
-//  - centerX/centerY/sizeScale are plain mutableFloatStateOf, written
-//    DIRECTLY in the gesture loop (not suspend, zero-lag 1:1 tracking).
+//  - centerX/centerY/sizeScale are plain snapshot state (sizeScale via
+//    BaseRelativeScale over an absolute-px state), written DIRECTLY in the gesture loop (not suspend, zero-lag 1:1 tracking).
 //  - Every programmatic movement (settle, stash, unstash, double-tap
 //    resize) is a non-suspend starter that launches a Job animating those
 //    same vars via androidx.compose.animation.core.animate. A new
@@ -107,6 +107,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableFloatState
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -140,6 +142,8 @@ import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.properties.ReadWriteProperty
+import kotlin.reflect.KProperty
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -354,16 +358,66 @@ private const val DISMISS_BELOW_NAV_FRACTION = 0.5f
 // real Samsung PiP's stash keeps a live sliver of the playing video
 // showing, not a fully hidden window.
 private val PIP_STASH_PEEK = 32.dp
-// The fixed size (in sizeScale units - 1f = the default 60%-of-screen
-// width) the window temporarily grows TO when controls are revealed, if
-// it's currently smaller than this. Not a multiplier: a window at any
+// The fixed width the window temporarily grows TO when controls are
+// revealed, if it's currently narrower. Not a multiplier: a window at any
 // size below the target becomes exactly the target while controls are
 // shown; a window already at/above it doesn't grow at all. Measured off
-// real PiP screenshots: the revealed window is ~47% of screen width
-// (505px of 1080), i.e. 0.467/0.6 = 0.78 of the default width.
-private const val CONTROLS_REVEAL_TARGET_SCALE = 0.78f
+// real PiP screenshots in portrait: the revealed window is ~47% of the
+// screen width (505px of 1080).
+// AM (DUMMY_PIP_REVEAL_TARGET_SHORT_EDGE_FIX) -->
+// Was 0.78 in sizeScale units (0.467/0.6), i.e. a fraction of the CURRENT
+// screen width - ~1095px in landscape instead of the measured 505px. That
+// was masked while sizeScale itself scaled with the screen width; with
+// the window's size now absolute across rotation
+// (DUMMY_PIP_ROTATION_ABSOLUTE_SIZE_FIX), a window carried into landscape
+// grew ~3x on tap, uncapped, past the bottom bound. The measurement was of
+// the SHORT edge (portrait width), so it's expressed against that now,
+// which is orientation-invariant like the window size itself, and capped
+// at the fitted max - see controlsRevealGrowFactor().
+// <-- AM (DUMMY_PIP_REVEAL_TARGET_SHORT_EDGE_FIX)
+// AM (DUMMY_PIP_REVEAL_TARGET_ASPECT_FIX) -->
+// A WIDTH target is only right for the 16:9 video it was measured on: a
+// 9:16 window 505px wide is ~900px tall, a 2.39:1 one only ~210px. The
+// target is now a size EDGE fed through the same aspect-aware sizing as
+// the minimum (sizeWidthForAspect - AOSP getSizeForAspectRatio: constant
+// diagonal within the aspect limits, short edge pinned beyond them), so
+// every aspect ratio reveals at the same apparent size real PiP does. The
+// edge is the measured 16:9 window's short edge (505 / 1.78 = ~284px of
+// 1080), which reproduces exactly the measured 505px width at 16:9.
+private const val CONTROLS_REVEAL_TARGET_EDGE_FRACTION =
+    505f / 1080f / PIP_ASPECT_LIMIT_FOR_MIN_SIZE
+// <-- AM (DUMMY_PIP_REVEAL_TARGET_ASPECT_FIX)
 
 private fun coerceInSafe(value: Float, min: Float, max: Float): Float = value.coerceIn(min, max.coerceAtLeast(min))
+
+// AM (DUMMY_PIP_ROTATION_ABSOLUTE_SIZE_FIX) -->
+// sizeScale/lastAdjustedScale used to be stored AS scales of the live
+// base width (60% of the CURRENT screen width), so a rotation silently
+// resized the window by the width ratio: a landscape window at its
+// minimum came back ~0.46x in portrait, below minWindowWidthPx(), and
+// the rotation effect only ever clamped DOWN. The stored truth is now
+// the window's absolute width in px, which rotation doesn't touch -
+// minWindowWidthPx() depends only on the aspect ratio and density, so a
+// width that satisfied it before a rotation still does after. The
+// scale is derived on read, so every existing sizeScale consumer keeps
+// its units unchanged. null = never sized = scale 1f (the default
+// follows the current orientation until something actually sets it).
+private class BaseRelativeScale(
+    private val widthPx: MutableState<Float?>,
+    private val baseWidthPx: State<Float>,
+) : ReadWriteProperty<Any?, Float> {
+    override fun getValue(thisRef: Any?, property: KProperty<*>): Float {
+        val base = baseWidthPx.value
+        val width = widthPx.value
+        return if (width == null || base <= 0f) 1f else width / base
+    }
+
+    override fun setValue(thisRef: Any?, property: KProperty<*>, value: Float) {
+        val base = baseWidthPx.value
+        if (base > 0f) widthPx.value = value * base
+    }
+}
+// <-- AM (DUMMY_PIP_ROTATION_ABSOLUTE_SIZE_FIX)
 
 // AM (DUMMY_PIP_PINCH_ROTATION_ANCHOR_FIX) -->
 // Rotate a vector by the window's tilt. The pinch layer scales AND
@@ -547,7 +601,10 @@ fun DummyPipContainer(
         // Double-tap toggle bookkeeping: real PiP expands to max and
         // collapses back to the LAST USER-ADJUSTED size (a pinch sets
         // it, the expansion itself never overwrites it).
-        var lastAdjustedScale by remember { mutableFloatStateOf(1f) }
+        // Absolute px under the hood - see BaseRelativeScale.
+        val lastAdjustedWidthPx = remember { mutableStateOf<Float?>(null) }
+        val lastAdjustedScaleDelegate = remember { BaseRelativeScale(lastAdjustedWidthPx, currentBaseWidth) }
+        var lastAdjustedScale by lastAdjustedScaleDelegate
         var toggledExpanded by remember { mutableStateOf(false) }
         // True while a pinch resize is in flight - drives the
         // full-screen touch blocker below (real PiP swallows touches to
@@ -581,7 +638,10 @@ fun DummyPipContainer(
 
         // Plain state, written directly inside the gesture loop - see the
         // file header for why these are NOT Animatables.
-        var sizeScale by remember { mutableFloatStateOf(1f) }
+        // Absolute px under the hood - see BaseRelativeScale.
+        val sizeWidthPx = remember { mutableStateOf<Float?>(null) }
+        val sizeScaleDelegate = remember { BaseRelativeScale(sizeWidthPx, currentBaseWidth) }
+        var sizeScale by sizeScaleDelegate
         var centerX by remember { mutableFloatStateOf(0f) }
         var centerY by remember { mutableFloatStateOf(0f) }
         // 0 = visually fullscreen, 1 = visually the floating window. Only
@@ -664,19 +724,44 @@ fun DummyPipContainer(
         // hypot(limit*minEdge, minEdge)); beyond them the SHORT edge is
         // pinned to minEdge. Returns the min WIDTH in px for the current
         // aspect ratio - portrait videos end up narrower than landscape.
-        fun minWindowWidthPx(): Float {
-            val minEdge = currentMinEdge.value
+        // AM (DUMMY_PIP_REVEAL_TARGET_ASPECT_FIX) -->
+        // Generalized from minWindowWidthPx()'s body so the controls
+        // reveal target sizes by the same rule - see
+        // CONTROLS_REVEAL_TARGET_EDGE_FRACTION.
+        fun sizeWidthForAspect(edge: Float): Float {
             val ar = currentAspect.value.coerceAtLeast(0.01f)
             return when {
-                ar > PIP_ASPECT_LIMIT_FOR_MIN_SIZE -> minEdge * ar
-                ar < 1f / PIP_ASPECT_LIMIT_FOR_MIN_SIZE -> minEdge
+                ar > PIP_ASPECT_LIMIT_FOR_MIN_SIZE -> edge * ar
+                ar < 1f / PIP_ASPECT_LIMIT_FOR_MIN_SIZE -> edge
                 else -> {
-                    val radius = hypot(PIP_ASPECT_LIMIT_FOR_MIN_SIZE * minEdge, minEdge)
+                    val radius = hypot(PIP_ASPECT_LIMIT_FOR_MIN_SIZE * edge, edge)
                     val h = sqrt(radius * radius / (ar * ar + 1f))
                     h * ar
                 }
             }
         }
+
+        fun minWindowWidthPx(): Float = sizeWidthForAspect(currentMinEdge.value)
+        // <-- AM (DUMMY_PIP_REVEAL_TARGET_ASPECT_FIX)
+
+        // AM (DUMMY_PIP_REVEAL_TARGET_SHORT_EDGE_FIX) -->
+        // The paint-time multiplier the controls reveal grows the window
+        // by (1f = no growth). Target capped at maxWindowWidthPx(): the
+        // growth is anchored at the corner nearest the window's center,
+        // so a grown rect no larger than the fitted max always stays
+        // inside the bounds. Single source for the composition-side
+        // target AND the gesture loop's settled check, so the two can't
+        // disagree.
+        fun controlsRevealGrowFactor(): Float {
+            val shortEdge = minOf(currentScreenWidth.value, currentScreenHeight.value)
+            val targetW = minOf(
+                sizeWidthForAspect(shortEdge * CONTROLS_REVEAL_TARGET_EDGE_FRACTION),
+                maxWindowWidthPx(),
+            )
+            val w = windowWidthPx()
+            return if (w > 0f && w < targetW) targetW / w else 1f
+        }
+        // <-- AM (DUMMY_PIP_REVEAL_TARGET_SHORT_EDGE_FIX)
 
         fun cancelMove() {
             moveJobX?.cancel()
@@ -1057,7 +1142,9 @@ fun DummyPipContainer(
         //     new display instead of clipping the old absolute px. Below:
         //     centerX/centerY are rescaled by new/old dimensions.
         //  2. PipBoundsAlgorithm.getSizeForAspectRatio() shrinks the
-        //     window when it no longer fits the new bounds. Below: a
+        //     window when it no longer fits the new bounds. The window's
+        //     absolute size is otherwise preserved across the rotation
+        //     (DUMMY_PIP_ROTATION_ABSOLUTE_SIZE_FIX). Below: a
         //     stored sizeScale that now overflows the (shorter) height is
         //     committed down to the fit, and the double-tap collapse
         //     target follows so it can't re-grow past it either.
@@ -1187,8 +1274,20 @@ fun DummyPipContainer(
                 // get the same re-settle, which converges to the same
                 // dock anyway.
                 // <-- AM (DUMMY_PIP_STALE_SETTLE_FIX)
+                // AM (DUMMY_PIP_STALE_SETTLE_BEYOND_WALL_FIX) -->
+                // Was `<= minX + 1f || >= maxX - 1f`: one-sided, so a
+                // target PAST the live wall also passed as "docked". That's
+                // the opposite stale case to the one above - portrait ->
+                // landscape, the side nav bar's inset isn't applied yet on
+                // the first landscape frame, so the rotation settle aims
+                // X under where the nav bar is about to be; the re-check
+                // on the inset change accepted it, and nothing re-validates
+                // once the settle lands, so the window rested under the
+                // nav buttons. Docked means ON a wall, within 1px either
+                // side.
+                // <-- AM (DUMMY_PIP_STALE_SETTLE_BEYOND_WALL_FIX)
                 val targetDocked = minX > maxX ||
-                    settleTargetX <= minX + 1f || settleTargetX >= maxX - 1f
+                    abs(settleTargetX - minX) <= 1f || abs(settleTargetX - maxX) <= 1f
                 val targetInBand = targetDocked && !settleTargetX.isNaN() && !settleTargetY.isNaN() &&
                     (minY > maxY || settleTargetY in minY..maxY)
                 if (targetInBand) return@LaunchedEffect
@@ -1243,7 +1342,7 @@ fun DummyPipContainer(
         // they stay reachable. Expand-TO, not expand-BY (corrected from
         // the pre-rebuild implementation's capped multiplier, which grew
         // every small window by the same factor regardless of how small
-        // it actually was): any window below CONTROLS_REVEAL_TARGET_SCALE
+        // it actually was): any window below the reveal target
         // visually becomes exactly that size while controls are shown -
         // the paint-time scale is target/current, so the RESULT is the
         // same fixed size every time. A window already at/above the
@@ -1261,8 +1360,8 @@ fun DummyPipContainer(
         // instead of pushing half-off the edge it's docked against
         // (confirmed real bug in the original: centered growth from a
         // corner-docked window overflows the screen).
-        val revealScaleTarget = if (mode == DummyPipMode.Pip && controlsShown && sizeScale < CONTROLS_REVEAL_TARGET_SCALE) {
-            CONTROLS_REVEAL_TARGET_SCALE / sizeScale
+        val revealScaleTarget = if (mode == DummyPipMode.Pip && controlsShown) {
+            controlsRevealGrowFactor()
         } else {
             1f
         }
@@ -2126,14 +2225,7 @@ fun DummyPipContainer(
                                                 // None once the reveal-grow
                                                 // had expanded the window.
                                                 val settledNow = abs(
-                                                    controlsRevealScaleAnim.value -
-                                                        (
-                                                            if (sizeScale < CONTROLS_REVEAL_TARGET_SCALE) {
-                                                                CONTROLS_REVEAL_TARGET_SCALE / sizeScale
-                                                            } else {
-                                                                1f
-                                                            }
-                                                            ),
+                                                    controlsRevealScaleAnim.value - controlsRevealGrowFactor(),
                                                 ) < 0.01f
                                                 val region = if (settledNow) {
                                                     hitRegion(downPosition, overlayW, overlayH)

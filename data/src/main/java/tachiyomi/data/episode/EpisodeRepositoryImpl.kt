@@ -107,6 +107,17 @@ class EpisodeRepositoryImpl(
         }
     }
 
+    // AM (DOWNLOAD_THUMBNAIL) -->
+    override suspend fun clearPreviewUrls(episodeIds: List<Long>) {
+        if (episodeIds.isEmpty()) return
+        try {
+            database.episodesQueries.clearPreviewUrls(episodeIds)
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e)
+        }
+    }
+    // <-- AM (DOWNLOAD_THUMBNAIL)
+
     override suspend fun removeEpisodesWithIds(episodeIds: List<Long>) {
         try {
             database.episodesQueries.removeEpisodesWithIds(episodeIds)

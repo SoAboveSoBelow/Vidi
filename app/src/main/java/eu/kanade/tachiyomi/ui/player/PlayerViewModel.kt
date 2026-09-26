@@ -690,12 +690,25 @@ class PlayerViewModel(
         // rather than force-unwrapping if it somehow doesn't.
         // <-- AM (SHARED_SESSION_SYNC_FIX)
         val episodeId = episode.id ?: return
+        // AM (MERGED_NOTIFICATION_ARTWORK_FIX) -->
+        // The artwork fallback follows the EPISODE's owner, not the library
+        // entry: on a merged entry currentAnime is the MergedSource parent, so
+        // every episode of every child fell back to the parent's cover - one
+        // image for the whole playlist, which is exactly what the cover-as-
+        // thumbnail complaint was. currentEpisodeAnime is the child the playing
+        // episode actually came from (see its own doc comment - thumbnails are
+        // named there as one of the things that must read it), so its cover is
+        // the right stand-in when the episode has no thumbnail of its own.
+        // Titles deliberately stay on the parent: the notification names the
+        // library entry the user started, not the child source behind it.
+        // <-- AM (MERGED_NOTIFICATION_ARTWORK_FIX)
+        val episodeAnime = stateData.value.currentEpisodeAnime ?: anime
         mediaHolder?.syncSessionState(
             animeId = anime.id,
             episodeId = episodeId,
             animeTitle = anime.title,
             episodeTitle = displayNameOf(episode),
-            animeThumbnailUrl = anime.thumbnailUrl,
+            animeThumbnailUrl = episodeAnime.thumbnailUrl,
             episodePreviewUrl = episode.preview_url,
         )
     }

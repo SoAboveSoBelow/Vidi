@@ -2,7 +2,6 @@
 package eu.kanade.tachiyomi.ui.recents
 
 import android.content.Context
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.graphics.res.animatedVectorResource
 import androidx.compose.animation.graphics.res.rememberAnimatedVectorPainter
 import androidx.compose.animation.graphics.vector.AnimatedImageVector
@@ -10,9 +9,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.FilterChip
@@ -26,10 +28,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -60,6 +60,7 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import mihon.app.di.appGraph
 import mihon.feature.upcoming.UpcomingScreen
 import tachiyomi.core.common.i18n.stringResource
@@ -112,34 +113,59 @@ data object RecentsTab : Tab {
         val snackbarHostState = SnackbarHostState()
         // <-- AM (TAB_HOLD)
         // AM (SUBTAB_SELECTION_PERSISTED) -->
-        // rememberSaveable, not remember - RecentsTab's Content() gets disposed and
-        // recomposed fresh when a pushed screen (e.g. AnimeScreen) is popped back to
-        // it, and a plain remember would silently reset this to its default (Updates)
-        // regardless of which sub-tab was actually showing before, discarding that
-        // sub-tab's own scroll position along with it (its LazyListState never even
-        // gets a chance to be restored, since it's the wrong sub-tab being shown).
-        var showHistoryScreen by rememberSaveable { mutableStateOf(false) }
+        // Must survive Content() being disposed and recomposed fresh when a pushed
+        // screen (e.g. AnimeScreen) is popped back to it - a plain remember would
+        // silently reset this to its default (Updates) regardless of which sub-tab
+        // was actually showing before, discarding that sub-tab's own scroll position
+        // along with it. rememberPagerState is rememberSaveable-backed, so that holds.
         // <-- AM (SUBTAB_SELECTION_PERSISTED)
+        // AM (RECENTS_SWIPE_PAGER) -->
+        // Was a Crossfade driven by a separate showHistoryScreen boolean, so the
+        // sub-tabs could only be switched via the chips. The pager's state is now
+        // the single source of truth - chips, the showHistory() channel and swipes
+        // all drive it, and the top/bottom bars derive from its currentPage.
+        val pagerState = rememberPagerState(initialPage = RECENTS_PAGE_UPDATES) { RECENTS_PAGE_COUNT }
+        val scope = rememberCoroutineScope()
+        val showHistoryScreen = pagerState.currentPage == RECENTS_PAGE_HISTORY
+        val updatesState by updatesViewModel.state.collectAsState()
 
         RecentsScaffold(
             showHistoryScreen = showHistoryScreen,
-            shouldShowHistoryScreen = { showHistoryScreen = it },
+            shouldShowHistoryScreen = { showHistory ->
+                scope.launch {
+                    pagerState.animateScrollToPage(
+                        if (showHistory) RECENTS_PAGE_HISTORY else RECENTS_PAGE_UPDATES,
+                    )
+                }
+            },
             updatesViewModel = updatesViewModel,
             historyViewModel = historyViewModel,
             snackbarHostState = snackbarHostState,
         ) { contentPadding ->
-            Crossfade(targetState = showHistoryScreen, label = "recents_crossfade") { showHistory ->
-                if (!showHistory) {
-                    AnimeUpdatesHalfTab(updatesViewModel, updatesSettingsViewModel, contentPadding)
-                } else {
-                    HistoryHalfTab(historyViewModel, snackbarHostState, contentPadding)
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.Top,
+                // Updates' selection mode owns the top/bottom bars (and hides the
+                // home bottom nav) - swiping away mid-selection would leave that
+                // state stranded on a page that's no longer showing.
+                userScrollEnabled = !updatesState.selectionMode,
+            ) { page ->
+                when (page) {
+                    RECENTS_PAGE_UPDATES ->
+                        AnimeUpdatesHalfTab(updatesViewModel, updatesSettingsViewModel, contentPadding)
+                    RECENTS_PAGE_HISTORY ->
+                        HistoryHalfTab(historyViewModel, snackbarHostState, contentPadding)
                 }
             }
         }
 
         LaunchedEffect(Unit) {
-            switchToHistoryTabChannel.receiveAsFlow().collectLatest { showHistoryScreen = true }
+            switchToHistoryTabChannel.receiveAsFlow().collectLatest {
+                pagerState.scrollToPage(RECENTS_PAGE_HISTORY)
+            }
         }
+        // <-- AM (RECENTS_SWIPE_PAGER)
         // <-- AM (RECENTS_FILTER_CHIP)
 
         LaunchedEffect(Unit) {
@@ -156,6 +182,12 @@ data object RecentsTab : Tab {
         }
     }
 }
+
+// AM (RECENTS_SWIPE_PAGER) -->
+private const val RECENTS_PAGE_UPDATES = 0
+private const val RECENTS_PAGE_HISTORY = 1
+private const val RECENTS_PAGE_COUNT = 2
+// <-- AM (RECENTS_SWIPE_PAGER)
 
 internal suspend fun openEpisode(context: Context, episode: Episode?, snackbarHostState: SnackbarHostState) {
     val playerPreferences: PlayerPreferences = context.appGraph.playerPreferences

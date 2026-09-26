@@ -26,10 +26,6 @@ import eu.kanade.domain.source.interactor.GetIncognitoState
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.interactor.AddTracks
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
-import eu.kanade.tachiyomi.data.cache.BackgroundCache
-import eu.kanade.tachiyomi.data.cache.CoverCache
-import eu.kanade.tachiyomi.util.removeBackgrounds
-import eu.kanade.tachiyomi.util.removeCovers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -65,10 +61,6 @@ class BrowseSourceViewModel(
     sourceManager: SourceManager,
     sourcePreferences: SourcePreferences,
     private val libraryPreferences: LibraryPreferences,
-    private val coverCache: CoverCache,
-    // AY -->
-    private val backgroundCache: BackgroundCache,
-    // <-- AY
     private val getRemoteAnime: GetRemoteAnime,
     private val getDuplicateLibraryAnime: GetDuplicateLibraryAnime,
     private val getCategories: GetCategories,
@@ -248,12 +240,13 @@ class BrowseSourceViewModel(
                 },
             )
 
-            if (!new.favorite) {
-                new = new.removeCovers(coverCache)
-                // AY -->
-                new = new.removeBackgrounds(backgroundCache)
-                // <-- AY
-            } else {
+            // AM (ART_SURVIVES_UNFAVORITE) -->
+            // The !favorite branch here was removeCovers()/removeBackgrounds() -
+            // unfavoriting from a source's browse list took the custom art with
+            // it just like the other two paths. See removeCovers' own doc
+            // comment; only the favorite branch has anything to do now.
+            // <-- AM (ART_SURVIVES_UNFAVORITE)
+            if (new.favorite) {
                 setAnimeDefaultEpisodeFlags.await(anime)
                 addTracks.bindEnhancedTrackers(anime, source)
             }

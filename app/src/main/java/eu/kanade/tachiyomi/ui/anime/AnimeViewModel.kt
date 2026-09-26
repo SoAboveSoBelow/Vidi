@@ -86,7 +86,6 @@ import eu.kanade.tachiyomi.ui.anime.track.TrackItem
 import eu.kanade.tachiyomi.util.AniChartApi
 import eu.kanade.tachiyomi.util.episode.getNextUnseen
 import eu.kanade.tachiyomi.util.nullIfEmpty
-import eu.kanade.tachiyomi.util.removeCovers
 import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.trimOrNull
 import kotlinx.coroutines.CoroutineScope
@@ -385,6 +384,9 @@ class AnimeViewModel(
                                 mergedChildren,
                                 order.isPreordered,
                                 order.displayNameByEpisodeId,
+                                // AM (SINGLE_EPISODE_THUMBNAIL) -->
+                                order.thumbnailUrlByEpisodeId,
+                                // <-- AM (SINGLE_EPISODE_THUMBNAIL)
                             ),
                             // AM (CUSTOM_EPISODE_ORDER) -->
                             isPreordered = order.isPreordered,
@@ -448,6 +450,9 @@ class AnimeViewModel(
                 mergedChildrenById(anime),
                 order.isPreordered,
                 order.displayNameByEpisodeId,
+                // AM (SINGLE_EPISODE_THUMBNAIL) -->
+                order.thumbnailUrlByEpisodeId,
+                // <-- AM (SINGLE_EPISODE_THUMBNAIL)
             )
             // <-- AM (CUSTOM_EPISODE_ORDER)
 
@@ -683,7 +688,19 @@ class AnimeViewModel(
     private suspend fun refreshMergeChildren(mergeParentId: Long, manualFetch: Boolean) {
         val children = mergeChildRepository.getChildrenByMergeParentId(mergeParentId)
         withUIContext {
-            children.forEach { child ->
+            // AM (MERGE_REFRESH_SKIP_COMPLETED) -->
+            // Was every child, unconditionally - an 8-child merge meant 8 full
+            // details+episodes round trips on every refresh, including for
+            // children that have finished airing and will never gain an episode.
+            // fetchEpisodesFromSeasons() already applies exactly this rule to
+            // seasons (completed AND fetched at least once = skip); merge
+            // children are the same shape of fan-out and had no rule at all.
+            // A manual refresh still fetches everything - that's the user
+            // explicitly asking for it.
+            // <-- AM (MERGE_REFRESH_SKIP_COMPLETED)
+            children.filter { child ->
+                manualFetch || child.lastUpdate == 0L || child.status.toInt() != SAnime.COMPLETED
+            }.forEach { child ->
                 when (child.fetchType) {
                     FetchType.Episodes -> {
                         updateAnimeFromRemote.awaitEpisodesUpdate(
@@ -821,10 +838,12 @@ class AnimeViewModel(
                     // so Settings > Advanced > Clear database (the app's only
                     // row-deleting cleanup) is what actually reaps it.
                     // <-- AM (MERGED_SOURCES)
-                    // Remove covers and update last modified in db
-                    if (anime.removeCovers(coverCache) != anime) {
-                        updateAnime.awaitUpdateCoverLastModified(anime.id)
-                    }
+                    // AM (ART_SURVIVES_UNFAVORITE) -->
+                    // Was removeCovers(coverCache) here, deleting a hand-set
+                    // cover the instant this ran. Custom art now follows the
+                    // same rule as the merge data described just above, for
+                    // the same reason - see removeCovers' own doc comment.
+                    // <-- AM (ART_SURVIVES_UNFAVORITE)
                     withUIContext { onRemoved() }
                 }
             } else {
@@ -1080,6 +1099,9 @@ class AnimeViewModel(
         // AM (EPISODE_NAMES) -->
         displayNames: Map<Long, String> = emptyMap(),
         // <-- AM (EPISODE_NAMES)
+        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+        thumbnailUrls: Map<Long, String> = emptyMap(),
+        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
     ): List<EpisodeList.Item> {
         return map { episode ->
             // AM (MERGED_SOURCES) -->
@@ -1115,6 +1137,19 @@ class AnimeViewModel(
                 // AM (EPISODE_NAMES) -->
                 displayName = displayNames[episode.id] ?: episode.name,
                 // <-- AM (EPISODE_NAMES)
+                // AM (SINGLE_EPISODE_THUMBNAIL) -->
+                thumbnailUrl = thumbnailUrls[episode.id]?.let { url ->
+                    // A custom cover lives in CoverCache under the child's id, not
+                    // at its thumbnailUrl, so the stored url would show the SOURCE's
+                    // cover for a child the user had given one. Resolved here rather
+                    // than in GetEpisodeOrder because the cache is an app-module
+                    // concern the domain layer has no access to. The row loads a
+                    // plain string, and a local file path is one - the full
+                    // AnimeCover treatment (coverLastModified-based invalidation)
+                    // would mean changing what the row accepts.
+                    coverCache.getCustomCoverFile(episode.animeId).takeIf { it.exists() }?.path ?: url
+                },
+                // <-- AM (SINGLE_EPISODE_THUMBNAIL)
                 downloadState = downloadState,
                 downloadProgress = activeDownload?.progress ?: 0,
                 selected = episode.id in selectedEpisodeIds,
@@ -1766,7 +1801,22 @@ class AnimeViewModel(
      */
     fun setEpisodeViewMode(viewMode: EpisodeViewMode) {
         val anime = successState?.anime ?: return
-        val switchingToThumbnails = !anime.showPreviews() && viewMode != EpisodeViewMode.SIMPLIFIED
+        // AM (VIEW_MODE_REFRESH_LOCAL_ONLY) -->
+        // The refresh only exists to populate thumbnails, and the only pipeline
+        // that produces one from a sync is LocalSource.generateMissingThumbnails
+        // (ffmpeg over the local file). A remote source can only ever return a
+        // preview_url it chose to publish, which almost none do - so for remote
+        // entries this was a full episode-list fetch, every toggle, for nothing.
+        //
+        // And it isn't one call: fetchAllFromSource() on a merged entry goes to
+        // refreshMergeChildren(), one details+episodes update per child with no
+        // skip conditions; on a seasons entry it can fan out per season; and it
+        // runs syncTrackers() plus a forced syncRelatedAnime() either way. A
+        // cosmetic toggle shouldn't reach any of that.
+        // <-- AM (VIEW_MODE_REFRESH_LOCAL_ONLY)
+        val switchingToThumbnails = anime.isLocal() &&
+            !anime.showPreviews() &&
+            viewMode != EpisodeViewMode.SIMPLIFIED
 
         viewModelScope.launchNonCancellable {
             setAnimeEpisodeFlags.awaitSetEpisodeViewMode(anime, viewMode)
@@ -2932,6 +2982,10 @@ sealed class EpisodeList {
         /** What to show as the episode's name - see ResolvedEpisodeOrder.displayNameByEpisodeId. */
         val displayName: String = episode.name,
         // <-- AM (EPISODE_NAMES)
+        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+        /** Cover to draw for a single-episode source - see ResolvedEpisodeOrder.thumbnailUrlByEpisodeId. */
+        val thumbnailUrl: String? = null,
+        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
         // AM (FILE_SIZE) -->
         var fileSize: Long? = null,
         // <-- AM (FILE_SIZE)

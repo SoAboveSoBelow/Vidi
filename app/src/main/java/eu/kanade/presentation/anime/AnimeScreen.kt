@@ -1756,7 +1756,12 @@ private fun LazyGridScope.sharedEpisodeItems(
                     scanlator = item.episode.scanlator.takeIf { !it.isNullOrBlank() },
                     // AY -->
                     summary = item.episode.summary.takeIf { !it.isNullOrBlank() && showSummaries },
-                    previewUrl = item.episode.previewUrl.takeIf { !it.isNullOrBlank() && showPreviews },
+                    // AM (SINGLE_EPISODE_THUMBNAIL) -->
+                    // The source's cover first: for a single-episode source it IS
+                    // this episode's thumbnail, and it is set for nothing else.
+                    // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+                    previewUrl = (item.thumbnailUrl ?: item.episode.previewUrl)
+                        .takeIf { !it.isNullOrBlank() && showPreviews },
                     // <-- AY
                     seen = item.episode.seen,
                     bookmark = item.episode.bookmark,

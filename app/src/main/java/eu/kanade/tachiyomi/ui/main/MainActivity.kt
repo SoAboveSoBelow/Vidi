@@ -963,6 +963,23 @@ class MainActivity : BaseActivity() {
                                 .consumeWindowInsets(contentPadding),
                         )
 
+                        // Draw navigation bar scrim when needed
+                        // AM (PLAYER_NAV_SCRIM_Z_ORDER) -->
+                        // Composed BEFORE PlayerOverlayHost so it sits beneath the
+                        // player in the Box's z-order. It used to be composed after,
+                        // which drew it on top of the fullscreen player's video.
+                        // <-- AM (PLAYER_NAV_SCRIM_Z_ORDER)
+                        if (remember { isNavigationBarNeedsScrim() }) {
+                            Spacer(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .fillMaxWidth()
+                                    .windowInsetsBottomHeight(WindowInsets.navigationBars)
+                                    .alpha(0.8f)
+                                    .background(MaterialTheme.colorScheme.surfaceContainer),
+                            )
+                        }
+
                         // AM (PLAYER_OVERLAY_MIGRATION) -->
                         // Hosted here, outside DefaultNavigatorScreenTransition
                         // entirely - see PlayerHostScreen.kt's own doc comment
@@ -974,18 +991,6 @@ class MainActivity : BaseActivity() {
                         // currently showing.
                         PlayerOverlayHost()
                         // <-- AM (PLAYER_OVERLAY_MIGRATION)
-
-                        // Draw navigation bar scrim when needed
-                        if (remember { isNavigationBarNeedsScrim() }) {
-                            Spacer(
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .fillMaxWidth()
-                                    .windowInsetsBottomHeight(WindowInsets.navigationBars)
-                                    .alpha(0.8f)
-                                    .background(MaterialTheme.colorScheme.surfaceContainer),
-                            )
-                        }
                     }
                 }
 

@@ -7,6 +7,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import logcat.LogPriority
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import tachiyomi.core.common.util.system.logcat
@@ -114,8 +115,35 @@ object MediaProxyServer {
         }
         // <-- AM (RELEASE_PREVIOUS_REGISTRATION)
         upstreams[key] = Upstream(url, headers, cacheKey, throttled)
-        return key to "http://127.0.0.1:$port/media/$key"
+        // AM (PROXY_RELATIVE_PATHS) -->
+        // The URL keeps the upstream's own filename as its last path segment, so a
+        // consumer resolving a relative reference from it lands on
+        // /media/<key>/<that reference> - see serve().
+        return key to "http://127.0.0.1:$port/media/$key/${url.fileName()}"
+        // <-- AM (PROXY_RELATIVE_PATHS)
     }
+
+    // AM (PROXY_RELATIVE_PATHS) -->
+    /** The last path segment of a URL, with any query and fragment dropped. */
+    private fun String.fileName(): String =
+        substringBefore('?').substringBefore('#').substringAfterLast('/').ifEmpty { "index" }
+
+    /**
+     * This upstream's neighbour at [relative], or null if it does not resolve.
+     *
+     * Inherits the headers (a CDN that needs a Referer for the manifest needs it
+     * for the segments too) and the throttle, and gets its own cache entry keyed
+     * off the parent's - each segment is a contiguous resource, so everything the
+     * cache does for a whole file works for one segment unchanged.
+     */
+    private fun Upstream.resolveSibling(relative: String): Upstream? {
+        val absolute = url.toHttpUrlOrNull()?.resolve(relative)?.toString() ?: return null
+        return copy(
+            url = absolute,
+            cacheKey = cacheKey?.let { "$it-s${relative.hashCode().toUInt()}" },
+        )
+    }
+    // <-- AM (PROXY_RELATIVE_PATHS)
 
     // AM (MEDIA_CACHE) -->
     fun attachCache(cache: MediaCache) {
@@ -213,9 +241,38 @@ object MediaProxyServer {
                     }
                 }
 
-                val key = path.substringAfterLast('/')
-                val upstream = upstreams[key] ?: return respondError(output, 404)
+                // AM (PROXY_RELATIVE_PATHS) -->
+                // The path is /media/<key>/<relative path>, and everything after
+                // the key is resolved against the upstream URL rather than looked
+                // up. A manifest (DASH .mpd, HLS .m3u8) is a text index whose
+                // entries are RELATIVE, and a consumer resolves them against the
+                // URL it fetched the manifest from - which is this server. Served
+                // under a bare key those became paths with no registration, so
+                // every segment 404'd and playback sat there loading forever
+                // ("dash: Failed to open an initialization section").
+                //
+                // Resolving instead of parsing is what makes this work for both
+                // formats and needs no manifest support at all: DASH
+                // SegmentTemplate URLs are generated at playback time from
+                // $Number$/$Time$ placeholders and cannot be enumerated up front,
+                // so any scheme that rewrites a manifest's contents can only ever
+                // cover the formats it knows how to parse. This covers whatever
+                // the consumer asks for.
+                val trimmed = path.trimStart('/').removePrefix("media/")
+                val key = trimmed.substringBefore('/')
+                val relative = trimmed.substringAfter('/', "")
+                val parent = upstreams[key] ?: return respondError(output, 404)
                 val httpClient = client ?: return respondError(output, 503)
+
+                // The manifest itself is served under its own name so relative
+                // resolution has a sibling to work from; anything else is a
+                // resource beside it.
+                val upstream = if (relative.isEmpty() || relative == parent.url.fileName()) {
+                    parent
+                } else {
+                    parent.resolveSibling(relative) ?: return respondError(output, 404)
+                }
+                // <-- AM (PROXY_RELATIVE_PATHS)
 
                 // AM (MEDIA_CACHE) -->
                 val cache = mediaCache

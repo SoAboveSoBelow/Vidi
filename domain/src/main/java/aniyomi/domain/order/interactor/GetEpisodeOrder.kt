@@ -107,6 +107,11 @@ class GetEpisodeOrder(
         }
 
         val childOrdering = mergeChildRepository.getChildOrderingByMergeParentId(host.id)
+        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+        // One read, two maps: titles and covers both come off the children and
+        // were two separate calls to the same query otherwise.
+        val children = mergeChildRepository.getChildrenByMergeParentId(host.id)
+        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
         // AM (EPISODE_NAMES) -->
         // Grouped BEFORE dedupe: the single-episode rule is about what a source
         // actually offers, not what survived dedupe.
@@ -126,10 +131,14 @@ class GetEpisodeOrder(
             seasonRows = entrySeasonRepository.getByHostAnimeId(host.id),
             // AM (EPISODE_NAMES) -->
             episodesByChild = episodesByChild,
-            childTitles = mergeChildRepository.getChildrenByMergeParentId(host.id)
-                .associate { it.id to it.title },
+            childTitles = children.associate { it.id to it.title },
             customNames = episodeNameRepository.getByAnimeIds(childOrdering.map { it.animeId }),
             // <-- AM (EPISODE_NAMES)
+            // AM (SINGLE_EPISODE_THUMBNAIL) -->
+            childThumbnails = children.mapNotNull { child ->
+                child.thumbnailUrl?.let { child.id to it }
+            }.toMap(),
+            // <-- AM (SINGLE_EPISODE_THUMBNAIL)
         )
     }
 
@@ -191,8 +200,13 @@ class GetEpisodeOrder(
                 // Titles are read once per membership change rather than per
                 // emission; a source renaming itself on refresh shows up when
                 // the screen is next opened.
-                val childTitles = mergeChildRepository.getChildrenByMergeParentId(host.id)
-                    .associate { it.id to it.title }
+                val children = mergeChildRepository.getChildrenByMergeParentId(host.id)
+                val childTitles = children.associate { it.id to it.title }
+                // AM (SINGLE_EPISODE_THUMBNAIL) -->
+                val childThumbnails = children.mapNotNull { child ->
+                    child.thumbnailUrl?.let { child.id to it }
+                }.toMap()
+                // <-- AM (SINGLE_EPISODE_THUMBNAIL)
                 val namesFlow = episodeNameRepository.getByAnimeIdsAsFlow(childOrdering.map { it.animeId })
                 // <-- AM (EPISODE_NAMES)
                 combine(
@@ -222,6 +236,9 @@ class GetEpisodeOrder(
                         childTitles = childTitles,
                         customNames = customNames,
                         // <-- AM (EPISODE_NAMES)
+                        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+                        childThumbnails = childThumbnails,
+                        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
                     )
                 }
             }
@@ -248,6 +265,9 @@ class GetEpisodeOrder(
         childTitles: Map<Long, String>,
         customNames: Map<Long, String>,
         // <-- AM (EPISODE_NAMES)
+        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+        childThumbnails: Map<Long, String> = emptyMap(),
+        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
     ): ResolvedEpisodeOrder {
         val overrideById = overrides.associateBy { it.episodeId }
         val orderingByChildId = childOrdering.associateBy { it.animeId }
@@ -308,6 +328,21 @@ class GetEpisodeOrder(
         }
         // <-- AM (EPISODE_NAMES)
 
+        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+        // The image half of the rule above, off the same grouping so the two
+        // cannot disagree about which episodes count as single-episode: the
+        // source's cover stands in for the source's title.
+        val singleEpisodeThumbnails = if (host.isMerged()) {
+            episodesByChild.filterValues { it.size == 1 }
+                .mapNotNull { (childId, episodes) ->
+                    childThumbnails[childId]?.takeIf { it.isNotBlank() }?.let { episodes.single().id to it }
+                }
+                .toMap()
+        } else {
+            emptyMap()
+        }
+        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+
         return ResolvedEpisodeOrder(
             episodes = ordered,
             seasonByEpisodeId = seasonById,
@@ -317,6 +352,9 @@ class GetEpisodeOrder(
             seasons = seasons,
             priorityByEpisodeId = priorityById,
             displayNameByEpisodeId = displayNames,
+            // AM (SINGLE_EPISODE_THUMBNAIL) -->
+            thumbnailUrlByEpisodeId = singleEpisodeThumbnails,
+            // <-- AM (SINGLE_EPISODE_THUMBNAIL)
             isPreordered = host.isMerged() || overrides.isNotEmpty(),
         )
     }
