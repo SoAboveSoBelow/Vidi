@@ -14,11 +14,6 @@ interface EpisodeRepository {
 
     suspend fun removeEpisodesWithIds(episodeIds: List<Long>)
 
-    // AM (DOWNLOAD_THUMBNAIL) -->
-    /** Clears preview_url for [episodeIds]; [update] can only set it, never clear it. */
-    suspend fun clearPreviewUrls(episodeIds: List<Long>)
-    // <-- AM (DOWNLOAD_THUMBNAIL)
-
     suspend fun getEpisodeByAnimeId(animeId: Long, applyScanlatorFilter: Boolean = false): List<Episode>
 
     // AM (MERGED_SOURCES) -->
