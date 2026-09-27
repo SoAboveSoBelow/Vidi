@@ -247,6 +247,26 @@ class LibraryPreferences(
         "pref_hide_missing_episode_indicators",
         false,
     )
+
+    // AM (TAG_LIMIT) -->
+    /**
+     * How many of an entry's tags are shown inline by default, merged or not.
+     *
+     * A plain count: zero shows none, and [UNCAPPED_TAG_LIMIT] - the step past
+     * [MAX_TAG_LIMIT] on the slider - shows every tag. Zero used to mean uncapped,
+     * which read backwards on a slider whose other end is a bigger number.
+     *
+     * This caps display only - nothing is dropped from the entry - so the rest stay
+     * one tap away in the tag popout, tag search still matches them, and raising the
+     * limit needs no refresh.
+     *
+     * It governs only the tags the user has not pinned in the popout. A pinned tag
+     * keeps the place they gave it whatever this becomes, until that entry's choices
+     * are reset, and an added tag is pinned when it is added - so zero here still
+     * shows those.
+     */
+    val maxTagsShown: Preference<Int> = preferenceStore.getInt("pref_max_tags_shown", DEFAULT_TAG_LIMIT)
+    // <-- AM (TAG_LIMIT)
     // endregion
 
     // AY -->
@@ -414,6 +434,24 @@ class LibraryPreferences(
         const val ANIME_HAS_UNSEEN = "anime_fully_seen"
         const val ANIME_NON_SEEN = "anime_started"
         const val ANIME_OUTSIDE_RELEASE_PERIOD = "anime_outside_release_period"
+
+        // AM (TAG_LIMIT) -->
+        /** Lowest [maxTagsShown]: no tags inline but the pinned ones. */
+        const val MIN_TAG_LIMIT = 0
+
+        /**
+         * Default [maxTagsShown]. The cap merged entries were written with before
+         * the limit became a display concern, so upgrading changes nothing about
+         * what a merge shows.
+         */
+        const val DEFAULT_TAG_LIMIT = 20
+
+        /** Highest counted [maxTagsShown]. */
+        const val MAX_TAG_LIMIT = 50
+
+        /** The step past [MAX_TAG_LIMIT], meaning no cap at all. */
+        const val UNCAPPED_TAG_LIMIT = MAX_TAG_LIMIT + 1
+        // <-- AM (TAG_LIMIT)
 
         const val MARK_DUPLICATE_EPISODE_SEEN_NEW = "new"
         const val MARK_DUPLICATE_EPISODE_SEEN_EXISTING = "existing"

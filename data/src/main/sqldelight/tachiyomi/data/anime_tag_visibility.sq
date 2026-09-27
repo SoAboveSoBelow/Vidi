@@ -1,0 +1,48 @@
+-- AM (TAG_LIMIT) -->
+import kotlin.Boolean;
+
+-- Sparse user overrides of which of an entry's tags are shown inline. A row
+-- exists only for a tag the user has actually moved between Visible and Hidden:
+-- no rows means the entry splits purely by LibraryPreferences.maxTagsShown, with
+-- no custom code path taken at read time.
+--
+-- Keyed by the tag TEXT rather than an id because tags have none - they are
+-- strings on the entry. That is also what makes the override survive a merge
+-- re-sync changing the tag set: a tag a newly added source brings in has no row
+-- and takes the default, a tag the user moved keeps its row wherever it lands in
+-- the new ranking, and a tag that disappears leaves a row that simply never
+-- matches. Orphan rows are harmless and cost one string comparison; they are not
+-- worth a cleanup pass that would forget a choice when a source is briefly
+-- removed and re-added.
+--
+-- The tag is stored as the user saw it. Lookups are case-insensitive via NOCASE
+-- so a source changing a tag's capitalisation between refreshes does not silently
+-- drop the choice.
+CREATE TABLE anime_tag_visibility(
+    anime_id INTEGER NOT NULL,
+    tag TEXT NOT NULL COLLATE NOCASE,
+    visible INTEGER AS Boolean NOT NULL,
+    PRIMARY KEY(anime_id, tag),
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX anime_tag_visibility_anime_id_index ON anime_tag_visibility(anime_id);
+
+getByAnimeId:
+SELECT anime_id, tag, visible
+FROM anime_tag_visibility
+WHERE anime_id = :animeId;
+
+upsert:
+INSERT OR REPLACE INTO anime_tag_visibility(anime_id, tag, visible)
+VALUES (:animeId, :tag, :visible);
+
+delete:
+DELETE FROM anime_tag_visibility
+WHERE anime_id = :animeId AND tag = :tag;
+
+deleteByAnimeId:
+DELETE FROM anime_tag_visibility
+WHERE anime_id = :animeId;
+-- <-- AM (TAG_LIMIT)

@@ -13,12 +13,22 @@ import tachiyomi.domain.anime.repository.AnimeRepository
  * Everything but tags comes from the info entry - the source chosen in merge
  * settings, or the highest-priority source if none is.
  *
- * Tags are drawn from every source, keeping the [MAX_TAGS] most popular: the
- * ones the most sources agree on. A merge of dozens of sources otherwise
- * accumulates hundreds, which say little about the entry and are slow to lay
- * out when the description is expanded. Duplicates differing only in case are
- * counted as one, keeping the first spelling seen in priority order, and ties
- * are broken the same way.
+ * Tags are drawn from every source and ordered most popular first: the ones the
+ * most sources agree on lead. Duplicates differing only in case are counted as
+ * one, keeping the first spelling seen in priority order, and ties are broken
+ * the same way. That count is what GetTagSourceCounts shows in the tag popout.
+ *
+ * All of them are kept. A merge of dozens of sources can accumulate hundreds,
+ * which say little about the entry and are slow to lay out when the description
+ * is expanded - but that is a display problem, and it is solved where they are
+ * displayed: `LibraryPreferences.maxTagsShown` caps what is shown inline, for
+ * merged and ordinary entries alike, and the rest sit behind a "more" chip.
+ * Truncating here instead would lose tags the popout and tag search can still
+ * use, and would need a refresh to get them back when the user raises the cap.
+ * The ordering is what makes that cap worth having: the first N tags are the
+ * ones the most sources agree on. That setting defaults to the twenty this used
+ * to keep, so dropping the truncation here changes what a merge shows only for a
+ * user who raises it.
  *
  * Called whenever an input changes: creating the merge, adding or removing a
  * source, changing the info entry, and refreshing the merge (sources' own
@@ -52,7 +62,6 @@ class SyncMergedEntryInfo(
                 )
             }
             .sortedWith(compareByDescending<RankedTag> { it.sources }.thenBy { it.firstSeen })
-            .take(MAX_TAGS)
             .map { it.tag }
 
         animeRepository.update(
@@ -71,10 +80,5 @@ class SyncMergedEntryInfo(
 
     /** [sources] is how many sources list the tag; [firstSeen] breaks ties by priority order. */
     private data class RankedTag(val tag: String, val sources: Int, val firstSeen: Int)
-
-    companion object {
-        /** How many tags a merged entry keeps, most popular first. */
-        const val MAX_TAGS = 20
-    }
 }
 // <-- AM (MERGE_SETTINGS)

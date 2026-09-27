@@ -8,6 +8,10 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.ui.util.fastAny
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import animiru.domain.anime.interactor.GetDisplayedTags
+import animiru.domain.anime.interactor.GetTagSourceCounts
+import animiru.domain.anime.interactor.SetTagVisibility
+import animiru.domain.anime.model.DisplayedTags
 import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
 import aniyomi.core.common.torrent.TorrentPreferences
@@ -85,7 +89,6 @@ import eu.kanade.tachiyomi.ui.anime.merged.MergeSettingsResult
 import eu.kanade.tachiyomi.ui.anime.track.TrackItem
 import eu.kanade.tachiyomi.util.AniChartApi
 import eu.kanade.tachiyomi.util.episode.getNextUnseen
-import eu.kanade.tachiyomi.util.nullIfEmpty
 import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.trimOrNull
 import kotlinx.coroutines.CoroutineScope
@@ -100,6 +103,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -115,7 +120,9 @@ import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchNonCancellable
 import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
+import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.anime.interactor.GetAnimeWithEpisodesAndSeasons
+import tachiyomi.domain.anime.interactor.GetCustomAnimeInfo
 import tachiyomi.domain.anime.interactor.GetDuplicateLibraryAnime
 import tachiyomi.domain.anime.interactor.SetAnimeEpisodeFlags
 import tachiyomi.domain.anime.interactor.SetAnimeSeasonFlags
@@ -179,6 +186,9 @@ class AnimeViewModel(
     private val downloadCache: DownloadCache,
     // AY -->
     private val getAnimeAndEpisodesAndSeasons: GetAnimeWithEpisodesAndSeasons,
+    // AM (TAG_LIMIT) -->
+    private val getAnime: GetAnime,
+    // <-- AM (TAG_LIMIT)
     // <-- AY
     private val getDuplicateLibraryAnime: GetDuplicateLibraryAnime,
     private val getAvailableScanlators: GetAvailableScanlators,
@@ -214,6 +224,11 @@ class AnimeViewModel(
     // AM (MERGE_SETTINGS) -->
     private val mergeSettingsRepository: MergeSettingsRepository,
     private val syncMergedEntryInfo: SyncMergedEntryInfo,
+    // AM (TAG_LIMIT) -->
+    private val getDisplayedTags: GetDisplayedTags,
+    private val setTagVisibility: SetTagVisibility,
+    private val getTagSourceCounts: GetTagSourceCounts,
+    // <-- AM (TAG_LIMIT)
     private val removeFromMerge: RemoveFromMerge,
     // <-- AM (MERGE_SETTINGS)
     // AY -->
@@ -233,6 +248,7 @@ class AnimeViewModel(
     // <-- AM (FILE_SIZE)
     // AM (CUSTOM_INFORMATION) -->
     private val setCustomAnimeInfo: SetCustomAnimeInfo,
+    private val getCustomAnimeInfo: GetCustomAnimeInfo,
     // <-- AM (CUSTOM_INFORMATION)
 ) : ViewModel() {
 
@@ -411,6 +427,38 @@ class AnimeViewModel(
                     }
                 }
         }
+
+        // AM (TAG_LIMIT) -->
+        viewModelScope.launchIO {
+            state.map { (it as? State.Success)?.let { s -> s.tagsTarget?.id ?: s.anime.id } }
+                .distinctUntilChanged()
+                .collectLatest { id ->
+                    if (id == null) return@collectLatest
+                    val added = getCustomAnimeInfo.get(id)?.addedGenre.orEmpty()
+                    updateSuccessState {
+                        it.copy(addedTags = added.mapTo(mutableSetOf(), String::lowercase))
+                    }
+                }
+        }
+
+        viewModelScope.launchIO {
+            // Re-subscribed when the popout is pointed at another entry, so a move or
+            // a pin redraws live there too rather than only on this screen's own tags.
+            state.map { (it as? State.Success)?.tagsTarget?.id }
+                .distinctUntilChanged()
+                .flatMapLatest { targetId ->
+                    getDisplayedTags.subscribe(
+                        animeId = targetId ?: animeId,
+                        tags = state
+                            .map { (it as? State.Success)?.let { s -> s.tagsTarget ?: s.anime }?.genre }
+                            .distinctUntilChanged(),
+                    )
+                }
+                .collectLatest { displayedTags ->
+                    updateSuccessState { it.copy(displayedTags = displayedTags) }
+                }
+        }
+        // <-- AM (TAG_LIMIT)
 
         viewModelScope.launchIO {
             getExcludedScanlators.subscribe(animeId)
@@ -737,7 +785,6 @@ class AnimeViewModel(
         author: String?,
         artist: String?,
         description: String?,
-        tags: List<String>?,
         status: Long?,
     ) {
         val state = successState ?: return
@@ -752,7 +799,6 @@ class AnimeViewModel(
                 ogAuthor = author?.trimOrNull(),
                 ogArtist = artist?.trimOrNull(),
                 ogDescription = description?.trimOrNull(),
-                ogGenre = tags?.nullIfEmpty(),
                 ogStatus = status ?: 0,
                 lastUpdate = anime.lastUpdate + 1,
             )
@@ -765,28 +811,29 @@ class AnimeViewModel(
                         author = newAuthor,
                         artist = newArtist,
                         description = newDesc,
-                        genre = tags,
                         status = status,
                     ),
                 )
             }
         } else {
-            val genre = if (!tags.isNullOrEmpty() && tags != state.anime.ogGenre) {
-                tags
-            } else {
-                null
-            }
+            // AM (TAG_LIMIT) -->
+            // Tags are edited in the tag popout now, so this leaves both tag fields
+            // exactly as they were: dropping them here would wipe a user's added
+            // tags every time they edited the title.
+            val custom = getCustomAnimeInfo.get(state.anime.id)
             setCustomAnimeInfo.set(
                 CustomAnimeInfo(
-                    state.anime.id,
-                    title?.trimOrNull(),
-                    author?.trimOrNull(),
-                    artist?.trimOrNull(),
-                    description?.trimOrNull(),
-                    genre,
-                    status.takeUnless { it == state.anime.ogStatus },
+                    id = state.anime.id,
+                    title = title?.trimOrNull(),
+                    author = author?.trimOrNull(),
+                    artist = artist?.trimOrNull(),
+                    description = description?.trimOrNull(),
+                    genre = custom?.genre,
+                    addedGenre = custom?.addedGenre,
+                    status = status.takeUnless { it == state.anime.ogStatus },
                 ),
             )
+            // <-- AM (TAG_LIMIT)
             anime = anime.copy(lastUpdate = anime.lastUpdate + 1)
         }
 
@@ -2368,6 +2415,15 @@ class AnimeViewModel(
         data object ClearAnime : Dialog
         // <-- AM (CLEAR_ANIME)
 
+        // AM (TAG_LIMIT) -->
+        /**
+         * The tag popout. [sourceCounts] is loaded when it opens and is empty for
+         * anything but a multi-source merge; the split itself is read live from
+         * state so a move redraws without reopening.
+         */
+        data class Tags(val sourceCounts: Map<String, Int>) : Dialog
+        // <-- AM (TAG_LIMIT)
+
         // AM (MERGE_SETTINGS) -->
         /** Merge settings' loaded data; edits are staged in MergeSettingsState until Save. */
         data class MergeSettings(
@@ -2379,7 +2435,18 @@ class AnimeViewModel(
         // <-- AM (MERGE_SETTINGS)
 
         // AM (EPISODE_NAMES) -->
-        data class RenameEpisode(val episodeId: Long, val currentName: String) : Dialog
+        data class RenameEpisode(
+            val episodeId: Long,
+            val currentName: String,
+            // AM (TAG_LIMIT) -->
+            /**
+             * The entry that owns the episode - the child on a merged entry, so Edit
+             * tags and Open entry act on the source the episode actually came from
+             * rather than on the merge.
+             */
+            val ownerAnimeId: Long,
+            // <-- AM (TAG_LIMIT)
+        ) : Dialog
         // <-- AM (EPISODE_NAMES)
 
         // AM (CUSTOM_EPISODE_ORDER) -->
@@ -2406,6 +2473,9 @@ class AnimeViewModel(
     // <-- AM (MERGE_SETTINGS)
 
     fun dismissDialog() {
+        // AM (TAG_LIMIT) -->
+        updateSuccessState { it.copy(tagsTarget = null) }
+        // <-- AM (TAG_LIMIT)
         updateSuccessState { it.copy(dialog = null) }
     }
 
@@ -2544,8 +2614,10 @@ class AnimeViewModel(
     // AM (EPISODE_NAMES) -->
     /** Only meaningful for a single episode, so the action is offered only then. */
     fun showRenameEpisodeDialog() {
-        val selected = successState?.selectedEpisodes?.singleOrNull() ?: return
-        showRenameEpisodeDialog(selected.id, selected.displayName)
+        val state = successState ?: return
+        val selected = state.selectedEpisodes.singleOrNull() ?: return
+        val owner = state.episodes.firstOrNull { it.episode.id == selected.id }?.owner
+        showRenameEpisodeDialog(selected.id, selected.displayName, owner?.id ?: state.anime.id)
     }
 
     /**
@@ -2553,9 +2625,9 @@ class AnimeViewModel(
      * double-tap gesture targets the row it landed on, which is not
      * necessarily the selection - and may be no selection at all.
      */
-    fun showRenameEpisodeDialog(episodeId: Long, currentName: String) {
+    fun showRenameEpisodeDialog(episodeId: Long, currentName: String, ownerAnimeId: Long) {
         updateSuccessState {
-            it.copy(dialog = Dialog.RenameEpisode(episodeId, currentName))
+            it.copy(dialog = Dialog.RenameEpisode(episodeId, currentName, ownerAnimeId))
         }
     }
 
@@ -2573,6 +2645,191 @@ class AnimeViewModel(
     // <-- AM (EPISODE_NAMES)
 
     // AM (MERGE_SETTINGS) -->
+    // AM (TAG_LIMIT) -->
+    /**
+     * Opens the popout for this entry, or for [ownerAnimeId] when that is a different
+     * one - the child that owns an episode, reached from the rename dialog.
+     */
+    fun showTagsDialog(ownerAnimeId: Long? = null) {
+        val state = successState ?: return
+        viewModelScope.launchIO {
+            // Read fresh rather than reused from the episode list. An Anime caches its
+            // custom info when it is constructed, and the list's owner instances were
+            // built when the list was - so a tag added or deleted since would show the
+            // state from before the edit. That was the reason a deleted tag came back
+            // on reopening while the delete action, which reads the store directly,
+            // correctly said there was nothing left to delete.
+            val target = ownerAnimeId
+                ?.takeIf { it != state.anime.id }
+                ?.let { getAnime.await(it) }
+            val id = target?.id ?: state.anime.id
+            val counts = getTagSourceCounts.await(id)
+            val added = getCustomAnimeInfo.get(id)?.addedGenre.orEmpty()
+            updateSuccessState {
+                it.copy(
+                    tagsTarget = target,
+                    addedTags = added.mapTo(mutableSetOf(), String::lowercase),
+                    dialog = Dialog.Tags(sourceCounts = counts),
+                )
+            }
+        }
+    }
+
+    /**
+     * Re-ranks any merge this entry is a source of, so a tag added to or deleted from a
+     * child reaches the merges that list it.
+     *
+     * A merged entry's tags are written from its children by SyncMergedEntryInfo, which
+     * otherwise only runs on merge events - so without this a tag added to a source sat
+     * on that source alone until the merge happened to be refreshed. The child's own
+     * added tags are part of its genre, so the re-rank picks them up like any source
+     * tag, counting towards the popularity order.
+     */
+    private suspend fun syncMergesOf(animeId: Long) {
+        mergeChildRepository.getMergeParentsByAnimeId(animeId)
+            .forEach { syncMergedEntryInfo.await(it.id) }
+    }
+
+    /**
+     * Rebuilds whichever entry the popout is editing so its tags are read again.
+     *
+     * An Anime caches its custom info when it is constructed, so the instance in state
+     * still has the tag list from before the write - copy() runs the constructor again
+     * and picks the new one up. It has to be the TARGET that is rebuilt: refreshing
+     * only this screen's entry left a popout pointed at a child showing stale tags.
+     */
+    private fun refreshTagsAnime(update: (Set<String>) -> Set<String>) {
+        updateSuccessState { state ->
+            val target = state.tagsTarget
+            val added = update(state.addedTags)
+            if (target != null) {
+                state.copy(
+                    tagsTarget = target.copy(lastUpdate = target.lastUpdate + 1),
+                    addedTags = added,
+                )
+            } else {
+                state.copy(
+                    anime = state.anime.copy(lastUpdate = state.anime.lastUpdate + 1),
+                    addedTags = added,
+                )
+            }
+        }
+    }
+
+    /** The entry the popout is editing: the target if it has one, else this screen's. */
+    private val State.Success.tagsAnime: Anime get() = tagsTarget ?: anime
+
+    /** Moves a selection of tags together. The popout stays open. */
+    fun setTagsVisible(tags: Collection<String>, visible: Boolean) {
+        val anime = successState?.tagsAnime ?: return
+        viewModelScope.launchIO {
+            setTagVisibility.awaitAll(anime, tags, visible)
+        }
+    }
+
+    /**
+     * Adds a tag of the user's own to this entry and pins it visible.
+     *
+     * It goes in `CustomAnimeInfo.addedGenre`, which is unioned onto the entry's
+     * own tags rather than replacing them, so a merged entry keeps picking up and
+     * re-ranking its sources' tags. It is pinned because the user just asked for
+     * it: on an entry already at the cap an unpinned one would be added and
+     * immediately hidden.
+     *
+     * A tag the entry already has - from a source, or added before - is not added
+     * twice; it is only pinned visible, which is the visible half of what the user
+     * asked for anyway.
+     */
+    fun addTag(tag: String) {
+        val trimmed = tag.trim()
+        if (trimmed.isEmpty()) return
+        val state = successState ?: return
+        val target = state.tagsAnime
+        viewModelScope.launchIO {
+            val existing = target.genre.orEmpty()
+            if (existing.none { it.equals(trimmed, ignoreCase = true) }) {
+                val custom = getCustomAnimeInfo.get(target.id)
+                setCustomAnimeInfo.set(
+                    CustomAnimeInfo(
+                        id = target.id,
+                        title = custom?.title,
+                        author = custom?.author,
+                        artist = custom?.artist,
+                        description = custom?.description,
+                        genre = custom?.genre,
+                        addedGenre = custom?.addedGenre.orEmpty() + trimmed,
+                        status = custom?.status,
+                    ),
+                )
+            }
+            setTagVisibility.pinNew(target.id, trimmed, visible = true)
+            syncMergesOf(target.id)
+            refreshTagsAnime { it + trimmed.lowercase() }
+        }
+    }
+
+    /**
+     * Deletes the user's own tags from a selection, ignoring the rest.
+     *
+     * Only added tags can go: a source's tag would return on the next refresh, and
+     * suppressing it instead would mean either a third list of deleted tags or an
+     * entry that stops taking new tags - hiding already says "not on this entry"
+     * without either.
+     */
+    fun deleteAddedTags(tags: Collection<String>) {
+        val state = successState ?: return
+        val target = state.tagsAnime
+        val custom = getCustomAnimeInfo.get(target.id) ?: return
+        val added = custom.addedGenre.orEmpty()
+        if (added.isEmpty()) return
+        val doomed = tags.filter { tag -> added.any { it.equals(tag, ignoreCase = true) } }
+        if (doomed.isEmpty()) return
+        viewModelScope.launchIO {
+            setCustomAnimeInfo.set(
+                custom.copy(
+                    addedGenre = added
+                        .filterNot { kept -> doomed.any { it.equals(kept, ignoreCase = true) } }
+                        .ifEmpty { null },
+                ),
+            )
+            // The pins would otherwise outlive the tags they were placed on.
+            setTagVisibility.unpinAll(target, doomed)
+            syncMergesOf(target.id)
+            val gone = doomed.mapTo(mutableSetOf(), String::lowercase)
+            refreshTagsAnime { it - gone }
+        }
+    }
+
+    /**
+     * Pins a selection where it already sits, so the global setting changing no
+     * longer moves it. The current placement is read from state rather than passed
+     * in: state is what the popout is showing, so the two cannot disagree.
+     */
+    fun pinTags(tags: Collection<String>) {
+        val state = successState ?: return
+        val visible = state.displayedTags.visible.toSet()
+        viewModelScope.launchIO {
+            setTagVisibility.pinAll(state.tagsAnime, tags.associateWith { it in visible })
+        }
+    }
+
+    /** Returns a selection of tags to the global cap. */
+    fun unpinTags(tags: Collection<String>) {
+        val anime = successState?.tagsAnime ?: return
+        viewModelScope.launchIO {
+            setTagVisibility.unpinAll(anime, tags)
+        }
+    }
+
+    /** Returns every tag to the global cap, dropping this entry's own choices. */
+    fun resetTagVisibility() {
+        val anime = successState?.tagsAnime ?: return
+        viewModelScope.launchIO {
+            setTagVisibility.reset(anime.id)
+        }
+    }
+    // <-- AM (TAG_LIMIT)
+
     fun showMergeSettingsDialog() {
         val anime = successState?.anime ?: return
         if (anime.source != MergedSource.ID) return
@@ -2735,6 +2992,27 @@ class AnimeViewModel(
             val dialog: Dialog? = null,
             val hasPromptedToAddBefore: Boolean = false,
             val hideMissingEpisodes: Boolean = false,
+            // AM (TAG_LIMIT) -->
+            /**
+             * The tags split into shown and hidden - see GetDisplayedTags - for
+             * whichever entry the popout is currently about: this one, or the child
+             * that owns an episode when it was opened from the rename dialog.
+             */
+            val displayedTags: DisplayedTags = DisplayedTags.Empty,
+            // AM (TAG_LIMIT) -->
+            /**
+             * The entry the popout is editing, when that is not the one on screen.
+             * Every tag action reads this first, so one set of actions serves both.
+             */
+            val tagsTarget: Anime? = null,
+            // <-- AM (TAG_LIMIT)
+            /**
+             * Lowercased tags the user added themselves, which are the only ones
+             * that can be deleted: a source's tag would come straight back on the
+             * next refresh, so hiding is what removing one means.
+             */
+            val addedTags: Set<String> = emptySet(),
+            // <-- AM (TAG_LIMIT)
             // AM (CUSTOM_EPISODE_ORDER) -->
             /**
              * The episode list arrived already ordered by GetEpisodeOrder and

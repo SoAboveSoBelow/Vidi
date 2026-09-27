@@ -83,6 +83,7 @@ import eu.kanade.presentation.anime.components.ItemHeader
 import eu.kanade.presentation.anime.components.MIN_EPISODES_FOR_SEARCH
 import eu.kanade.presentation.anime.components.MissingEpisodeCountListItem
 import eu.kanade.presentation.anime.components.NextEpisodeAiringListItem
+import eu.kanade.presentation.anime.components.TagVisibilityDialog
 import eu.kanade.presentation.anime.components.rememberEpisodeReorder
 import eu.kanade.presentation.components.relativeDateText
 import eu.kanade.presentation.util.formatEpisodeNumber
@@ -240,6 +241,16 @@ fun AnimeScreen(
     onRelatedAnimeLongClicked: (Anime) -> Unit,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
+    // AM (TAG_LIMIT) -->
+    onMoreTagsClicked: () -> Unit,
+    onSetTagsVisible: (tags: Collection<String>, visible: Boolean) -> Unit,
+    onPinTags: (tags: Collection<String>) -> Unit,
+    onUnpinTags: (tags: Collection<String>) -> Unit,
+    onAddTag: (String) -> Unit,
+    onDeleteTags: (tags: Collection<String>) -> Unit,
+    onResetTagVisibility: () -> Unit,
+    onDismissTagsDialog: () -> Unit,
+    // <-- AM (TAG_LIMIT)
 ) {
     val context = LocalContext.current
     val onCopyTagToClipboard: (tag: String) -> Unit = {
@@ -331,6 +342,16 @@ fun AnimeScreen(
             onRelatedAnimeLongClicked = onRelatedAnimeLongClicked,
             relatedAnimeDisplayMode = relatedAnimeDisplayMode,
             // <-- AY
+            // AM (TAG_LIMIT) -->
+            onMoreTagsClicked = onMoreTagsClicked,
+            onSetTagsVisible = onSetTagsVisible,
+            onPinTags = onPinTags,
+            onUnpinTags = onUnpinTags,
+            onAddTag = onAddTag,
+            onDeleteTags = onDeleteTags,
+            onResetTagVisibility = onResetTagVisibility,
+            onDismissTagsDialog = onDismissTagsDialog,
+            // <-- AM (TAG_LIMIT)
         )
     } else {
         AnimeScreenLargeImpl(
@@ -415,6 +436,16 @@ fun AnimeScreen(
             onRelatedAnimeLongClicked = onRelatedAnimeLongClicked,
             relatedAnimeDisplayMode = relatedAnimeDisplayMode,
             // <-- AY
+            // AM (TAG_LIMIT) -->
+            onMoreTagsClicked = onMoreTagsClicked,
+            onSetTagsVisible = onSetTagsVisible,
+            onPinTags = onPinTags,
+            onUnpinTags = onUnpinTags,
+            onAddTag = onAddTag,
+            onDeleteTags = onDeleteTags,
+            onResetTagVisibility = onResetTagVisibility,
+            onDismissTagsDialog = onDismissTagsDialog,
+            // <-- AM (TAG_LIMIT)
         )
     }
 }
@@ -525,6 +556,16 @@ private fun AnimeScreenSmallImpl(
     onRelatedAnimeLongClicked: (Anime) -> Unit,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
+    // AM (TAG_LIMIT) -->
+    onMoreTagsClicked: () -> Unit,
+    onSetTagsVisible: (tags: Collection<String>, visible: Boolean) -> Unit,
+    onPinTags: (tags: Collection<String>) -> Unit,
+    onUnpinTags: (tags: Collection<String>) -> Unit,
+    onAddTag: (String) -> Unit,
+    onDeleteTags: (tags: Collection<String>) -> Unit,
+    onResetTagVisibility: () -> Unit,
+    onDismissTagsDialog: () -> Unit,
+    // <-- AM (TAG_LIMIT)
 ) {
     // AY -->
     val density = LocalDensity.current
@@ -552,6 +593,31 @@ private fun AnimeScreenSmallImpl(
     // was last filtered here.
     // <-- AM (PLAYLIST_SEARCH_SCOPE)
     var episodeSearchQuery by remember { mutableStateOf("") }
+    // AM (TAG_LIMIT) -->
+    // Rendered here rather than with the screen's other dialogs because one of the
+    // tag actions it offers scopes the episode search, whose field state is local to
+    // this composable.
+    val tagsDialog = state.dialog
+    if (tagsDialog is AnimeViewModel.Dialog.Tags) {
+        TagVisibilityDialog(
+            displayedTags = state.displayedTags,
+            sourceCounts = tagsDialog.sourceCounts,
+            addedTags = state.addedTags,
+            canSearchPlaylist = listItem.size >= MIN_EPISODES_FOR_SEARCH,
+            onDismissRequest = onDismissTagsDialog,
+            onSetTagsVisible = onSetTagsVisible,
+            onPinTags = onPinTags,
+            onUnpinTags = onUnpinTags,
+            onAddTag = onAddTag,
+            onDeleteTags = onDeleteTags,
+            onResetTagVisibility = onResetTagVisibility,
+            onTagSearch = onTagSearch,
+            onTagGlobalSearch = onTagGlobalSearch,
+            onTagEpisodeSearch = { episodeSearchQuery = it },
+            onCopyTagToClipboard = onCopyTagToClipboard,
+        )
+    }
+    // <-- AM (TAG_LIMIT)
     // AM (CUSTOM_EPISODE_ORDER) -->
     // Search is a display layer too: reorder mode edits the whole order.
     val filteredListItem = remember(listItem, episodeSearchQuery, state.isReordering) {
@@ -853,7 +919,10 @@ private fun AnimeScreenSmallImpl(
                         ExpandableAnimeDescription(
                             defaultExpandState = state.isFromSource,
                             description = state.anime.description,
-                            tagsProvider = { state.anime.genre },
+                            // AM (TAG_LIMIT) -->
+                            displayedTags = state.displayedTags,
+                            onMoreTagsClicked = onMoreTagsClicked,
+                            // <-- AM (TAG_LIMIT)
                             notes = state.anime.notes,
                             onTagSearch = onTagSearch,
                             // AM (TAG_SEARCH_MENU) -->
@@ -1151,6 +1220,16 @@ fun AnimeScreenLargeImpl(
     onRelatedAnimeLongClicked: (Anime) -> Unit,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
+    // AM (TAG_LIMIT) -->
+    onMoreTagsClicked: () -> Unit,
+    onSetTagsVisible: (tags: Collection<String>, visible: Boolean) -> Unit,
+    onPinTags: (tags: Collection<String>) -> Unit,
+    onUnpinTags: (tags: Collection<String>) -> Unit,
+    onAddTag: (String) -> Unit,
+    onDeleteTags: (tags: Collection<String>) -> Unit,
+    onResetTagVisibility: () -> Unit,
+    onDismissTagsDialog: () -> Unit,
+    // <-- AM (TAG_LIMIT)
 ) {
     val layoutDirection = LocalLayoutDirection.current
     val density = LocalDensity.current
@@ -1175,6 +1254,31 @@ fun AnimeScreenLargeImpl(
     // was last filtered here.
     // <-- AM (PLAYLIST_SEARCH_SCOPE)
     var episodeSearchQuery by remember { mutableStateOf("") }
+    // AM (TAG_LIMIT) -->
+    // Rendered here rather than with the screen's other dialogs because one of the
+    // tag actions it offers scopes the episode search, whose field state is local to
+    // this composable.
+    val tagsDialog = state.dialog
+    if (tagsDialog is AnimeViewModel.Dialog.Tags) {
+        TagVisibilityDialog(
+            displayedTags = state.displayedTags,
+            sourceCounts = tagsDialog.sourceCounts,
+            addedTags = state.addedTags,
+            canSearchPlaylist = listItem.size >= MIN_EPISODES_FOR_SEARCH,
+            onDismissRequest = onDismissTagsDialog,
+            onSetTagsVisible = onSetTagsVisible,
+            onPinTags = onPinTags,
+            onUnpinTags = onUnpinTags,
+            onAddTag = onAddTag,
+            onDeleteTags = onDeleteTags,
+            onResetTagVisibility = onResetTagVisibility,
+            onTagSearch = onTagSearch,
+            onTagGlobalSearch = onTagGlobalSearch,
+            onTagEpisodeSearch = { episodeSearchQuery = it },
+            onCopyTagToClipboard = onCopyTagToClipboard,
+        )
+    }
+    // <-- AM (TAG_LIMIT)
     // AM (CUSTOM_EPISODE_ORDER) -->
     // Search is a display layer too: reorder mode edits the whole order.
     val filteredListItem = remember(listItem, episodeSearchQuery, state.isReordering) {
@@ -1439,7 +1543,10 @@ fun AnimeScreenLargeImpl(
                             ExpandableAnimeDescription(
                                 defaultExpandState = true,
                                 description = state.anime.description,
-                                tagsProvider = { state.anime.genre },
+                                // AM (TAG_LIMIT) -->
+                                displayedTags = state.displayedTags,
+                                onMoreTagsClicked = onMoreTagsClicked,
+                                // <-- AM (TAG_LIMIT)
                                 notes = state.anime.notes,
                                 onTagSearch = onTagSearch,
                                 // AM (TAG_SEARCH_MENU) -->

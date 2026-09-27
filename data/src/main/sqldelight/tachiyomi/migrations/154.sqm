@@ -1,0 +1,16 @@
+-- AM (TAG_LIMIT) -->
+import kotlin.Boolean;
+
+-- Sparse per-entry overrides of which tags are shown inline. See
+-- anime_tag_visibility.sq.
+CREATE TABLE anime_tag_visibility(
+    anime_id INTEGER NOT NULL,
+    tag TEXT NOT NULL COLLATE NOCASE,
+    visible INTEGER AS Boolean NOT NULL,
+    PRIMARY KEY(anime_id, tag),
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX anime_tag_visibility_anime_id_index ON anime_tag_visibility(anime_id);
+-- <-- AM (TAG_LIMIT)

@@ -19,23 +19,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
-import androidx.core.view.children
 import coil3.load
 import coil3.request.transformations
 import coil3.transform.RoundedCornersTransformation
-import com.google.android.material.chip.Chip
-import com.google.android.material.chip.ChipGroup
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.databinding.EditAnimeDialogBinding
-import eu.kanade.tachiyomi.util.dropBlank
-import eu.kanade.tachiyomi.util.getResourceColor
 import eu.kanade.tachiyomi.util.lang.chop
 import eu.kanade.tachiyomi.util.system.dpToPx
-import eu.kanade.tachiyomi.util.trimOrNull
-import eu.kanade.tachiyomi.widget.materialdialogs.setTextInput
 import kotlinx.coroutines.CoroutineScope
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.anime.model.Anime
@@ -53,7 +44,6 @@ fun EditAnimeDialog(
         author: String?,
         artist: String?,
         description: String?,
-        tags: List<String>?,
         status: Long?,
     ) -> Unit,
 ) {
@@ -72,7 +62,6 @@ fun EditAnimeDialog(
                         binding.animeAuthor.text.toString(),
                         binding.animeArtist.text.toString(),
                         binding.animeDescription.text.toString(),
-                        binding.animeGenresTags.getTextStrings(),
                         binding.status.selectedItemPosition.let {
                             when (it) {
                                 1 -> SAnime.ONGOING
@@ -118,6 +107,12 @@ fun EditAnimeDialog(
     )
 }
 
+private fun loadCover(anime: Anime, context: Context, binding: EditAnimeDialogBinding) {
+    binding.animeCover.load(anime) {
+        transformations(RoundedCornersTransformation(4.dpToPx.toFloat()))
+    }
+}
+
 private fun onViewCreated(anime: Anime, context: Context, binding: EditAnimeDialogBinding, scope: CoroutineScope) {
     loadCover(anime, context, binding)
 
@@ -160,7 +155,6 @@ private fun onViewCreated(anime: Anime, context: Context, binding: EditAnimeDial
         binding.animeAuthor.setText(anime.author.orEmpty())
         binding.animeArtist.setText(anime.artist.orEmpty())
         binding.animeDescription.setText(anime.description.orEmpty())
-        binding.animeGenresTags.setChips(anime.genre.orEmpty().dropBlank(), scope)
     } else {
         if (anime.title != anime.ogTitle) {
             binding.title.append(anime.title)
@@ -174,7 +168,6 @@ private fun onViewCreated(anime: Anime, context: Context, binding: EditAnimeDial
         if (anime.description != anime.ogDescription) {
             binding.animeDescription.append(anime.description.orEmpty())
         }
-        binding.animeGenresTags.setChips(anime.genre.orEmpty().dropBlank(), scope)
 
         binding.title.hint = context.stringResource(AMMR.strings.title_hint, anime.ogTitle)
         if (anime.ogAuthor != null) {
@@ -191,72 +184,6 @@ private fun onViewCreated(anime: Anime, context: Context, binding: EditAnimeDial
                 )
         }
     }
-    binding.animeGenresTags.clearFocus()
 
-    binding.resetTags.setOnClickListener { resetTags(anime, binding, scope) }
 }
 
-private fun resetTags(anime: Anime, binding: EditAnimeDialogBinding, scope: CoroutineScope) {
-    if (anime.genre.isNullOrEmpty() || anime.isLocal()) {
-        binding.animeGenresTags.setChips(emptyList(), scope)
-    } else {
-        binding.animeGenresTags.setChips(anime.ogGenre.orEmpty(), scope)
-    }
-}
-
-private fun loadCover(anime: Anime, context: Context, binding: EditAnimeDialogBinding) {
-    binding.animeCover.load(anime) {
-        transformations(RoundedCornersTransformation(4.dpToPx.toFloat()))
-    }
-}
-
-private fun ChipGroup.setChips(items: List<String>, scope: CoroutineScope) {
-    removeAllViews()
-
-    items.asSequence().map { item ->
-        Chip(context).apply {
-            text = item
-
-            isCloseIconVisible = true
-            closeIcon?.setTint(context.getResourceColor(R.attr.colorAccent))
-            setOnCloseIconClickListener {
-                removeView(this)
-            }
-        }
-    }.forEach {
-        addView(it)
-    }
-
-    val addTagChip = Chip(context).apply {
-        setText(R.string.add_tag)
-
-        chipIcon = ContextCompat.getDrawable(context, R.drawable.ic_add_24dp)?.apply {
-            isChipIconVisible = true
-            setTint(context.getResourceColor(R.attr.colorAccent))
-        }
-
-        setOnClickListener {
-            var newTag: String? = null
-            MaterialAlertDialogBuilder(context)
-                .setTitle(R.string.add_tag)
-                .setTextInput {
-                    newTag = it.trimOrNull()
-                }
-                .setPositiveButton(R.string.action_ok) { _, _ ->
-                    if (newTag != null) setChips(items + listOfNotNull(newTag), scope)
-                }
-                .setNegativeButton(R.string.action_cancel, null)
-                .show()
-        }
-    }
-    addView(addTagChip)
-}
-
-private fun ChipGroup.getTextStrings(): List<String> = children.mapNotNull {
-    if (it is Chip && !it.text.toString().contains(context.stringResource(AMMR.strings.add_tag), ignoreCase = true)) {
-        it.text.toString()
-    } else {
-        null
-    }
-}.toList()
-// <-- AM (CUSTOM_INFORMATION)

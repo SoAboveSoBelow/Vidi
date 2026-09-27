@@ -55,6 +55,9 @@ data class BackupAnime(
     @ProtoNumber(203) var customAuthor: String? = null,
     @ProtoNumber(204) var customDescription: String? = null,
     @ProtoNumber(205) var customGenre: List<String>? = null,
+    // AM (TAG_LIMIT) -->
+    @ProtoNumber(210) var customAddedGenre: List<String>? = null,
+    // <-- AM (TAG_LIMIT)
     // <-- AM (CUSTOM_INFORMATION)
     // Since ProtoNumber 108 was previously used in the past, we cannot reuse it. May cause issues with aniyomi
     // AM -->
@@ -117,6 +120,7 @@ data class BackupAnime(
             customAuthor != null ||
             customDescription != null ||
             customGenre != null ||
+            customAddedGenre != null ||
             customStatus != 0
         ) {
             return CustomAnimeInfo(
@@ -126,6 +130,7 @@ data class BackupAnime(
                 artist = customArtist,
                 description = customDescription,
                 genre = customGenre,
+                addedGenre = customAddedGenre,
                 status = customStatus.takeUnless { it == 0 }?.toLong(),
             )
         }

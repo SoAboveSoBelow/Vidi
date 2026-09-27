@@ -40,6 +40,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
@@ -55,6 +56,17 @@ fun AdaptiveSheet(
     enableSwipeDismiss: Boolean,
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
+    // AM (TAG_LIMIT) -->
+    /**
+     * The MOST the sheet ever has to be dragged down before releasing dismisses it.
+     * Under this it is still half the sheet's height, so a short sheet behaves as it
+     * always did; a tall one stops growing harder to close.
+     *
+     * Null settles to the nearest anchor as this always did, for every caller that
+     * does not ask.
+     */
+    dismissThreshold: Dp? = null,
+    // <-- AM (TAG_LIMIT)
     content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -113,6 +125,7 @@ fun AdaptiveSheet(
         val anchoredDraggableState = rememberSaveable(saver = AnchoredDraggableState.Saver()) {
             AnchoredDraggableState(initialValue = 1)
         }
+        val dismissThresholdPx = dismissThreshold?.let { with(density) { it.toPx() } }
         val flingBehavior = AnchoredDraggableDefaults.flingBehavior(
             state = anchoredDraggableState,
             positionalThreshold = { _: Float -> with(density) { 56.dp.toPx() } },
@@ -130,19 +143,25 @@ fun AdaptiveSheet(
                     indication = null,
                     onClick = internalOnDismissRequest,
                 )
-                .fillMaxSize()
-                .onSizeChanged {
-                    val anchors = DraggableAnchors {
-                        0 at 0f
-                        1 at it.height.toFloat()
-                    }
-                    anchoredDraggableState.updateAnchors(anchors)
-                },
+                .fillMaxSize(),
             contentAlignment = Alignment.BottomCenter,
         ) {
             Surface(
                 modifier = Modifier
                     .widthIn(max = 460.dp)
+                    // AM (TAG_LIMIT) -->
+                    // Measured on the SHEET, not the full-screen Box around it: the
+                    // sheet's own height is both how far it travels to be off screen
+                    // and what "half the distance" should mean.
+                    .onSizeChanged {
+                        anchoredDraggableState.updateAnchors(
+                            DraggableAnchors {
+                                0 at 0f
+                                1 at it.height.toFloat()
+                            },
+                        )
+                    }
+                    // <-- AM (TAG_LIMIT)
                     .clickable(
                         interactionSource = null,
                         indication = null,
@@ -151,11 +170,46 @@ fun AdaptiveSheet(
                     .then(
                         if (enableSwipeDismiss) {
                             Modifier.nestedScroll(
-                                remember(anchoredDraggableState) {
+                                // AM (TAG_LIMIT) -->
+                                // This is the release path for a drag that came
+                                // through the sheet's content, and the only one that
+                                // governs a sheet with a scrollable body. settle()
+                                // picks the nearest anchor, so dismissing needed half
+                                // the distance to an anchor a screen away; the 56dp
+                                // positionalThreshold below is read only by the drag
+                                // that lands on the sheet itself.
+                                remember(anchoredDraggableState, dismissThresholdPx) {
                                     anchoredDraggableState.preUpPostDownNestedScrollConnection {
-                                        scope.launch { anchoredDraggableState.settle(sheetAnimationSpec) }
+                                        scope.launch {
+                                            val cap = dismissThresholdPx
+                                            if (cap == null) {
+                                                anchoredDraggableState.settle(sheetAnimationSpec)
+                                            } else {
+                                                val dragged = anchoredDraggableState.offset
+                                                    .takeIf { it.isFinite() }
+                                                    ?: 0f
+                                                // Half the sheet, but never more than
+                                                // the cap. Proportional alone made a
+                                                // tall menu cost proportionally more
+                                                // for the same outcome; a flat value
+                                                // small enough for a tall menu was far
+                                                // twitchier than a small menu ever was.
+                                                // A short sheet keeps the travel it
+                                                // always had; only ones past the cap
+                                                // stop getting harder to close.
+                                                val half = anchoredDraggableState.anchors
+                                                    .positionOf(1)
+                                                    .takeIf { it.isFinite() }
+                                                    ?.div(2f)
+                                                    ?: cap
+                                                anchoredDraggableState.animateTo(
+                                                    if (dragged >= minOf(half, cap)) 1 else 0,
+                                                )
+                                            }
+                                        }
                                     }
                                 },
+                                // <-- AM (TAG_LIMIT)
                             )
                         } else {
                             Modifier

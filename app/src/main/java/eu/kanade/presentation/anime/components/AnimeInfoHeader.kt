@@ -82,6 +82,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import animiru.domain.anime.model.DisplayedTags
 import aniyomi.domain.anime.model.AnimeRelationGroup
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -294,7 +295,10 @@ fun AnimeActionRow(
 fun ExpandableAnimeDescription(
     defaultExpandState: Boolean,
     description: String?,
-    tagsProvider: () -> List<String>?,
+    // AM (TAG_LIMIT) -->
+    displayedTags: DisplayedTags,
+    onMoreTagsClicked: () -> Unit,
+    // <-- AM (TAG_LIMIT)
     notes: String,
     onTagSearch: (String) -> Unit,
     // AM (TAG_SEARCH_MENU) -->
@@ -336,8 +340,15 @@ fun ExpandableAnimeDescription(
                 .padding(horizontal = 16.dp)
                 .clickableNoIndication { onExpanded(!expanded) },
         )
-        val tags = tagsProvider()
-        if (!tags.isNullOrEmpty()) {
+        // AM (TAG_LIMIT) -->
+        // The split arrives ready-made (see GetDisplayedTags): it depends on the
+        // entry's own tags, the user's per-entry choices and the global cap, two
+        // of which are database reads. The row shows exactly what Visible holds,
+        // and the "more" chip stands in for the rest.
+        // Always emitted, even with no tags at all: the popout is the only place
+        // tags are edited now, so the chip that opens it has to be reachable from
+        // every entry.
+        run {
             Box(
                 modifier = Modifier
                     .padding(top = 8.dp)
@@ -347,85 +358,61 @@ fun ExpandableAnimeDescription(
             ) {
                 var showMenu by remember { mutableStateOf(false) }
                 var tagSelected by remember { mutableStateOf("") }
-                DropdownMenu(
+                TagActionsMenu(
                     expanded = showMenu,
+                    canSearchPlaylist = canSearchPlaylist,
                     onDismissRequest = { showMenu = false },
-                ) {
-                    // AM (TAG_SEARCH_MENU) -->
-                    // "Search" keeps both its label and its behaviour. Adding a
-                    // differently-scoped action is not a reason to redefine an
-                    // existing one - anyone who had learnt this item would have
-                    // silently got a different feature.
-                    DropdownMenuItem(
-                        text = { Text(text = stringResource(MR.strings.action_search)) },
-                        onClick = {
-                            onTagSearch(tagSelected)
-                            showMenu = false
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(text = stringResource(MR.strings.action_global_search)) },
-                        onClick = {
-                            onTagGlobalSearch(tagSelected)
-                            showMenu = false
-                        },
-                    )
-                    // Hidden where the entry has too few episodes for the
-                    // search field to exist: it would set a query with nothing
-                    // on screen to show, edit or clear it.
-                    if (canSearchPlaylist) {
-                        DropdownMenuItem(
-                            text = { Text(text = stringResource(AMMR.strings.am_action_search_playlist)) },
-                            onClick = {
-                                onTagEpisodeSearch(tagSelected)
-                                showMenu = false
-                            },
-                        )
-                    }
-                    // <-- AM (TAG_SEARCH_MENU)
-                    DropdownMenuItem(
-                        text = { Text(text = stringResource(MR.strings.action_copy_to_clipboard)) },
-                        onClick = {
-                            onCopyTagToClipboard(tagSelected)
-                            showMenu = false
-                        },
-                    )
+                    onSearch = { onTagSearch(tagSelected) },
+                    onGlobalSearch = { onTagGlobalSearch(tagSelected) },
+                    onEpisodeSearch = { onTagEpisodeSearch(tagSelected) },
+                    onCopyToClipboard = { onCopyTagToClipboard(tagSelected) },
+                )
+                val onTagClick: (String) -> Unit = { tag ->
+                    tagSelected = tag
+                    showMenu = true
                 }
                 if (expanded) {
                     FlowRow(
                         modifier = Modifier.padding(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
                     ) {
-                        tags.forEach {
+                        displayedTags.visible.forEach {
                             TagsChip(
                                 modifier = DefaultTagChipModifier,
                                 text = it,
-                                onClick = {
-                                    tagSelected = it
-                                    showMenu = true
-                                },
+                                onClick = { onTagClick(it) },
                             )
                         }
+                        MoreTagsChip(
+                            modifier = DefaultTagChipModifier,
+                            hiddenCount = displayedTags.hidden.size,
+                            onClick = onMoreTagsClicked,
+                        )
                     }
                 } else {
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = MaterialTheme.padding.medium),
                         horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
                     ) {
-                        items(items = tags) {
+                        items(items = displayedTags.visible) {
                             TagsChip(
                                 modifier = DefaultTagChipModifier,
                                 text = it,
-                                onClick = {
-                                    tagSelected = it
-                                    showMenu = true
-                                },
+                                onClick = { onTagClick(it) },
+                            )
+                        }
+                        item {
+                            MoreTagsChip(
+                                modifier = DefaultTagChipModifier,
+                                hiddenCount = displayedTags.hidden.size,
+                                onClick = onMoreTagsClicked,
                             )
                         }
                     }
                 }
             }
         }
+        // <-- AM (TAG_LIMIT)
     }
 }
 
@@ -843,8 +830,96 @@ private fun AnimeSummary(
 
 private val DefaultTagChipModifier = Modifier.padding(vertical = 4.dp)
 
+// AM (TAG_SEARCH_MENU) -->
+/**
+ * What a tag offers when tapped. Shared by the inline rows and the tag popout, so
+ * a tag does the same thing wherever the user reaches it.
+ */
 @Composable
-private fun TagsChip(
+internal fun TagActionsMenu(
+    expanded: Boolean,
+    canSearchPlaylist: Boolean,
+    onDismissRequest: () -> Unit,
+    onSearch: () -> Unit,
+    onGlobalSearch: () -> Unit,
+    onEpisodeSearch: () -> Unit,
+    onCopyToClipboard: () -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismissRequest,
+    ) {
+        // "Search" keeps both its label and its behaviour. Adding a
+        // differently-scoped action is not a reason to redefine an existing one -
+        // anyone who had learnt this item would have silently got a different
+        // feature.
+        DropdownMenuItem(
+            text = { Text(text = stringResource(MR.strings.action_search)) },
+            onClick = {
+                onSearch()
+                onDismissRequest()
+            },
+        )
+        DropdownMenuItem(
+            text = { Text(text = stringResource(MR.strings.action_global_search)) },
+            onClick = {
+                onGlobalSearch()
+                onDismissRequest()
+            },
+        )
+        // Hidden where the entry has too few episodes for the search field to
+        // exist: it would set a query with nothing on screen to show, edit or
+        // clear it.
+        if (canSearchPlaylist) {
+            DropdownMenuItem(
+                text = { Text(text = stringResource(AMMR.strings.am_action_search_playlist)) },
+                onClick = {
+                    onEpisodeSearch()
+                    onDismissRequest()
+                },
+            )
+        }
+        DropdownMenuItem(
+            text = { Text(text = stringResource(MR.strings.action_copy_to_clipboard)) },
+            onClick = {
+                onCopyToClipboard()
+                onDismissRequest()
+            },
+        )
+    }
+}
+// <-- AM (TAG_SEARCH_MENU)
+
+// AM (TAG_LIMIT) -->
+/**
+ * Opens the tag popout, and stands in for the tags the split leaves out.
+ *
+ * With tags hidden it reads as a count of what is missing rather than a bare
+ * "more", so the user can tell a couple from dozens without opening anything. With
+ * none hidden there is no count to give, so it reads as what it does - and it is
+ * still shown, because the popout is now the only place tags are edited and an
+ * entry with nothing hidden would otherwise have no way in.
+ */
+@Composable
+private fun MoreTagsChip(
+    hiddenCount: Int,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    TagsChip(
+        modifier = modifier,
+        text = if (hiddenCount > 0) {
+            stringResource(AMMR.strings.am_action_more_tags, hiddenCount)
+        } else {
+            stringResource(AMMR.strings.am_action_edit_tags)
+        },
+        onClick = onClick,
+    )
+}
+// <-- AM (TAG_LIMIT)
+
+@Composable
+internal fun TagsChip(
     text: String,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,

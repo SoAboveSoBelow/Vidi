@@ -133,6 +133,7 @@ private fun Anime.toBackupAnime(
                 backupAnime.customAuthor = it.author
                 backupAnime.customDescription = it.description
                 backupAnime.customGenre = it.genre
+                backupAnime.customAddedGenre = it.addedGenre
                 backupAnime.customStatus = it.status?.toInt() ?: 0
             }
         }

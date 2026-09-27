@@ -82,8 +82,18 @@ data class Anime(
     val description: String?
         get() = customAnimeInfo?.description ?: ogDescription
 
+    // AM (TAG_LIMIT) -->
+    // Added tags are unioned rather than replacing, and land after the entry's own
+    // so a merged entry's ranking still leads. Composed here rather than in the tag
+    // popout so everything reading genre - tag search, backups - sees them too.
     val genre: List<String>?
-        get() = customAnimeInfo?.genre ?: ogGenre
+        get() {
+            val base = customAnimeInfo?.genre ?: ogGenre
+            val added = customAnimeInfo?.addedGenre.orEmpty()
+            if (added.isEmpty()) return base
+            return (base.orEmpty() + added).distinctBy(String::lowercase)
+        }
+    // <-- AM (TAG_LIMIT)
 
     val status: Long
         get() = customAnimeInfo?.status ?: ogStatus

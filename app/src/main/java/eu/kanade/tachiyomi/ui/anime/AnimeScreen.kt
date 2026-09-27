@@ -263,7 +263,13 @@ class AnimeScreen(
             onInvertSelection = viewModel::invertSelection,
             // AM (EPISODE_NAMES) -->
             onRenameEpisode = { viewModel.showRenameEpisodeDialog() },
-            onEpisodeRenameRequest = { viewModel.showRenameEpisodeDialog(it.id, it.displayName) },
+            onEpisodeRenameRequest = {
+                viewModel.showRenameEpisodeDialog(
+                    episodeId = it.id,
+                    currentName = it.displayName,
+                    ownerAnimeId = it.owner?.id ?: successState.anime.id,
+                )
+            },
             // <-- AM (EPISODE_NAMES)
             // AM (CUSTOM_EPISODE_ORDER) -->
             reorderActions = remember(viewModel) {
@@ -298,6 +304,16 @@ class AnimeScreen(
             },
             relatedAnimeDisplayMode = viewModel.relatedAnimeDisplayMode,
             // <-- AY
+            // AM (TAG_LIMIT) -->
+            onMoreTagsClicked = viewModel::showTagsDialog,
+            onSetTagsVisible = viewModel::setTagsVisible,
+            onPinTags = viewModel::pinTags,
+            onUnpinTags = viewModel::unpinTags,
+            onAddTag = viewModel::addTag,
+            onDeleteTags = viewModel::deleteAddedTags,
+            onResetTagVisibility = viewModel::resetTagVisibility,
+            onDismissTagsDialog = viewModel::dismissDialog,
+            // <-- AM (TAG_LIMIT)
         )
 
         var showScanlatorsDialog by remember { mutableStateOf(false) }
@@ -523,6 +539,10 @@ class AnimeScreen(
                     currentName = dialog.currentName,
                     onConfirm = { viewModel.renameEpisode(dialog.episodeId, it) },
                     onDismissRequest = onDismissRequest,
+                    // AM (TAG_LIMIT) -->
+                    onEditTags = { viewModel.showTagsDialog(dialog.ownerAnimeId) },
+                    onOpenEntry = { navigator.push(AnimeScreen(dialog.ownerAnimeId)) },
+                    // <-- AM (TAG_LIMIT)
                 )
             }
             // <-- AM (EPISODE_NAMES)
@@ -552,6 +572,12 @@ class AnimeScreen(
                 )
             }
             // <-- AM (MERGE_SETTINGS)
+            // AM (TAG_LIMIT) -->
+            // Rendered by the entry screen's content instead of here: one of the
+            // tag actions it offers scopes the episode search, whose field state
+            // is local to AnimeScreenSmallImpl / AnimeScreenLargeImpl.
+            is AnimeViewModel.Dialog.Tags -> {}
+            // <-- AM (TAG_LIMIT)
         }
 
         if (showScanlatorsDialog) {

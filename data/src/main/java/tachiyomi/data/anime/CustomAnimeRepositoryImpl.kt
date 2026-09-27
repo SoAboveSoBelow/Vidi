@@ -50,6 +50,7 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
             animeInfo.artist == null &&
             animeInfo.description == null &&
             animeInfo.genre == null &&
+            animeInfo.addedGenre == null &&
             animeInfo.status == null
         ) {
             customAnimeMap.remove(animeInfo.id)
@@ -61,10 +62,16 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
 
     private fun saveCustomInfo() {
         val jsonElements = customAnimeMap.values.map { it.toJson() }
+        // AM (TAG_LIMIT) -->
+        // The delete happens either way. Skipping the whole write when nothing is left
+        // meant clearing the last entry's custom info left the previous file on disk,
+        // so it came back on the next read - removing the last edit never stuck while
+        // adding one always did.
+        editJson.delete()
         if (jsonElements.isNotEmpty()) {
-            editJson.delete()
             editJson.writeText(Json.encodeToString(AnimeList(jsonElements)))
         }
+        // <-- AM (TAG_LIMIT)
     }
 
     @Serializable
@@ -80,6 +87,9 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
         val artist: String? = null,
         val description: String? = null,
         val genre: List<String>? = null,
+        // AM (TAG_LIMIT) -->
+        val addedGenre: List<String>? = null,
+        // <-- AM (TAG_LIMIT)
         val status: Long? = null,
     ) {
 
@@ -90,19 +100,25 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
             artist = this@AnimeJson.artist,
             description = this@AnimeJson.description,
             genre = this@AnimeJson.genre,
+            // AM (TAG_LIMIT) -->
+            addedGenre = this@AnimeJson.addedGenre,
+            // <-- AM (TAG_LIMIT)
             status = this@AnimeJson.status?.takeUnless { it == 0L },
         )
     }
 
     private fun CustomAnimeInfo.toJson(): AnimeJson {
         return AnimeJson(
-            id,
-            title,
-            author,
-            artist,
-            description,
-            genre,
-            status,
+            id = id,
+            title = title,
+            author = author,
+            artist = artist,
+            description = description,
+            genre = genre,
+            // AM (TAG_LIMIT) -->
+            addedGenre = addedGenre,
+            // <-- AM (TAG_LIMIT)
+            status = status,
         )
     }
 }

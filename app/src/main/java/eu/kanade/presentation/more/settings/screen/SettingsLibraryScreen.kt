@@ -34,6 +34,8 @@ import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_NETW
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_ONLY_ON_WIFI
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.MARK_DUPLICATE_EPISODE_SEEN_EXISTING
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.MARK_DUPLICATE_EPISODE_SEEN_NEW
+import tachiyomi.domain.library.service.LibraryPreferences.Companion.MIN_TAG_LIMIT
+import tachiyomi.domain.library.service.LibraryPreferences.Companion.UNCAPPED_TAG_LIMIT
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -259,6 +261,9 @@ object SettingsLibraryScreen : SearchableSettings {
     private fun getBehaviorGroup(
         libraryPreferences: LibraryPreferences,
     ): Preference.PreferenceGroup {
+        // AM (TAG_LIMIT) -->
+        val maxTagsShown by libraryPreferences.maxTagsShown.collectAsState()
+        // <-- AM (TAG_LIMIT)
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pref_behavior),
             preferenceItems = listOf(
@@ -312,6 +317,20 @@ object SettingsLibraryScreen : SearchableSettings {
                     preference = libraryPreferences.hideMissingEpisodes,
                     title = stringResource(AMMR.strings.am_pref_hide_missing_episode_indicators),
                 ),
+                // AM (TAG_LIMIT) -->
+                Preference.PreferenceItem.SliderPreference(
+                    value = maxTagsShown,
+                    valueRange = MIN_TAG_LIMIT..UNCAPPED_TAG_LIMIT,
+                    title = stringResource(AMMR.strings.am_pref_max_tags_shown),
+                    subtitle = stringResource(AMMR.strings.am_pref_max_tags_shown_summary),
+                    valueString = if (maxTagsShown < UNCAPPED_TAG_LIMIT) {
+                        maxTagsShown.toString()
+                    } else {
+                        stringResource(AMMR.strings.am_pref_max_tags_shown_uncapped)
+                    },
+                    onValueChanged = { libraryPreferences.maxTagsShown.set(it) },
+                ),
+                // <-- AM (TAG_LIMIT)
             ),
         )
     }
