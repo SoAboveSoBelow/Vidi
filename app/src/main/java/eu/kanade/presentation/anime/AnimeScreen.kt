@@ -80,6 +80,7 @@ import eu.kanade.presentation.anime.components.EpisodeSeasonSwitcher
 import eu.kanade.presentation.anime.components.EpisodeDownloadAction
 import eu.kanade.presentation.anime.components.ExpandableAnimeDescription
 import eu.kanade.presentation.anime.components.ItemHeader
+import eu.kanade.presentation.anime.components.MIN_EPISODES_FOR_SEARCH
 import eu.kanade.presentation.anime.components.MissingEpisodeCountListItem
 import eu.kanade.presentation.anime.components.NextEpisodeAiringListItem
 import eu.kanade.presentation.anime.components.rememberEpisodeReorder
@@ -93,6 +94,7 @@ import eu.kanade.tachiyomi.source.getNameForAnimeInfo
 import eu.kanade.tachiyomi.ui.anime.AnimeSeasonItem
 import eu.kanade.tachiyomi.ui.anime.AnimeViewModel
 import eu.kanade.tachiyomi.ui.anime.EpisodeList
+import eu.kanade.tachiyomi.ui.player.PlaylistSearchScope
 // AM (NOW_PLAYING_INDICATOR) -->
 import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 // <-- AM (NOW_PLAYING_INDICATOR)
@@ -106,6 +108,9 @@ import kotlinx.coroutines.flow.flowOf
 import mihon.app.di.appGraph
 import sh.calvin.reorderable.ReorderableItem
 import tachiyomi.core.common.util.lang.withIOContext
+import mihon.domain.library.model.search.QueryNode
+import mihon.feature.library.EpisodeSearchFields
+import mihon.feature.library.matches
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.EpisodeViewMode
 import tachiyomi.domain.episode.model.Episode
@@ -158,6 +163,9 @@ fun AnimeScreen(
 
     // For tags menu
     onTagSearch: (String) -> Unit,
+    // AM (TAG_SEARCH_MENU) -->
+    onTagGlobalSearch: (String) -> Unit,
+    // <-- AM (TAG_SEARCH_MENU)
 
     onFilterButtonClicked: () -> Unit,
     onShuffleClicked: () -> Unit,
@@ -216,6 +224,7 @@ fun AnimeScreen(
     onInvertSelection: () -> Unit,
     // AM (EPISODE_NAMES) -->
     onRenameEpisode: () -> Unit,
+    onEpisodeRenameRequest: (EpisodeList.Item) -> Unit,
     // <-- AM (EPISODE_NAMES)
     // AM (CUSTOM_EPISODE_ORDER) -->
     reorderActions: EpisodeReorderActions,
@@ -263,6 +272,9 @@ fun AnimeScreen(
             onWebViewLongClicked = onWebViewLongClicked,
             onTrackingClicked = onTrackingClicked,
             onTagSearch = onTagSearch,
+            // AM (TAG_SEARCH_MENU) -->
+            onTagGlobalSearch = onTagGlobalSearch,
+            // <-- AM (TAG_SEARCH_MENU)
             onCopyTagToClipboard = onCopyTagToClipboard,
             onFilterClicked = onFilterButtonClicked,
             onShuffleClicked = onShuffleClicked,
@@ -307,6 +319,7 @@ fun AnimeScreen(
             onInvertSelection = onInvertSelection,
             // AM (EPISODE_NAMES) -->
             onRenameEpisode = onRenameEpisode,
+            onEpisodeRenameRequest = onEpisodeRenameRequest,
             // <-- AM (EPISODE_NAMES)
             // AM (CUSTOM_EPISODE_ORDER) -->
             reorderActions = reorderActions,
@@ -343,6 +356,9 @@ fun AnimeScreen(
             onWebViewLongClicked = onWebViewLongClicked,
             onTrackingClicked = onTrackingClicked,
             onTagSearch = onTagSearch,
+            // AM (TAG_SEARCH_MENU) -->
+            onTagGlobalSearch = onTagGlobalSearch,
+            // <-- AM (TAG_SEARCH_MENU)
             onCopyTagToClipboard = onCopyTagToClipboard,
             onFilterButtonClicked = onFilterButtonClicked,
             onShuffleClicked = onShuffleClicked,
@@ -387,6 +403,7 @@ fun AnimeScreen(
             onInvertSelection = onInvertSelection,
             // AM (EPISODE_NAMES) -->
             onRenameEpisode = onRenameEpisode,
+            onEpisodeRenameRequest = onEpisodeRenameRequest,
             // <-- AM (EPISODE_NAMES)
             // AM (CUSTOM_EPISODE_ORDER) -->
             reorderActions = reorderActions,
@@ -430,6 +447,9 @@ private fun AnimeScreenSmallImpl(
 
     // For tags menu
     onTagSearch: (String) -> Unit,
+    // AM (TAG_SEARCH_MENU) -->
+    onTagGlobalSearch: (String) -> Unit,
+    // <-- AM (TAG_SEARCH_MENU)
     onCopyTagToClipboard: (tag: String) -> Unit,
 
     onFilterClicked: () -> Unit,
@@ -489,6 +509,7 @@ private fun AnimeScreenSmallImpl(
     onInvertSelection: () -> Unit,
     // AM (EPISODE_NAMES) -->
     onRenameEpisode: () -> Unit,
+    onEpisodeRenameRequest: (EpisodeList.Item) -> Unit,
     // <-- AM (EPISODE_NAMES)
     // AM (CUSTOM_EPISODE_ORDER) -->
     reorderActions: EpisodeReorderActions,
@@ -521,19 +542,37 @@ private fun AnimeScreenSmallImpl(
     }
 
     // AM (EPISODE_SEARCH) -->
-    var episodeSearchQuery by remember { mutableStateOf<String?>(null) }
+    // AM (PLAYLIST_SEARCH_SCOPE) -->
+    // Deliberately NOT seeded from the submitted query - the field opens empty
+    // and collapsed every time, as it did before scoping existed. An entry
+    // screen that arrived pre-filtered hid episodes with no visible cause, and
+    // the submitted query is already shown in the player's episode-list dialog,
+    // which is where it is legible while something is playing. Submission still
+    // happens on episode tap below, so the dialog stays current with whatever
+    // was last filtered here.
+    // <-- AM (PLAYLIST_SEARCH_SCOPE)
+    var episodeSearchQuery by remember { mutableStateOf("") }
     // AM (CUSTOM_EPISODE_ORDER) -->
     // Search is a display layer too: reorder mode edits the whole order.
     val filteredListItem = remember(listItem, episodeSearchQuery, state.isReordering) {
         val query = episodeSearchQuery
-        if (query.isNullOrBlank() || state.isReordering) {
+        if (query.isBlank() || state.isReordering) {
             // <-- AM (CUSTOM_EPISODE_ORDER)
             listItem
         } else {
+            // AM (EPISODE_TAG_SEARCH) -->
+            // The library search grammar, matched per episode against the
+            // entry it belongs to - the child on a merged entry, so tag: and
+            // source: mean that child's tags and source rather than the
+            // parent's. Matching displayName rather than episode.name also
+            // makes a renamed episode, or a single-episode source showing its
+            // source's title, findable by the only name the list shows it
+            // under.
+            val queryNode = QueryNode.from(query)
             listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
-                item.episode.name.contains(query, ignoreCase = true) ||
-                    formatEpisodeNumber(item.episode.episodeNumber).contains(query, ignoreCase = true)
+                queryNode.matches(item.toSearchFields(state.anime, state.source.name))
             }
+            // <-- AM (EPISODE_TAG_SEARCH)
         }
     }
     // <-- AM (EPISODE_SEARCH)
@@ -627,16 +666,34 @@ private fun AnimeScreenSmallImpl(
                     onInvertSelection = { onInvertSelection() },
                     // AM (CUSTOM_EPISODE_ORDER) -->
                     isReordering = state.isReordering,
-                    // AM (EPISODE_NAMES) -->
-                    onRenameEpisode = onRenameEpisode,
-                    // <-- AM (EPISODE_NAMES)
                     onToggleReorder = {
                         if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
                     }.takeIf { state.anime.fetchType == FetchType.Episodes },
                     // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
-                    onEpisodeSearchQueryChange = { episodeSearchQuery = it },
+                    // AM (PLAYLIST_SEARCH_SCOPE) -->
+                    // Emptying the field unscopes the playlist without waiting
+                    // for an episode tap. Back and the X both route through
+                    // here, so closing the search and clearing it unfilter by
+                    // the same path rather than needing a case each.
+                    //
+                    // The transition gate the closed state needed is gone with
+                    // it: nothing sends "" to mean "opened empty" any more, so
+                    // an empty value here is always the user having emptied it.
+                    //
+                    // No rebuild is kicked off from here: changeEpisode already
+                    // compares the stored query against the one the playlist
+                    // was built from, so the next episode change picks this up.
+                    // Doing it with a collector instead is what was racing the
+                    // load and anchoring the index on whichever won.
+                    onEpisodeSearchQueryChange = { query ->
+                        episodeSearchQuery = query
+                        if (query.isEmpty()) {
+                            PlaylistSearchScope.clearFor(state.anime.id)
+                        }
+                    },
+                    // <-- AM (PLAYLIST_SEARCH_SCOPE)
                     // AM (EPISODE_SEARCH_MIN_COUNT) -->
                     // listItem, not the filtered list: filtering down to a handful
                     // of results must not make the control that did the filtering
@@ -682,6 +739,9 @@ private fun AnimeScreenSmallImpl(
                         onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
                         onDownloadEpisode = onDownloadEpisode,
                         onMultiDeleteClicked = onMultiDeleteClicked,
+                        // AM (EPISODE_NAMES) -->
+                        onRenameEpisode = onRenameEpisode,
+                        // <-- AM (EPISODE_NAMES)
                         fillFraction = 1f,
                     )
                 }
@@ -796,6 +856,14 @@ private fun AnimeScreenSmallImpl(
                             tagsProvider = { state.anime.genre },
                             notes = state.anime.notes,
                             onTagSearch = onTagSearch,
+                            // AM (TAG_SEARCH_MENU) -->
+                            // The tag goes in as plain text. The field is a plain search
+                            // field, and putting query syntax in it would show the user a
+                            // format they never typed and have to understand to edit.
+                            onTagEpisodeSearch = { episodeSearchQuery = it },
+                            onTagGlobalSearch = onTagGlobalSearch,
+                            canSearchPlaylist = listItem.size >= MIN_EPISODES_FOR_SEARCH,
+                            // <-- AM (TAG_SEARCH_MENU)
                             onCopyTagToClipboard = onCopyTagToClipboard,
                             onEditNotes = onEditNotesClicked,
                             // AY -->
@@ -828,7 +896,14 @@ private fun AnimeScreenSmallImpl(
                             enabled = !isAnySelected,
                             itemCount = when (state.anime.fetchType) {
                                 FetchType.Seasons -> seasons.size
-                                FetchType.Episodes -> episodes.size
+                                // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                // Counted off the visible list, so a search
+                                // reduces it the way the filters already do.
+                                // processedEpisodes has the filters applied but
+                                // not the search, which is applied a layer
+                                // later in filteredListItem.
+                                FetchType.Episodes -> filteredListItem.count { it is EpisodeList.Item }
+                                // <-- AM (PLAYLIST_SEARCH_SCOPE)
                             },
                             missingItemsCount = if (state.hideMissingEpisodes) {
                                 0
@@ -951,6 +1026,15 @@ private fun AnimeScreenSmallImpl(
                                 onDownloadEpisode = onDownloadEpisode,
                                 onEpisodeSelected = onEpisodeSelected,
                                 onEpisodeSwipe = onEpisodeSwipe,
+                                // AM (EPISODE_NAMES) -->
+                                onEpisodeRenameRequest = onEpisodeRenameRequest,
+                                isDialogOpen = state.dialog != null,
+                                // <-- AM (EPISODE_NAMES)
+                                // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                onSubmitEpisodeSearch = {
+                                    PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
+                                },
+                                // <-- AM (PLAYLIST_SEARCH_SCOPE)
                                 itemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
                             )
                         }
@@ -989,6 +1073,9 @@ fun AnimeScreenLargeImpl(
 
     // For tags menu
     onTagSearch: (String) -> Unit,
+    // AM (TAG_SEARCH_MENU) -->
+    onTagGlobalSearch: (String) -> Unit,
+    // <-- AM (TAG_SEARCH_MENU)
     onCopyTagToClipboard: (tag: String) -> Unit,
 
     onFilterButtonClicked: () -> Unit,
@@ -1048,6 +1135,7 @@ fun AnimeScreenLargeImpl(
     onInvertSelection: () -> Unit,
     // AM (EPISODE_NAMES) -->
     onRenameEpisode: () -> Unit,
+    onEpisodeRenameRequest: (EpisodeList.Item) -> Unit,
     // <-- AM (EPISODE_NAMES)
     // AM (CUSTOM_EPISODE_ORDER) -->
     reorderActions: EpisodeReorderActions,
@@ -1077,19 +1165,37 @@ fun AnimeScreenLargeImpl(
     }
 
     // AM (EPISODE_SEARCH) -->
-    var episodeSearchQuery by remember { mutableStateOf<String?>(null) }
+    // AM (PLAYLIST_SEARCH_SCOPE) -->
+    // Deliberately NOT seeded from the submitted query - the field opens empty
+    // and collapsed every time, as it did before scoping existed. An entry
+    // screen that arrived pre-filtered hid episodes with no visible cause, and
+    // the submitted query is already shown in the player's episode-list dialog,
+    // which is where it is legible while something is playing. Submission still
+    // happens on episode tap below, so the dialog stays current with whatever
+    // was last filtered here.
+    // <-- AM (PLAYLIST_SEARCH_SCOPE)
+    var episodeSearchQuery by remember { mutableStateOf("") }
     // AM (CUSTOM_EPISODE_ORDER) -->
     // Search is a display layer too: reorder mode edits the whole order.
     val filteredListItem = remember(listItem, episodeSearchQuery, state.isReordering) {
         val query = episodeSearchQuery
-        if (query.isNullOrBlank() || state.isReordering) {
+        if (query.isBlank() || state.isReordering) {
             // <-- AM (CUSTOM_EPISODE_ORDER)
             listItem
         } else {
+            // AM (EPISODE_TAG_SEARCH) -->
+            // The library search grammar, matched per episode against the
+            // entry it belongs to - the child on a merged entry, so tag: and
+            // source: mean that child's tags and source rather than the
+            // parent's. Matching displayName rather than episode.name also
+            // makes a renamed episode, or a single-episode source showing its
+            // source's title, findable by the only name the list shows it
+            // under.
+            val queryNode = QueryNode.from(query)
             listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
-                item.episode.name.contains(query, ignoreCase = true) ||
-                    formatEpisodeNumber(item.episode.episodeNumber).contains(query, ignoreCase = true)
+                queryNode.matches(item.toSearchFields(state.anime, state.source.name))
             }
+            // <-- AM (EPISODE_TAG_SEARCH)
         }
     }
     // <-- AM (EPISODE_SEARCH)
@@ -1176,16 +1282,34 @@ fun AnimeScreenLargeImpl(
                     onInvertSelection = { onInvertSelection() },
                     // AM (CUSTOM_EPISODE_ORDER) -->
                     isReordering = state.isReordering,
-                    // AM (EPISODE_NAMES) -->
-                    onRenameEpisode = onRenameEpisode,
-                    // <-- AM (EPISODE_NAMES)
                     onToggleReorder = {
                         if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
                     }.takeIf { state.anime.fetchType == FetchType.Episodes },
                     // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
-                    onEpisodeSearchQueryChange = { episodeSearchQuery = it },
+                    // AM (PLAYLIST_SEARCH_SCOPE) -->
+                    // Emptying the field unscopes the playlist without waiting
+                    // for an episode tap. Back and the X both route through
+                    // here, so closing the search and clearing it unfilter by
+                    // the same path rather than needing a case each.
+                    //
+                    // The transition gate the closed state needed is gone with
+                    // it: nothing sends "" to mean "opened empty" any more, so
+                    // an empty value here is always the user having emptied it.
+                    //
+                    // No rebuild is kicked off from here: changeEpisode already
+                    // compares the stored query against the one the playlist
+                    // was built from, so the next episode change picks this up.
+                    // Doing it with a collector instead is what was racing the
+                    // load and anchoring the index on whichever won.
+                    onEpisodeSearchQueryChange = { query ->
+                        episodeSearchQuery = query
+                        if (query.isEmpty()) {
+                            PlaylistSearchScope.clearFor(state.anime.id)
+                        }
+                    },
+                    // <-- AM (PLAYLIST_SEARCH_SCOPE)
                     // AM (EPISODE_SEARCH_MIN_COUNT) -->
                     // listItem, not the filtered list: filtering down to a handful
                     // of results must not make the control that did the filtering
@@ -1232,6 +1356,9 @@ fun AnimeScreenLargeImpl(
                             onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
                             onDownloadEpisode = onDownloadEpisode,
                             onMultiDeleteClicked = onMultiDeleteClicked,
+                            // AM (EPISODE_NAMES) -->
+                            onRenameEpisode = onRenameEpisode,
+                            // <-- AM (EPISODE_NAMES)
                             fillFraction = 0.5f,
                         )
                     }
@@ -1315,6 +1442,14 @@ fun AnimeScreenLargeImpl(
                                 tagsProvider = { state.anime.genre },
                                 notes = state.anime.notes,
                                 onTagSearch = onTagSearch,
+                                // AM (TAG_SEARCH_MENU) -->
+                                // The tag goes in as plain text. The field is a plain search
+                                // field, and putting query syntax in it would show the user a
+                                // format they never typed and have to understand to edit.
+                                onTagEpisodeSearch = { episodeSearchQuery = it },
+                                onTagGlobalSearch = onTagGlobalSearch,
+                                canSearchPlaylist = listItem.size >= MIN_EPISODES_FOR_SEARCH,
+                                // <-- AM (TAG_SEARCH_MENU)
                                 onCopyTagToClipboard = onCopyTagToClipboard,
                                 onEditNotes = onEditNotesClicked,
                                 // AY -->
@@ -1359,7 +1494,10 @@ fun AnimeScreenLargeImpl(
                                     enabled = !isAnySelected,
                                     itemCount = when (state.anime.fetchType) {
                                         FetchType.Seasons -> seasons.size
-                                        FetchType.Episodes -> episodes.size
+                                        // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                        FetchType.Episodes ->
+                                            filteredListItem.count { it is EpisodeList.Item }
+                                        // <-- AM (PLAYLIST_SEARCH_SCOPE)
                                     },
                                     missingItemsCount = if (state.hideMissingEpisodes) {
                                         0
@@ -1480,6 +1618,15 @@ fun AnimeScreenLargeImpl(
                                         onDownloadEpisode = onDownloadEpisode,
                                         onEpisodeSelected = onEpisodeSelected,
                                         onEpisodeSwipe = onEpisodeSwipe,
+                                        // AM (EPISODE_NAMES) -->
+                                        onEpisodeRenameRequest = onEpisodeRenameRequest,
+                                        isDialogOpen = state.dialog != null,
+                                        // <-- AM (EPISODE_NAMES)
+                                        // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                        onSubmitEpisodeSearch = {
+                                            PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
+                                        },
+                                        // <-- AM (PLAYLIST_SEARCH_SCOPE)
                                         // AY -->
                                         itemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
                                         // <-- AY
@@ -1509,6 +1656,9 @@ private fun SharedAnimeBottomActionMenu(
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onDownloadEpisode: ((List<EpisodeList.Item>, EpisodeDownloadAction) -> Unit)?,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (EPISODE_NAMES) -->
+    onRenameEpisode: () -> Unit,
+    // <-- AM (EPISODE_NAMES)
     fillFraction: Float,
     modifier: Modifier = Modifier,
 ) {
@@ -1556,6 +1706,11 @@ private fun SharedAnimeBottomActionMenu(
             onEpisodeClicked(selected.fastMap { it.episode }.first(), true)
         }.takeIf { alwaysUseExternalPlayer && selected.size == 1 },
         // <-- AY
+        // AM (EPISODE_NAMES) -->
+        // One name, one episode: the view model ignores the call for any other
+        // selection size, so don't offer it.
+        onRenameClicked = onRenameEpisode.takeIf { selected.size == 1 },
+        // <-- AM (EPISODE_NAMES)
     )
 }
 
@@ -1671,6 +1826,17 @@ private fun LazyGridScope.sharedEpisodeItems(
     onDownloadEpisode: ((List<EpisodeList.Item>, EpisodeDownloadAction) -> Unit)?,
     onEpisodeSelected: (EpisodeList.Item, Boolean, Boolean) -> Unit,
     onEpisodeSwipe: (EpisodeList.Item, LibraryPreferences.EpisodeSwipeAction) -> Unit,
+    // AM (EPISODE_NAMES) -->
+    onEpisodeRenameRequest: (EpisodeList.Item) -> Unit,
+    // A tap that lands while a dialog is opening was already captured by
+    // this row's gesture detector, so the dialog's own window never sees
+    // it - the row has to decline it itself.
+    isDialogOpen: Boolean,
+    // <-- AM (EPISODE_NAMES)
+    // AM (PLAYLIST_SEARCH_SCOPE) -->
+    /** Confirms the current search as what the playlist is built from. */
+    onSubmitEpisodeSearch: () -> Unit,
+    // <-- AM (PLAYLIST_SEARCH_SCOPE)
     // AY -->
     itemModifier: Modifier = Modifier,
     // <-- AY
@@ -1778,17 +1944,60 @@ private fun LazyGridScope.sharedEpisodeItems(
                     episodeSwipeStartAction = episodeSwipeStartAction,
                     episodeSwipeEndAction = episodeSwipeEndAction,
                     onLongClick = {
-                        onEpisodeSelected(item, !item.selected, true)
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        // AM (EPISODE_NAMES) -->
+                        if (!isDialogOpen) {
+                            onEpisodeSelected(item, !item.selected, true)
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                        // <-- AM (EPISODE_NAMES)
                     },
                     onClick = {
-                        onEpisodeItemClick(
-                            episodeItem = item,
-                            isAnyEpisodeSelected = isAnyEpisodeSelected,
-                            onToggleSelection = { onEpisodeSelected(item, !item.selected, false) },
-                            onEpisodeClicked = onEpisodeClicked,
-                        )
+                        // AM (EPISODE_NAMES) -->
+                        // The third tap of a triple tap: taps one and two
+                        // fired the rename dialog, and this one was already
+                        // in flight behind it, landing as a fresh single tap
+                        // a double-tap timeout later. Checked here rather
+                        // than debounced - by the time this runs the dialog
+                        // is in state, so it is an ordinary state test, not
+                        // a guess about timing.
+                        if (!isDialogOpen) {
+                            onEpisodeItemClick(
+                                episodeItem = item,
+                                isAnyEpisodeSelected = isAnyEpisodeSelected,
+                                onToggleSelection = { onEpisodeSelected(item, !item.selected, false) },
+                                // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                // Submitted before playback starts, so the
+                                // session builds its playlist from the list
+                                // that was on screen when this was tapped.
+                                // Only on the play branch: toggling a
+                                // selection is not a confirmation.
+                                onEpisodeClicked = { episode, alt ->
+                                    onSubmitEpisodeSearch()
+                                    onEpisodeClicked(episode, alt)
+                                },
+                                // <-- AM (PLAYLIST_SEARCH_SCOPE)
+                            )
+                        }
+                        // <-- AM (EPISODE_NAMES)
                     },
+                    // AM (EPISODE_NAMES) -->
+                    // Targets the row it landed on, not the selection - so it
+                    // works with nothing selected, which is the point of it.
+                    //
+                    // Null once anything is selected (which includes reorder
+                    // mode). A non-null onDoubleClick makes detectTapGestures
+                    // hold every tap for the double-tap timeout before it can
+                    // commit to onClick, and in selection mode that tap is a
+                    // checkbox toggle - 300ms of lag on the one gesture that
+                    // gets repeated the most. Renaming is reachable from
+                    // browse mode, where the same delay buys the gesture.
+                    onDoubleClick = if (isAnyEpisodeSelected) {
+                        null
+                    } else {
+                        { onEpisodeRenameRequest(item) }
+                    },
+                    onDoubleClickLabel = stringResource(AMMR.strings.am_action_rename_episode),
+                    // <-- AM (EPISODE_NAMES)
                     onDownloadClick = if (onDownloadEpisode != null) {
                         { onDownloadEpisode(listOf(item), it) }
                     } else {
@@ -1908,3 +2117,25 @@ private fun Modifier.ignorePadding(gridPadding: Int) = layout { measurable, cons
     }
 }
 // <-- AY
+
+// AM (EPISODE_TAG_SEARCH) -->
+/**
+ * [fallbackAnime] and [fallbackSourceName] cover an ordinary entry, whose
+ * episodes have no separate owner to resolve - they belong to the entry being
+ * displayed.
+ */
+private fun EpisodeList.Item.toSearchFields(
+    fallbackAnime: Anime,
+    fallbackSourceName: String,
+): EpisodeSearchFields {
+    val anime = owner ?: fallbackAnime
+    return EpisodeSearchFields(
+        displayName = displayName,
+        episodeNumber = episode.episodeNumber,
+        scanlator = episode.scanlator,
+        anime = anime,
+        sourceName = ownerSourceName.ifEmpty { fallbackSourceName },
+        tags = anime.genre.orEmpty(),
+    )
+}
+// <-- AM (EPISODE_TAG_SEARCH)

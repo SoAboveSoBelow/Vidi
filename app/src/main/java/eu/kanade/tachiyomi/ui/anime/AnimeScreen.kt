@@ -194,6 +194,9 @@ class AnimeScreen(
                 }
             },
             onTagSearch = { scope.launch { performGenreSearch(navigator, it, viewModel.source!!) } },
+            // AM (TAG_SEARCH_MENU) -->
+            onTagGlobalSearch = { scope.launch { performSearch(navigator, it, global = true) } },
+            // <-- AM (TAG_SEARCH_MENU)
             onFilterButtonClicked = viewModel::showSettingsDialog,
             onShuffleClicked = { viewModel.toggleEpisodeShuffle() },
             onRefresh = viewModel::fetchAllFromSource,
@@ -259,7 +262,8 @@ class AnimeScreen(
             onAllEpisodeSelected = viewModel::toggleAllSelection,
             onInvertSelection = viewModel::invertSelection,
             // AM (EPISODE_NAMES) -->
-            onRenameEpisode = viewModel::showRenameEpisodeDialog,
+            onRenameEpisode = { viewModel.showRenameEpisodeDialog() },
+            onEpisodeRenameRequest = { viewModel.showRenameEpisodeDialog(it.id, it.displayName) },
             // <-- AM (EPISODE_NAMES)
             // AM (CUSTOM_EPISODE_ORDER) -->
             reorderActions = remember(viewModel) {

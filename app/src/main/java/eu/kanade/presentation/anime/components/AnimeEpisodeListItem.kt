@@ -44,6 +44,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -89,6 +92,15 @@ fun AnimeEpisodeListItem(
     episodeSwipeEndAction: LibraryPreferences.EpisodeSwipeAction,
     onLongClick: () -> Unit,
     onClick: () -> Unit,
+    // AM (EPISODE_NAMES) -->
+    // Null keeps combinedClickable's onDoubleClick null, which matters: a
+    // non-null one makes detectTapGestures hold every single tap for the
+    // double-tap timeout before it can commit to onClick. Callers that have
+    // no double-tap action must pass null rather than an empty lambda, or
+    // every tap in the list pays that delay for nothing.
+    onDoubleClick: (() -> Unit)? = null,
+    onDoubleClickLabel: String? = null,
+    // <-- AM (EPISODE_NAMES)
     onDownloadClick: ((EpisodeDownloadAction) -> Unit)?,
     onEpisodeSwipe: (LibraryPreferences.EpisodeSwipeAction) -> Unit,
     // AM (FILE_SIZE) -->
@@ -125,6 +137,10 @@ fun AnimeEpisodeListItem(
         onSwipe = { onEpisodeSwipe(episodeSwipeEndAction) },
     )
 
+    // AM (EPISODE_NAMES) -->
+    val doubleClickAction = onDoubleClick
+    // <-- AM (EPISODE_NAMES)
+
     SwipeableActionsBox(
         modifier = modifier.clipToBounds(),
         startActions = listOfNotNull(start),
@@ -144,7 +160,32 @@ fun AnimeEpisodeListItem(
                 .combinedClickable(
                     onClick = onClick,
                     onLongClick = onLongClick,
+                    // AM (EPISODE_NAMES) -->
+                    onDoubleClick = onDoubleClick,
+                    // <-- AM (EPISODE_NAMES)
                 )
+                // AM (EPISODE_NAMES) -->
+                // combinedClickable maps onClick and onLongClick into
+                // semantics but has no mapping for a double click, and
+                // double-tap is TalkBack's own activation gesture, so the
+                // gesture is unreachable with a screen reader. This exposes
+                // the same action through the accessibility actions menu.
+                .then(
+                    doubleClickAction?.let { action ->
+                        Modifier.semantics {
+                            customActions = listOf(
+                                CustomAccessibilityAction(
+                                    label = onDoubleClickLabel.orEmpty(),
+                                    action = {
+                                        action()
+                                        true
+                                    },
+                                ),
+                            )
+                        }
+                    } ?: Modifier,
+                )
+                // <-- AM (EPISODE_NAMES)
                 .padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 12.dp),
         ) {
             // AY -->

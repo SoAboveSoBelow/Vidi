@@ -435,7 +435,14 @@ fun PlayerControls(
             ) {
                 TopLeftPlayerControls(
                     animeTitle = uiData.animeTitle,
-                    mediaTitle = uiData.mediaTitle,
+                    // AM (EPISODE_NAMES) -->
+                    // Resolved here rather than stored, so it matches the
+                    // episode list and follows a rename made while this
+                    // session is alive.
+                    mediaTitle = stateData.currentEpisode
+                        ?.let(stateData::displayNameOf)
+                        .orEmpty(),
+                    // <-- AM (EPISODE_NAMES)
                     onTitleClick = { onPlayerEvent(PlayerEvent.ShowEpisodeDialog) },
                     onBackClick = onBack,
                 )
@@ -571,7 +578,6 @@ private fun PlayerControlsPreview() {
             ),
             uiData = PlayerViewModel.PlayerUiData(
                 animeTitle = "ef - a tale of memories.",
-                mediaTitle = "Ep. 2 - Upon a Time",
                 playerUpdate = PlayerUpdates.DoubleSpeed,
             ),
             playbackData = PlayerViewModel.PlayerPlaybackData(

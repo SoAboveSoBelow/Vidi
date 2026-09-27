@@ -1,6 +1,6 @@
 package eu.kanade.tachiyomi.ui.player.components
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -35,6 +36,10 @@ import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.data.database.models.EpisodeImpl
 import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
 import tachiyomi.presentation.core.components.material.padding
+import tachiyomi.i18n.animiru.AMMR
+import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.util.nowPlayingBackground
+import tachiyomi.presentation.core.util.selectedBackground
 
 @Composable
 fun EpisodeListItem(
@@ -45,6 +50,19 @@ fun EpisodeListItem(
     onBookmarkClicked: (Long?, Boolean) -> Unit,
     onFillermarkClicked: (Long?, Boolean) -> Unit,
     onEpisodeClicked: (Long?) -> Unit,
+    // AM (PLAYER_EPISODE_LIST_SELECTION) -->
+    // All four default to the row's previous behaviour, so the cast playlist
+    // sheet - the other caller of this component - is untouched.
+    //
+    // A non-null onOpenEntryClicked swaps the two mark buttons for an open-
+    // entry button: the marks move into the list's selection bar, where they
+    // act on a selection rather than on one row. Passing null keeps the marks
+    // in the row.
+    onOpenEntryClicked: ((Long?) -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
+    selectionMode: Boolean = false,
+    isSelected: Boolean = false,
+    // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
 ) {
     var isBookmarked by remember { mutableStateOf(episode.bookmark) }
     var isFillermarked by remember { mutableStateOf(episode.fillermark) }
@@ -81,30 +99,66 @@ fun EpisodeListItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = { onEpisodeClicked(episode.id) })
+            // AM (PLAYER_EPISODE_LIST_SELECTION) -->
+            .selectedBackground(isSelected)
+            // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+            // AM (NOW_PLAYING_INDICATOR) -->
+            // The same tint the entry's own episode list uses, in the same
+            // position in the chain - drawn behind the whole row, under the
+            // click ripple and outside the row's padding. The bold italic
+            // below marks the same episode; this is the entry list's
+            // treatment carried over so the two lists read alike.
+            .nowPlayingBackground(isCurrentEpisode)
+            // <-- AM (NOW_PLAYING_INDICATOR)
+            // AM (PLAYER_EPISODE_LIST_SELECTION) -->
+            .combinedClickable(
+                onClick = { onEpisodeClicked(episode.id) },
+                onLongClick = onLongClick,
+            )
+            // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
             .padding(vertical = MaterialTheme.padding.extraSmall),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(onClick = { clickBookmark(!isBookmarked) }) {
-            Icon(
-                imageVector = Icons.Filled.Bookmark,
-                contentDescription = null,
-                tint = bookmarkColor,
-                modifier = Modifier
-                    .sizeIn(maxHeight = with(LocalDensity.current) { textHeight.toDp() - 2.dp })
-                    .alpha(bookmarkAlpha),
-            )
-        }
+        // AM (PLAYER_EPISODE_LIST_SELECTION) -->
+        // No checkbox: selection is shown by the row tint alone, the way the
+        // entry's own episode list does it. The leading button stays put and
+        // goes inert while selecting, mirroring how that list disables the
+        // download indicator rather than swapping it out - a row that changes
+        // shape on selection makes the list jump.
+        if (onOpenEntryClicked != null) {
+            IconButton(
+                onClick = { onOpenEntryClicked(episode.id) },
+                enabled = !selectionMode,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Visibility,
+                    contentDescription = stringResource(AMMR.strings.am_action_open_entry),
+                )
+            }
+        } else {
+            IconButton(onClick = { clickBookmark(!isBookmarked) }) {
+                Icon(
+                    imageVector = Icons.Filled.Bookmark,
+                    contentDescription = null,
+                    tint = bookmarkColor,
+                    modifier = Modifier
+                        .sizeIn(maxHeight = with(LocalDensity.current) { textHeight.toDp() - 2.dp })
+                        .alpha(bookmarkAlpha),
+                )
+            }
 
-        IconButton(onClick = { clickFillermark(!isFillermarked) }) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.Label,
-                contentDescription = null,
-                tint = fillermarkColor,
-                modifier = Modifier
-                    .sizeIn(maxHeight = with(LocalDensity.current) { textHeight.toDp() - 2.dp })
-                    .alpha(fillermarkAlpha),
-            )
+            IconButton(onClick = { clickFillermark(!isFillermarked) }) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Label,
+                    contentDescription = null,
+                    tint = fillermarkColor,
+                    modifier = Modifier
+                        .sizeIn(maxHeight = with(LocalDensity.current) { textHeight.toDp() - 2.dp })
+                        .alpha(fillermarkAlpha),
+                )
+            }
         }
+        // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
 
         Spacer(modifier = Modifier.width(2.dp))
 

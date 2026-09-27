@@ -95,7 +95,7 @@ import eu.kanade.tachiyomi.data.track.myanimelist.MyAnimeList
 import eu.kanade.tachiyomi.source.MergedSource
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.ui.anime.EpisodeShufflePreferences
-import eu.kanade.tachiyomi.ui.anime.episodeShuffleSortKey
+import eu.kanade.tachiyomi.ui.anime.shuffledWithinSeasons
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.player.cast.CastDialog
 import eu.kanade.tachiyomi.ui.player.cast.CastSheet
@@ -143,9 +143,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -153,6 +155,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import logcat.LogPriority
+import mihon.domain.library.model.search.QueryNode
+import mihon.feature.library.matches
+import mihon.feature.library.EpisodeSearchFields
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -439,7 +444,75 @@ class PlayerViewModel(
                 updateUiData { it.copy(fontList = fetchFonts(fonts)) }
             }
         }
+
+        // AM (SHUFFLE_FOLLOWS_SEED) -->
+        observeShuffleSeed()
+        // <-- AM (SHUFFLE_FOLLOWS_SEED)
     }
+
+    // AM (PLAYLIST_SEARCH_SCOPE) -->
+    // There is deliberately no collector on PlaylistSearchScope. Every way a
+    // search gets submitted is followed by starting an episode - from the
+    // dialog that is changeEpisode(), from the entry list it is session setup -
+    // and both build the playlist from the submitted query themselves. A
+    // collector added nothing except a second writer racing them, and it also
+    // meant submitting for one entry rebuilt a different entry's playlist
+    // unscoped, because queryFor() returned empty for the one still playing.
+    // <-- AM (PLAYLIST_SEARCH_SCOPE)
+
+    // AM (SHUFFLE_FOLLOWS_SEED) -->
+    /**
+     * Keeps the playlist's order following the stored shuffle seed.
+     *
+     * currentPlaylist has one writer, setupEpisodeList, and it runs when a
+     * session starts. Sessions here are service-owned and outlive the player
+     * UI, so toggling shuffle from the entry screen while something is playing
+     * changed the list - which recomputes from state - and left the playlist
+     * built before the toggle. Play order kept following the old order for the
+     * rest of the session.
+     *
+     * Compared against the seed the playlist was actually built with rather
+     * than by dropping the first emission: changes() replays the current value
+     * on subscribe, and a count-based skip would break the moment this
+     * resubscribes or the session changes anime.
+     */
+    private fun observeShuffleSeed() {
+        viewModelScope.launchIO {
+            stateData
+                .map { it.currentAnime?.id }
+                .distinctUntilChanged()
+                .collectLatest { animeId ->
+                    if (animeId == null) return@collectLatest
+                    episodeShufflePreferences.seed(animeId).changes().collectLatest { seed ->
+                        if (seed != stateData.value.playlistShuffleSeed) {
+                            rebuildPlaylistPreservingCurrent()
+                        }
+                    }
+                }
+        }
+    }
+
+    /**
+     * Rebuilds the playlist under the episode that is playing. Nothing about
+     * playback is touched - only which episode comes next changes, so the
+     * index is re-anchored on the current episode's id rather than kept.
+     */
+    private suspend fun rebuildPlaylistPreservingCurrent() {
+        val anime = stateData.value.currentAnime ?: return
+        val playing = stateData.value.currentEpisode ?: return
+        setupEpisodeList(anime)
+        val playlist = stateData.value.currentPlaylist
+        val index = playlist.indexOfFirst { it.id == playing.id }
+        if (index == -1) return
+        updateStateData {
+            it.copy(
+                currentPlaylistIndex = index,
+                hasPreviousEpisode = index != 0,
+                hasNextEpisode = index != playlist.size - 1,
+            )
+        }
+    }
+    // <-- AM (SHUFFLE_FOLLOWS_SEED)
 
     // AM (SERVICE_OWNED_PLAYER) -->
     // player/mpv are backed by a mutable field instead of a fixed val, so bindToService()
@@ -1549,6 +1622,12 @@ class PlayerViewModel(
         // number would interleave a merged entry's seasons back together
         // (S1E1, S2E1, ...) and would discard a custom order outright.
         val isMerged = anime.source == MergedSource.ID
+        // AM (SHUFFLE_FOLLOWS_SEED) -->
+        // Read once and recorded in state below. The playlist is derived from
+        // this value, so it has to be possible to tell later whether the
+        // playlist still matches the stored seed.
+        val shuffleSeed = episodeShufflePreferences.seed(anime.id).get()
+        // <-- AM (SHUFFLE_FOLLOWS_SEED)
         val resolvedOrder = getEpisodeOrder.awaitResolved(anime)
         val rawEpisodes = resolvedOrder.episodes
         val isPreordered = resolvedOrder.isPreordered
@@ -1560,6 +1639,14 @@ class PlayerViewModel(
             emptyMap()
         }
         // <-- AM (CUSTOM_EPISODE_ORDER)
+        // AM (EPISODE_TAG_SEARCH) -->
+        // One stub lookup per source, not per episode. Needed both by the
+        // search scope below and by the state it is published into.
+        val ownerSourceNames = ownerById.values
+            .map { it.source }
+            .distinct()
+            .associateWith { sourceManager.getOrStub(it).name }
+        // <-- AM (EPISODE_TAG_SEARCH)
 
         val episodes = rawEpisodes
             .let {
@@ -1596,13 +1683,30 @@ class PlayerViewModel(
             .let { sorted ->
                 // Mirrors the episode list screen's shuffle via the same persisted
                 // per-anime seed (EpisodeShufflePreferences), no explicit wiring needed.
-                val seed = episodeShufflePreferences.seed(anime.id).get()
+                val seed = shuffleSeed
                 if (seed == 0L) {
                     sorted
                 } else {
-                    sorted.sortedBy { episodeShuffleSortKey(seed, it.id ?: 0L) }
+                    // AM (SEASON_SCOPED_SHUFFLE) -->
+                    sorted.shuffledWithinSeasons(
+                        seed = seed,
+                        idOf = { it.id ?: 0L },
+                        seasonRankOf = { episode ->
+                            episode.id
+                                ?.let(resolvedOrder.seasonByEpisodeId::get)
+                                ?.let(resolvedOrder.seasonRankByNumber::get)
+                        },
+                    )
+                    // <-- AM (SEASON_SCOPED_SHUFFLE)
                 }
             }
+
+        // AM (PLAYLIST_SEARCH_SCOPE) -->
+        // Read here, applied after the user filters below: the search is the
+        // last thing that narrows the list, and the dialog needs the list as it
+        // stands before it.
+        val scopeQuery = PlaylistSearchScope.queryFor(anime.id)
+        // <-- AM (PLAYLIST_SEARCH_SCOPE)
 
         val selectedEpisode = episodes.find { it.id == episodeId }
             ?: error("Requested episode of id $episodeId not found in episode list")
@@ -1659,19 +1763,70 @@ class PlayerViewModel(
             filtered += listOf(selectedEpisode)
         }
 
+        // AM (PLAYLIST_SEARCH_SCOPE) -->
+        // The submitted search, last. Derived here rather than handed a frozen
+        // list of ids, so a rehost or the shuffle rebuild re-applies it without
+        // knowing it exists.
+        //
+        // filtered is kept as the unscoped list: the dialog searches that, not
+        // the scoped result. Searching what the scope already produced can only
+        // narrow further - you could never broaden or change a filter, because
+        // the episodes you were trying to reach were not in the list being
+        // searched.
+        val unscoped = filtered.toList()
+        val scoped = if (scopeQuery.isBlank()) {
+            unscoped
+        } else {
+            val queryNode = QueryNode.from(scopeQuery)
+            val hostSourceName = sourceManager.getOrStub(anime.source).name
+            unscoped.filter { episode ->
+                val owner = episode.anime_id?.let { ownerById[it] } ?: anime
+                queryNode.matches(
+                    EpisodeSearchFields(
+                        displayName = episode.id
+                            ?.let(resolvedOrder.displayNameByEpisodeId::get)
+                            ?: episode.name,
+                        episodeNumber = episode.episode_number.toDouble(),
+                        scanlator = episode.scanlator,
+                        anime = owner,
+                        sourceName = ownerSourceNames[owner.source] ?: hostSourceName,
+                        tags = owner.genre.orEmpty(),
+                    ),
+                )
+            }.let { if (it.any { episode -> episode.id == episodeId }) it else it + selectedEpisode }
+        }
+        // <-- AM (PLAYLIST_SEARCH_SCOPE)
+
         // AM (CUSTOM_EPISODE_ORDER) -->
-        // Season boundaries only mean something while the playlist runs in
-        // watch order: a shuffled playlist crosses seasons on nearly every
-        // step, so it carries no season map and never prompts at one.
-        val isShuffled = episodeShufflePreferences.seed(anime.id).get() != 0L
-        val playlistSeasonById = if (isShuffled || resolvedOrder.seasonNumbers.size <= 1) {
+        // AM (SEASON_SCOPED_SHUFFLE) -->
+        // The shuffle exclusion here is gone. It existed because a flat
+        // shuffle crossed a season boundary on nearly every step, which would
+        // have prompted constantly; shuffledWithinSeasons keeps seasons in
+        // sequence and scrambles only within them, so boundaries are
+        // monotonic again and the prompt fires once per season as it does
+        // unshuffled.
+        // <-- AM (SEASON_SCOPED_SHUFFLE)
+        val playlistSeasonById = if (resolvedOrder.seasonNumbers.size <= 1) {
             emptyMap()
         } else {
             resolvedOrder.seasonByEpisodeId
         }
         updateStateData {
             it.copy(
-                currentPlaylist = filtered.toList(),
+                currentPlaylist = scoped,
+                // AM (PLAYLIST_SEARCH_SCOPE) -->
+                playlistUnscoped = unscoped,
+                // <-- AM (PLAYLIST_SEARCH_SCOPE)
+                // AM (EPISODE_TAG_SEARCH) -->
+                playlistOwnerByAnimeId = ownerById,
+                playlistOwnerSourceNames = ownerSourceNames,
+                // <-- AM (EPISODE_TAG_SEARCH)
+                // AM (SHUFFLE_FOLLOWS_SEED) -->
+                playlistShuffleSeed = shuffleSeed,
+                // <-- AM (SHUFFLE_FOLLOWS_SEED)
+                // AM (PLAYLIST_SEARCH_SCOPE) -->
+                playlistSearchQuery = scopeQuery,
+                // <-- AM (PLAYLIST_SEARCH_SCOPE)
                 playlistSeasonById = playlistSeasonById,
                 // AM (NAMED_SEASONS) -->
                 playlistSeasons = resolvedOrder.seasons,
@@ -1699,10 +1854,8 @@ class PlayerViewModel(
     }
 
     // AM (EPISODE_NAMES) -->
-    /** The episode's name as the list shows it - custom name, or a single-episode source's title. */
-    fun displayNameOf(episode: Episode): String {
-        return episode.id?.let { stateData.value.playlistEpisodeNames[it] } ?: episode.name
-    }
+    /** The episode's name as the list shows it - see PlayerStateData.displayNameOf. */
+    fun displayNameOf(episode: Episode): String = stateData.value.displayNameOf(episode)
     // <-- AM (EPISODE_NAMES)
 
     private fun setupEpisode(episode: Episode) {
@@ -1737,10 +1890,6 @@ class PlayerViewModel(
                 hasPreviousEpisode = currentEpisodeIndex != 0,
                 hasNextEpisode = currentEpisodeIndex != currentState.currentPlaylist.size - 1,
             )
-        }
-
-        updateUiData {
-            it.copy(mediaTitle = episode.name)
         }
 
         setPropertyDouble("user-data/current-anime/episode-number", episode.episode_number.toDouble())
@@ -3841,9 +3990,16 @@ class PlayerViewModel(
     private suspend fun loadEpisode(episodeId: Long?): EpisodeLoadResult? {
         val displayAnime = stateData.value.currentAnime ?: return null
 
-        val chosenEpisode = stateData.value.currentPlaylist.firstOrNull { ep ->
-            ep.id == episodeId
-        } ?: return null
+        // AM (PLAYLIST_SEARCH_SCOPE) -->
+        // Resolved against the unscoped list. currentPlaylist is what plays
+        // NEXT; being asked to start a specific episode is not constrained by
+        // it, and refusing here returned null - which left isLoadingEpisode
+        // true with nothing to clear it, so the player buffered forever on any
+        // episode outside the active scope.
+        val chosenEpisode = stateData.value.currentPlaylist.firstOrNull { ep -> ep.id == episodeId }
+            ?: stateData.value.playlistUnscoped.firstOrNull { ep -> ep.id == episodeId }
+            ?: return null
+        // <-- AM (PLAYLIST_SEARCH_SCOPE)
 
         // AM (MERGED_SOURCES) -->
         val (anime, source) = resolveEpisodeAnimeAndSource(displayAnime, chosenEpisode) ?: return null
@@ -3970,6 +4126,17 @@ class PlayerViewModel(
         episodeChangeJob?.cancel()
         episodeChangeJob = viewModelScope.launch {
             // <-- AM (EPISODE_CHANGE_RACE_FIX)
+            // AM (PLAYLIST_SEARCH_SCOPE) -->
+            // Submitting a search and picking an episode is one action, so the
+            // rebuild belongs in this job, before the load - not in a collector
+            // racing it. Two coroutines writing playlist state during a switch
+            // is how the index ended up anchored on whichever finished last.
+            stateData.value.currentAnime?.let { anime ->
+                if (PlaylistSearchScope.queryFor(anime.id) != stateData.value.playlistSearchQuery) {
+                    setupEpisodeList(anime)
+                }
+            }
+            // <-- AM (PLAYLIST_SEARCH_SCOPE)
             val switchMethod = loadEpisode(episodeId)
             updateUiData { it.copy(isLoadingHosters = false) }
 
@@ -5737,6 +5904,22 @@ class PlayerViewModel(
         /** Display names for the playlist - custom names and single-episode source titles. */
         val playlistEpisodeNames: Map<Long, String> = emptyMap(),
         // <-- AM (EPISODE_NAMES)
+        // AM (SHUFFLE_FOLLOWS_SEED) -->
+        /** The shuffle seed [currentPlaylist] was ordered by; 0 means unshuffled. */
+        val playlistShuffleSeed: Long = 0L,
+        // <-- AM (SHUFFLE_FOLLOWS_SEED)
+        // AM (PLAYLIST_SEARCH_SCOPE) -->
+        /** The submitted search [currentPlaylist] was built from; empty means unscoped. */
+        val playlistSearchQuery: String = "",
+        /** [currentPlaylist] before the search narrowed it - what the dialog searches. */
+        val playlistUnscoped: List<Episode> = emptyList(),
+        // <-- AM (PLAYLIST_SEARCH_SCOPE)
+        // AM (EPISODE_TAG_SEARCH) -->
+        /** Merged children by their anime id; empty for an ordinary entry. */
+        val playlistOwnerByAnimeId: Map<Long, Anime> = emptyMap(),
+        /** Source name per source id, for the children above. */
+        val playlistOwnerSourceNames: Map<Long, String> = emptyMap(),
+        // <-- AM (EPISODE_TAG_SEARCH)
         val hasPreviousEpisode: Boolean = false,
         val hasNextEpisode: Boolean = false,
         val isEpisodeOnline: Boolean = false,
@@ -5780,7 +5963,46 @@ class PlayerViewModel(
         val hosterList: List<Hoster> = emptyList(),
         val hosterState: List<HosterState> = emptyList(),
         val isPipAvailable: Boolean = false,
-    )
+    ) {
+        // AM (EPISODE_NAMES) -->
+        /**
+         * The episode's name as the episode list shows it: a custom name, then
+         * a single-episode source's own title, then the source's episode name.
+         *
+         * Lives on the state rather than the ViewModel so the player's title
+         * bar and its episode list resolve a name the same way the list does,
+         * from one definition. Deriving it also means it cannot go stale: a
+         * name copied into ui state at episode setup would keep whatever was
+         * true at that moment, and an episode renamed from the entry screen
+         * while the session is alive behind the mini player would not reach
+         * the title.
+         */
+        fun displayNameOf(episode: Episode): String {
+            return episode.id?.let { playlistEpisodeNames[it] } ?: episode.name
+        }
+        // <-- AM (EPISODE_NAMES)
+
+        // AM (EPISODE_TAG_SEARCH) -->
+        /**
+         * What the search grammar sees for this episode. The owning entry is
+         * the merged child where there is one, so tag: and source: mean that
+         * child's rather than the parent's.
+         */
+        fun searchFieldsOf(episode: Episode): EpisodeSearchFields? {
+            val host = currentAnime ?: return null
+            val owner = episode.anime_id?.let { playlistOwnerByAnimeId[it] } ?: host
+            return EpisodeSearchFields(
+                displayName = displayNameOf(episode),
+                episodeNumber = episode.episode_number.toDouble(),
+                scanlator = episode.scanlator,
+                anime = owner,
+                sourceName = playlistOwnerSourceNames[owner.source]
+                    ?: currentSource?.name.orEmpty(),
+                tags = owner.genre.orEmpty(),
+            )
+        }
+        // <-- AM (EPISODE_TAG_SEARCH)
+    }
 
     @Stable
     data class PlayerUiData(
@@ -5789,7 +6011,11 @@ class PlayerViewModel(
         val previousPauseState: Boolean? = false,
         val hosterExpandedList: List<Boolean> = emptyList(),
         val selectedHosterVideoIndex: Pair<Int, Int> = Pair(-1, -1),
-        val mediaTitle: String = "",
+        // AM (EPISODE_NAMES) -->
+        // mediaTitle removed: derived from stateData where it is shown, so a
+        // rename reaches the player without an ordering dependency on when
+        // the playlist's names were resolved.
+        // <-- AM (EPISODE_NAMES)
         val animeTitle: String = "",
         val controlsShown: Boolean = true,
         val seekBarShown: Boolean = true,

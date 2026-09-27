@@ -1,6 +1,8 @@
 package eu.kanade.presentation.anime.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -10,12 +12,14 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -34,8 +38,9 @@ import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DoneAll
-import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NewLabel
 import androidx.compose.material.icons.outlined.RemoveDone
@@ -47,8 +52,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -78,6 +84,183 @@ import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.stringResource
 import kotlin.time.Duration.Companion.seconds
 
+// AM (BOTTOM_ACTION_OVERFLOW) -->
+/** Where an action wants to live, independent of how much room the bar has. */
+enum class BottomActionPlacement {
+    /**
+     * Never leaves the bar. For an action whose content anchors a dropdown to
+     * the button's box — that anchor has nowhere to attach from inside a menu.
+     */
+    Pinned,
+
+    /** A button while the bar has room for it, otherwise into the overflow. */
+    Auto,
+
+    /**
+     * Always in the overflow menu, however wide the bar is. For an action that
+     * is deliberately tucked away rather than merely low priority.
+     */
+    Overflow,
+}
+
+/**
+ * One action in a bottom action bar.
+ *
+ * [key] identifies the action for the long-press label state. It is deliberately
+ * not the list position: actions appear and disappear with the selection, so a
+ * positional index silently attaches the revealed label to whichever button
+ * happens to slide into that slot.
+ */
+@Immutable
+class BottomActionItem(
+    val key: String,
+    val title: String,
+    val icon: ImageVector,
+    val onClick: () -> Unit,
+    val placement: BottomActionPlacement = BottomActionPlacement.Auto,
+    val content: (@Composable () -> Unit)? = null,
+)
+
+/**
+ * The shared bottom action bar. Owns the scaffold (surface, insets, long-press
+ * label) and decides how many actions fit, so the bars above only describe what
+ * their actions are.
+ *
+ * Nothing here confirms anything despite the historical naming: a long press
+ * reveals the button's own title for a second and widens it, and the click is
+ * unguarded either way. An action loses nothing by overflowing — a menu row
+ * carries that same title permanently.
+ */
+@Composable
+private fun BottomActionBar(
+    visible: Boolean,
+    actions: List<BottomActionItem>,
+    modifier: Modifier = Modifier,
+    enter: EnterTransition = expandVertically(expandFrom = Alignment.Bottom),
+    exit: ExitTransition = shrinkVertically(shrinkTowards = Alignment.Bottom),
+    // Each bar kept the insets modifier it already had. The two forms differ in
+    // whether they consume the inset for descendants, so swapping one for the
+    // other risks double padding or none at all depending on what an ancestor
+    // did — not something to change while moving the code.
+    insetsModifier: Modifier = Modifier.padding(
+        WindowInsets.navigationBars
+            .only(WindowInsetsSides.Bottom)
+            .asPaddingValues(),
+    ),
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = enter,
+        exit = exit,
+    ) {
+        Surface(
+            modifier = modifier,
+            shape = MaterialTheme.shapes.large.copy(bottomEnd = ZeroCornerSize, bottomStart = ZeroCornerSize),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            val scope = rememberCoroutineScope()
+            val haptic = LocalHapticFeedback.current
+            var revealedKey by remember { mutableStateOf<String?>(null) }
+            var revealJob by remember { mutableStateOf<Job?>(null) }
+            val onLongClickItem: (String) -> Unit = { key ->
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                revealedKey = key
+                revealJob?.cancel()
+                revealJob = scope.launch {
+                    delay(1.seconds)
+                    if (isActive && revealedKey == key) revealedKey = null
+                }
+            }
+
+            BoxWithConstraints(
+                modifier = insetsModifier.padding(horizontal = 8.dp, vertical = 12.dp),
+            ) {
+                // How many 48.dp targets fit the width this bar actually got,
+                // which on a two-pane layout is a fraction of the window.
+                val slots = (this.maxWidth / MinButtonWidth).toInt().coerceAtLeast(1)
+                val (barActions, overflowActions) = splitForOverflow(actions, slots)
+
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    barActions.forEach { action ->
+                        Button(
+                            title = action.title,
+                            icon = action.icon,
+                            labelRevealed = revealedKey == action.key,
+                            onLongClick = { onLongClickItem(action.key) },
+                            onClick = action.onClick,
+                            content = action.content,
+                        )
+                    }
+                    if (overflowActions.isNotEmpty()) {
+                        // Scoped to the overflow button's own presence, so the
+                        // menu cannot come back open when a later selection
+                        // brings the overflow back.
+                        var overflowExpanded by remember { mutableStateOf(false) }
+                        Button(
+                            title = stringResource(MR.strings.label_more),
+                            icon = Icons.Outlined.MoreVert,
+                            labelRevealed = false,
+                            onLongClick = {},
+                            onClick = { overflowExpanded = true },
+                        ) {
+                            DropdownMenu(
+                                expanded = overflowExpanded,
+                                onDismissRequest = { overflowExpanded = false },
+                                offset = BottomBarMenuDpOffset,
+                            ) {
+                                overflowActions.forEach { action ->
+                                    DropdownMenuItem(
+                                        text = { Text(action.title) },
+                                        onClick = {
+                                            overflowExpanded = false
+                                            action.onClick()
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Splits [actions] into the ones that stay in the bar and the ones that move
+ * into the overflow menu, given how many [slots] the bar can hold.
+ *
+ * Actions placed in the overflow go there whatever the width. The width only
+ * decides how many of the remaining ones the bar can still show; those are
+ * evicted from the trailing edge, and pinned actions are never evicted. The
+ * menu keeps the actions in their original order, so hiding one does not
+ * reshuffle the others.
+ */
+private fun splitForOverflow(
+    actions: List<BottomActionItem>,
+    slots: Int,
+): Pair<List<BottomActionItem>, List<BottomActionItem>> {
+    val evicted = actions.indices
+        .filterTo(mutableSetOf()) { actions[it].placement == BottomActionPlacement.Overflow }
+
+    // One slot goes to the overflow button itself, but only once something is
+    // actually in it.
+    fun capacity() = if (evicted.isEmpty()) slots else (slots - 1).coerceAtLeast(0)
+
+    for (index in actions.indices.reversed()) {
+        if (actions.size - evicted.size <= capacity()) break
+        if (actions[index].placement != BottomActionPlacement.Auto) continue
+        evicted += index
+    }
+
+    val bar = actions.filterIndexed { index, _ -> index !in evicted }
+    val overflow = actions.filterIndexed { index, _ -> index in evicted }
+    return bar to overflow
+}
+
+private val MinButtonWidth = 48.dp
+// <-- AM (BOTTOM_ACTION_OVERFLOW)
+
 @Composable
 fun AnimeBottomActionMenu(
     visible: Boolean,
@@ -97,162 +280,166 @@ fun AnimeBottomActionMenu(
     onExternalClicked: (() -> Unit)? = null,
     onInternalClicked: (() -> Unit)? = null,
     // <-- AY
+    // AM (EPISODE_NAMES) -->
+    onRenameClicked: (() -> Unit)? = null,
+    // <-- AM (EPISODE_NAMES)
 ) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = expandVertically(expandFrom = Alignment.Bottom),
-        exit = shrinkVertically(shrinkTowards = Alignment.Bottom),
-    ) {
-        val context = LocalContext.current
-        val scope = rememberCoroutineScope()
-        // AY -->
-        val playerPreferences = remember { context.appGraph.playerPreferences }
-        // <-- AY
-        Surface(
-            modifier = modifier,
-            shape = MaterialTheme.shapes.large.copy(bottomEnd = ZeroCornerSize, bottomStart = ZeroCornerSize),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            val haptic = LocalHapticFeedback.current
-            // AY -->
-            val confirm = remember {
-                mutableStateListOf(false, false, false, false, false, false, false, false, false, false, false)
-            }
-            // <-- AY
-            var resetJob by remember { mutableStateOf<Job?>(null) }
-            val onLongClickItem: (Int) -> Unit = { toConfirmIndex ->
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                confirm.indices.forEach { i -> confirm[i] = i == toConfirmIndex }
-                resetJob?.cancel()
-                resetJob = scope.launch {
-                    delay(1.seconds)
-                    if (isActive) confirm[toConfirmIndex] = false
-                }
-            }
-            Row(
-                modifier = Modifier
-                    .padding(
-                        WindowInsets.navigationBars
-                            .only(WindowInsetsSides.Bottom)
-                            .asPaddingValues(),
-                    )
-                    .padding(horizontal = 8.dp, vertical = 12.dp),
-            ) {
-                if (onBookmarkClicked != null) {
-                    Button(
-                        title = stringResource(AYMR.strings.action_bookmark_episode),
-                        icon = Icons.Outlined.BookmarkAdd,
-                        toConfirm = confirm[0],
-                        onLongClick = { onLongClickItem(0) },
-                        onClick = onBookmarkClicked,
-                    )
-                }
-                if (onRemoveBookmarkClicked != null) {
-                    Button(
-                        title = stringResource(AYMR.strings.action_remove_bookmark_episode),
-                        icon = Icons.Outlined.BookmarkRemove,
-                        toConfirm = confirm[1],
-                        onLongClick = { onLongClickItem(1) },
-                        onClick = onRemoveBookmarkClicked,
-                    )
-                }
-                // AY -->
-                if (onFillermarkClicked != null) {
-                    Button(
-                        title = stringResource(AYMR.strings.action_fillermark_episode),
-                        icon = Icons.Outlined.NewLabel,
-                        toConfirm = confirm[2],
-                        onLongClick = { onLongClickItem(2) },
-                        onClick = onFillermarkClicked,
-                    )
-                }
-                if (onRemoveFillermarkClicked != null) {
-                    Button(
-                        title = stringResource(AYMR.strings.action_remove_fillermark_episode),
-                        icon = Icons.AutoMirrored.Outlined.LabelOff,
-                        toConfirm = confirm[3],
-                        onLongClick = { onLongClickItem(3) },
-                        onClick = onRemoveFillermarkClicked,
-                    )
-                }
-                // <-- AY
-                if (onMarkAsSeenClicked != null) {
-                    Button(
-                        title = stringResource(AMMR.strings.am_action_mark_as_seen),
-                        icon = Icons.Outlined.DoneAll,
-                        toConfirm = confirm[4],
-                        onLongClick = { onLongClickItem(4) },
-                        onClick = onMarkAsSeenClicked,
-                    )
-                }
-                if (onMarkAsUnseenClicked != null) {
-                    Button(
-                        title = stringResource(AMMR.strings.am_action_mark_as_unseen),
-                        icon = Icons.Outlined.RemoveDone,
-                        toConfirm = confirm[5],
-                        onLongClick = { onLongClickItem(5) },
-                        onClick = onMarkAsUnseenClicked,
-                    )
-                }
-                if (onMarkPreviousAsSeenClicked != null) {
-                    Button(
-                        title = stringResource(AYMR.strings.action_mark_previous_as_seen),
-                        icon = ImageVector.vectorResource(R.drawable.ic_done_prev_24dp),
-                        toConfirm = confirm[6],
-                        onLongClick = { onLongClickItem(6) },
-                        onClick = onMarkPreviousAsSeenClicked,
-                    )
-                }
-                if (onDownloadClicked != null) {
-                    Button(
-                        title = stringResource(MR.strings.action_download),
-                        icon = Icons.Outlined.Download,
-                        toConfirm = confirm[7],
-                        onLongClick = { onLongClickItem(7) },
-                        onClick = onDownloadClicked,
-                    )
-                }
-                if (onDeleteClicked != null) {
-                    Button(
-                        title = stringResource(MR.strings.action_delete),
-                        icon = Icons.Outlined.Delete,
-                        toConfirm = confirm[8],
-                        onLongClick = { onLongClickItem(8) },
-                        onClick = onDeleteClicked,
-                    )
-                }
+    val context = LocalContext.current
+    // AY -->
+    val playerPreferences = remember { context.appGraph.playerPreferences }
+    val alwaysUseExternalPlayer = playerPreferences.alwaysUseExternalPlayer.get()
+    // <-- AY
 
-                // AY -->
-                if (onExternalClicked != null && !playerPreferences.alwaysUseExternalPlayer.get()) {
-                    Button(
-                        title = stringResource(AYMR.strings.action_play_externally),
-                        icon = Icons.AutoMirrored.Outlined.OpenInNew,
-                        toConfirm = confirm[9],
-                        onLongClick = { onLongClickItem(9) },
-                        onClick = onExternalClicked,
-                    )
-                }
-                if (onInternalClicked != null && playerPreferences.alwaysUseExternalPlayer.get()) {
-                    Button(
-                        title = stringResource(AYMR.strings.action_play_internally),
-                        icon = Icons.AutoMirrored.Outlined.Input,
-                        toConfirm = confirm[10],
-                        onLongClick = { onLongClickItem(10) },
-                        onClick = onInternalClicked,
-                    )
-                }
-                // <-- AY
-            }
+    val actions = buildList {
+        if (onBookmarkClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "bookmark",
+                    title = stringResource(AYMR.strings.action_bookmark_episode),
+                    icon = Icons.Outlined.BookmarkAdd,
+                    onClick = onBookmarkClicked,
+                ),
+            )
         }
+        if (onRemoveBookmarkClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "remove_bookmark",
+                    title = stringResource(AYMR.strings.action_remove_bookmark_episode),
+                    icon = Icons.Outlined.BookmarkRemove,
+                    onClick = onRemoveBookmarkClicked,
+                ),
+            )
+        }
+        // AY -->
+        if (onFillermarkClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "fillermark",
+                    title = stringResource(AYMR.strings.action_fillermark_episode),
+                    icon = Icons.Outlined.NewLabel,
+                    onClick = onFillermarkClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        if (onRemoveFillermarkClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "remove_fillermark",
+                    title = stringResource(AYMR.strings.action_remove_fillermark_episode),
+                    icon = Icons.AutoMirrored.Outlined.LabelOff,
+                    onClick = onRemoveFillermarkClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        // <-- AY
+        if (onMarkAsSeenClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "mark_seen",
+                    title = stringResource(AMMR.strings.am_action_mark_as_seen),
+                    icon = Icons.Outlined.DoneAll,
+                    onClick = onMarkAsSeenClicked,
+                ),
+            )
+        }
+        if (onMarkAsUnseenClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "mark_unseen",
+                    title = stringResource(AMMR.strings.am_action_mark_as_unseen),
+                    icon = Icons.Outlined.RemoveDone,
+                    onClick = onMarkAsUnseenClicked,
+                ),
+            )
+        }
+        if (onMarkPreviousAsSeenClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "mark_previous_seen",
+                    title = stringResource(AYMR.strings.action_mark_previous_as_seen),
+                    icon = ImageVector.vectorResource(R.drawable.ic_done_prev_24dp),
+                    onClick = onMarkPreviousAsSeenClicked,
+                ),
+            )
+        }
+        if (onDownloadClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "download",
+                    title = stringResource(MR.strings.action_download),
+                    icon = Icons.Outlined.Download,
+                    onClick = onDownloadClicked,
+                ),
+            )
+        }
+        if (onDeleteClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "delete",
+                    title = stringResource(MR.strings.action_delete),
+                    icon = Icons.Outlined.Delete,
+                    onClick = onDeleteClicked,
+                ),
+            )
+        }
+        // AM (EPISODE_NAMES) -->
+        // Single-target by nature, so the caller offers it only for a single
+        // selection. Lives in the menu rather than the bar: it is rare enough
+        // that a slot of its own would cost every other action width.
+        if (onRenameClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "rename",
+                    title = stringResource(AMMR.strings.am_action_rename_episode),
+                    icon = Icons.Outlined.Edit,
+                    onClick = onRenameClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        // <-- AM (EPISODE_NAMES)
+        // AY -->
+        if (onExternalClicked != null && !alwaysUseExternalPlayer) {
+            add(
+                BottomActionItem(
+                    key = "play_externally",
+                    title = stringResource(AYMR.strings.action_play_externally),
+                    icon = Icons.AutoMirrored.Outlined.OpenInNew,
+                    onClick = onExternalClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        if (onInternalClicked != null && alwaysUseExternalPlayer) {
+            add(
+                BottomActionItem(
+                    key = "play_internally",
+                    title = stringResource(AYMR.strings.action_play_internally),
+                    icon = Icons.AutoMirrored.Outlined.Input,
+                    onClick = onInternalClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        // <-- AY
     }
+
+    BottomActionBar(
+        visible = visible,
+        actions = actions,
+        modifier = modifier,
+    )
 }
 
 // AM (CUSTOM_EPISODE_ORDER) -->
 /**
  * Replaces AnimeBottomActionMenu while reordering. None of the normal bulk
  * actions belong here: each clears the selection when it finishes, which would
- * end the mode mid-edit. Lives in this file to share Button, so it looks and
- * behaves (long-press labels) exactly like the menu it replaces.
+ * end the mode mid-edit. Shares the bar above, so it looks and behaves
+ * (long-press labels) exactly like the menu it replaces.
  *
  * A null action is omitted, matching the menu's own convention: Change season
  * and Reset order act on the selection so need one, and Discard only appears
@@ -266,68 +453,44 @@ fun EpisodeReorderBottomBar(
     onResetClicked: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = expandVertically(expandFrom = Alignment.Bottom),
-        exit = shrinkVertically(shrinkTowards = Alignment.Bottom),
-    ) {
-        val scope = rememberCoroutineScope()
-        Surface(
-            modifier = modifier,
-            shape = MaterialTheme.shapes.large.copy(bottomEnd = ZeroCornerSize, bottomStart = ZeroCornerSize),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            val haptic = LocalHapticFeedback.current
-            val confirm = remember { mutableStateListOf(false, false, false) }
-            var resetJob by remember { mutableStateOf<Job?>(null) }
-            val onLongClickItem: (Int) -> Unit = { toConfirmIndex ->
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                confirm.indices.forEach { i -> confirm[i] = i == toConfirmIndex }
-                resetJob?.cancel()
-                resetJob = scope.launch {
-                    delay(1.seconds)
-                    if (isActive) confirm[toConfirmIndex] = false
-                }
-            }
-            Row(
-                modifier = Modifier
-                    .padding(
-                        WindowInsets.navigationBars
-                            .only(WindowInsetsSides.Bottom)
-                            .asPaddingValues(),
-                    )
-                    .padding(horizontal = 8.dp, vertical = 12.dp),
-            ) {
-                if (onChangeSeasonClicked != null) {
-                    Button(
-                        title = stringResource(AMMR.strings.am_action_change_episode_season),
-                        icon = Icons.Default.Layers,
-                        toConfirm = confirm[0],
-                        onLongClick = { onLongClickItem(0) },
-                        onClick = onChangeSeasonClicked,
-                    )
-                }
-                if (onDiscardClicked != null) {
-                    Button(
-                        title = stringResource(AMMR.strings.am_action_discard_order_changes),
-                        icon = Icons.Outlined.History,
-                        toConfirm = confirm[1],
-                        onLongClick = { onLongClickItem(1) },
-                        onClick = onDiscardClicked,
-                    )
-                }
-                if (onResetClicked != null) {
-                    Button(
-                        title = stringResource(AMMR.strings.am_action_reset_episode_order),
-                        icon = Icons.Default.RestartAlt,
-                        toConfirm = confirm[2],
-                        onLongClick = { onLongClickItem(2) },
-                        onClick = onResetClicked,
-                    )
-                }
-            }
+    val actions = buildList {
+        if (onChangeSeasonClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "change_season",
+                    title = stringResource(AMMR.strings.am_action_change_episode_season),
+                    icon = Icons.Default.Layers,
+                    onClick = onChangeSeasonClicked,
+                ),
+            )
+        }
+        if (onDiscardClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "discard_order",
+                    title = stringResource(AMMR.strings.am_action_discard_order_changes),
+                    icon = Icons.Outlined.History,
+                    onClick = onDiscardClicked,
+                ),
+            )
+        }
+        if (onResetClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "reset_order",
+                    title = stringResource(AMMR.strings.am_action_reset_episode_order),
+                    icon = Icons.Default.RestartAlt,
+                    onClick = onResetClicked,
+                ),
+            )
         }
     }
+
+    BottomActionBar(
+        visible = visible,
+        actions = actions,
+        modifier = modifier,
+    )
 }
 // <-- AM (CUSTOM_EPISODE_ORDER)
 
@@ -335,13 +498,13 @@ fun EpisodeReorderBottomBar(
 private fun RowScope.Button(
     title: String,
     icon: ImageVector,
-    toConfirm: Boolean,
+    labelRevealed: Boolean,
     onLongClick: () -> Unit,
     onClick: () -> Unit,
     content: (@Composable () -> Unit)? = null,
 ) {
     val animatedWeight by animateFloatAsState(
-        targetValue = if (toConfirm) 2f else 1f,
+        targetValue = if (labelRevealed) 2f else 1f,
         label = "weight",
     )
     Box(
@@ -366,7 +529,7 @@ private fun RowScope.Button(
             )
 
             AnimatedVisibility(
-                visible = toConfirm,
+                visible = labelRevealed,
                 enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
                 exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(),
             ) {
@@ -396,138 +559,108 @@ fun LibraryBottomActionMenu(
     // <-- AM (MERGED_SOURCES)
     modifier: Modifier = Modifier,
 ) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = expandVertically(animationSpec = tween(delayMillis = 300)),
-        exit = shrinkVertically(animationSpec = tween()),
-    ) {
-        val scope = rememberCoroutineScope()
-        Surface(
-            modifier = modifier,
-            shape = MaterialTheme.shapes.large.copy(bottomEnd = ZeroCornerSize, bottomStart = ZeroCornerSize),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            val haptic = LocalHapticFeedback.current
-            val confirm = remember { mutableStateListOf(false, false, false, false, false, false, false) }
-            var resetJob by remember { mutableStateOf<Job?>(null) }
-            val onLongClickItem: (Int) -> Unit = { toConfirmIndex ->
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                confirm.indices.forEach { i -> confirm[i] = i == toConfirmIndex }
-                resetJob?.cancel()
-                resetJob = scope.launch {
-                    delay(1.seconds)
-                    if (isActive) confirm[toConfirmIndex] = false
-                }
-            }
-            val itemOverflow = onDownloadClicked != null
-            Row(
-                modifier = Modifier
-                    .windowInsetsPadding(
-                        WindowInsets.navigationBars
-                            .only(WindowInsetsSides.Bottom),
-                    )
-                    .padding(horizontal = 8.dp, vertical = 12.dp),
-            ) {
-                Button(
-                    title = stringResource(MR.strings.action_move_category),
-                    icon = Icons.AutoMirrored.Outlined.Label,
-                    toConfirm = confirm[0],
-                    onLongClick = { onLongClickItem(0) },
-                    onClick = onChangeCategoryClicked,
-                )
-                Button(
-                    title = stringResource(AMMR.strings.am_action_mark_as_seen),
-                    icon = Icons.Outlined.DoneAll,
-                    toConfirm = confirm[1],
-                    onLongClick = { onLongClickItem(1) },
-                    onClick = onMarkAsSeenClicked,
-                )
-                Button(
-                    title = stringResource(AMMR.strings.am_action_mark_as_unseen),
-                    icon = Icons.Outlined.RemoveDone,
-                    toConfirm = confirm[2],
-                    onLongClick = { onLongClickItem(2) },
-                    onClick = onMarkAsUnseenClicked,
-                )
-                if (onDownloadClicked != null) {
-                    var downloadExpanded by remember { mutableStateOf(false) }
-                    Button(
-                        title = stringResource(MR.strings.action_download),
-                        icon = Icons.Outlined.Download,
-                        toConfirm = confirm[3],
-                        onLongClick = { onLongClickItem(3) },
-                        onClick = { downloadExpanded = !downloadExpanded },
-                    ) {
+    // Hoisted above the bar so the menu's anchor survives recomposition of the
+    // action list. That also outlives the bar hiding, so close it explicitly
+    // rather than have it reappear over the next selection.
+    var downloadExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(visible) {
+        if (!visible) downloadExpanded = false
+    }
+
+    val actions = buildList {
+        add(
+            BottomActionItem(
+                key = "move_category",
+                title = stringResource(MR.strings.action_move_category),
+                icon = Icons.AutoMirrored.Outlined.Label,
+                onClick = onChangeCategoryClicked,
+            ),
+        )
+        add(
+            BottomActionItem(
+                key = "mark_seen",
+                title = stringResource(AMMR.strings.am_action_mark_as_seen),
+                icon = Icons.Outlined.DoneAll,
+                onClick = onMarkAsSeenClicked,
+            ),
+        )
+        add(
+            BottomActionItem(
+                key = "mark_unseen",
+                title = stringResource(AMMR.strings.am_action_mark_as_unseen),
+                icon = Icons.Outlined.RemoveDone,
+                onClick = onMarkAsUnseenClicked,
+            ),
+        )
+        if (onDownloadClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "download",
+                    title = stringResource(MR.strings.action_download),
+                    icon = Icons.Outlined.Download,
+                    onClick = { downloadExpanded = !downloadExpanded },
+                    // Its menu anchors to this button's box, so it cannot move
+                    // into the overflow.
+                    placement = BottomActionPlacement.Pinned,
+                    content = {
                         DownloadDropdownMenu(
                             expanded = downloadExpanded,
                             onDismissRequest = { downloadExpanded = false },
                             onDownloadClicked = onDownloadClicked,
                             offset = BottomBarMenuDpOffset,
                         )
-                    }
-                }
-                if (!itemOverflow) {
-                    Button(
-                        title = stringResource(MR.strings.migrate),
-                        icon = Icons.Outlined.SwapCalls,
-                        toConfirm = confirm[4],
-                        onLongClick = { onLongClickItem(4) },
-                        onClick = onMigrateClicked,
-                    )
-                    // AM (MERGED_SOURCES) -->
-                    if (onMergeClicked != null) {
-                        Button(
-                            title = stringResource(AMMR.strings.am_action_merge),
-                            icon = Icons.Outlined.CallMerge,
-                            toConfirm = confirm[6],
-                            onLongClick = { onLongClickItem(6) },
-                            onClick = onMergeClicked,
-                        )
-                    }
-                    // <-- AM (MERGED_SOURCES)
-                    Button(
-                        title = stringResource(MR.strings.action_delete),
-                        icon = Icons.Outlined.Delete,
-                        toConfirm = confirm[5],
-                        onLongClick = { onLongClickItem(5) },
-                        onClick = onDeleteClicked,
-                    )
-                } else {
-                    var overflowMenuOpen by remember { mutableStateOf(false) }
-                    Button(
-                        title = stringResource(MR.strings.label_more),
-                        icon = Icons.Outlined.MoreVert,
-                        toConfirm = false,
-                        onLongClick = {},
-                        onClick = { overflowMenuOpen = true },
-                    ) {
-                        DropdownMenu(
-                            expanded = overflowMenuOpen,
-                            onDismissRequest = { overflowMenuOpen = false },
-                            offset = BottomBarMenuDpOffset,
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(MR.strings.migrate)) },
-                                onClick = onMigrateClicked,
-                            )
-                            // AM (MERGED_SOURCES) -->
-                            if (onMergeClicked != null) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(AMMR.strings.am_action_merge)) },
-                                    onClick = onMergeClicked,
-                                )
-                            }
-                            // <-- AM (MERGED_SOURCES)
-                            DropdownMenuItem(
-                                text = { Text(stringResource(MR.strings.action_delete)) },
-                                onClick = onDeleteClicked,
-                            )
-                        }
-                    }
-                }
-            }
+                    },
+                ),
+            )
         }
+        add(
+            BottomActionItem(
+                key = "migrate",
+                title = stringResource(MR.strings.migrate),
+                icon = Icons.Outlined.SwapCalls,
+                onClick = onMigrateClicked,
+                placement = BottomActionPlacement.Overflow,
+            ),
+        )
+        // AM (MERGED_SOURCES) -->
+        if (onMergeClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "merge",
+                    title = stringResource(AMMR.strings.am_action_merge),
+                    icon = Icons.Outlined.CallMerge,
+                    onClick = onMergeClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        // <-- AM (MERGED_SOURCES)
+        add(
+            BottomActionItem(
+                key = "delete",
+                title = stringResource(MR.strings.action_delete),
+                icon = Icons.Outlined.Delete,
+                onClick = onDeleteClicked,
+                // The old bar put this in the overflow alongside migrate and
+                // merge, but only when the download action happened to be
+                // present. Keeping it in the bar is the one deliberate
+                // difference: it is a core action, not a niche one.
+                placement = BottomActionPlacement.Auto,
+            ),
+        )
     }
+
+    BottomActionBar(
+        visible = visible,
+        actions = actions,
+        modifier = modifier,
+        enter = expandVertically(animationSpec = tween(delayMillis = 300)),
+        exit = shrinkVertically(animationSpec = tween()),
+        insetsModifier = Modifier.windowInsetsPadding(
+            WindowInsets.navigationBars
+                .only(WindowInsetsSides.Bottom),
+        ),
+    )
 }
 
 private val BottomBarMenuDpOffset = DpOffset(0.dp, 0.dp)

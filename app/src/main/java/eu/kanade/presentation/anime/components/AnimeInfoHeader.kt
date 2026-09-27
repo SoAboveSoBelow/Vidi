@@ -105,6 +105,7 @@ import org.intellij.markdown.ast.findChildOfType
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.library.model.LibraryDisplayMode
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
 import tachiyomi.presentation.core.components.material.TextButton
@@ -296,6 +297,12 @@ fun ExpandableAnimeDescription(
     tagsProvider: () -> List<String>?,
     notes: String,
     onTagSearch: (String) -> Unit,
+    // AM (TAG_SEARCH_MENU) -->
+    onTagEpisodeSearch: (String) -> Unit,
+    onTagGlobalSearch: (String) -> Unit,
+    /** False where this entry has too few episodes to have a search field. */
+    canSearchPlaylist: Boolean,
+    // <-- AM (TAG_SEARCH_MENU)
     onCopyTagToClipboard: (tag: String) -> Unit,
     onEditNotes: () -> Unit,
     // AY -->
@@ -344,6 +351,11 @@ fun ExpandableAnimeDescription(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false },
                 ) {
+                    // AM (TAG_SEARCH_MENU) -->
+                    // "Search" keeps both its label and its behaviour. Adding a
+                    // differently-scoped action is not a reason to redefine an
+                    // existing one - anyone who had learnt this item would have
+                    // silently got a different feature.
                     DropdownMenuItem(
                         text = { Text(text = stringResource(MR.strings.action_search)) },
                         onClick = {
@@ -351,6 +363,26 @@ fun ExpandableAnimeDescription(
                             showMenu = false
                         },
                     )
+                    DropdownMenuItem(
+                        text = { Text(text = stringResource(MR.strings.action_global_search)) },
+                        onClick = {
+                            onTagGlobalSearch(tagSelected)
+                            showMenu = false
+                        },
+                    )
+                    // Hidden where the entry has too few episodes for the
+                    // search field to exist: it would set a query with nothing
+                    // on screen to show, edit or clear it.
+                    if (canSearchPlaylist) {
+                        DropdownMenuItem(
+                            text = { Text(text = stringResource(AMMR.strings.am_action_search_playlist)) },
+                            onClick = {
+                                onTagEpisodeSearch(tagSelected)
+                                showMenu = false
+                            },
+                        )
+                    }
+                    // <-- AM (TAG_SEARCH_MENU)
                     DropdownMenuItem(
                         text = { Text(text = stringResource(MR.strings.action_copy_to_clipboard)) },
                         onClick = {

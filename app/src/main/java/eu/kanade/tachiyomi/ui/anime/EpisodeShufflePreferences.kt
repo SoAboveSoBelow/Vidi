@@ -61,3 +61,35 @@ fun episodeShuffleSortKey(seed: Long, episodeId: Long): Long {
     h = (h xor (h ushr 27)) * 0x94d049bb133111ebuL.toLong()
     return h xor (h ushr 31)
 }
+
+// AM (SEASON_SCOPED_SHUFFLE) -->
+/**
+ * Shuffled order that keeps seasons in sequence: seasons stay in their display
+ * order and only the episodes inside each one are scrambled.
+ *
+ * Shuffling the whole list flat made season boundaries meaningless - a shuffled
+ * playlist crossed one on nearly every step - which is why the player had to
+ * drop its season map and give up the next-season prompt entirely while
+ * shuffle was on. Scoping the scramble to within a season keeps boundaries
+ * monotonic, so the prompt fires exactly once per season again.
+ *
+ * [seasonRankOf] is a display rank, not the season number: season numbers are
+ * user-managed and need not be ordered. Anything without a season sorts last
+ * rather than being dropped.
+ *
+ * One definition for all three surfaces - the episode list, the player's
+ * playlist, and the merged entry's next-unseen lookup. They derive their order
+ * independently from the same seed, so a change to what "shuffled" means has
+ * to be a change in one place or they silently disagree about what plays next.
+ */
+fun <T> List<T>.shuffledWithinSeasons(
+    seed: Long,
+    idOf: (T) -> Long,
+    seasonRankOf: (T) -> Int?,
+): List<T> = sortedWith(
+    compareBy(
+        { seasonRankOf(it) ?: Int.MAX_VALUE },
+        { episodeShuffleSortKey(seed, idOf(it)) },
+    ),
+)
+// <-- AM (SEASON_SCOPED_SHUFFLE)

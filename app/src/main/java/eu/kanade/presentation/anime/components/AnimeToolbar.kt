@@ -12,10 +12,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FlipToBack
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material3.AlertDialog
@@ -36,9 +34,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -61,7 +59,6 @@ import tachiyomi.presentation.core.theme.active
 import tachiyomi.presentation.core.util.clearFocusOnSoftKeyboardHide
 import tachiyomi.presentation.core.util.runOnEnterKeyPressed
 import tachiyomi.presentation.core.util.secondaryItemAlpha
-import tachiyomi.presentation.core.util.showSoftKeyboard
 
 @Composable
 fun AnimeToolbar(
@@ -101,14 +98,15 @@ fun AnimeToolbar(
     // AM (CUSTOM_EPISODE_ORDER) -->
     isReordering: Boolean,
     onToggleReorder: (() -> Unit)?,
-    // AM (EPISODE_NAMES) -->
-    onRenameEpisode: (() -> Unit)?,
-    // <-- AM (EPISODE_NAMES)
     // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AM (EPISODE_SEARCH) -->
-    episodeSearchQuery: String?,
-    onEpisodeSearchQueryChange: (String?) -> Unit,
+    // AM (ALWAYS_OPEN_EPISODE_SEARCH) -->
+    // Plain String, not String?: null used to mean "field closed", and there is
+    // no closed state left, so empty is the only "not filtering" there is.
+    episodeSearchQuery: String,
+    onEpisodeSearchQueryChange: (String) -> Unit,
+    // <-- AM (ALWAYS_OPEN_EPISODE_SEARCH)
     // AM (EPISODE_SEARCH_MIN_COUNT) -->
     // The unfiltered episode count, so the search action can be left out of
     // entries small enough to scan by eye.
@@ -125,11 +123,35 @@ fun AnimeToolbar(
     // own mode, not a function of the selection count.
     val isActionMode = actionModeCounter > 0 || isReordering
     // <-- AM (CUSTOM_EPISODE_ORDER)
-    val isSearching = episodeSearchQuery != null
+    // AM (ALWAYS_OPEN_EPISODE_SEARCH) -->
+    // The field has no open/closed state any more, so there is nothing for the
+    // user to toggle: it is shown whenever the entry is long enough to warrant
+    // searching at all. A state that only existed before its first use was the
+    // inconsistency - once opened it never closed again, so "closed" really
+    // meant "not used yet".
+    val isSearchVisible = episodeCount >= MIN_EPISODES_FOR_SEARCH
+    // <-- AM (ALWAYS_OPEN_EPISODE_SEARCH)
     // AM (EPISODE_VIEW_MODE) -->
     var episodeViewModeDialogShown by remember { mutableStateOf(false) }
     // <-- AM (EPISODE_VIEW_MODE)
     val searchFocusRequester = remember { FocusRequester() }
+    // AM (PLAYLIST_SEARCH_SCOPE) -->
+    // Back has to put the keyboard away without touching the query, because
+    // filtering is live: the results the user is typing toward are behind the
+    // keyboard, so the gesture that reveals them cannot also be the one that
+    // discards them. Clearing on back was the original behaviour and is wrong
+    // for the same reason.
+    var isSearchFocused by remember { mutableStateOf(false) }
+    val searchKeyboardController = LocalSoftwareKeyboardController.current
+    val searchFocusManager = LocalFocusManager.current
+    // Typed, not inferred: hide() on a nullable controller is the last
+    // expression, so an unannotated lambda infers () -> Unit? and will not fit
+    // navigateUp's (() -> Unit)?.
+    val closeSearchKeyboard: () -> Unit = {
+        searchFocusManager.clearFocus()
+        searchKeyboardController?.hide()
+    }
+    // <-- AM (PLAYLIST_SEARCH_SCOPE)
     AppBar(
         titleContent = {
             // AM (CUSTOM_EPISODE_ORDER) -->
@@ -138,26 +160,38 @@ fun AnimeToolbar(
             } else if (isActionMode) {
                 // <-- AM (CUSTOM_EPISODE_ORDER)
                 AppBarTitle(actionModeCounter.toString())
-            } else if (!isSearching) {
+            } else if (!isSearchVisible) {
                 AppBarTitle(title, modifier = Modifier.alpha(titleAlphaProvider()))
             } else {
-                val keyboardController = LocalSoftwareKeyboardController.current
-                val focusManager = LocalFocusManager.current
-
-                val clearFocus: () -> Unit = {
-                    focusManager.clearFocus()
-                    keyboardController?.hide()
-                    focusManager.moveFocus(FocusDirection.Next)
-                }
+                // AM (PLAYLIST_SEARCH_SCOPE) -->
+                // The IME's own search key and the hardware enter key land
+                // here, and both should do exactly what back does: put the
+                // keyboard away and leave the query alone.
+                //
+                // No moveFocus: this field is the only focusable thing in the
+                // bar, so advancing focus handed it straight back, and a
+                // BasicTextField raises the keyboard on gaining focus - which
+                // is why the search key looked like it did nothing.
+                val clearFocus = closeSearchKeyboard
+                // <-- AM (PLAYLIST_SEARCH_SCOPE)
 
                 BasicTextField(
-                    value = episodeSearchQuery.orEmpty(),
+                    value = episodeSearchQuery,
                     onValueChange = onEpisodeSearchQueryChange,
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusRequester(searchFocusRequester)
+                        // AM (PLAYLIST_SEARCH_SCOPE) -->
+                        .onFocusChanged { isSearchFocused = it.isFocused }
+                        // <-- AM (PLAYLIST_SEARCH_SCOPE)
                         .runOnEnterKeyPressed(action = clearFocus)
-                        .showSoftKeyboard(remember { episodeSearchQuery.isNullOrEmpty() })
+                        // AM (ALWAYS_OPEN_EPISODE_SEARCH) -->
+                        // No showSoftKeyboard here. It requests focus on first
+                        // composition, which was right when the field appeared
+                        // because the user had just pressed search - now the
+                        // field is simply part of the bar, and grabbing focus
+                        // would throw the keyboard up on entering every entry.
+                        // <-- AM (ALWAYS_OPEN_EPISODE_SEARCH)
                         .clearFocusOnSoftKeyboardHide(),
                     textStyle = MaterialTheme.typography.titleMedium.copy(
                         color = MaterialTheme.colorScheme.onBackground,
@@ -169,12 +203,21 @@ fun AnimeToolbar(
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.onBackground),
                     decorationBox = { innerTextField ->
                         TextFieldDefaults.DecorationBox(
-                            value = episodeSearchQuery.orEmpty(),
+                            value = episodeSearchQuery,
                             innerTextField = innerTextField,
                             enabled = true,
                             singleLine = true,
                             visualTransformation = VisualTransformation.None,
                             interactionSource = remember { MutableInteractionSource() },
+                            // AM (ALWAYS_OPEN_EPISODE_SEARCH) -->
+                            // The generic hint, not the entry name. Carrying
+                            // the title here was only ever compensation for the
+                            // slot the field took over, and the title earned
+                            // little: it appeared solely once the header had
+                            // scrolled away, by which point the user has been
+                            // looking at the entry they opened. A field that
+                            // says what it is beats one that says where you
+                            // are.
                             placeholder = {
                                 Text(
                                     modifier = Modifier.secondaryItemAlpha(),
@@ -186,6 +229,7 @@ fun AnimeToolbar(
                                     ),
                                 )
                             },
+                            // <-- AM (ALWAYS_OPEN_EPISODE_SEARCH)
                             container = {},
                         )
                     },
@@ -196,11 +240,13 @@ fun AnimeToolbar(
         backgroundColor = MaterialTheme.colorScheme
             .surfaceColorAtElevation(3.dp)
             .copy(alpha = if (isActionMode) 1f else backgroundAlphaProvider()),
-        navigateUp = if (isSearching) {
-            { onEpisodeSearchQueryChange(null) }
-        } else {
-            navigateUp
-        },
+        // AM (PLAYLIST_SEARCH_SCOPE) -->
+        // Hides the keyboard while the field has focus, and leaves the entry
+        // otherwise - so the first back reveals the filtered list and the
+        // second one exits. The query is never cleared here; the X does that,
+        // and clearing it is what unscopes the playlist.
+        navigateUp = if (isSearchFocused) closeSearchKeyboard else navigateUp,
+        // <-- AM (PLAYLIST_SEARCH_SCOPE)
         actions = {
             var downloadExpanded by remember { mutableStateOf(false) }
             if (onClickDownload != null) {
@@ -217,19 +263,12 @@ fun AnimeToolbar(
                 actions = buildList {
                     if (isActionMode) {
                         // AM (CUSTOM_EPISODE_ORDER) -->
-                        // First of the three, so it sits third from the right.
                         // AM (EPISODE_NAMES) -->
-                        // Renaming targets one episode, so it appears only
-                        // when exactly one is selected.
-                        if (onRenameEpisode != null && actionModeCounter == 1) {
-                            add(
-                                AppBar.Action(
-                                    title = stringResource(AMMR.strings.am_action_rename_episode),
-                                    icon = Icons.Outlined.Edit,
-                                    onClick = onRenameEpisode,
-                                ),
-                            )
-                        }
+                        // Rename lives in the bottom bar's overflow instead of
+                        // here: it only applies to a single selection, and an
+                        // action that appears and disappears with the selection
+                        // count reflows the width of every other action in this
+                        // bar as it does so.
                         // <-- AM (EPISODE_NAMES)
                         // A true toggle, tinted while on. Turning it off returns
                         // to plain selection mode with the selection kept; X or
@@ -263,31 +302,22 @@ fun AnimeToolbar(
                         return@buildList
                     }
                     // AM (EPISODE_SEARCH) -->
-                    // AM (EPISODE_SEARCH_MIN_COUNT) -->
-                    // isSearching stays in the condition on its own for the reset
-                    // branch below: if a query is somehow already active on a short
-                    // entry, clearing it must still be reachable.
-                    if (!isSearching && episodeCount >= MIN_EPISODES_FOR_SEARCH) {
-                    // <-- AM (EPISODE_SEARCH_MIN_COUNT)
-                        add(
-                            AppBar.Action(
-                                title = stringResource(MR.strings.action_search),
-                                icon = Icons.Outlined.Search,
-                                onClick = { onEpisodeSearchQueryChange("") },
-                            ),
-                        )
-                    } else if (episodeSearchQuery.orEmpty().isNotEmpty()) {
+                    // AM (ALWAYS_OPEN_EPISODE_SEARCH) -->
+                    // No search action - the field is already there. Only the
+                    // reset remains, and it no longer requests focus: that kept
+                    // a just-opened field from losing focus, and now it would
+                    // raise the keyboard back over the very results clearing is
+                    // meant to reveal.
+                    if (episodeSearchQuery.isNotEmpty()) {
                         add(
                             AppBar.Action(
                                 title = stringResource(MR.strings.action_reset),
                                 icon = Icons.Outlined.Close,
-                                onClick = {
-                                    onEpisodeSearchQueryChange("")
-                                    searchFocusRequester.requestFocus()
-                                },
+                                onClick = { onEpisodeSearchQueryChange("") },
                             ),
                         )
                     }
+                    // <-- AM (ALWAYS_OPEN_EPISODE_SEARCH)
                     // <-- AM (EPISODE_SEARCH)
                     if (onClickDownload != null) {
                         add(
@@ -471,5 +501,5 @@ private fun EpisodeViewModeDialog(
 
 // AM (EPISODE_SEARCH_MIN_COUNT) -->
 /** Below this many episodes the list is short enough to scan without searching. */
-private const val MIN_EPISODES_FOR_SEARCH = 10
+internal const val MIN_EPISODES_FOR_SEARCH = 10
 // <-- AM (EPISODE_SEARCH_MIN_COUNT)

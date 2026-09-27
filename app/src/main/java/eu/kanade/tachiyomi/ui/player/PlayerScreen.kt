@@ -33,6 +33,7 @@ import animiru.domain.player.model.VideoFilters
 import animiru.domain.player.service.SubtitleAssOverride
 import cafe.adriel.voyager.core.annotation.InternalVoyagerApi
 import eu.kanade.presentation.theme.playerRippleConfiguration
+import eu.kanade.tachiyomi.ui.main.OpenEntryRequests
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
 import eu.kanade.tachiyomi.ui.player.cast.CastDialog
 import eu.kanade.tachiyomi.ui.player.cast.CastScreen
@@ -821,8 +822,13 @@ fun PlayerScreen(
                 PlayerDialogs(
                     dialogShown = uiData.dialogShown,
                     episodeDisplayMode = stateData.currentAnime?.displayMode,
-                    currentEpisodeIndex = stateData.currentPlaylistIndex,
-                    episodeList = stateData.currentPlaylist,
+                    // AM (PLAYLIST_SEARCH_SCOPE) -->
+                    // The unscoped list, so the search can widen as well as
+                    // narrow, with the playing episode identified by id since a
+                    // playlist index does not address this list.
+                    currentEpisodeId = stateData.currentEpisode?.id,
+                    episodeList = stateData.playlistUnscoped.ifEmpty { stateData.currentPlaylist },
+                    // <-- AM (PLAYLIST_SEARCH_SCOPE)
                     dateRelativeTime = relativeTime,
                     dateFormat = dateFormat,
                     onBookmarkClicked = viewModel::bookmarkEpisode,
@@ -831,6 +837,46 @@ fun PlayerScreen(
                         viewModel.setDialog(Dialogs.None)
                         viewModel.changeEpisode(it)
                     },
+                    // AM (EPISODE_NAMES) -->
+                    displayNameOf = stateData::displayNameOf,
+                    // <-- AM (EPISODE_NAMES)
+                    // AM (EPISODE_TAG_SEARCH) -->
+                    searchFieldsOf = stateData::searchFieldsOf,
+                    // <-- AM (EPISODE_TAG_SEARCH)
+                    // AM (PLAYLIST_SEARCH_SCOPE) -->
+                    playlistAnimeId = stateData.currentAnime?.id,
+                    // <-- AM (PLAYLIST_SEARCH_SCOPE)
+                    // AM (PLAYER_EPISODE_LIST_SELECTION) -->
+                    // Only offered where the player can actually get out of
+                    // the way. onEnterDummyPip is null for PlayerActivity and
+                    // the spike screens, and opening an entry behind a
+                    // fullscreen player would look like nothing happened.
+                    onOpenEntryClicked = onEnterDummyPip?.let { enterDummyPip ->
+                        { episodeId: Long? ->
+                            val ownerId = stateData.currentPlaylist
+                                .find { it.id == episodeId }
+                                ?.anime_id
+                            if (ownerId != null) {
+                                viewModel.setDialog(Dialogs.None)
+                                enterDummyPip()
+                                OpenEntryRequests.open(ownerId)
+                            }
+                        }
+                    },
+                    onOpenPlaylistEntry = onEnterDummyPip?.let { enterDummyPip ->
+                        {
+                            // The playlist's own entry, so on a merged entry
+                            // this is the parent rather than the child the
+                            // current episode belongs to.
+                            stateData.currentAnime?.id?.let { animeId ->
+                                viewModel.setDialog(Dialogs.None)
+                                enterDummyPip()
+                                OpenEntryRequests.open(animeId)
+                            }
+                            Unit
+                        }
+                    },
+                    // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
                     onDismissRequest = { viewModel.setDialog(Dialogs.None) },
                 )
 

@@ -1103,11 +1103,21 @@ class AnimeViewModel(
         thumbnailUrls: Map<Long, String> = emptyMap(),
         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
     ): List<EpisodeList.Item> {
+        // AM (EPISODE_TAG_SEARCH) -->
+        // One stub lookup per source rather than per episode - a merged entry
+        // has few children and many episodes.
+        val sourceNameCache = mutableMapOf<Long, String>()
+        // <-- AM (EPISODE_TAG_SEARCH)
         return map { episode ->
             // AM (MERGED_SOURCES) -->
             val owner = mergedChildrenById[episode.animeId] ?: anime
             val isLocal = owner.isLocal()
             // <-- AM (MERGED_SOURCES)
+            // AM (EPISODE_TAG_SEARCH) -->
+            val ownerSourceName = sourceNameCache.getOrPut(owner.source) {
+                sourceManager.getOrStub(owner.source).name
+            }
+            // <-- AM (EPISODE_TAG_SEARCH)
             val activeDownload = if (isLocal) {
                 null
             } else {
@@ -1150,6 +1160,10 @@ class AnimeViewModel(
                     coverCache.getCustomCoverFile(episode.animeId).takeIf { it.exists() }?.path ?: url
                 },
                 // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+                // AM (EPISODE_TAG_SEARCH) -->
+                owner = owner,
+                ownerSourceName = ownerSourceName,
+                // <-- AM (EPISODE_TAG_SEARCH)
                 downloadState = downloadState,
                 downloadProgress = activeDownload?.progress ?: 0,
                 selected = episode.id in selectedEpisodeIds,
@@ -1321,6 +1335,33 @@ class AnimeViewModel(
                         )
                     }
                 }
+            // AM (EPISODE_SHUFFLE_MERGED_FIX) -->
+            // This branch returns before the shuffled path below, so Continue
+            // on a merged entry picked the next unseen in union watch order
+            // while the list and the player both built a shuffled order around
+            // it - press Continue and playback started somewhere the playlist
+            // did not agree was next.
+            //
+            // Same seed and same key function as both of those, so all three
+            // land on the same episode. sortDescending is deliberately not
+            // consulted: it mirrors an ordering that shuffle has replaced.
+            if (successState.isShuffleEnabled) {
+                // AM (SEASON_SCOPED_SHUFFLE) -->
+                // Kept in step with the list and the playlist deliberately.
+                // All three derive the order independently from one seed, so
+                // changing what shuffled means in two of them and not the
+                // third leaves Continue starting outside the order the player
+                // then builds around it.
+                val seasonRankByNumber = successState.seasonNumbers.withIndex()
+                    .associate { (rank, number) -> number to rank }
+                return episodes.shuffledWithinSeasons(
+                    seed = successState.episodeShuffleSeed,
+                    idOf = { it.id },
+                    seasonRankOf = { successState.episodeSeasonById[it.id]?.let(seasonRankByNumber::get) },
+                ).find { !it.seen }
+                // <-- AM (SEASON_SCOPED_SHUFFLE)
+            }
+            // <-- AM (EPISODE_SHUFFLE_MERGED_FIX)
             return if (anime.sortDescending()) {
                 episodes.findLast { !it.seen }
             } else {
@@ -2504,8 +2545,17 @@ class AnimeViewModel(
     /** Only meaningful for a single episode, so the action is offered only then. */
     fun showRenameEpisodeDialog() {
         val selected = successState?.selectedEpisodes?.singleOrNull() ?: return
+        showRenameEpisodeDialog(selected.id, selected.displayName)
+    }
+
+    /**
+     * Names one episode directly rather than through the selection. The
+     * double-tap gesture targets the row it landed on, which is not
+     * necessarily the selection - and may be no selection at all.
+     */
+    fun showRenameEpisodeDialog(episodeId: Long, currentName: String) {
         updateSuccessState {
-            it.copy(dialog = Dialog.RenameEpisode(selected.id, selected.displayName))
+            it.copy(dialog = Dialog.RenameEpisode(episodeId, currentName))
         }
     }
 
@@ -2799,11 +2849,20 @@ class AnimeViewModel(
                 // Ahead of shuffle: a shuffled view is not what's being edited.
                 if (isReordering) return@lazy processedEpisodes
                 // <-- AM (CUSTOM_EPISODE_ORDER)
+                // AM (SEASON_SCOPED_SHUFFLE) -->
+                // Constant season term while the switcher scopes the list to
+                // one season, so this only changes the "all seasons" view -
+                // which previously interleaved every season at random.
                 if (isShuffleEnabled) {
-                    return@lazy processedEpisodes.sortedBy {
-                        episodeShuffleSortKey(episodeShuffleSeed, it.id)
-                    }
+                    val seasonRankByNumber = seasonNumbers.withIndex()
+                        .associate { (rank, number) -> number to rank }
+                    return@lazy processedEpisodes.shuffledWithinSeasons(
+                        seed = episodeShuffleSeed,
+                        idOf = { it.id },
+                        seasonRankOf = { episodeSeasonById[it.id]?.let(seasonRankByNumber::get) },
+                    )
                 }
+                // <-- AM (SEASON_SCOPED_SHUFFLE)
 
                 if (hideMissingEpisodes) {
                     return@lazy processedEpisodes
@@ -2986,6 +3045,15 @@ sealed class EpisodeList {
         /** Cover to draw for a single-episode source - see ResolvedEpisodeOrder.thumbnailUrlByEpisodeId. */
         val thumbnailUrl: String? = null,
         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+        // AM (EPISODE_TAG_SEARCH) -->
+        /**
+         * The entry this episode belongs to - the child on a merged entry -
+         * and its source's name. Resolved where the owner already is, so
+         * search can match the episode's own tags rather than the parent's.
+         */
+        val owner: Anime? = null,
+        val ownerSourceName: String = "",
+        // <-- AM (EPISODE_TAG_SEARCH)
         // AM (FILE_SIZE) -->
         var fileSize: Long? = null,
         // <-- AM (FILE_SIZE)

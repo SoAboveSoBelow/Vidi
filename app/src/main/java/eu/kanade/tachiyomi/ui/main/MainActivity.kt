@@ -61,6 +61,7 @@ import androidx.interpolator.view.animation.FastOutSlowInInterpolator
 import androidx.interpolator.view.animation.LinearOutSlowInInterpolator
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import animiru.feature.mpvfiles.MpvConfig
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.Navigator
@@ -568,13 +569,86 @@ class MainActivity : BaseActivity() {
         ) {
             return
         }
-        val params = buildSelfPipParams(autoEnter = true) ?: return
+        // AM (SELF_PIP_STALE_AUTO_ENTER_ON_SESSION_END_FIX) -->
+        // Was `?: return`, which made this unreachable exactly when it mattered
+        // most. buildSelfPipParams() returns null for "there is no session",
+        // and a session ending is precisely when the registration needs to go
+        // back to false: setAutoEnterEnabled() is a standing registration the
+        // OS acts on by itself, so whatever was last pushed while playing
+        // (true, normally) stays armed on the ActivityRecord for the rest of
+        // this Activity's life. Pausing de-registered correctly because the
+        // session still existed and !paused folded into the value; ending
+        // never did, because the function bailed before reaching the push.
+        // Result: Home or Recents later, with no player anywhere, auto-entered
+        // PIP on a stale registration - an empty window, no video, no dummy
+        // pip.
+        //
+        // This is the same shape as DUMMY_PIP_STALE_AUTO_ENTER_FIX's own
+        // finding ("it just meant this function stopped being called at all,
+        // which left the stale true registration in place rather than
+        // replacing it with an explicit false"). That fix folded the check
+        // into the value for the dummy-pip branch but left this top-level
+        // guard as the bail-out it was warning about.
+        //
+        // Not a timing guard: an explicit de-registration replacing a missing
+        // one. enterSelfPipIfEligible() still treats null as "do not enter" -
+        // only the registration path changes.
+        val params = buildSelfPipParams(autoEnter = true) ?: disabledAutoEnterPipParams()
+        // <-- AM (SELF_PIP_STALE_AUTO_ENTER_ON_SESSION_END_FIX)
         try {
             setPictureInPictureParams(params)
         } catch (e: Exception) {
             logcat(LogPriority.ERROR) { "SELF_PIP_AUTO_ENTER_FIX setPictureInPictureParams failed: $e" }
         }
     }
+
+    // AM (SELF_PIP_STALE_AUTO_ENTER_ON_SESSION_END_FIX) -->
+    /**
+     * Params that say one thing: do not auto-enter. Deliberately sets nothing
+     * else - ActivityRecord.setPictureInPictureParams() merges via
+     * copyOnlySet(), so every field left unset keeps whatever the last real
+     * session registered, and only the auto-enter bit is revoked.
+     */
+    private fun disabledAutoEnterPipParams(): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(false)
+        }
+        return builder.build()
+    }
+
+    /**
+     * Keeps the OS registration tied to whether a session actually exists,
+     * rather than to any one teardown path remembering to poke it.
+     *
+     * Every way a session can end - onDismiss, onEnterBackground, and
+     * PlayerHostScreen's own onDispose - clears hasExternalScreenConsumer, and
+     * the collector that used to push params is cancelled alongside it, so
+     * none of them could push the de-registration themselves. Observing the
+     * state instead means a new teardown path cannot reintroduce this bug by
+     * forgetting a call.
+     *
+     * repeatOnLifecycle(STARTED) also covers a session ending while this
+     * Activity is stopped: updateAutoEnterPipParams()'s own lifecycle guard
+     * would drop that push, and the re-emission on restart replays it before
+     * the user can leave the app again.
+     */
+    private fun observeSessionForPipRegistration() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                PlayerMediaHolder.currentFlow.collectLatest { holder ->
+                    if (holder == null) {
+                        updateAutoEnterPipParams()
+                    } else {
+                        holder.hasExternalScreenConsumerFlow.collect {
+                            updateAutoEnterPipParams()
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // <-- AM (SELF_PIP_STALE_AUTO_ENTER_ON_SESSION_END_FIX)
     // <-- AM (SELF_PIP_AUTO_ENTER_FIX)
 
     private fun enterSelfPipIfEligible() {
@@ -583,6 +657,14 @@ class MainActivity : BaseActivity() {
         if (holder?.hasExternalScreenConsumer != true || holder.viewModel?.playbackData?.value?.paused != false) {
             return
         }
+        // AM (SELF_PIP_EXPLICIT_ENTRY_HONOURS_PREFERENCE) -->
+        // SELF_PIP_AUTO_ENTER_FIX added pipOnExit to the auto-enter value but
+        // not here, so the explicit path entered PIP on a Home press even with
+        // the preference off - the auto-enter and explicit paths disagreed
+        // about the same setting. Drop this hunk if the intent was that the
+        // preference only ever governed the Recents/auto path.
+        if (!graph.playerPreferences.pipOnExit.get()) return
+        // <-- AM (SELF_PIP_EXPLICIT_ENTRY_HONOURS_PREFERENCE)
         // AM (DUMMY_PIP_FULLSCREEN_RESTORE) -->
         // Requirement from the original dummy-pip scoping: leaving the app
         // must show real PIP with the FULL video, not the small dummy-pip
@@ -888,6 +970,10 @@ class MainActivity : BaseActivity() {
             },
         )
 
+        // AM (SELF_PIP_STALE_AUTO_ENTER_ON_SESSION_END_FIX) -->
+        observeSessionForPipRegistration()
+        // <-- AM (SELF_PIP_STALE_AUTO_ENTER_ON_SESSION_END_FIX)
+
         val didMigration = Migrator.awaitAndRelease()
 
         // Do not let the launcher create a new activity http://stackoverflow.com/questions/16283079
@@ -993,6 +1079,30 @@ class MainActivity : BaseActivity() {
                         // <-- AM (PLAYER_OVERLAY_MIGRATION)
                     }
                 }
+
+                // AM (OPEN_ENTRY_FROM_OVERLAY) -->
+                // Collected here rather than in HomeScreen: this is composed
+                // for the life of the Activity, so a request lands whatever
+                // screen is currently on top.
+                //
+                // Pushes on top of whatever is there rather than switching
+                // tabs. Consecutive requests replace the entry this opened
+                // last instead of stacking, but only while that screen is
+                // still the top one - a screen the user navigated to
+                // themselves is never replaced out from under them.
+                var lastOpenedEntryKey by remember { mutableStateOf<String?>(null) }
+                LaunchedEffect(navigator) {
+                    OpenEntryRequests.requests.collect { animeId ->
+                        val screen = AnimeScreen(animeId)
+                        if (lastOpenedEntryKey != null && navigator.lastItem.key == lastOpenedEntryKey) {
+                            navigator.replace(screen)
+                        } else {
+                            navigator.push(screen)
+                        }
+                        lastOpenedEntryKey = screen.key
+                    }
+                }
+                // <-- AM (OPEN_ENTRY_FROM_OVERLAY)
 
                 // Pop source-related screens when incognito mode is turned off
                 LaunchedEffect(Unit) {

@@ -48,6 +48,8 @@
     <string name="am.merge_settings_remove_source">Remove from merge</string>
     <string name="am.merge_settings_remove_confirm">Remove %1$s from this merge? It goes back to your library as its own entry.</string>
     <string name="am.action_rename_episode">Rename episode</string>
+    <string name="am.action_open_entry">Open entry</string>
+    <string name="am.action_search_playlist">Playlist search</string>
     <string name="am.rename_episode_hint">Name (leave empty to use the source\'s)</string>
     <string name="am.entry_seasons_title">Seasons</string>
     <string name="am.entry_season_create">Add season</string>
