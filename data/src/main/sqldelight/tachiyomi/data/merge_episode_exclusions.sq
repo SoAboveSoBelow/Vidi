@@ -1,0 +1,50 @@
+-- AM (MERGE_EPISODE_EXCLUSION) -->
+-- Episodes the user has taken out of ONE merged entry's order, without taking
+-- their source out of the merge. Sparse: no row means nothing was removed, and
+-- an entry nobody has edited never touches this table.
+--
+-- host_anime_id is the merge parent the episode was removed FROM, matching
+-- episode_order's own host semantics - the episode still belongs to its child
+-- source, still downloads and resolves through it, and still appears under that
+-- source's own entry. Only this merge's order stops including it, so the same
+-- episode can be removed from one merge and kept in another.
+--
+-- Deliberately NOT a column on episode_order, despite the identical key. That
+-- table's upsert is INSERT OR REPLACE and its replaceAll rewrites a host's whole
+-- row set, so a reorder or a snapshot restore would silently un-remove
+-- episodes. Removal is also not an ordering override - it says whether an
+-- episode is in the list, not where - and keeping the two apart means neither
+-- has to know about the other.
+CREATE TABLE merge_episode_exclusions(
+    host_anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    PRIMARY KEY(host_anime_id, episode_id),
+    FOREIGN KEY(host_anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX merge_episode_exclusions_host_anime_id_index ON merge_episode_exclusions(host_anime_id);
+
+getByHostAnimeId:
+SELECT episode_id
+FROM merge_episode_exclusions
+WHERE host_anime_id = :hostAnimeId;
+
+insert:
+INSERT OR IGNORE INTO merge_episode_exclusions(host_anime_id, episode_id)
+VALUES (:hostAnimeId, :episodeId);
+
+delete:
+DELETE FROM merge_episode_exclusions
+WHERE host_anime_id = :hostAnimeId AND episode_id = :episodeId;
+
+deleteAll:
+DELETE FROM merge_episode_exclusions
+WHERE host_anime_id = :hostAnimeId AND episode_id IN :episodeIds;
+
+deleteByHostAnimeId:
+DELETE FROM merge_episode_exclusions
+WHERE host_anime_id = :hostAnimeId;
+-- <-- AM (MERGE_EPISODE_EXCLUSION)

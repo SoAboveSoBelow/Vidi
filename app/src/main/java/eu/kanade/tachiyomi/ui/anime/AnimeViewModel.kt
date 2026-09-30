@@ -22,12 +22,16 @@ import aniyomi.domain.anime.model.SeasonAnime
 import aniyomi.domain.anime.model.SeasonDisplayMode
 // AM (MERGED_SOURCES) -->
 import aniyomi.domain.episode.repository.EpisodeNameRepository
+import aniyomi.domain.merge.interactor.GetRemovedMergeEpisodes
+import aniyomi.domain.merge.interactor.RemoveEpisodeFromMerge
 import aniyomi.domain.merge.interactor.RemoveFromMerge
 import aniyomi.domain.merge.interactor.SyncMergedEntryInfo
 import aniyomi.domain.merge.model.DedupeMode
 import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
 import aniyomi.domain.merge.model.MergeSettings
+import aniyomi.domain.merge.model.RemovedMergeEpisode
 import aniyomi.domain.merge.repository.MergeChildRepository
+import aniyomi.domain.merge.repository.MergeEpisodeExclusionRepository
 // <-- AM (MERGED_SOURCES)
 // AM (CUSTOM_EPISODE_ORDER) -->
 import aniyomi.domain.merge.repository.MergeSettingsRepository
@@ -157,6 +161,7 @@ import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.storage.service.StoragePreferences
 import tachiyomi.domain.track.interactor.GetTracks
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.source.local.LocalSource
 import tachiyomi.source.local.isLocal
@@ -230,6 +235,11 @@ class AnimeViewModel(
     private val getTagSourceCounts: GetTagSourceCounts,
     // <-- AM (TAG_LIMIT)
     private val removeFromMerge: RemoveFromMerge,
+    // AM (MERGE_EPISODE_EXCLUSION) -->
+    private val removeEpisodeFromMerge: RemoveEpisodeFromMerge,
+    private val getRemovedMergeEpisodes: GetRemovedMergeEpisodes,
+    private val mergeEpisodeExclusionRepository: MergeEpisodeExclusionRepository,
+    // <-- AM (MERGE_EPISODE_EXCLUSION)
     // <-- AM (MERGE_SETTINGS)
     // AY -->
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
@@ -2431,6 +2441,14 @@ class AnimeViewModel(
             val dedupeMode: DedupeMode,
             val infoAnimeId: Long?,
             val seasons: List<EntrySeason>,
+            // AM (MERGE_EPISODE_EXCLUSION) -->
+            /**
+             * Episodes removed from this merge one at a time, listed so the
+             * removal stays visible and reversible. Empty for a merge nobody has
+             * removed episodes from, where the section is not shown at all.
+             */
+            val removedEpisodes: List<RemovedMergeEpisode> = emptyList(),
+            // <-- AM (MERGE_EPISODE_EXCLUSION)
         ) : Dialog
         // <-- AM (MERGE_SETTINGS)
 
@@ -2446,6 +2464,13 @@ class AnimeViewModel(
              */
             val ownerAnimeId: Long,
             // <-- AM (TAG_LIMIT)
+            // AM (MERGE_EPISODE_EXCLUSION) -->
+            /**
+             * Whether Remove from merge is offered. False on an ordinary entry,
+             * where there is no merge to remove the episode from.
+             */
+            val isMerged: Boolean = false,
+            // <-- AM (MERGE_EPISODE_EXCLUSION)
         ) : Dialog
         // <-- AM (EPISODE_NAMES)
 
@@ -2627,7 +2652,16 @@ class AnimeViewModel(
      */
     fun showRenameEpisodeDialog(episodeId: Long, currentName: String, ownerAnimeId: Long) {
         updateSuccessState {
-            it.copy(dialog = Dialog.RenameEpisode(episodeId, currentName, ownerAnimeId))
+            it.copy(
+                dialog = Dialog.RenameEpisode(
+                    episodeId = episodeId,
+                    currentName = currentName,
+                    ownerAnimeId = ownerAnimeId,
+                    // AM (MERGE_EPISODE_EXCLUSION) -->
+                    isMerged = it.anime.source == MergedSource.ID,
+                    // <-- AM (MERGE_EPISODE_EXCLUSION)
+                ),
+            )
         }
     }
 
@@ -2643,6 +2677,43 @@ class AnimeViewModel(
         }
     }
     // <-- AM (EPISODE_NAMES)
+
+    // AM (MERGE_EPISODE_EXCLUSION) -->
+    /**
+     * Takes one episode out of this merged entry's order. The episode list is
+     * driven by GetEpisodeOrder.subscribe, which watches the removals, so the
+     * row disappears without this having to touch the list.
+     */
+    fun removeEpisodeFromMerge(episodeId: Long) {
+        val anime = successState?.anime ?: return
+        if (anime.source != MergedSource.ID) return
+        viewModelScope.launchIO {
+            val result = removeEpisodeFromMerge.await(anime.id, episodeId)
+            val message = when (result) {
+                is RemoveEpisodeFromMerge.Result.EpisodeRemoved ->
+                    context.stringResource(AMMR.strings.am_episode_removed_from_merge)
+                is RemoveEpisodeFromMerge.Result.SourceRemoved ->
+                    context.stringResource(AMMR.strings.am_source_removed_from_merge, result.childTitle)
+                RemoveEpisodeFromMerge.Result.NotApplicable -> null
+            }
+            message?.let { snackbarHostState.showSnackbar(it) }
+            toggleAllSelection(false)
+        }
+    }
+
+    /** Puts a removed episode back into the merge's order, from merge settings. */
+    fun restoreEpisodeToMerge(episodeId: Long) {
+        val anime = successState?.anime ?: return
+        viewModelScope.launchIO {
+            mergeEpisodeExclusionRepository.remove(anime.id, episodeId)
+            val removedEpisodes = getRemovedMergeEpisodes.await(anime.id)
+            updateSuccessState { state ->
+                val dialog = state.dialog as? Dialog.MergeSettings ?: return@updateSuccessState state
+                state.copy(dialog = dialog.copy(removedEpisodes = removedEpisodes))
+            }
+        }
+    }
+    // <-- AM (MERGE_EPISODE_EXCLUSION)
 
     // AM (MERGE_SETTINGS) -->
     // AM (TAG_LIMIT) -->
@@ -2844,6 +2915,9 @@ class AnimeViewModel(
                 )
             }
             val settings = mergeSettingsRepository.get(anime.id)
+            // AM (MERGE_EPISODE_EXCLUSION) -->
+            val removedEpisodes = getRemovedMergeEpisodes.await(anime.id)
+            // <-- AM (MERGE_EPISODE_EXCLUSION)
             updateSuccessState { state ->
                 state.copy(
                     dialog = Dialog.MergeSettings(
@@ -2851,6 +2925,9 @@ class AnimeViewModel(
                         dedupeMode = settings.dedupeMode,
                         infoAnimeId = settings.infoAnimeId,
                         seasons = state.entrySeasons,
+                        // AM (MERGE_EPISODE_EXCLUSION) -->
+                        removedEpisodes = removedEpisodes,
+                        // <-- AM (MERGE_EPISODE_EXCLUSION)
                     ),
                 )
             }

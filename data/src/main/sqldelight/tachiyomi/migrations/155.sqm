@@ -1,0 +1,15 @@
+-- AM (MERGE_EPISODE_EXCLUSION) -->
+-- Episodes taken out of one merged entry's order. See
+-- merge_episode_exclusions.sq.
+CREATE TABLE merge_episode_exclusions(
+    host_anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    PRIMARY KEY(host_anime_id, episode_id),
+    FOREIGN KEY(host_anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX merge_episode_exclusions_host_anime_id_index ON merge_episode_exclusions(host_anime_id);
+-- <-- AM (MERGE_EPISODE_EXCLUSION)

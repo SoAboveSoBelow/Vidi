@@ -543,6 +543,10 @@ class AnimeScreen(
                     onEditTags = { viewModel.showTagsDialog(dialog.ownerAnimeId) },
                     onOpenEntry = { navigator.push(AnimeScreen(dialog.ownerAnimeId)) },
                     // <-- AM (TAG_LIMIT)
+                    // AM (MERGE_EPISODE_EXCLUSION) -->
+                    onRemoveFromMerge = { viewModel.removeEpisodeFromMerge(dialog.episodeId) }
+                        .takeIf { dialog.isMerged },
+                    // <-- AM (MERGE_EPISODE_EXCLUSION)
                 )
             }
             // <-- AM (EPISODE_NAMES)
@@ -569,6 +573,9 @@ class AnimeScreen(
                     // ViewModel state, so it's back on returning.
                     onOpenEntryClick = { navigator.push(AnimeScreen(it.id)) },
                     onEditSeasonsClick = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
+                    // AM (MERGE_EPISODE_EXCLUSION) -->
+                    onRestoreEpisodeClick = viewModel::restoreEpisodeToMerge,
+                    // <-- AM (MERGE_EPISODE_EXCLUSION)
                 )
             }
             // <-- AM (MERGE_SETTINGS)

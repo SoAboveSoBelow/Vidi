@@ -288,6 +288,20 @@ fun PlayerHostScreen(
         val vm = reconcilingViewModel ?: return@LaunchedEffect
         val last = lastReconciled
         if (last != null && last.first == animeId && last.second == episodeId) return@LaunchedEffect
+
+        // AM (LOAD_FAILURE_NOT_FATAL) -->
+        // Records what the session ACTUALLY ended up on, not what was asked
+        // for. A load that fails now rolls the session back to the entry it
+        // was playing (see PlayerViewModel.restoreSession), so writing the
+        // request here would leave this host convinced it is showing an entry
+        // the ViewModel had already abandoned - and every later request would
+        // reconcile against that wrong baseline.
+        suspend fun recordSettledTarget() {
+            vm.awaitEpisodeChange()
+            lastReconciled = vm.stateData.value.let { it.currentAnime?.id to it.currentEpisode?.id }
+        }
+        // <-- AM (LOAD_FAILURE_NOT_FATAL)
+
         when (last?.first) {
             null -> {
                 // Fresh ViewModel, nothing loaded - initial load. Guarded by
@@ -301,13 +315,13 @@ fun PlayerHostScreen(
                         hostIndex = hosterIndex,
                         vidIndex = videoIndex,
                     )
-                    lastReconciled = animeId to episodeId
+                    recordSettledTarget()
                 }
             }
             animeId -> {
                 PlayerMediaHolder.current?.isDummyPipActive = false
                 vm.changeEpisode(episodeId)
-                lastReconciled = animeId to episodeId
+                recordSettledTarget()
             }
             else -> {
                 PlayerMediaHolder.current?.isDummyPipActive = false
@@ -318,7 +332,7 @@ fun PlayerHostScreen(
                     hostIndex = hosterIndex,
                     vidIndex = videoIndex,
                 )
-                lastReconciled = animeId to episodeId
+                recordSettledTarget()
             }
         }
     }

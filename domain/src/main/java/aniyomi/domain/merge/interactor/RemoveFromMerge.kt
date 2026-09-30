@@ -2,6 +2,7 @@
 package aniyomi.domain.merge.interactor
 
 import aniyomi.domain.merge.repository.MergeChildRepository
+import aniyomi.domain.merge.repository.MergeEpisodeExclusionRepository
 import aniyomi.domain.merge.repository.MergeSettingsRepository
 import aniyomi.domain.order.repository.EpisodeOrderRepository
 import dev.zacsweers.metro.Inject
@@ -32,6 +33,9 @@ class RemoveFromMerge(
     private val episodeRepository: EpisodeRepository,
     private val mergeChildRepository: MergeChildRepository,
     private val mergeSettingsRepository: MergeSettingsRepository,
+    // AM (MERGE_EPISODE_EXCLUSION) -->
+    private val mergeEpisodeExclusionRepository: MergeEpisodeExclusionRepository,
+    // <-- AM (MERGE_EPISODE_EXCLUSION)
     private val episodeOrderRepository: EpisodeOrderRepository,
     private val syncMergedEntryInfo: SyncMergedEntryInfo,
 ) {
@@ -42,6 +46,13 @@ class RemoveFromMerge(
 
         val episodeIds = episodeRepository.getEpisodeByAnimeId(child.id).map { it.id }
         episodeOrderRepository.deleteAll(mergeParentId, episodeIds)
+        // AM (MERGE_EPISODE_EXCLUSION) -->
+        // Same reasoning as the order rows above: a removal says this episode is
+        // kept out of the merge's list, which means nothing once its source is
+        // not in the merge - and left behind it would silently re-apply if the
+        // source were ever added back.
+        mergeEpisodeExclusionRepository.removeAll(mergeParentId, episodeIds)
+        // <-- AM (MERGE_EPISODE_EXCLUSION)
         mergeChildRepository.removeChild(mergeParentId, child.id)
 
         if (!child.favorite) {

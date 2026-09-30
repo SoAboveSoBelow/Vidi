@@ -50,7 +50,13 @@
     <string name="am.action_rename_episode">Rename episode</string>
     <string name="am.action_open_entry">Open entry</string>
     <string name="am.action_search_playlist">Playlist search</string>
-    <string name="am.rename_episode_hint">Name (leave empty to use the source\'s)</string>
+    <string name="am.rename_episode_hint">Rename Episode (Empty will revert)</string>
+    <string name="am.quick_edit">Quick Edit</string>
+    <string name="am.action_remove_from_merge">Remove from merge</string>
+    <string name="am.episode_removed_from_merge">Episode removed from merge</string>
+    <string name="am.source_removed_from_merge">Last episode from %1$s — source removed from merge</string>
+    <string name="am.merge_removed_episodes">Removed episodes</string>
+    <string name="am.action_restore_to_merge">Restore</string>
     <string name="am.entry_seasons_title">Seasons</string>
     <string name="am.entry_season_create">Add season</string>
     <string name="am.entry_season_rename">Rename season</string>
@@ -68,7 +74,7 @@
     <string name="am.pref_max_tags_shown">Default tags shown</string>
     <string name="am.pref_max_tags_shown_summary">Adjusts max tags shown on sources</string>
     <string name="am.pref_max_tags_shown_uncapped">Uncapped</string>
-    <string name="am.action_more_tags">More +%1$d</string>
+    <string name="am.action_more_tags">+%1$d More</string>
     <string name="am.action_edit_tags">Edit tags</string>
     <string name="am.action_open_entry">Open entry</string>
     <string name="am.action_add_tag">Add tag</string>
@@ -338,6 +344,11 @@
     <string name="pip_first_button_action_skip_10">Skip 10 seconds</string>
     <string name="pip_first_button_action_previous_episode">Previous episode</string>
     <string name="pip_first_button_action_background_play">Background play</string>
+
+    <!-- Player - errors -->
+    <string name="no_source_found">No source found</string>
+    <string name="skipped_missing_sources">Skipped %1$d with no source</string>
+    <string name="skipped_missing_sources_none_left">Skipped %1$d with no source — nothing left to play</string>
 
     <!-- Cast -->
     <string name="player_cast">Cast</string>

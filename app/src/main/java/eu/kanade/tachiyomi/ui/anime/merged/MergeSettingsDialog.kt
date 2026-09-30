@@ -5,11 +5,15 @@ package eu.kanade.tachiyomi.ui.anime.merged
 
 import android.content.Context
 import android.view.LayoutInflater
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -19,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -26,6 +31,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.recyclerview.widget.ConcatAdapter
 import androidx.recyclerview.widget.LinearLayoutManager
 import aniyomi.domain.merge.model.DedupeMode
+import aniyomi.domain.merge.model.RemovedMergeEpisode
 import aniyomi.domain.season.model.EntrySeason
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import eu.kanade.presentation.theme.colorscheme.AndroidViewColorScheme
@@ -35,6 +41,7 @@ import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
+import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 
 @Stable
@@ -141,6 +148,9 @@ fun MergeSettingsDialog(
     onPositiveClick: (MergeSettingsResult) -> Unit,
     onOpenEntryClick: (Anime) -> Unit,
     onEditSeasonsClick: () -> Unit,
+    // AM (MERGE_EPISODE_EXCLUSION) -->
+    onRestoreEpisodeClick: (Long) -> Unit,
+    // <-- AM (MERGE_EPISODE_EXCLUSION)
 ) {
     val colorScheme = AndroidViewColorScheme(MaterialTheme.colorScheme)
     val context = LocalContext.current
@@ -180,6 +190,28 @@ fun MergeSettingsDialog(
                     },
                     modifier = Modifier.fillMaxWidth(),
                 )
+
+                // AM (MERGE_EPISODE_EXCLUSION) -->
+                // Compose rather than another row type in the view-based adapter
+                // above: this list is read-only apart from Restore, so it needs
+                // none of that adapter's drag/reorder machinery. Restore applies
+                // immediately instead of waiting for Save - it is not a staged
+                // edit like the order and season changes around it, and the
+                // ViewModel refreshes this list as it goes.
+                if (dialog.removedEpisodes.isNotEmpty()) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = MaterialTheme.padding.small))
+                    Text(
+                        text = stringResource(AMMR.strings.am_merge_removed_episodes),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    dialog.removedEpisodes.forEach { removed ->
+                        RemovedEpisodeRow(
+                            removed = removed,
+                            onRestoreClick = { onRestoreEpisodeClick(removed.episodeId) },
+                        )
+                    }
+                }
+                // <-- AM (MERGE_EPISODE_EXCLUSION)
             }
         },
         properties = DialogProperties(
@@ -188,3 +220,35 @@ fun MergeSettingsDialog(
     )
 }
 // <-- AM (MERGE_SETTINGS)
+
+// AM (MERGE_EPISODE_EXCLUSION) -->
+/** One removed episode, with the source it came from so identical names stay apart. */
+@Composable
+private fun RemovedEpisodeRow(
+    removed: RemovedMergeEpisode,
+    onRestoreClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = removed.episodeName,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (removed.sourceTitle.isNotEmpty()) {
+                Text(
+                    text = removed.sourceTitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        TextButton(onClick = onRestoreClick) {
+            Text(text = stringResource(AMMR.strings.am_action_restore_to_merge))
+        }
+    }
+}
+// <-- AM (MERGE_EPISODE_EXCLUSION)

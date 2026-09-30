@@ -285,6 +285,10 @@ fun EpisodeListDialog(
                             }
                         },
                         onOpenEntryClicked = onOpenEntryClicked,
+                        // AM (OPEN_ENTRY_MERGED_ONLY) -->
+                        // This list has a selection bar, so the marks live there.
+                        marksInRow = false,
+                        // <-- AM (OPEN_ENTRY_MERGED_ONLY)
                         onLongClick = {
                             episode.id?.let { selectedIds = selectedIds + it }
                         },

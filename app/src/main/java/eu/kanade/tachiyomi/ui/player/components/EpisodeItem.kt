@@ -59,6 +59,14 @@ fun EpisodeListItem(
     // act on a selection rather than on one row. Passing null keeps the marks
     // in the row.
     onOpenEntryClicked: ((Long?) -> Unit)? = null,
+    // AM (OPEN_ENTRY_MERGED_ONLY) -->
+    /**
+     * Whether the bookmark/fillermark buttons belong in the row. False for the
+     * player's episode list, whose selection bar owns them; the cast playlist
+     * sheet - the other caller - has no selection bar and keeps them here.
+     */
+    marksInRow: Boolean = true,
+    // <-- AM (OPEN_ENTRY_MERGED_ONLY)
     onLongClick: (() -> Unit)? = null,
     selectionMode: Boolean = false,
     isSelected: Boolean = false,
@@ -135,7 +143,15 @@ fun EpisodeListItem(
                     contentDescription = stringResource(AMMR.strings.am_action_open_entry),
                 )
             }
-        } else {
+            // AM (OPEN_ENTRY_MERGED_ONLY) -->
+            // Nothing in the leading slot. The open-entry button is only offered
+            // where an episode can belong to a source other than the one being
+            // viewed - a merged entry - so on an ordinary entry the slot is
+            // simply empty rather than falling back to the row marks: those live
+            // in this list's selection bar, and putting them back here would
+            // duplicate them and make the two lists read differently.
+            // <-- AM (OPEN_ENTRY_MERGED_ONLY)
+        } else if (marksInRow) {
             IconButton(onClick = { clickBookmark(!isBookmarked) }) {
                 Icon(
                     imageVector = Icons.Filled.Bookmark,

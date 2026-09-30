@@ -42,6 +42,14 @@ fun RenameEpisodeDialog(
     onEditTags: () -> Unit,
     onOpenEntry: () -> Unit,
     // <-- AM (TAG_LIMIT)
+    // AM (MERGE_EPISODE_EXCLUSION) -->
+    /**
+     * Takes this episode out of the merged entry's order. Null on an ordinary
+     * entry, which has no merge to remove it from - the slot carries the
+     * dialog's title there instead of standing empty.
+     */
+    onRemoveFromMerge: (() -> Unit)?,
+    // <-- AM (MERGE_EPISODE_EXCLUSION)
 ) {
     var name by rememberSaveable { mutableStateOf(currentName) }
     AlertDialog(
@@ -81,11 +89,30 @@ fun RenameEpisodeDialog(
             }
         },
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = stringResource(AMMR.strings.am_action_rename_episode),
-                    modifier = Modifier.weight(1f),
-                )
+            // AM (MERGE_EPISODE_EXCLUSION) -->
+            // The old "Rename episode" heading is gone - the field's own label
+            // already says that, and the heading only repeated it. The row is now
+            // the dialog's top strip: Remove from merge hard left where the
+            // heading was, or, with no merge to remove from, a plain title so the
+            // strip isn't just a lone icon.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                if (onRemoveFromMerge != null) {
+                    TextButton(
+                        onClick = {
+                            onDismissRequest()
+                            onRemoveFromMerge()
+                        },
+                    ) {
+                        Text(text = stringResource(AMMR.strings.am_action_remove_from_merge))
+                    }
+                } else {
+                    Text(text = stringResource(AMMR.strings.am_quick_edit))
+                }
+                // <-- AM (MERGE_EPISODE_EXCLUSION)
                 // Pushed WITHOUT dismissing: the dialog is ViewModel state, so it is
                 // still here on the way back, as the merge settings dialog does.
                 IconButton(onClick = onOpenEntry) {

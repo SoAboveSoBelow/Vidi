@@ -100,6 +100,7 @@ import tachiyomi.core.common.util.lang.launchNonCancellable
 import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.seconds
@@ -738,7 +739,7 @@ class PlayerActivity : BaseActivity() {
                 // AM (REOPEN_LOAD_FAILURE_PRESERVE_SESSION_FIX) -->
                 if (hadValidSessionBeforeReinit) {
                     withUIContext {
-                        showToast(exception.message ?: "")
+                        showToast(loadFailureStringResource(exception))
                     }
                     logcat(LogPriority.ERROR, exception)
                 } else {
@@ -747,6 +748,17 @@ class PlayerActivity : BaseActivity() {
                     }
                 }
                 // <-- AM (REOPEN_LOAD_FAILURE_PRESERVE_SESSION_FIX)
+
+                // AM (LOAD_FAILURE_NOT_FATAL) -->
+                // Stop here rather than falling through to loadHosters() below.
+                // init() failed, so there is nothing to hand it but an empty list,
+                // on which selectBestVideo() finds nothing and it raises "No
+                // available videos" - replacing the real reason just reported, and
+                // crashing the process on its way out of the coroutine.
+                viewModel.updateIsLoadingHosters(false)
+                withUIContext { setIntent(intent) }
+                return@launchNonCancellable
+                // <-- AM (LOAD_FAILURE_NOT_FATAL)
             }
 
             viewModel.updateIsLoadingHosters(false)
@@ -2252,13 +2264,23 @@ class PlayerActivity : BaseActivity() {
         super.onSaveInstanceState(outState)
     }
 
+    // AM (LOAD_FAILURE_NOT_FATAL) -->
+    /**
+     * What a load failure is shown as. A [PlayerViewModel.ExceptionWithStringResource]
+     * already names its own reason; anything else is an opaque failure from the
+     * source whose message ("HTTP error 404") reads as nothing to the user, so it
+     * becomes "No source found" and the real exception goes to logcat. Mirrors
+     * PlayerViewModel.reportLoadFailure(), which does this for failures raised
+     * after init().
+     */
+    private fun loadFailureStringResource(error: Throwable) =
+        (error as? PlayerViewModel.ExceptionWithStringResource)?.stringResource
+            ?: AMMR.strings.no_source_found
+    // <-- AM (LOAD_FAILURE_NOT_FATAL)
+
     /** Shows a toast and closes the activity when the initial episode load fails. */
     private fun setInitialEpisodeError(error: Throwable) {
-        if (error is PlayerViewModel.ExceptionWithStringResource) {
-            showToast(error.stringResource)
-        } else {
-            showToast(error.message ?: "")
-        }
+        showToast(loadFailureStringResource(error))
         logcat(LogPriority.ERROR, error)
         finish()
     }

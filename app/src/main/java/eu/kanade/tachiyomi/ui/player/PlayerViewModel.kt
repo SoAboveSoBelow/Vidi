@@ -127,6 +127,7 @@ import eu.kanade.tachiyomi.util.lang.takeBytes
 import eu.kanade.tachiyomi.util.storage.DiskUtil
 import eu.kanade.tachiyomi.util.storage.cacheImageDir
 import eu.kanade.tachiyomi.util.system.getWanIp
+import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.system.workManager
 import `is`.xyz.mpv.MPVNode
 import `is`.xyz.mpv.Utils
@@ -1240,7 +1241,7 @@ class PlayerViewModel(
             }
             CastEvent.LoadingFailed -> {
                 viewModelScope.launch {
-                    _eventFlow.emit(Event.ToastResource(AMMR.strings.cast_server_load_failed))
+                    showMessage(AMMR.strings.cast_server_load_failed)
                 }
             }
         }
@@ -1469,6 +1470,141 @@ class PlayerViewModel(
         val stringResource: StringResource,
     ) : Exception(message)
 
+    // AM (LOAD_FAILURE_NOT_FATAL) -->
+    /**
+     * Writes the mpv `user-data/current-anime` table for [anime]. Reads
+     * stateData for the skip-intro length, so currentAnime must already BE
+     * [anime] by the time this runs.
+     */
+    private suspend fun writeAnimeUserData(anime: Anime) {
+        val skipIntroLength = getAnimeSkipIntroLength()
+        updateCastUiData { it.copy(skipIntroLength = skipIntroLength.toLong()) }
+
+        val parentTitle = anime.parentId?.let { getAnime.await(it)?.title } ?: ""
+        setPropertyString("user-data/current-anime/anime-title", anime.title)
+        setPropertyString("user-data/current-anime/parent-title", parentTitle)
+        setPropertyInt("user-data/current-anime/intro-length", skipIntroLength)
+        setPropertyString(
+            "user-data/current-anime/category",
+            getCategories.await(anime.id).joinToString {
+                it.name
+            },
+        )
+    }
+
+    /**
+     * Everything a cross-anime switch overwrites that says WHICH session this
+     * is. Captured before [switchToAnime] touches anything, so a switch whose
+     * load fails can put the live session back as it was instead of leaving it
+     * half-switched - the old file still loaded and paused in mpv, wrapped in
+     * the new anime's title, playlist, episode and hoster state.
+     */
+    private data class SessionSnapshot(
+        val state: PlayerStateData,
+        val ui: PlayerUiData,
+        val cast: CastUiData,
+        val wasPlaying: Boolean,
+        val episodeId: Long,
+        val hosterList: List<Hoster>?,
+        val qualityIndex: Pair<Int, Int>,
+        val episodePosition: Long?,
+    )
+
+    private fun captureSession() = SessionSnapshot(
+        state = stateData.value,
+        ui = uiData.value,
+        cast = castUiData.value,
+        wasPlaying = !playbackData.value.paused,
+        episodeId = episodeId,
+        hosterList = currentHosterList,
+        qualityIndex = qualityIndex,
+        episodePosition = episodePosition,
+    )
+
+    /**
+     * Rolls the session back to [snapshot] after a failed switch.
+     *
+     * The state objects go back wholesale rather than field by field. Between
+     * the capture and here the only writer is the switch itself - it runs
+     * inside episodeChangeJob, with the player paused and no file loading - so
+     * everything the snapshot holds is still true of what mpv actually has
+     * loaded, and a hand-picked field list would silently stop covering
+     * whatever gets added to PlayerStateData next.
+     *
+     * Not restored: the prefetched next episode, which switchToAnime dropped.
+     * It belongs to this playlist and is still valid, but re-prefetching it is
+     * cheap and getting it wrong is not.
+     */
+    private suspend fun restoreSession(snapshot: SessionSnapshot) {
+        updateStateData { snapshot.state }
+        updateUiData { snapshot.ui.copy(isLoadingEpisode = false, isLoadingHosters = false) }
+        updateCastUiData { snapshot.cast.copy(isLoadingEpisode = false) }
+
+        episodeId = snapshot.episodeId
+        currentHosterList = snapshot.hosterList
+        qualityIndex = snapshot.qualityIndex
+        episodePosition = snapshot.episodePosition
+
+        snapshot.state.currentAnime?.let { writeAnimeUserData(it) }
+        snapshot.state.currentEpisode?.let {
+            setPropertyDouble("user-data/current-anime/episode-number", it.episode_number.toDouble())
+        }
+        // setupEpisode() pinned the holder to the episode that was being switched
+        // to; needsInit() reads that, so leaving it pointing at an episode this
+        // session never loaded would make a later request for the restored one
+        // no-op.
+        syncHolderSessionState()
+
+        if (snapshot.wasPlaying) unpause()
+    }
+
+    /**
+     * Reports a load failure to the user instead of letting it leave a
+     * coroutine through the uncaught handler and take the process with it.
+     *
+     * With nothing playable behind it (a fresh open) the Activity still
+     * finishes - there is nothing to fall back to, which is what
+     * setInitialEpisodeError() has always done. On top of a session that is
+     * still playing it is reported and no more: destroying a working session
+     * over a switch that did not happen is the same over-reaction
+     * REOPEN_LOAD_FAILURE_PRESERVE_SESSION_FIX removed from the reopen path.
+     *
+     * [ExceptionWithStringResource] already names its own reason, so it is
+     * shown as-is. Anything else is an opaque failure from the source - the 404
+     * a deleted entry's page returns, a timeout, a layout change - and reads as
+     * nothing to the user, so it becomes "No source found" and the real
+     * exception goes to logcat.
+     */
+    private suspend fun reportLoadFailure(error: Throwable) {
+        logcat(LogPriority.ERROR, error) { "Load failed" }
+        showMessage((error as? ExceptionWithStringResource)?.stringResource ?: AMMR.strings.no_source_found)
+    }
+
+    /**
+     * Shows a message to the user.
+     *
+     * Deliberately NOT an [Event]. The event channel has exactly one
+     * subscriber in the codebase - PlayerActivity.onCreate() - and the
+     * single-activity player never builds that Activity, so every message the
+     * ViewModel raised was emitted into a MutableSharedFlow with no
+     * subscribers, which discards it. Collecting it from the player host
+     * would only narrow the hole: that composable exists while a session is
+     * on screen, and a failure can land as a session ends or after it has.
+     * Toasting on the injected application context depends on no UI being
+     * alive at all, which is what "visible in and out of the player" needs.
+     *
+     * Known limit: Android does not display toasts over a real PIP window, so
+     * a failure that lands while in system PIP is still logged and unseen.
+     */
+    private suspend fun showMessage(resource: StringResource, vararg args: Any) = withUIContext {
+        context.toast(
+            if (args.isEmpty()) context.stringResource(resource) else context.stringResource(resource, *args),
+        )
+    }
+
+    private suspend fun showMessage(text: String) = withUIContext { context.toast(text) }
+    // <-- AM (LOAD_FAILURE_NOT_FATAL)
+
     suspend fun init(
         animeId: Long,
         initialEpisodeId: Long,
@@ -1542,20 +1678,11 @@ class PlayerViewModel(
 
                 setupEpisode(episode)
 
-                val skipIntroLength = getAnimeSkipIntroLength()
-                updateCastUiData { it.copy(skipIntroLength = skipIntroLength.toLong()) }
-
-                // Write to mpv table
-                val parentTitle = anime.parentId?.let { getAnime.await(it)?.title } ?: ""
-                setPropertyString("user-data/current-anime/anime-title", anime.title)
-                setPropertyString("user-data/current-anime/parent-title", parentTitle)
-                setPropertyInt("user-data/current-anime/intro-length", skipIntroLength)
-                setPropertyString(
-                    "user-data/current-anime/category",
-                    getCategories.await(anime.id).joinToString {
-                        it.name
-                    },
-                )
+                // AM (LOAD_FAILURE_NOT_FATAL) -->
+                // Extracted so a failed cross-anime switch can rewrite these for
+                // the anime it rolls back to - see restoreSession().
+                writeAnimeUserData(anime)
+                // <-- AM (LOAD_FAILURE_NOT_FATAL)
 
                 // Load hosters
                 if (hostList.isNotBlank()) {
@@ -2012,7 +2139,7 @@ class PlayerViewModel(
                 stopHttpServer()
                 val (success, port) = MainActivity.startHttpServerService(context, source.id)
                 if (!success) {
-                    _eventFlow.emit(Event.ToastResource(AYMR.strings.http_server_start_failure))
+                    showMessage(AYMR.strings.http_server_start_failure)
                     return@launch
                 }
 
@@ -2051,7 +2178,7 @@ class PlayerViewModel(
                 }
 
                 if (isReady != true) {
-                    _eventFlow.emit(Event.ToastResource(AMMR.strings.cast_server_start_failed))
+                    showMessage(AMMR.strings.cast_server_start_failed)
                     stopCasting()
                     return@launch
                 }
@@ -2277,14 +2404,12 @@ class PlayerViewModel(
             if (netflixStyle) {
                 // show a toast with the seconds before the skip
                 viewModelScope.launch {
-                    _eventFlow.emit(
-                        Event.ToastString(
-                            "Skip Intro: ${context.stringResource(
-                                AYMR.strings.player_aniskip_dontskip_toast,
-                                chapter.name.substringBeforeLast(ChapterUtils.ANIYOMI_CHAPTER_IDENTIFIER),
-                                defaultWaitingTime,
-                            )}",
-                        ),
+                    showMessage(
+                        "Skip Intro: ${context.stringResource(
+                            AYMR.strings.player_aniskip_dontskip_toast,
+                            chapter.name.substringBeforeLast(ChapterUtils.ANIYOMI_CHAPTER_IDENTIFIER),
+                            defaultWaitingTime,
+                        )}",
                     )
                 }
                 updateCastUiData {
@@ -2605,6 +2730,20 @@ class PlayerViewModel(
                 }
 
                 throw e
+            } catch (e: Throwable) {
+                // AM (LOAD_FAILURE_NOT_FATAL) -->
+                // Everything that can fail in here used to leave through the
+                // coroutine's uncaught handler and kill the process:
+                // selectBestVideo() finding nothing (an empty hoster list, or one
+                // whose videos have all errored), loadVideo() running out of
+                // fallbacks, a hoster resolver throwing. None of those are
+                // programming errors - they are the ordinary outcome of a source
+                // that no longer has the video - so they get reported, not thrown.
+                // Whatever was still resolving goes back to Idle so the quality
+                // sheet is usable rather than stuck spinning.
+                markLoadingHostersIdle()
+                reportLoadFailure(e)
+                // <-- AM (LOAD_FAILURE_NOT_FATAL)
             }
         }
     }
@@ -2934,7 +3073,7 @@ class PlayerViewModel(
                         httpServer?.listeningPort ?: 0
                     } catch (e: Exception) {
                         logcat(LogPriority.ERROR, e) { "Failed to start http server" }
-                        _eventFlow.emit(Event.ToastResource(AYMR.strings.http_server_start_failure))
+                        showMessage(AYMR.strings.http_server_start_failure)
                         return@launchIO
                     }
 
@@ -3250,7 +3389,7 @@ class PlayerViewModel(
 
         logcat(LogPriority.ERROR) { errorMessage }
         viewModelScope.launch {
-            _eventFlow.emit(Event.ToastString(errorMessage))
+            showMessage(errorMessage)
         }
 
         // AM (EOF_REPLAY_NO_RELOAD) -->
@@ -4009,9 +4148,23 @@ class PlayerViewModel(
         setupEpisode(chosenEpisode)
 
         return withIOContext {
-            try {
+            // AM (LOAD_FAILURE_NOT_FATAL) -->
+            // The result is built from THIS episode's resolved hosters, held in
+            // a local first. It used to assign currentHosterList inside the try
+            // and then read that field back out below, so a getHosters() throw -
+            // the 404 a deleted entry's page returns - left the field holding the
+            // PREVIOUS episode's list and handed it back as if it were this
+            // one's. The caller saw a perfectly good hoster list, loaded it, and
+            // played the previous video under this episode's slot: the duplicate
+            // in the play order. The catch logged and swallowed, so nothing said
+            // otherwise.
+            //
+            // Failure is now null, and currentHosterList is cleared with it - a
+            // stale list is worse than none, since init()'s defaultResult reads
+            // this field too.
+            val resolved = try {
                 // AM (NEXT_EPISODE_PREFETCH) -->
-                currentHosterList = prefetchedFor(chosenEpisode.id)?.hosterList
+                val hosters = prefetchedFor(chosenEpisode.id)?.hosterList
                     ?: episodeLoader.getHosters(
                         episode = chosenEpisode.toDomainEpisode()!!,
                         anime,
@@ -4019,13 +4172,17 @@ class PlayerViewModel(
                     )
                 // <-- AM (NEXT_EPISODE_PREFETCH)
                 this@PlayerViewModel.episodeId = chosenEpisode.id!!
+                hosters
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                logcat(LogPriority.ERROR, e) { e.message ?: "Error getting links" }
+                logcat(LogPriority.ERROR, e) { "Failed to resolve hosters for episodeId=${chosenEpisode.id}" }
+                null
             }
+            currentHosterList = resolved
+            // <-- AM (LOAD_FAILURE_NOT_FATAL)
 
             EpisodeLoadResult(
-                hosterList = currentHosterList,
+                hosterList = resolved,
                 episodeTitle = "${displayAnime.title} - ${displayNameOf(chosenEpisode)}",
             )
         }
@@ -4090,6 +4247,27 @@ class PlayerViewModel(
     private var episodeChangeJob: Job? = null
     // <-- AM (EPISODE_CHANGE_RACE_FIX)
 
+    // AM (LOAD_FAILURE_NOT_FATAL) -->
+    /**
+     * Suspends until the in-flight episode/anime change has settled.
+     *
+     * [changeEpisode], [changeAnime] and the initial load are fire-and-forget
+     * - they assign [episodeChangeJob] and return - so a caller that needs to
+     * know WHAT the session ended up on has to wait for the job rather than
+     * assume the request it made is what landed. Since a failed load now rolls
+     * the session back, "the request" and "what is playing" are no longer the
+     * same thing, and PlayerHostScreen's reconciliation bookkeeping reads the
+     * real state through this instead of recording its own request as fact.
+     *
+     * Joining a job that a newer change has already replaced waits on the
+     * newer one, which is correct: the newer change is the one that decides
+     * where the session lands.
+     */
+    suspend fun awaitEpisodeChange() {
+        episodeChangeJob?.join()
+    }
+    // <-- AM (LOAD_FAILURE_NOT_FATAL)
+
     /** Switches playback to [episodeId]; [autoPlay] indicates an automatic transition. */
     fun changeEpisode(episodeId: Long?, autoPlay: Boolean = false) {
         if (stateData.value.isCasting) {
@@ -4137,41 +4315,64 @@ class PlayerViewModel(
                 }
             }
             // <-- AM (PLAYLIST_SEARCH_SCOPE)
-            val switchMethod = loadEpisode(episodeId)
-            updateUiData { it.copy(isLoadingHosters = false) }
+            // AM (LOAD_FAILURE_NOT_FATAL) -->
+            // An entry whose source has nothing left to give is stepped over
+            // rather than played. Both of the old outcomes were wrong for a play
+            // order: an empty hoster list raised InitialEpisodeError, whose only
+            // handler finishes the legacy Activity and which nothing subscribes
+            // to here at all, and a null one fell through to a bare logcat, so
+            // the order simply stopped on a dead entry with no explanation.
+            //
+            // The walk is bounded by the playlist: each attempt advances the
+            // index (loadEpisode -> setupEpisode), and it ends at the last entry.
+            // Failures are counted so the user gets one message at the end of the
+            // run instead of one per dead entry.
+            var targetId = episodeId
+            var skipped = 0
 
-            if (switchMethod == null) {
-                if (stateData.value.currentAnime != null && !autoPlay) {
-                    _eventFlow.emit(Event.ToastResource(AYMR.strings.no_next_episode))
-                }
-                return@launch
-            }
+            while (true) {
+                val switchMethod = loadEpisode(targetId)
 
-            if (switchMethod.hosterList != null) {
-                when {
-                    switchMethod.hosterList.isEmpty() -> _eventFlow.emit(
-                        Event.InitialEpisodeError(
-                            ExceptionWithStringResource(
-                                "Hoster list is empty",
-                                AYMR.strings.no_hosters,
-                            ),
-                        ),
-                    )
-                    else -> {
-                        loadHosters(
-                            hosterList = switchMethod.hosterList,
-                            hosterIndex = -1,
-                            videoIndex = -1,
-                        )
+                if (switchMethod == null) {
+                    updateUiData { it.copy(isLoadingEpisode = false, isLoadingHosters = false) }
+                    if (skipped > 0) {
+                        showMessage(AMMR.strings.skipped_missing_sources, skipped)
+                    } else if (stateData.value.currentAnime != null && !autoPlay) {
+                        showMessage(AYMR.strings.no_next_episode)
                     }
+                    return@launch
                 }
-            } else {
-                logcat(LogPriority.ERROR) { "Error getting links" }
-            }
 
-            if (pipEpisodeToasts) {
-                _eventFlow.emit(Event.EpisodeTitle(switchMethod.episodeTitle))
+                if (!switchMethod.hosterList.isNullOrEmpty()) {
+                    updateUiData { it.copy(isLoadingHosters = false) }
+                    if (skipped > 0) {
+                        showMessage(AMMR.strings.skipped_missing_sources, skipped)
+                    }
+                    loadHosters(
+                        hosterList = switchMethod.hosterList,
+                        hosterIndex = -1,
+                        videoIndex = -1,
+                    )
+                    if (pipEpisodeToasts) {
+                        _eventFlow.emit(Event.EpisodeTitle(switchMethod.episodeTitle))
+                    }
+                    return@launch
+                }
+
+                skipped++
+                val nextIndex = stateData.value.currentPlaylistIndex + 1
+                val nextId = stateData.value.currentPlaylist.getOrNull(nextIndex)?.id
+                if (nextId == null) {
+                    // Nothing loaded, so no later stage will clear the episode
+                    // spinner - it has to come down here or the player buffers
+                    // forever on an order that has run out.
+                    updateUiData { it.copy(isLoadingEpisode = false, isLoadingHosters = false) }
+                    showMessage(AMMR.strings.skipped_missing_sources_none_left, skipped)
+                    return@launch
+                }
+                targetId = nextId
             }
+            // <-- AM (LOAD_FAILURE_NOT_FATAL)
         }
     }
 
@@ -4245,6 +4446,13 @@ class PlayerViewModel(
         vidIndex: Int,
     ) {
         // <-- AM (MERGED_SOURCES)
+        // AM (LOAD_FAILURE_NOT_FATAL) -->
+        // Taken before the teardown below, while the state still describes what is
+        // actually loaded in mpv.
+        val snapshot = captureSession()
+        val hadLiveSession = stateData.value.currentVideo != null
+        // <-- AM (LOAD_FAILURE_NOT_FATAL)
+
         if (stateData.value.isCasting) {
             castManager.stopRemoteMediaClient()
             updateCastUiData { it.copy(isLoadingEpisode = true) }
@@ -4291,6 +4499,28 @@ class PlayerViewModel(
         logcat(LogPriority.INFO) {
             "CROSS_ANIME_IN_PLACE_SWITCH init() returned initResult=$initResult loadResult=$loadResult"
         }
+
+        // AM (LOAD_FAILURE_NOT_FATAL) -->
+        // loadResult used to be logged and then ignored, so a failed init fell
+        // through into loadHosters() anyway. That is wrong twice over: the empty
+        // list makes loadHosters() raise "No available videos", which both hides
+        // the real reason (a 404 from a deleted entry's page, say) and used to
+        // crash the process on its way out - and on the other branch, init()'s
+        // defaultResult carries the PREVIOUS anime's hoster list, which would have
+        // been loaded under the new anime's state.
+        val failure: Throwable? = loadResult.exceptionOrNull()
+            ?: if (loadResult.getOrDefault(false)) null else IllegalStateException("Unknown error")
+        if (failure != null) {
+            if (hadLiveSession) {
+                restoreSession(snapshot)
+            } else {
+                updateUiData { it.copy(isLoadingEpisode = false, isLoadingHosters = false) }
+            }
+            reportLoadFailure(failure)
+            return
+        }
+        // <-- AM (LOAD_FAILURE_NOT_FATAL)
+
         updateUiData { it.copy(isLoadingHosters = false) }
         loadHosters(
             hosterList = initResult.hosterList ?: emptyList(),
@@ -5758,14 +5988,12 @@ class PlayerViewModel(
             if (netflixStyle) {
                 // show a toast with the seconds before the skip
                 viewModelScope.launch {
-                    _eventFlow.emit(
-                        Event.ToastString(
-                            "Skip Intro: ${context.stringResource(
-                                AYMR.strings.player_aniskip_dontskip_toast,
-                                chapter.chapterTitle,
-                                defaultWaitingTime,
-                            )}",
-                        ),
+                    showMessage(
+                        "Skip Intro: ${context.stringResource(
+                            AYMR.strings.player_aniskip_dontskip_toast,
+                            chapter.chapterTitle,
+                            defaultWaitingTime,
+                        )}",
                     )
                 }
                 updateUiData { it.copy(skipIntroText = context.stringResource(AYMR.strings.player_aniskip_dontskip)) }
@@ -5873,7 +6101,7 @@ class PlayerViewModel(
                 delay(1.seconds)
             }
             setPropertyBoolean("pause", true)
-            _eventFlow.emit(Event.ToastResource(AYMR.strings.toast_sleep_timer_ended))
+            showMessage(AYMR.strings.toast_sleep_timer_ended)
         }
     }
 

@@ -7,6 +7,7 @@ import aniyomi.domain.merge.model.MERGED_SOURCE_ID
 import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
 import aniyomi.domain.merge.model.MergeChildOrdering
 import aniyomi.domain.merge.repository.MergeChildRepository
+import aniyomi.domain.merge.repository.MergeEpisodeExclusionRepository
 import aniyomi.domain.merge.repository.MergeSettingsRepository
 import aniyomi.domain.order.model.EpisodeOrderOverride
 import aniyomi.domain.order.model.ResolvedEpisodeOrder
@@ -69,6 +70,9 @@ class GetEpisodeOrder(
     // AM (EPISODE_NAMES) -->
     private val episodeNameRepository: EpisodeNameRepository,
     // <-- AM (EPISODE_NAMES)
+    // AM (MERGE_EPISODE_EXCLUSION) -->
+    private val mergeEpisodeExclusionRepository: MergeEpisodeExclusionRepository,
+    // <-- AM (MERGE_EPISODE_EXCLUSION)
 ) {
 
     /**
@@ -119,13 +123,19 @@ class GetEpisodeOrder(
             .getEpisodesByMergeParentId(host.id, applyScanlatorFilter)
             .groupBy { it.animeId }
         // <-- AM (EPISODE_NAMES)
+        // AM (MERGE_EPISODE_EXCLUSION) -->
+        // Applied to the union, not to episodesByChild: removal is about this
+        // merge's order, and the per-source grouping still feeds the
+        // single-episode naming rule, which is about what a source offers.
+        val removed = mergeEpisodeExclusionRepository.getByHostAnimeId(host.id)
+        // <-- AM (MERGE_EPISODE_EXCLUSION)
         return resolve(
             host = host,
             default = getMergedEpisodeList.build(
                 childOrdering = childOrdering,
                 episodesByChild = episodesByChild,
                 dedupeMode = mergeSettingsRepository.get(host.id).dedupeMode,
-            ),
+            ).filterNot { it.id in removed },
             overrides = episodeOrderRepository.getByHostAnimeId(host.id),
             childOrdering = childOrdering,
             seasonRows = entrySeasonRepository.getByHostAnimeId(host.id),
@@ -181,6 +191,16 @@ class GetEpisodeOrder(
             }
         }
 
+        // AM (MERGE_EPISODE_EXCLUSION) -->
+        // Paired with the overrides rather than passed as a sixth flow: combine's
+        // typed overloads stop at five, and the array form would give up the
+        // types for every one of them.
+        val overridesAndRemovedFlow = combine(
+            overridesFlow,
+            mergeEpisodeExclusionRepository.getByHostAnimeIdAsFlow(host.id),
+        ) { overrides, removed -> overrides to removed }
+        // <-- AM (MERGE_EPISODE_EXCLUSION)
+
         return mergeChildRepository.getChildOrderingByMergeParentIdAsFlow(host.id)
             .flatMapLatest { childOrdering ->
                 if (childOrdering.isEmpty()) {
@@ -211,11 +231,12 @@ class GetEpisodeOrder(
                 // <-- AM (EPISODE_NAMES)
                 combine(
                     childEpisodes,
-                    overridesFlow,
+                    overridesAndRemovedFlow,
                     seasonRowsFlow,
                     settingsFlow,
                     namesFlow,
-                ) { episodesByChild, overrides, seasonRows, settings, customNames ->
+                ) { episodesByChild, overridesAndRemoved, seasonRows, settings, customNames ->
+                    val (overrides, removed) = overridesAndRemoved
                     resolve(
                         host = host,
                         // AM (MERGED_SOURCES) -->
@@ -226,7 +247,10 @@ class GetEpisodeOrder(
                             childOrdering = childOrdering,
                             episodesByChild = episodesByChild,
                             dedupeMode = settings.dedupeMode,
-                        ),
+                        )
+                            // AM (MERGE_EPISODE_EXCLUSION) -->
+                            .filterNot { it.id in removed },
+                        // <-- AM (MERGE_EPISODE_EXCLUSION)
                         // <-- AM (MERGED_SOURCES)
                         overrides = overrides,
                         childOrdering = childOrdering,

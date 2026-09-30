@@ -851,18 +851,26 @@ fun PlayerScreen(
                     // the way. onEnterDummyPip is null for PlayerActivity and
                     // the spike screens, and opening an entry behind a
                     // fullscreen player would look like nothing happened.
-                    onOpenEntryClicked = onEnterDummyPip?.let { enterDummyPip ->
-                        { episodeId: Long? ->
-                            val ownerId = stateData.currentPlaylist
-                                .find { it.id == episodeId }
-                                ?.anime_id
-                            if (ownerId != null) {
-                                viewModel.setDialog(Dialogs.None)
-                                enterDummyPip()
-                                OpenEntryRequests.open(ownerId)
+                    // AM (OPEN_ENTRY_MERGED_ONLY) -->
+                    // Also only on a merged entry. playlistOwnerByAnimeId is
+                    // empty for an ordinary one, where every episode already
+                    // belongs to the entry being viewed, so the button would
+                    // open the screen the list was opened from.
+                    onOpenEntryClicked = onEnterDummyPip
+                        ?.takeIf { stateData.playlistOwnerByAnimeId.isNotEmpty() }
+                        ?.let { enterDummyPip ->
+                            { episodeId: Long? ->
+                                val ownerId = stateData.currentPlaylist
+                                    .find { it.id == episodeId }
+                                    ?.anime_id
+                                if (ownerId != null) {
+                                    viewModel.setDialog(Dialogs.None)
+                                    enterDummyPip()
+                                    OpenEntryRequests.open(ownerId)
+                                }
                             }
-                        }
-                    },
+                        },
+                    // <-- AM (OPEN_ENTRY_MERGED_ONLY)
                     onOpenPlaylistEntry = onEnterDummyPip?.let { enterDummyPip ->
                         {
                             // The playlist's own entry, so on a merged entry
