@@ -1,7 +1,10 @@
 // AM (EPISODE_NAMES) -->
 package eu.kanade.presentation.anime.components
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.Icons
@@ -15,10 +18,13 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -67,6 +73,8 @@ fun RenameEpisodeDialog(
     var name by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(currentName))
     }
+    var isFocused by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
     // <-- AM (RENAME_SELECTS_ALL)
     AlertDialog(
         onDismissRequest = onDismissRequest,
@@ -142,18 +150,40 @@ fun RenameEpisodeDialog(
         },
         // <-- AM (TAG_LIMIT)
         text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                singleLine = true,
-                label = { Text(text = stringResource(AMMR.strings.am_rename_episode_hint)) },
-                // AM (RENAME_SELECTS_ALL)
-                modifier = Modifier.onFocusChanged { focus ->
-                    if (focus.isFocused) {
-                        name = name.copy(selection = TextRange(0, name.text.length))
-                    }
-                },
-            )
+            // AM (RENAME_SELECTS_ALL) -->
+            // The first tap is taken by the overlay rather than the field. Doing
+            // this from onFocusChanged did not work: the same tap that focuses a
+            // text field also places the caret where it landed, and that runs
+            // after the focus callback, so the selection was set and then
+            // immediately replaced by a cursor. Swallowing the tap means no
+            // caret is ever placed - the overlay selects everything and asks for
+            // focus itself. Once focused the overlay is gone, so tapping again
+            // moves the caret as normal.
+            Box {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text(text = stringResource(AMMR.strings.am_rename_episode_hint)) },
+                    modifier = Modifier
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { isFocused = it.isFocused },
+                )
+                if (!isFocused) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) {
+                                name = name.copy(selection = TextRange(0, name.text.length))
+                                focusRequester.requestFocus()
+                            },
+                    )
+                }
+            }
+            // <-- AM (RENAME_SELECTS_ALL)
         },
     )
 }
