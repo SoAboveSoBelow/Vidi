@@ -818,6 +818,19 @@ fun PlayerScreen(
                     modifier = Modifier,
                 )
 
+                // AM (PLAYER_ADD_TO_LIBRARY) -->
+                // Shared exit for the add-to-library dialogs' off-player
+                // actions - same steps as onOpenPlaylistEntry below.
+                val leavePlayerForEntry: (Long) -> Unit = { animeId ->
+                    onEnterDummyPip?.let { enterDummyPip ->
+                        viewModel.setDialog(Dialogs.None)
+                        enterDummyPip()
+                        OpenEntryRequests.open(animeId)
+                    }
+                    Unit
+                }
+                // <-- AM (PLAYER_ADD_TO_LIBRARY)
+
                 // Dialogs
                 PlayerDialogs(
                     dialogShown = uiData.dialogShown,
@@ -885,6 +898,35 @@ fun PlayerScreen(
                         }
                     },
                     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+                    // AM (PLAYER_ADD_TO_LIBRARY) -->
+                    isFavorited = stateData.currentAnime?.favorite == true,
+                    onAddToLibrary = { viewModel.toggleCurrentAnimeFavorite() },
+                    onAddToLibraryAnyway = {
+                        viewModel.setDialog(Dialogs.None)
+                        viewModel.toggleCurrentAnimeFavorite(checkDuplicate = false)
+                    },
+                    // The three actions that cannot be finished over a player.
+                    // Migration needs MigrateAnimeDialog, which is an extension
+                    // on a Voyager Screen and pushes a season-select screen of
+                    // its own, and editing categories needs CategoryScreen; both
+                    // live where the navigator does. So each leaves the player
+                    // the way the episode list's open-entry button does and lands
+                    // on an entry screen that has them - the duplicate for
+                    // "Show entry" and "Migrate", the playlist's own entry for
+                    // "Edit categories". Nothing happens where that exit does
+                    // not exist (PlayerActivity, the spikes), as with that
+                    // button.
+                    onOpenAnime = { anime -> leavePlayerForEntry(anime.id) },
+                    onMigrate = { anime -> leavePlayerForEntry(anime.id) },
+                    onEditCategories = {
+                        stateData.currentAnime?.id?.let { leavePlayerForEntry(it) }
+                    },
+                    onConfirmCategories = { anime, categoryIds ->
+                        viewModel.setDialog(Dialogs.None)
+                        viewModel.applyFavoriteCategories(anime, categoryIds)
+                    },
+                    onDeleteDownloads = viewModel::deleteDownloadsOf,
+                    // <-- AM (PLAYER_ADD_TO_LIBRARY)
                     onDismissRequest = { viewModel.setDialog(Dialogs.None) },
                 )
 

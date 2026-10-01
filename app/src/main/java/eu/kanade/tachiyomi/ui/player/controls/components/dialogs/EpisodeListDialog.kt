@@ -12,13 +12,16 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.NewLabel
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
@@ -44,6 +47,7 @@ import eu.kanade.presentation.util.formatEpisodeNumber
 import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.ui.player.PlaylistSearchScope
 import eu.kanade.tachiyomi.ui.player.components.EpisodeListItem
+import eu.kanade.tachiyomi.ui.player.components.rememberEpisodeMarks
 import eu.kanade.tachiyomi.util.lang.toRelativeString
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -92,6 +96,11 @@ fun EpisodeListDialog(
     onOpenEntryClicked: ((Long?) -> Unit)?,
     /** Opens the entry this playlist belongs to - the merge parent, or the entry itself. */
     onOpenPlaylistEntry: (() -> Unit)?,
+    // AM (PLAYER_ADD_TO_LIBRARY) -->
+    /** Whether the playlist's entry is already in the library. */
+    isFavorited: Boolean,
+    onAddToLibrary: () -> Unit,
+    // <-- AM (PLAYER_ADD_TO_LIBRARY)
     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
     onDismissRequest: () -> Unit,
 ) {
@@ -160,6 +169,16 @@ fun EpisodeListDialog(
         .indexOfFirst { it.id != null && it.id == currentEpisodeId }
         .coerceAtLeast(0)
     // <-- AM (NOW_PLAYING_INDICATOR)
+    // AM (PLAYER_MARK_BADGES) -->
+    // Marking goes through this rather than straight to the callbacks, so rows
+    // redraw when the selection bar marks several at once - the playlist itself
+    // is not refetched while the player lives, so nothing else would tell them.
+    val marks = rememberEpisodeMarks(
+        episodes = episodeList,
+        onBookmarkClicked = onBookmarkClicked,
+        onFillermarkClicked = onFillermarkClicked,
+    )
+    // <-- AM (PLAYER_MARK_BADGES)
     val episodeListState = rememberLazyListState(initialFirstVisibleItemIndex = itemScrollIndex)
     val dateFormatter = remember(dateFormat) { UiPreferences.dateFormat(dateFormat) }
 
@@ -182,14 +201,17 @@ fun EpisodeListDialog(
                     // Offered only when it would change something: with every
                     // selected episode already bookmarked there is nothing for
                     // the add action to do, and the same in reverse.
-                    onBookmark = { selectedEpisodes.forEach { onBookmarkClicked(it.id, true) } }
-                        .takeIf { selectedEpisodes.any { !it.bookmark } },
-                    onRemoveBookmark = { selectedEpisodes.forEach { onBookmarkClicked(it.id, false) } }
-                        .takeIf { selectedEpisodes.any { it.bookmark } },
-                    onFillermark = { selectedEpisodes.forEach { onFillermarkClicked(it.id, true) } }
-                        .takeIf { selectedEpisodes.any { !it.fillermark } },
-                    onRemoveFillermark = { selectedEpisodes.forEach { onFillermarkClicked(it.id, false) } }
-                        .takeIf { selectedEpisodes.any { it.fillermark } },
+                    // AM (PLAYER_MARK_BADGES): through the mark state, and the
+                    // offered-only-when-useful checks read from it too, so they
+                    // follow what the bar itself has just done.
+                    onBookmark = { selectedEpisodes.forEach { marks.setBookmark(it.id, true) } }
+                        .takeIf { selectedEpisodes.any { !marks.marksOf(it).bookmarked } },
+                    onRemoveBookmark = { selectedEpisodes.forEach { marks.setBookmark(it.id, false) } }
+                        .takeIf { selectedEpisodes.any { marks.marksOf(it).bookmarked } },
+                    onFillermark = { selectedEpisodes.forEach { marks.setFillermark(it.id, true) } }
+                        .takeIf { selectedEpisodes.any { !marks.marksOf(it).fillermarked } },
+                    onRemoveFillermark = { selectedEpisodes.forEach { marks.setFillermark(it.id, false) } }
+                        .takeIf { selectedEpisodes.any { marks.marksOf(it).fillermarked } },
                     onClearSelection = { selectedIds = emptySet() },
                 )
             } else {
@@ -214,6 +236,9 @@ fun EpisodeListDialog(
                     },
                     // <-- AM (PLAYLIST_SEARCH_SCOPE)
                     onOpenPlaylistEntry = onOpenPlaylistEntry,
+                    // AM (PLAYER_ADD_TO_LIBRARY)
+                    isFavorited = isFavorited,
+                    onAddToLibrary = onAddToLibrary,
                 )
             }
             // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
@@ -260,13 +285,20 @@ fun EpisodeListDialog(
                                 )
                         } ?: ""
 
+                    // AM (PLAYER_MARK_BADGES)
+                    val episodeMarks = marks.marksOf(episode)
+
                     EpisodeListItem(
                         episode = episode,
                         isCurrentEpisode = isCurrentEpisode,
                         title = title,
                         date = date,
-                        onBookmarkClicked = onBookmarkClicked,
-                        onFillermarkClicked = onFillermarkClicked,
+                        // AM (PLAYER_MARK_BADGES) -->
+                        isBookmarked = episodeMarks.bookmarked,
+                        isFillermarked = episodeMarks.fillermarked,
+                        onBookmarkClicked = marks::setBookmark,
+                        onFillermarkClicked = marks::setFillermark,
+                        // <-- AM (PLAYER_MARK_BADGES)
                         // AM (PLAYER_EPISODE_LIST_SELECTION) -->
                         onEpisodeClicked = { id ->
                             when {
@@ -318,6 +350,10 @@ private fun EpisodeListDialogHeader(
     searchQuery: String,
     onChangeSearchQuery: (String) -> Unit,
     onOpenPlaylistEntry: (() -> Unit)?,
+    // AM (PLAYER_ADD_TO_LIBRARY) -->
+    isFavorited: Boolean,
+    onAddToLibrary: () -> Unit,
+    // <-- AM (PLAYER_ADD_TO_LIBRARY)
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -397,6 +433,22 @@ private fun EpisodeListDialogHeader(
                 )
             }
         }
+
+        // AM (PLAYER_ADD_TO_LIBRARY) -->
+        // The entry screen's heart, same filled/outlined pair and the same
+        // behaviour: it opens the categories dialog, whose checked set decides
+        // whether the entry is in the library. Live in both states - a filled
+        // heart is how an entry gets taken back out.
+        IconButton(onClick = onAddToLibrary) {
+            Icon(
+                imageVector = if (isFavorited) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                contentDescription = stringResource(
+                    if (isFavorited) MR.strings.in_library else MR.strings.add_to_library,
+                ),
+                tint = if (isFavorited) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+            )
+        }
+        // <-- AM (PLAYER_ADD_TO_LIBRARY)
     }
 }
 // <-- AM (ALWAYS_OPEN_EPISODE_SEARCH)

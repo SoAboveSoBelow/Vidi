@@ -318,9 +318,17 @@ fun ExpandableAnimeDescription(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
+        // AM (DESCRIPTION_EXPAND) -->
+        // The setting only ever collapses: [defaultExpandState] still decides
+        // when descriptions DO open expanded (from a source's browse list, and
+        // always in the two-pane layout), so leaving the setting on keeps the
+        // behaviour that predates it.
+        val context = LocalContext.current
+        val expandOnOpen = remember { context.appGraph.uiPreferences.expandDescriptionOnOpen.get() }
         val (expanded, onExpanded) = rememberSaveable {
-            mutableStateOf(defaultExpandState)
+            mutableStateOf(defaultExpandState && expandOnOpen)
         }
+        // <-- AM (DESCRIPTION_EXPAND)
         val desc =
             description.takeIf { !it.isNullOrBlank() } ?: stringResource(MR.strings.description_placeholder)
 

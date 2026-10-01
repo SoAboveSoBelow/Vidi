@@ -25,12 +25,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
@@ -53,8 +55,11 @@ import eu.kanade.tachiyomi.ui.player.loader.HosterLoader
 import kotlinx.coroutines.launch
 import logcat.LogPriority
 import mihon.app.di.appGraph
+import eu.kanade.tachiyomi.core.security.SecurityPreferences
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.interactor.GetAnime
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.domain.anime.model.asAnimeCover
 import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.source.service.SourceManager
@@ -123,6 +128,9 @@ class PlayerMediaHolder(
     private val getEpisode: GetEpisode = context.appGraph.getEpisode,
     private val sourceManager: SourceManager = context.appGraph.sourceManager,
     private val playerPreferences: PlayerPreferences = context.appGraph.playerPreferences,
+    // AM (HIDE_NOTIFICATION_CONTENT) -->
+    private val securityPreferences: SecurityPreferences = context.appGraph.securityPreferences,
+    // <-- AM (HIDE_NOTIFICATION_CONTENT)
     private val coverManager: LocalCoverManager = context.appGraph.coverManager,
     private val episodeThumbnailManager: LocalEpisodeThumbnailManager = context.appGraph.episodeThumbnailManager,
     // <-- AM (BACKGROUND_SKIP_FIX)
@@ -219,6 +227,10 @@ class PlayerMediaHolder(
 
     // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
     companion object {
+        // AM (PLAYLIST_PROGRESS)
+        /** How often [livePositionMs] samples mpv. One second: it feeds a mm:ss label. */
+        private const val POSITION_SAMPLE_INTERVAL_MS = 1_000L
+
         // AM (NOW_PLAYING_INDICATOR) -->
         // Backing StateFlow so UI (e.g. the episode list) can react to a holder
         // being created/released, not just read the value once. [current] stays
@@ -487,6 +499,34 @@ class PlayerMediaHolder(
     private val _state = MutableStateFlow(PlayerMediaState())
     val state = _state.asStateFlow()
 
+    // AM (PLAYLIST_PROGRESS) -->
+    /**
+     * Live playback position, sampled once a second, for UI that wants to follow
+     * playback as it happens.
+     *
+     * Neither existing source is fast enough for that: the database is written
+     * on a 5s cadence (PlayerViewModel's PERSIST_ON_CADENCE - a save is a read,
+     * an episode update and a history upsert, which is why it is not per tick),
+     * and [state]'s own positionMs comes from the 15s MediaSession timer plus
+     * pause/restart events, which is all the system media controls need since
+     * they extrapolate between pushes.
+     *
+     * Deliberately separate from [state] rather than ticking that every second:
+     * state changes drive the MediaSession PlaybackState pushes, and this is a
+     * display concern with no business adding traffic there. Cold and
+     * self-contained - nothing samples while nothing collects, and each sample
+     * is one mpv property read - so a screen that shows progress pays for it
+     * only while it is on screen.
+     */
+    val livePositionMs: Flow<Long> = flow {
+        while (true) {
+            val seconds = runCatching { _player?.mpv?.getPropertyInt("time-pos") }.getOrNull()
+            if (seconds != null) emit(seconds.toLong() * 1000L)
+            delay(POSITION_SAMPLE_INTERVAL_MS)
+        }
+    }
+    // <-- AM (PLAYLIST_PROGRESS)
+
     // AM (LIVE_POSITION_TRACKING) -->
     // Scoped to this holder, not any PlayerViewModel - cancelled in release() and
     // replaced with a fresh one on the next real adopt(). PlayerViewModel's own
@@ -734,12 +774,34 @@ class PlayerMediaHolder(
                 // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
                 if (current.resolvedEpisodeKey != (current.animeId to current.episodeId)) return
                 if (current.animeTitle.isNotEmpty() || current.episodeTitle.isNotEmpty()) {
+                    // AM (HIDE_NOTIFICATION_CONTENT) -->
+                    // What the system media controls show - the shade's media card,
+                    // the lock screen, Bluetooth head units - comes from here, not
+                    // from the Service's notification text, so hiding notification
+                    // content has to redact this too or the episode name and
+                    // thumbnail stay on the lock screen. Read per push so toggling
+                    // the setting mid-playback takes effect on the next one.
+                    // Duration stays: it is a length, not content, and the controls
+                    // need it for their progress bar.
+                    val hideContent = securityPreferences.hideNotificationContent.get()
+                    // <-- AM (HIDE_NOTIFICATION_CONTENT)
                     val artworkForCurrentEpisode = lastArtwork
                         .takeIf { lastArtworkKey == (current.animeId to current.episodeId) }
+                        .takeUnless { hideContent }
                     mediaSession?.setMetadata(
                         MediaMetadata.Builder()
-                            .putString(MediaMetadata.METADATA_KEY_TITLE, current.episodeTitle)
-                            .putString(MediaMetadata.METADATA_KEY_ARTIST, current.animeTitle)
+                            .putString(
+                                MediaMetadata.METADATA_KEY_TITLE,
+                                if (hideContent) {
+                                    context.stringResource(AMMR.strings.player_background_playback_channel)
+                                } else {
+                                    current.episodeTitle
+                                },
+                            )
+                            .putString(
+                                MediaMetadata.METADATA_KEY_ARTIST,
+                                if (hideContent) "" else current.animeTitle,
+                            )
                             .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs.toLong())
                             .apply {
                                 if (artworkForCurrentEpisode != null) {

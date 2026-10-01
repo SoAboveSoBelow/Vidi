@@ -14,14 +14,19 @@ import tachiyomi.domain.episode.repository.EpisodeRepository
  * Builds the combined episode list for a merged entry.
  *
  * Every episode of every child is kept - nothing is collapsed or deduped by
- * episode number: merging a 10-episode entry with a 20-episode entry yields
- * 30 episodes. Ordering is the watch order: children are grouped by their
- * internal season (`merge_children.season_number` - a single shared season,
- * [MERGE_DEFAULT_SEASON_NUMBER], by default; splitting children into separate
- * seasons is a later UI feature), seasons are laid out ascending, and within
- * a season children follow merge order (`merge_children.priority`) with each
- * child's episodes sorted by episode number. The player consumes this order
- * as-is and the detail screen preserves it.
+ * episode number unless a dedupe mode asks for it: merging a 10-episode entry
+ * with a 20-episode entry yields 30 episodes. Ordering is the watch order:
+ * children are grouped by their internal season
+ * (`merge_children.season_number` - a single shared season,
+ * [MERGE_DEFAULT_SEASON_NUMBER], by default), seasons are laid out ascending,
+ * and within a season each child gets a BLOCK of its own in merge order
+ * (`merge_children.priority`), its episodes sorted by episode number inside
+ * it. So reordering the sources in merge settings reorders their episodes with
+ * them. The player consumes this order as-is and the detail screen preserves
+ * it.
+ *
+ * This is the same layout GetEpisodeOrder's banded default keys describe, and
+ * the two must stay in step - see its defaultSortKey.
  *
  * Children with no episodes (or the whole entry having no children) are
  * ordinary results, not error states - see [await]'s empty-list return.
@@ -78,11 +83,11 @@ class GetMergedEpisodeList(
                 dedupe(episodesByPriority, dedupeMode)
                     // <-- AM (MERGE_SETTINGS)
                     // AM (CUSTOM_EPISODE_ORDER) -->
-                    // Sources interleave by number within the season (A1, B1,
-                    // A2...), priority then id breaking ties - exactly
-                    // GetEpisodeOrder's canonical order, so the first override
-                    // never reshuffles untouched episodes.
-                    .sortedWith(compareBy({ it.second.episodeNumber }, { it.first }, { it.second.id }))
+                    // Each source in a block of its own, in merge order, its
+                    // episodes by number inside it - exactly what
+                    // GetEpisodeOrder's banded default keys describe, so the
+                    // first override never reshuffles untouched episodes.
+                    .sortedWith(compareBy({ it.first }, { it.second.episodeNumber }, { it.second.id }))
                     .map { it.second }
                 // <-- AM (CUSTOM_EPISODE_ORDER)
             }

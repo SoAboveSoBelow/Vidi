@@ -47,6 +47,16 @@ class UiPreferences(
 
     val imagesInDescription: Preference<Boolean> = preferenceStore.getBoolean("pref_render_images_description", true)
 
+    // AM (DESCRIPTION_EXPAND) -->
+    /**
+     * Whether an entry's description starts expanded. On by default, which is
+     * the behaviour that predates the setting: off makes every entry open with
+     * the description collapsed, wherever it was opened from.
+     */
+    val expandDescriptionOnOpen: Preference<Boolean> =
+        preferenceStore.getBoolean("pref_expand_description_on_open", true)
+    // <-- AM (DESCRIPTION_EXPAND)
+
     companion object {
         fun dateFormat(format: String): DateTimeFormatter = when (format) {
             "" -> DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT)

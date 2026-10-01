@@ -11,6 +11,7 @@ import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.util.formatEpisodeNumber
 import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.ui.player.components.EpisodeListItem
+import eu.kanade.tachiyomi.ui.player.components.rememberEpisodeMarks
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.GenericTracksSheet
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.TrackSheetTitle
 import eu.kanade.tachiyomi.util.lang.toRelativeString
@@ -37,6 +38,14 @@ fun CastPlaylistSheet(
     val context = LocalContext.current
 
     val dateFormatter = remember(dateFormat) { UiPreferences.dateFormat(dateFormat) }
+
+    // AM (PLAYER_MARK_BADGES): same reason as the player's own episode list -
+    // nothing here is told when a mark is written.
+    val marks = rememberEpisodeMarks(
+        episodes = episodeList,
+        onBookmarkClicked = onBookmarkClicked,
+        onFillermarkClicked = onFillermarkClicked,
+    )
 
     GenericTracksSheet(
         tracks = episodeList,
@@ -66,13 +75,20 @@ fun CastPlaylistSheet(
                         )
                 } ?: ""
 
+            // AM (PLAYER_MARK_BADGES)
+            val episodeMarks = marks.marksOf(episode)
+
             EpisodeListItem(
                 episode = episode,
                 isCurrentEpisode = isCurrentEpisode,
                 title = title,
                 date = date,
-                onBookmarkClicked = onBookmarkClicked,
-                onFillermarkClicked = onFillermarkClicked,
+                // AM (PLAYER_MARK_BADGES) -->
+                isBookmarked = episodeMarks.bookmarked,
+                isFillermarked = episodeMarks.fillermarked,
+                onBookmarkClicked = marks::setBookmark,
+                onFillermarkClicked = marks::setFillermark,
+                // <-- AM (PLAYER_MARK_BADGES)
                 onEpisodeClicked = onEpisodeClicked,
             )
         },

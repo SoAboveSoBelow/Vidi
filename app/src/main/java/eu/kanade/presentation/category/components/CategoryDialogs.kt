@@ -30,6 +30,7 @@ import eu.kanade.presentation.category.visualName
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.domain.category.model.Category
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 
@@ -185,6 +186,12 @@ fun CategoryDeleteDialog(
     )
 }
 
+// AM (CATEGORY_DIALOG_CLEAR)
+private fun <T> uncheck(state: CheckboxState<T>): CheckboxState<T> = when (state) {
+    is CheckboxState.State -> CheckboxState.State.None(state.value)
+    is CheckboxState.TriState -> CheckboxState.TriState.None(state.value)
+}
+
 @Composable
 fun ChangeCategoryDialog(
     initialSelection: List<CheckboxState<Category>>,
@@ -219,12 +226,17 @@ fun ChangeCategoryDialog(
         onDismissRequest = onDismissRequest,
         confirmButton = {
             Row {
-                tachiyomi.presentation.core.components.material.TextButton(onClick = {
-                    onDismissRequest()
-                    onEditCategories()
-                }) {
-                    Text(text = stringResource(MR.strings.action_edit))
+                // AM (CATEGORY_DIALOG_CLEAR) -->
+                // Where Edit used to be, which has moved up beside the title.
+                // Only unchecks - it neither saves nor closes, so clearing and
+                // then cancelling leaves the entry as it was.
+                tachiyomi.presentation.core.components.material.TextButton(
+                    onClick = { selection = selection.map { state -> uncheck(state) } },
+                    enabled = selection.any { it !is CheckboxState.State.None && it !is CheckboxState.TriState.None },
+                ) {
+                    Text(text = stringResource(AMMR.strings.am_action_clear_selection))
                 }
+                // <-- AM (CATEGORY_DIALOG_CLEAR)
                 Spacer(modifier = Modifier.weight(1f))
                 tachiyomi.presentation.core.components.material.TextButton(onClick = onDismissRequest) {
                     Text(text = stringResource(MR.strings.action_cancel))
@@ -247,7 +259,26 @@ fun ChangeCategoryDialog(
             }
         },
         title = {
-            Text(text = stringResource(MR.strings.action_move_category))
+            // AM (CATEGORY_DIALOG_CLEAR) -->
+            // Edit sits here now, at the top right, out of the way of the
+            // buttons that act on this dialog's own selection. The title says
+            // what the dialog is rather than what it does, since it no longer
+            // only sets.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = stringResource(MR.strings.categories),
+                    modifier = Modifier.weight(1f),
+                )
+                tachiyomi.presentation.core.components.material.TextButton(
+                    onClick = {
+                        onDismissRequest()
+                        onEditCategories()
+                    },
+                ) {
+                    Text(text = stringResource(MR.strings.action_edit))
+                }
+            }
+            // <-- AM (CATEGORY_DIALOG_CLEAR)
         },
         text = {
             Column(

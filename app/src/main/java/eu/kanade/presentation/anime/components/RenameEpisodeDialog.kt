@@ -13,12 +13,18 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.i18n.stringResource
@@ -51,7 +57,19 @@ fun RenameEpisodeDialog(
     onRemoveFromMerge: (() -> Unit)?,
     // <-- AM (MERGE_EPISODE_EXCLUSION)
 ) {
-    var name by rememberSaveable { mutableStateOf(currentName) }
+    // AM (RENAME_SELECTS_ALL) -->
+    // Opens with the whole name selected and the field focused, so typing
+    // replaces it - renaming an episode is almost always writing a new name
+    // rather than editing the source's, and clearing it by hand first was the
+    // common first move.
+    var name by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(
+            TextFieldValue(currentName, selection = TextRange(0, currentName.length)),
+        )
+    }
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    // <-- AM (RENAME_SELECTS_ALL)
     AlertDialog(
         onDismissRequest = onDismissRequest,
         // AM (TAG_LIMIT) -->
@@ -80,7 +98,8 @@ fun RenameEpisodeDialog(
                     TextButton(
                         onClick = {
                             onDismissRequest()
-                            onConfirm(name)
+                            // AM (RENAME_SELECTS_ALL)
+                            onConfirm(name.text)
                         },
                     ) {
                         Text(text = stringResource(MR.strings.action_ok))
@@ -130,6 +149,8 @@ fun RenameEpisodeDialog(
                 onValueChange = { name = it },
                 singleLine = true,
                 label = { Text(text = stringResource(AMMR.strings.am_rename_episode_hint)) },
+                // AM (RENAME_SELECTS_ALL)
+                modifier = Modifier.focusRequester(focusRequester),
             )
         },
     )

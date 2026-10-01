@@ -33,7 +33,10 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import aniyomi.domain.merge.model.DedupeMode
 import aniyomi.domain.merge.model.RemovedMergeEpisode
 import aniyomi.domain.season.model.EntrySeason
+import aniyomi.domain.season.model.isProvisionalSeason
+import aniyomi.domain.season.model.provisionalSeasonNumber
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import eu.kanade.presentation.anime.season.ChangeSeasonDialog
 import eu.kanade.presentation.theme.colorscheme.AndroidViewColorScheme
 import eu.kanade.tachiyomi.databinding.MergeSettingsDialogBinding
 import eu.kanade.tachiyomi.ui.anime.AnimeViewModel
@@ -63,7 +66,28 @@ class MergeSettingsState(
 
     private var seasonByChild: Map<Long, Long> = emptyMap()
 
-    fun canMove(): Boolean = dedupeMode == DedupeMode.PRIORITY
+    // AM (NAMED_SEASONS) -->
+    /**
+     * Seasons the quick-add staged for creation, in the order they were staged,
+     * carrying [provisionalSeasonNumber]s until Save turns them into real rows.
+     * Staged rather than created on tap so Cancel discards them along with every
+     * other edit in this dialog.
+     */
+    private var pendingSeasons: List<EntrySeason> by mutableStateOf(emptyList())
+
+    /** The real seasons plus the staged ones - what the picker shows. */
+    val shownSeasons: List<EntrySeason> get() = seasons + pendingSeasons
+
+    /** The season [childId] is currently pointed at, staged or saved. */
+    fun stagedSeasonOf(childId: Long): Long? = seasonByChild[childId]
+
+    /** The source [childId] belongs to, for the picker's title. */
+    fun sourceNameOf(childId: Long): String? = sources.firstOrNull { it.anime.id == childId }?.sourceName
+    // <-- AM (NAMED_SEASONS)
+
+    // AM: reordering is always available - merge order is the block order of
+    // the sources' episodes, not just the dedupe tiebreak. See
+    // GetEpisodeOrder.defaultSortKey.
 
     fun onViewCreated(
         context: Context,
@@ -77,12 +101,12 @@ class MergeSettingsState(
         infoAnimeId = dialog.infoAnimeId
         seasonByChild = dialog.sources.associate { it.anime.id to it.seasonNumber }
 
-        val adapter = MergeSettingsAdapter(this, canMove(), colorScheme, seasons)
+        val adapter = MergeSettingsAdapter(this, colorScheme, shownSeasons)
         this.adapter = adapter
-        headerAdapter = MergeSettingsHeaderAdapter(this, adapter, colorScheme)
+        headerAdapter = MergeSettingsHeaderAdapter(this, colorScheme)
         binding.recycler.adapter = ConcatAdapter(headerAdapter, adapter)
         binding.recycler.layoutManager = LinearLayoutManager(context)
-        adapter.isHandleDragEnabled = canMove()
+        adapter.isHandleDragEnabled = true
         adapter.updateDataSet(sources.map { MergeSettingsItem(it) })
     }
 
@@ -106,12 +130,76 @@ class MergeSettingsState(
             .show()
     }
 
-    override fun onSeasonSelected(position: Int, seasonNumber: Long) {
-        val source = adapter?.currentItems?.getOrNull(position)?.source ?: return
-        seasonByChild = seasonByChild + (source.anime.id to seasonNumber)
+    // AM (NAMED_SEASONS) -->
+    /**
+     * The row whose season dialog is open, by child anime id, or null for none.
+     * The dialog is Compose while the row is a RecyclerView item, so the row
+     * asks for it and the composable renders it from here.
+     */
+    var seasonPickerChildId: Long? by mutableStateOf(null)
+        private set
+
+    override fun onSeasonPickerClick(position: Int) {
+        seasonPickerChildId = adapter?.currentItems?.getOrNull(position)?.source?.anime?.id
     }
 
-    override fun onEditSeasonsClick() = onEditSeasonsClick.invoke()
+    fun dismissSeasonPicker() {
+        seasonPickerChildId = null
+    }
+
+    /** Stages [seasonNumber] for [childId] - written by Save, like every edit here. */
+    fun onSeasonPicked(childId: Long, seasonNumber: Long) {
+        seasonByChild = seasonByChild + (childId to seasonNumber)
+        dropUnusedPendingSeasons()
+        // The row shows its season on a button, so it has to be rebound even
+        // when the season list itself did not change.
+        adapter?.updateSeasons(shownSeasons)
+    }
+
+    /**
+     * Stages the offered next season for [childId]. It gets a provisional
+     * number until Save creates it, so Cancel discards it with everything else.
+     */
+    fun onNextSeasonPicked(childId: Long) {
+        val number = provisionalSeasonNumber(pendingSeasons.size)
+        pendingSeasons = pendingSeasons + EntrySeason(number = number, name = null, sortOrder = null)
+        onSeasonPicked(childId, number)
+    }
+    // <-- AM (NAMED_SEASONS)
+
+    // AM (NAMED_SEASONS) -->
+    /**
+     * Forgets the staged seasons no source points at any more - the user picked
+     * the offered season for a row and then picked something else for it, so the
+     * season was never wanted. Save already skips creating them; this is what
+     * takes them out of the pickers, which would otherwise keep listing a
+     * season that is not going to exist and offer the one after it.
+     *
+     * The survivors are renumbered so provisional numbers stay -1, -2, ... in
+     * staged order: the pickers label them by position, and Save creates them in
+     * that order.
+     */
+    private fun dropUnusedPendingSeasons() {
+        if (pendingSeasons.isEmpty()) return
+        val used = seasonByChild.values.filterTo(HashSet()) { it.isProvisionalSeason() }
+        val kept = pendingSeasons.filter { it.number in used }
+        if (kept.size == pendingSeasons.size) return
+        val renumbered = kept.mapIndexed { index, season ->
+            season.copy(number = provisionalSeasonNumber(index))
+        }
+        val remapped = kept.map { it.number }.zip(renumbered.map { it.number }).toMap()
+        pendingSeasons = renumbered
+        seasonByChild = seasonByChild.mapValues { (_, number) -> remapped[number] ?: number }
+        adapter?.updateSeasons(shownSeasons)
+    }
+
+    /** Seasons added in the season manager while this dialog stayed open. */
+    fun onSeasonsRefreshed(refreshed: List<EntrySeason>) {
+        if (refreshed == seasons) return
+        seasons = refreshed
+        adapter?.updateSeasons(shownSeasons)
+    }
+    // <-- AM (NAMED_SEASONS)
 
     override fun seasonOf(position: Int): Long? {
         val source = adapter?.currentItems?.getOrNull(position)?.source ?: return null
@@ -188,6 +276,10 @@ fun MergeSettingsDialog(
                         state.onViewCreated(factoryContext, binding, dialog, colorScheme)
                         binding.root
                     },
+                    // AM (NAMED_SEASONS): onViewCreated runs once, so without
+                    // this the adapter keeps the season list the dialog opened
+                    // with and never sees one added in the season manager.
+                    update = { state.onSeasonsRefreshed(dialog.seasons) },
                     modifier = Modifier.fillMaxWidth(),
                 )
 
@@ -218,6 +310,25 @@ fun MergeSettingsDialog(
             usePlatformDefaultWidth = true,
         ),
     )
+
+    // AM (NAMED_SEASONS) -->
+    // The row's season picker, over this dialog rather than inside the
+    // RecyclerView - the same dialog reorder mode uses. Its picks are staged
+    // like every other edit here, so it has no Save of its own.
+    val pickerChildId = state.seasonPickerChildId
+    if (pickerChildId != null) {
+        ChangeSeasonDialog(
+            seasons = state.shownSeasons,
+            selectedSeason = state.stagedSeasonOf(pickerChildId),
+            title = state.sourceNameOf(pickerChildId)
+                ?: stringResource(AMMR.strings.am_action_change_episode_season),
+            onSeasonSelected = { state.onSeasonPicked(pickerChildId, it) },
+            onCreateNextSeason = { state.onNextSeasonPicked(pickerChildId) },
+            onEditSeasons = onEditSeasonsClick,
+            onDismissRequest = state::dismissSeasonPicker,
+        )
+    }
+    // <-- AM (NAMED_SEASONS)
 }
 // <-- AM (MERGE_SETTINGS)
 

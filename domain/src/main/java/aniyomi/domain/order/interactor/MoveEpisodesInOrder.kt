@@ -166,9 +166,11 @@ class MoveEpisodesInOrder(
 
     companion object {
         /**
-         * Smallest gap a drop may subdivide. Keys are episode numbers, where a
-         * Double resolves far below this, so it leaves a wide safety margin
-         * while allowing ~20 drops into one gap before a renormalize.
+         * Smallest gap a drop may subdivide. Keys are episode numbers, banded
+         * by merge position for a merged entry, so the largest of them is a few
+         * million - where a Double still resolves far below this. That leaves a
+         * wide safety margin while allowing ~20 drops into one gap before a
+         * renormalize.
          */
         private const val MIN_GAP = 1e-6
 

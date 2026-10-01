@@ -48,8 +48,8 @@ import tachiyomi.domain.episode.repository.EpisodeRepository
  *
  * Override keys sit in the same space as the default keys rather than being
  * list indices, which is what lets them stay sparse: [defaultSortKey] is built
- * from values that survive new episodes arriving (an episode's `sourceOrder`,
- * and for a merged host the owning child's merge priority), so an override
+ * from values that survive new episodes arriving (an episode's number, and for
+ * a merged host the owning child's position in merge order), so an override
  * written today still means the same thing after the next library update.
  *
  * Display concerns stay out of here. The stored order is the ascending watch
@@ -104,7 +104,9 @@ class GetEpisodeOrder(
                 seasonRows = entrySeasonRepository.getByHostAnimeId(host.id),
                 // AM (EPISODE_NAMES) -->
                 episodesByChild = mapOf(host.id to episodes),
-                childTitles = emptyMap(),
+                // AM (EPISODE_NAMES): its own title, for the single-episode rule
+                // below - an ordinary entry is its own only source.
+                childTitles = mapOf(host.id to host.title),
                 customNames = episodeNameRepository.getByAnimeIds(listOf(host.id)),
                 // <-- AM (EPISODE_NAMES)
             )
@@ -184,7 +186,8 @@ class GetEpisodeOrder(
                     childOrdering = emptyList(),
                     seasonRows = seasonRows,
                     episodesByChild = mapOf(host.id to episodes),
-                    childTitles = emptyMap(),
+                    // AM (EPISODE_NAMES): as above - its own title.
+                    childTitles = mapOf(host.id to host.title),
                     customNames = customNames,
                 )
                 // <-- AM (EPISODE_NAMES)
@@ -302,7 +305,14 @@ class GetEpisodeOrder(
         val seasonById = default.associate {
             it.id to (overrideById[it.id]?.seasonNumber ?: defaultSeasonById.getValue(it.id))
         }
-        val defaultSortKeyById = default.associate { it.id to defaultSortKey(it) }
+        // AM (MERGE_SETTINGS): a merged entry's default keys are banded by the
+        // source's position in merge order, so its episodes list in per-source
+        // blocks. Empty for an ordinary entry, whose keys are bare numbers.
+        val blockByChild = childOrdering
+            .sortedBy { it.priority }
+            .withIndex()
+            .associate { (block, child) -> child.animeId to block }
+        val defaultSortKeyById = default.associate { it.id to defaultSortKey(it, blockByChild) }
         val priorityById = default.associate { it.id to (orderingByChildId[it.animeId]?.priority ?: 0L) }
         val sortKeyById = default.associate {
             it.id to (overrideById[it.id]?.sortKey ?: defaultSortKeyById.getValue(it.id))
@@ -337,16 +347,18 @@ class GetEpisodeOrder(
         // AM (EPISODE_NAMES) -->
         // A source offering exactly one episode names it after itself: its
         // episode name ("Movie", "1", the show's name again) says nothing the
-        // source's title doesn't say better. Scoped to merged entries - a
-        // standalone one-episode entry would just repeat its own title. A
-        // custom name always wins.
-        val singleEpisodeChildTitles = if (host.isMerged()) {
-            episodesByChild.filterValues { it.size == 1 }
-                .mapNotNull { (childId, episodes) -> childTitles[childId]?.let { episodes.single().id to it } }
-                .toMap()
-        } else {
-            emptyMap()
-        }
+        // source's title doesn't say better. A custom name always wins.
+        //
+        // This used to be scoped to merged entries, on the grounds that a
+        // standalone one-episode entry would only repeat its own title. That
+        // holds on the entry screen, where the title is right above the row, but
+        // not in the player's playlist, which shows rows and nothing else - a
+        // movie played straight from its source read "Movie" there with no
+        // indication of which one. An ordinary entry is its own only source, so
+        // the same rule applies to it with its own title.
+        val singleEpisodeChildTitles = episodesByChild.filterValues { it.size == 1 }
+            .mapNotNull { (childId, episodes) -> childTitles[childId]?.let { episodes.single().id to it } }
+            .toMap()
         val displayNames = ordered.associate {
             it.id to (customNames[it.id] ?: singleEpisodeChildTitles[it.id] ?: it.name)
         }
@@ -356,6 +368,10 @@ class GetEpisodeOrder(
         // The image half of the rule above, off the same grouping so the two
         // cannot disagree about which episodes count as single-episode: the
         // source's cover stands in for the source's title.
+        //
+        // Still merged-only, unlike the title half: a cover says which source an
+        // episode came from, which is a question only a merge raises. On an
+        // ordinary entry it would repeat the cover at the top of the screen.
         val singleEpisodeThumbnails = if (host.isMerged()) {
             episodesByChild.filterValues { it.size == 1 }
                 .mapNotNull { (childId, episodes) ->
@@ -405,22 +421,45 @@ class GetEpisodeOrder(
 
     /**
      * Default position of [episode] within its season, in the key space
-     * overrides are written against: simply its episode number.
+     * overrides are written against.
      *
-     * The number is what the default order is sorted by, and the two must
-     * agree exactly - the first override flips an entry from its untouched
-     * default list to being sorted by these keys, and any disagreement would
-     * reshuffle every episode the user never touched. sourceOrder would not
-     * do: sources conventionally give 0 to the NEWEST episode.
+     * For an ordinary entry that is simply its episode number. For a merged
+     * entry the number sits inside its source's BAND: the source's position in
+     * merge order times [BLOCK_SPAN]. So a merge lists its sources in blocks -
+     * all of source 1's episodes, then source 2's - and reordering the sources
+     * in merge settings relays the episodes with them, with no rows written
+     * anywhere. Within a block the key is still the plain episode number, so a
+     * newly released episode lands after its source's existing ones rather
+     * than shifting anything, and a reset override falls back into its own
+     * block.
      *
-     * For a merged entry this interleaves sources by number within a season
-     * (A1, B1, A2, B2...), with merge priority breaking ties - duplicates sit
-     * together, which dedupe then collapses. The number is also what keeps
-     * overrides meaningful over time: a newly released episode gets a higher
-     * number and lands after existing ones instead of shifting them.
+     * The default order and these keys must agree exactly - the first override
+     * flips an entry from its untouched default list to being sorted by these
+     * keys, and any disagreement would reshuffle every episode the user never
+     * touched. [GetMergedEpisodeList] therefore blocks its output the same
+     * way. sourceOrder would not do as the within-block key: sources
+     * conventionally give 0 to the NEWEST episode.
+     *
+     * An unrecognised number is -1, which would otherwise sit just below its
+     * own band and trail the block above it, so it is clamped.
      */
-    private fun defaultSortKey(episode: Episode): Double = episode.episodeNumber
+    private fun defaultSortKey(episode: Episode, blockByChild: Map<Long, Int>): Double {
+        val block = blockByChild[episode.animeId] ?: return episode.episodeNumber
+        return block * BLOCK_SPAN + episode.episodeNumber.coerceAtLeast(0.0)
+    }
 
     private fun Anime.isMerged(): Boolean = source == MERGED_SOURCE_ID
+
+    companion object {
+        /**
+         * Width of one source's band of default keys. Wide enough that no real
+         * episode number reaches into the next block, small enough that a whole
+         * merge's keys stay far inside a Double's exact-integer range.
+         *
+         * Shared with GetMergedEpisodeList, which must lay its default list out
+         * in the same blocks these keys describe.
+         */
+        const val BLOCK_SPAN = 1_000_000.0
+    }
 }
 // <-- AM (CUSTOM_EPISODE_ORDER)

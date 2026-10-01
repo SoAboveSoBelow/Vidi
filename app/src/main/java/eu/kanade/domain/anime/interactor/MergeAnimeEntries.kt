@@ -2,6 +2,7 @@
 package eu.kanade.domain.anime.interactor
 
 import aniyomi.domain.merge.interactor.SyncMergedEntryInfo
+import aniyomi.domain.merge.interactor.TransferMergeEpisodeMarks
 import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
 import aniyomi.domain.merge.repository.MergeChildRepository
 import dev.zacsweers.metro.Inject
@@ -40,6 +41,9 @@ class MergeAnimeEntries(
     // AM (MERGE_SETTINGS) -->
     private val syncMergedEntryInfo: SyncMergedEntryInfo,
     // <-- AM (MERGE_SETTINGS)
+    // AM (MERGE_MARK_TRANSFER) -->
+    private val transferMergeEpisodeMarks: TransferMergeEpisodeMarks,
+    // <-- AM (MERGE_MARK_TRANSFER)
 ) {
 
     // AM (MERGE_EXISTING) -->
@@ -145,6 +149,10 @@ class MergeAnimeEntries(
         // Details beyond title and cover, and tags from every source.
         syncMergedEntryInfo.await(parent.id)
         // <-- AM (MERGE_SETTINGS)
+        // AM (MERGE_MARK_TRANSFER): a no-op while dedupe is off, which is the
+        // default for a new merge - it matters once a mode that hides episodes
+        // is chosen, and is cheap enough to not need predicting here.
+        transferMergeEpisodeMarks.await(parent.id)
         return parent
     }
 
@@ -171,6 +179,9 @@ class MergeAnimeEntries(
         // The new source's tags join the merged entry's.
         syncMergedEntryInfo.await(mergeParent.id)
         // <-- AM (MERGE_SETTINGS)
+        // AM (MERGE_MARK_TRANSFER): the source joining may be the one whose
+        // episodes dedupe now hides, so its marks move onto the ones shown.
+        transferMergeEpisodeMarks.await(mergeParent.id)
     }
 }
 // <-- AM (MERGED_SOURCES)

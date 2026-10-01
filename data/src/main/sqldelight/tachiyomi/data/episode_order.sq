@@ -15,10 +15,12 @@
 -- position within it" (season_number set, sort_key null) as easily as
 -- "repositioned where it already was" (the reverse).
 --
--- sort_key is a fractional index in the same space as the default key -
--- sourceOrder for an ordinary host, priority-and-sourceOrder for a merged one
--- - so dropping an episode between two others stores the midpoint of their
--- effective keys and newly fetched episodes still slot in sensibly.
+-- sort_key is a fractional index in the same space as the default key - the
+-- episode number for an ordinary host, and for a merged one that number inside
+-- the owning source's band (its position in merge order times 1000000, see
+-- GetEpisodeOrder.defaultSortKey) - so dropping an episode between two others
+-- stores the midpoint of their effective keys and newly fetched episodes still
+-- slot in sensibly.
 CREATE TABLE episode_order(
     host_anime_id INTEGER NOT NULL,
     episode_id INTEGER NOT NULL,

@@ -32,7 +32,7 @@ import eu.kanade.presentation.anime.EpisodeOptionsDialogScreen
 import eu.kanade.presentation.anime.EpisodeSettingsDialog
 import eu.kanade.presentation.anime.SeasonSettingsDialog
 import eu.kanade.presentation.anime.components.AnimeImagesDialog
-import eu.kanade.presentation.anime.components.ChangeEpisodeSeasonDialog
+import eu.kanade.presentation.anime.season.ChangeSeasonDialog
 import eu.kanade.presentation.anime.components.ClearAnimeDialog
 // AM (MERGE_SEASONS) -->
 import eu.kanade.presentation.anime.components.RenameEpisodeDialog
@@ -336,8 +336,15 @@ class AnimeScreen(
                     initialSelection = dialog.initialSelection,
                     onDismissRequest = onDismissRequest,
                     onEditCategories = { navigator.push(CategoryScreen()) },
+                    // AM (HEART_OPENS_CATEGORIES): the heart's dialog decides
+                    // membership by what is checked; "Set categories" on an
+                    // entry already in the library only moves it between them.
                     onConfirm = { include, _ ->
-                        viewModel.moveAnimeToCategoriesAndAddToLibrary(dialog.anime, include)
+                        if (dialog.removeOnEmpty) {
+                            viewModel.applyFavoriteCategories(dialog.anime, include)
+                        } else {
+                            viewModel.moveAnimeToCategoriesAndAddToLibrary(dialog.anime, include)
+                        }
                     },
                 )
             }
@@ -552,10 +559,11 @@ class AnimeScreen(
             // <-- AM (EPISODE_NAMES)
             // AM (CUSTOM_EPISODE_ORDER) -->
             is AnimeViewModel.Dialog.ChangeEpisodeSeason -> {
-                ChangeEpisodeSeasonDialog(
+                ChangeSeasonDialog(
                     seasons = dialog.seasons,
                     onSeasonSelected = viewModel::moveSelectionToSeason,
                     // AM (NAMED_SEASONS) -->
+                    onCreateNextSeason = viewModel::moveSelectionToNextSeason,
                     onEditSeasons = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
                     // <-- AM (NAMED_SEASONS)
                     onDismissRequest = onDismissRequest,

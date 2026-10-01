@@ -172,6 +172,12 @@ object SettingsAppearanceScreen : SearchableSettings {
                     preference = uiPreferences.imagesInDescription,
                     title = stringResource(AMMR.strings.am_pref_display_images_description),
                 ),
+                // AM (DESCRIPTION_EXPAND) -->
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = uiPreferences.expandDescriptionOnOpen,
+                    title = stringResource(AMMR.strings.am_pref_expand_description_on_open),
+                ),
+                // <-- AM (DESCRIPTION_EXPAND)
                 // AM (EPISODE_VIEW_MODE) -->
                 Preference.PreferenceItem.ListPreference(
                     preference = defaultEpisodeViewModePreference,

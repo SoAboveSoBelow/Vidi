@@ -19,13 +19,10 @@ import tachiyomi.i18n.animiru.AMMR
 
 class MergeSettingsHeaderAdapter(
     private val state: MergeSettingsState,
-    adapter: MergeSettingsAdapter,
     private val colorScheme: AndroidViewColorScheme,
 ) : RecyclerView.Adapter<MergeSettingsHeaderAdapter.HeaderViewHolder>() {
 
     private lateinit var binding: MergeSettingsHeaderBinding
-
-    val sortingListener: SortingListener = adapter
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): HeaderViewHolder {
         binding = MergeSettingsHeaderBinding.inflate(LayoutInflater.from(parent.context), parent, false)
@@ -65,7 +62,6 @@ class MergeSettingsHeaderAdapter(
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     if (binding.dedupeSwitch.isChecked) {
                         state.dedupeMode = modes.getOrElse(position) { DedupeMode.PRIORITY }
-                        sortingListener.onSetPrioritySort(state.canMove())
                     }
                     // Set the selected item's background to transparent.
                     if (view != null) (view as TextView).setBackgroundColor(Color.TRANSPARENT)
@@ -87,7 +83,6 @@ class MergeSettingsHeaderAdapter(
                     DedupeMode.OFF
                 }
                 binding.dedupeModeSpinner.isEnabled = isChecked
-                sortingListener.onSetPrioritySort(state.canMove())
             }
 
             val sources = state.sources
@@ -110,10 +105,6 @@ class MergeSettingsHeaderAdapter(
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-    }
-
-    interface SortingListener {
-        fun onSetPrioritySort(isPriorityOrder: Boolean)
     }
 }
 // <-- AM (MERGE_SETTINGS)

@@ -26,6 +26,7 @@ import aniyomi.domain.merge.interactor.GetRemovedMergeEpisodes
 import aniyomi.domain.merge.interactor.RemoveEpisodeFromMerge
 import aniyomi.domain.merge.interactor.RemoveFromMerge
 import aniyomi.domain.merge.interactor.SyncMergedEntryInfo
+import aniyomi.domain.merge.interactor.TransferMergeEpisodeMarks
 import aniyomi.domain.merge.model.DedupeMode
 import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
 import aniyomi.domain.merge.model.MergeSettings
@@ -40,7 +41,9 @@ import aniyomi.domain.order.interactor.MoveEpisodesInOrder
 import aniyomi.domain.order.model.EpisodeOrderOverride
 import aniyomi.domain.order.model.ResolvedEpisodeOrder
 import aniyomi.domain.order.repository.EpisodeOrderRepository
+import aniyomi.domain.season.interactor.ManageEntrySeasons
 import aniyomi.domain.season.model.EntrySeason
+import aniyomi.domain.season.model.isProvisionalSeason
 // <-- AM (CUSTOM_EPISODE_ORDER)
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Assisted
@@ -166,6 +169,7 @@ import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.source.local.LocalSource
 import tachiyomi.source.local.isLocal
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.floor
 
@@ -223,6 +227,12 @@ class AnimeViewModel(
     private val moveEpisodesInOrder: MoveEpisodesInOrder,
     private val episodeOrderRepository: EpisodeOrderRepository,
     // <-- AM (CUSTOM_EPISODE_ORDER)
+    // AM (NAMED_SEASONS) -->
+    private val manageEntrySeasons: ManageEntrySeasons,
+    // <-- AM (NAMED_SEASONS)
+    // AM (MERGE_MARK_TRANSFER) -->
+    private val transferMergeEpisodeMarks: TransferMergeEpisodeMarks,
+    // <-- AM (MERGE_MARK_TRANSFER)
     // AM (EPISODE_NAMES) -->
     private val episodeNameRepository: EpisodeNameRepository,
     // <-- AM (EPISODE_NAMES)
@@ -854,22 +864,57 @@ class AnimeViewModel(
     // <-- AM (CUSTOM_INFORMATION)
 
     fun toggleFavorite() {
-        toggleFavorite(
-            onRemoved = {
-                viewModelScope.launch {
-                    if (!hasDownloads()) return@launch
-                    val result = snackbarHostState.showSnackbar(
-                        message = context.stringResource(AYMR.strings.delete_downloads_for_anime),
-                        actionLabel = context.stringResource(MR.strings.action_delete),
-                        withDismissAction = true,
-                    )
-                    if (result == SnackbarResult.ActionPerformed) {
-                        deleteDownloads()
-                    }
-                }
-            },
-        )
+        toggleFavorite(onRemoved = ::offerToDeleteDownloads)
     }
+
+    // AM (HEART_OPENS_CATEGORIES) -->
+    /** The offer that follows any removal from the library, wherever it was made. */
+    private fun offerToDeleteDownloads() {
+        viewModelScope.launch {
+            if (!hasDownloads()) return@launch
+            val result = snackbarHostState.showSnackbar(
+                message = context.stringResource(AYMR.strings.delete_downloads_for_anime),
+                actionLabel = context.stringResource(MR.strings.action_delete),
+                withDismissAction = true,
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                deleteDownloads()
+            }
+        }
+    }
+
+    /**
+     * The heart's categories dialog confirm. The checked set is the entry's
+     * library membership: at least one category puts it in (and sets them),
+     * none takes it out. Nothing else in the dialog writes anything, so Cancel
+     * leaves the entry exactly as it was.
+     */
+    fun applyFavoriteCategories(anime: Anime, categoryIds: List<Long>) {
+        viewModelScope.launchIO {
+            if (categoryIds.isEmpty()) {
+                // Never in the library: nothing was asked for and nothing is done.
+                if (!anime.favorite) return@launchIO
+                if (!updateAnime.awaitUpdateFavorite(anime.id, false)) return@launchIO
+                // The category rows are deliberately left alone, like the merge
+                // data and custom art an unfavourite also survives: they are
+                // what the dialog offers back if the entry is added again, so
+                // clearing them would make a removal lose the choice as well.
+                withUIContext { offerToDeleteDownloads() }
+                return@launchIO
+            }
+            setAnimeCategories.await(anime.id, categoryIds)
+            if (anime.favorite) return@launchIO
+            if (!updateAnime.awaitUpdateFavorite(anime.id, true)) return@launchIO
+            val source = successState?.source ?: return@launchIO
+            addTracks.bindEnhancedTrackers(anime, source)
+            // AY -->
+            if (autoOpenTrack && anime.fetchType == FetchType.Episodes) {
+                showTrackDialog()
+            }
+            // <-- AY
+        }
+    }
+    // <-- AM (HEART_OPENS_CATEGORIES)
 
     /**
      * Update favorite status of anime, (removes / adds) anime (to / from) library.
@@ -881,6 +926,47 @@ class AnimeViewModel(
         val state = successState ?: return
         viewModelScope.launchIO {
             val anime = state.anime
+
+            // AM (HEART_OPENS_CATEGORIES) -->
+            // The heart asks instead of acting: it opens the categories dialog,
+            // whose checked set decides library membership - at least one
+            // category means in the library, none means out of it. Nothing is
+            // written until that dialog is confirmed, so a misread tap on a
+            // filled heart no longer removes anything.
+            //
+            // Unless there are no categories to choose from, where there is
+            // nothing to ask and the old immediate add/remove stands - the
+            // dialog would otherwise be an empty list with no way to add.
+            val allCategories = getCategories()
+            if (allCategories.isNotEmpty()) {
+                if (!isFavorited && checkDuplicate) {
+                    val duplicates = getDuplicateLibraryAnime(anime)
+                    if (duplicates.isNotEmpty()) {
+                        updateSuccessState { it.copy(dialog = Dialog.DuplicateAnime(anime, duplicates)) }
+                        return@launchIO
+                    }
+                }
+                // Whatever the entry is already filed under, which outlives a
+                // removal - so adding something back offers the categories it
+                // had. An entry that has none falls back to the default, if
+                // there is one, so the common case is one tap on OK.
+                val checked = getAnimeCategoryIds(anime).ifEmpty {
+                    listOfNotNull(libraryPreferences.defaultCategory.get().toLong().takeIf { id -> id > 0 })
+                }
+                updateSuccessState {
+                    it.copy(
+                        dialog = Dialog.ChangeCategory(
+                            anime = anime,
+                            initialSelection = allCategories.mapAsCheckboxState { category ->
+                                category.id in checked
+                            },
+                            removeOnEmpty = true,
+                        ),
+                    )
+                }
+                return@launchIO
+            }
+            // <-- AM (HEART_OPENS_CATEGORIES)
 
             if (isFavorited) {
                 // Remove from library
@@ -2397,6 +2483,15 @@ class AnimeViewModel(
         data class ChangeCategory(
             val anime: Anime,
             val initialSelection: List<CheckboxState<Category>>,
+            // AM (HEART_OPENS_CATEGORIES) -->
+            /**
+             * Whether confirming with nothing checked takes the entry out of
+             * the library. True when the heart opened this - there the checked
+             * set IS library membership - and false for "Set categories" on an
+             * entry already in it, which only ever moves it between them.
+             */
+            val removeOnEmpty: Boolean = false,
+            // <-- AM (HEART_OPENS_CATEGORIES)
         ) : Dialog
         data class DeleteEpisodes(val episodes: List<Episode>) : Dialog
         data class DuplicateAnime(val anime: Anime, val duplicates: List<AnimeWithEpisodeCount>) : Dialog
@@ -2489,6 +2584,15 @@ class AnimeViewModel(
     data class ReorderSession(
         val snapshot: List<EpisodeOrderOverride>,
         val hasChanges: Boolean = false,
+        // AM (NAMED_SEASONS) -->
+        /**
+         * Seasons this session moved episodes out of OR into. Checked for
+         * emptiness when the mode is left, so a season the quick-add created
+         * does not linger unnamed and empty once its episodes move on again -
+         * including when discarding the changes empties it.
+         */
+        val touchedSeasons: Set<Long> = emptySet(),
+        // <-- AM (NAMED_SEASONS)
     )
     // <-- AM (CUSTOM_EPISODE_ORDER)
 
@@ -2562,7 +2666,10 @@ class AnimeViewModel(
      */
     fun leaveReorderMode() {
         resetRangeAnchors()
+        // AM (NAMED_SEASONS)
+        val touched = successState?.reorderSession?.touchedSeasons.orEmpty()
         updateSuccessState { it.copy(reorderSession = null) }
+        pruneTouchedSeasons(touched)
     }
 
     fun exitReorderMode() {
@@ -2570,16 +2677,33 @@ class AnimeViewModel(
         // bar stays up at zero selected, so this ends the mode in one step.
         toggleAllSelection(false)
         resetRangeAnchors()
+        // AM (NAMED_SEASONS)
+        val touched = successState?.reorderSession?.touchedSeasons.orEmpty()
         updateSuccessState { it.copy(reorderSession = null) }
+        pruneTouchedSeasons(touched)
     }
 
     /** Moves [episodeIds] as a group - see MoveEpisodesInOrder. No-op outside reorder mode. */
     fun moveEpisodes(episodeIds: List<Long>, targetSeason: Long, placement: MoveEpisodesInOrder.Placement) {
         val anime = successState?.anime ?: return
         if (successState?.isReordering != true || episodeIds.isEmpty()) return
+        // AM (NAMED_SEASONS): both sides of the move, remembered so an unnamed
+        // season left empty can be pruned when the mode is left. The target is
+        // included because discarding the changes is what empties it.
+        val moved = episodeIds.toHashSet()
+        val touched = successState?.episodeSeasonById.orEmpty()
+            .filterKeys { it in moved }
+            .values
+            .toSet() + targetSeason
         viewModelScope.launchIO {
             moveEpisodesInOrder.await(anime, episodeIds, targetSeason, placement)
-            markReorderChanged()
+            markReorderChanged(touched)
+            // AM (NAMED_SEASONS): a season this move emptied goes now rather
+            // than when the mode is left - it would otherwise keep showing in
+            // the season pickers with nothing in it. The target is excluded:
+            // it just received these episodes, and it is only discarding the
+            // changes that can empty it, which prunes on its own.
+            manageEntrySeasons.pruneEmpty(anime, touched - targetSeason)
         }
     }
 
@@ -2599,6 +2723,36 @@ class AnimeViewModel(
         moveEpisodes(ids, targetSeason, MoveEpisodesInOrder.Placement.AtEnd)
     }
 
+    // AM (NAMED_SEASONS) -->
+    /** Guards the quick-add against a double tap - see [moveSelectionToNextSeason]. */
+    private val isCreatingSeason = AtomicBoolean(false)
+
+    /**
+     * Creates the season the dialog offered and moves the selection into it.
+     *
+     * Immediate, unlike the merge picker's staged quick-add: this dialog has no
+     * Save - every reorder edit is written through and "discard changes" is the
+     * undo. That undo returns the episodes and leaves the season behind, exactly
+     * as if it had been made in the season manager.
+     */
+    fun moveSelectionToNextSeason() {
+        val state = successState ?: return
+        if (!state.isReordering || state.selectedEpisodes.isEmpty()) return
+        // create is read-modify-write on IO, so a second tap landing before the
+        // first write does would make two seasons out of one gesture.
+        if (!isCreatingSeason.compareAndSet(false, true)) return
+        val ids = state.selectedEpisodes.map { it.id }
+        viewModelScope.launchIO {
+            try {
+                val number = manageEntrySeasons.create(state.anime, name = null)
+                moveEpisodes(ids, number, MoveEpisodesInOrder.Placement.AtEnd)
+            } finally {
+                isCreatingSeason.set(false)
+            }
+        }
+    }
+    // <-- AM (NAMED_SEASONS)
+
     /** Restores the stored order to how it was when reorder mode was entered - including undoing resets. */
     fun discardReorderChanges() {
         val anime = successState?.anime ?: return
@@ -2608,6 +2762,11 @@ class AnimeViewModel(
             updateSuccessState { state ->
                 state.reorderSession?.let { state.copy(reorderSession = it.copy(hasChanges = false)) } ?: state
             }
+            // AM (NAMED_SEASONS): the restore puts every episode back, so a
+            // season the quick-add created during this session now holds
+            // nothing. Checked here rather than only on exit so the season goes
+            // as soon as the discard empties it.
+            manageEntrySeasons.pruneEmpty(anime, session.touchedSeasons)
         }
     }
 
@@ -2628,12 +2787,33 @@ class AnimeViewModel(
         }
     }
 
-    private fun markReorderChanged() {
+    private fun markReorderChanged(touched: Set<Long> = emptySet()) {
         resetRangeAnchors()
         updateSuccessState { state ->
-            state.reorderSession?.let { state.copy(reorderSession = it.copy(hasChanges = true)) } ?: state
+            state.reorderSession?.let {
+                state.copy(
+                    reorderSession = it.copy(
+                        hasChanges = true,
+                        // AM (NAMED_SEASONS)
+                        touchedSeasons = it.touchedSeasons + touched,
+                    ),
+                )
+            } ?: state
         }
     }
+
+    // AM (NAMED_SEASONS) -->
+    /**
+     * Deletes any of [touched] that is now empty and unnamed - see
+     * ManageEntrySeasons.pruneEmpty for why only these and not every empty
+     * season.
+     */
+    private fun pruneTouchedSeasons(touched: Set<Long>) {
+        val anime = successState?.anime ?: return
+        if (touched.isEmpty()) return
+        viewModelScope.launchIO { manageEntrySeasons.pruneEmpty(anime, touched) }
+    }
+    // <-- AM (NAMED_SEASONS)
     // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AM (EPISODE_NAMES) -->
@@ -2939,6 +3119,10 @@ class AnimeViewModel(
      * in the season manager while the dialog was open falls back to the default
      * instead of resurrecting it. Details are resynced when anything that feeds
      * them changed.
+     *
+     * AM (NAMED_SEASONS): seasons the picker's quick-add staged are created here
+     * too - they carry provisional numbers until this point, so Save is the
+     * first moment they exist.
      */
     fun applyMergeSettings(result: MergeSettingsResult) {
         val anime = successState?.anime ?: return
@@ -2948,20 +3132,56 @@ class AnimeViewModel(
         updateSuccessState { it.copy(dialog = null) }
         viewModelScope.launchIO {
             if (result.order != savedOrder) {
+                // AM (CUSTOM_EPISODE_ORDER): this is all the episode relayout
+                // needs - a merge's default keys are banded by merge position,
+                // so the new source order IS the new episode order.
                 mergeChildRepository.setPriorities(anime.id, result.order)
             }
             val existingSeasons = successState?.entrySeasons.orEmpty().mapTo(HashSet()) { it.number }
-            result.seasonByChild.forEach { (childId, season) ->
-                if (season == savedSeasons[childId]) return@forEach
-                val target = season.takeIf { it in existingSeasons } ?: MERGE_DEFAULT_SEASON_NUMBER
+            // AM (NAMED_SEASONS) -->
+            // Create the staged seasons, in the order they were staged, and swap
+            // their provisional numbers for the real ones. Only those a source
+            // still points at are created - one the user picked away from again
+            // was never wanted.
+            val realByProvisional = result.seasonByChild.values
+                .filter { it.isProvisionalSeason() }
+                .distinct()
+                .sortedDescending()
+                .associateWith { manageEntrySeasons.create(anime, name = null) }
+            // <-- AM (NAMED_SEASONS)
+            // AM (NAMED_SEASONS): the seasons sources moved off, so an unnamed
+            // one left holding nothing can be pruned below.
+            val vacated = mutableSetOf<Long>()
+            result.seasonByChild.forEach { (childId, staged) ->
+                if (staged == savedSeasons[childId]) return@forEach
+                // AM (NAMED_SEASONS) -->
+                val season = realByProvisional[staged] ?: staged
+                val target = when {
+                    // Just created, so it exists however stale the cached list is.
+                    staged.isProvisionalSeason() -> season
+                    season in existingSeasons -> season
+                    else -> MERGE_DEFAULT_SEASON_NUMBER
+                }
+                savedSeasons[childId]?.let(vacated::add)
+                // <-- AM (NAMED_SEASONS)
                 mergeChildRepository.setSeasonNumber(anime.id, childId, target)
             }
+            // AM (NAMED_SEASONS)
+            manageEntrySeasons.pruneEmpty(anime, vacated)
             if (result.dedupeMode != dialog.dedupeMode || result.infoAnimeId != dialog.infoAnimeId) {
                 mergeSettingsRepository.set(
                     anime.id,
                     MergeSettings(dedupeMode = result.dedupeMode, infoAnimeId = result.infoAnimeId),
                 )
             }
+            // AM (MERGE_MARK_TRANSFER) -->
+            // A new dedupe mode hides a different set of episodes, so marks on
+            // the ones it now hides move onto the ones it shows. After the
+            // settings write, which it reads.
+            if (result.dedupeMode != dialog.dedupeMode) {
+                transferMergeEpisodeMarks.await(anime.id)
+            }
+            // <-- AM (MERGE_MARK_TRANSFER)
             if (result.infoAnimeId != dialog.infoAnimeId || result.order != savedOrder) {
                 syncMergedEntryInfo.await(anime.id)
             }
@@ -2972,7 +3192,13 @@ class AnimeViewModel(
     fun removeSourceFromMerge(child: Anime) {
         val anime = successState?.anime ?: return
         updateSuccessState { it.copy(dialog = null) }
-        viewModelScope.launchIO { removeFromMerge.await(anime.id, child) }
+        viewModelScope.launchIO {
+            // AM (NAMED_SEASONS): read before the removal - afterwards there is
+            // no row left to say which season the source held.
+            val vacated = mergeChildRepository.getChildSeasonsByMergeParentId(anime.id)[child.id]
+            removeFromMerge.await(anime.id, child)
+            manageEntrySeasons.pruneEmpty(anime, setOfNotNull(vacated))
+        }
     }
     // <-- AM (MERGE_SETTINGS)
 

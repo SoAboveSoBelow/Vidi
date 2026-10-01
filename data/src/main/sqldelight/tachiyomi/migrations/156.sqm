@@ -1,0 +1,33 @@
+-- AM (CUSTOM_EPISODE_ORDER) -->
+-- Merged entries list their sources in per-source blocks again instead of
+-- interleaving them by episode number, so a merged entry's episode-order keys
+-- are back in a band of merge position * 1000000 + episode number. This is the
+-- inverse of migration 152, which removed the band.
+--
+-- Existing keys were written in plain episode-number space, so each one gets
+-- its owning source's band added back; without this a custom order would keep
+-- its numbers while everything around it moved into blocks, dragging those
+-- episodes to the front of the entry.
+--
+-- The band comes from the source's POSITION in merge order (how many of the
+-- entry's other sources have a lower priority), not from the priority value
+-- itself, which need not be contiguous - the same rule the reader applies.
+-- An episode whose owner is somehow not a child of the entry matches no rows
+-- and keeps its key.
+UPDATE episode_order
+SET sort_key = sort_key + (
+    SELECT COUNT(*) * 1000000
+    FROM merge_children lower
+    WHERE lower.merge_parent_id = episode_order.host_anime_id
+    AND lower.priority < (
+        SELECT owner.priority
+        FROM merge_children owner
+        WHERE owner.merge_parent_id = episode_order.host_anime_id
+        AND owner.anime_id = (
+            SELECT anime_id FROM episodes WHERE _id = episode_order.episode_id
+        )
+    )
+)
+WHERE sort_key IS NOT NULL
+AND host_anime_id IN (SELECT _id FROM animes WHERE source = -1);
+-- <-- AM (CUSTOM_EPISODE_ORDER)

@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 // <-- AM (BACKGROUND_SKIP_FIX)
+import mihon.app.di.appGraph
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
@@ -433,10 +434,22 @@ class PlayerBackgroundPlaybackService : Service() {
         )
         // <-- AM (NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX)
 
+        // AM (HIDE_NOTIFICATION_CONTENT) -->
+        // The privacy setting hides what is playing. The MediaSession's own
+        // metadata is redacted alongside this (see PlayerMediaHolder) - between
+        // them they feed the shade, the lock screen and the media card, and
+        // hiding one without the other leaves the episode name on display.
+        // Read per build, so toggling the setting mid-playback takes effect on
+        // the next notification update.
+        val hideContent = appGraph.securityPreferences.hideNotificationContent.get()
+        // <-- AM (HIDE_NOTIFICATION_CONTENT)
+
         return NotificationCompat.Builder(this, Notifications.CHANNEL_BACKGROUND_PLAYBACK)
             .setSmallIcon(R.drawable.ic_ani)
-            .setContentTitle(title)
-            .setContentText(subtitle)
+            .setContentTitle(
+                if (hideContent) stringResource(AMMR.strings.player_background_playback_channel) else title,
+            )
+            .setContentText(subtitle.takeUnless { hideContent })
             // AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX) -->
             // Was setOngoing(true), blocked swipe-dismiss
             // <-- AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX)

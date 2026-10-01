@@ -1,13 +1,17 @@
 package eu.kanade.tachiyomi.ui.player.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.filled.Bookmark
@@ -24,6 +28,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -34,9 +41,11 @@ import eu.kanade.presentation.anime.components.DotSeparatorText
 import eu.kanade.presentation.theme.TachiyomiPreviewTheme
 import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.data.database.models.EpisodeImpl
+import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
+import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
 import tachiyomi.presentation.core.components.material.padding
-import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.nowPlayingBackground
 import tachiyomi.presentation.core.util.selectedBackground
@@ -71,9 +80,16 @@ fun EpisodeListItem(
     selectionMode: Boolean = false,
     isSelected: Boolean = false,
     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+    // AM (PLAYER_MARK_BADGES) -->
+    /**
+     * The marks to draw. Passed in rather than read off [episode] and kept in
+     * local state, which is what made a row ignore any marking it did not do
+     * itself - the selection bar's above all. See EpisodeMarkState.
+     */
+    isBookmarked: Boolean = episode.bookmark,
+    isFillermarked: Boolean = episode.fillermark,
+    // <-- AM (PLAYER_MARK_BADGES)
 ) {
-    var isBookmarked by remember { mutableStateOf(episode.bookmark) }
-    var isFillermarked by remember { mutableStateOf(episode.fillermark) }
     var textHeight by remember { mutableStateOf(0) }
 
     val defaultColor = MaterialTheme.colorScheme.onSurface
@@ -92,17 +108,6 @@ fun EpisodeListItem(
     val textWeight = if (isCurrentEpisode) FontWeight.Bold else FontWeight.Normal
     val textStyle = if (isCurrentEpisode) FontStyle.Italic else FontStyle.Normal
 
-    val clickBookmark: (Boolean) -> Unit = { bookmarked ->
-        episode.bookmark = bookmarked
-        isBookmarked = bookmarked
-        onBookmarkClicked(episode.id, bookmarked)
-    }
-
-    val clickFillermark: (Boolean) -> Unit = { fillermarked ->
-        episode.fillermark = fillermarked
-        isFillermarked = fillermarked
-        onFillermarkClicked(episode.id, fillermarked)
-    }
 
     Row(
         modifier = Modifier
@@ -152,7 +157,7 @@ fun EpisodeListItem(
             // duplicate them and make the two lists read differently.
             // <-- AM (OPEN_ENTRY_MERGED_ONLY)
         } else if (marksInRow) {
-            IconButton(onClick = { clickBookmark(!isBookmarked) }) {
+            IconButton(onClick = { onBookmarkClicked(episode.id, !isBookmarked) }) {
                 Icon(
                     imageVector = Icons.Filled.Bookmark,
                     contentDescription = null,
@@ -163,7 +168,7 @@ fun EpisodeListItem(
                 )
             }
 
-            IconButton(onClick = { clickFillermark(!isFillermarked) }) {
+            IconButton(onClick = { onFillermarkClicked(episode.id, !isFillermarked) }) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.Label,
                     contentDescription = null,
@@ -194,6 +199,28 @@ fun EpisodeListItem(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // AM (PLAYER_MARK_BADGES) -->
+                // Leading the subtitle line, where there is room, rather than
+                // tinting the row: a row can carry one mark, both or neither,
+                // and a single highlight cannot say which. Two badges can, and
+                // they read the same whatever the row's seen/playing state.
+                if (isBookmarked) {
+                    MarkBadge(
+                        imageVector = Icons.Filled.Bookmark,
+                        contentDescription = stringResource(MR.strings.action_filter_bookmarked),
+                        container = MaterialTheme.colorScheme.primaryContainer,
+                        content = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                if (isFillermarked) {
+                    MarkBadge(
+                        imageVector = Icons.AutoMirrored.Filled.Label,
+                        contentDescription = stringResource(AYMR.strings.action_filter_fillermarked),
+                        container = MaterialTheme.colorScheme.tertiaryContainer,
+                        content = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                }
+                // <-- AM (PLAYER_MARK_BADGES)
                 if (date != null) {
                     Text(
                         text = date,
@@ -227,6 +254,32 @@ fun EpisodeListItem(
         }
     }
 }
+
+// AM (PLAYER_MARK_BADGES) -->
+/** A small marked-state chip for the subtitle line. Icon only - the label is its description. */
+@Composable
+private fun MarkBadge(
+    imageVector: ImageVector,
+    contentDescription: String,
+    container: Color,
+    content: Color,
+) {
+    Box(
+        modifier = Modifier
+            .padding(end = 4.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(container)
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+    ) {
+        Icon(
+            imageVector = imageVector,
+            contentDescription = contentDescription,
+            tint = content,
+            modifier = Modifier.size(12.dp),
+        )
+    }
+}
+// <-- AM (PLAYER_MARK_BADGES)
 
 @Composable
 @PreviewLightDark

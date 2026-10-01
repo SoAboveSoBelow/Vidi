@@ -36,6 +36,7 @@ import aniyomi.core.common.torrent.TorrentPreferences
 import aniyomi.core.common.torrent.TorrentServerApi
 import aniyomi.core.common.torrent.TorrentServerUtils
 // AM (MERGED_SOURCES) -->
+import aniyomi.domain.episode.repository.EpisodeNameRepository
 import aniyomi.domain.merge.repository.MergeChildRepository
 // <-- AM (MERGED_SOURCES)
 // AM (CUSTOM_EPISODE_ORDER) -->
@@ -58,6 +59,7 @@ import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.connection.SyncPreferences
 import eu.kanade.domain.episode.model.toDbEpisode
 import eu.kanade.domain.source.interactor.GetIncognitoState
+import eu.kanade.domain.track.interactor.AddTracks
 import eu.kanade.domain.track.interactor.TrackEpisode
 import eu.kanade.domain.track.service.TrackPreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
@@ -168,14 +170,17 @@ import tachiyomi.cast.CastManagerEvent
 import tachiyomi.cast.domain.TrackInformation
 import tachiyomi.cast.domain.VideoInformation
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.preference.mapAsCheckboxState
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchNonCancellable
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.interactor.GetAnime
+import tachiyomi.domain.anime.interactor.GetDuplicateLibraryAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.category.interactor.GetCategories
+import tachiyomi.domain.category.interactor.SetAnimeCategories
 import tachiyomi.domain.custombutton.interactor.GetCustomButtons
 import tachiyomi.domain.custombutton.model.CustomButton
 import tachiyomi.domain.download.service.DownloadPreferences
@@ -227,6 +232,13 @@ class PlayerViewModel(
     private val getIncognitoState: GetIncognitoState,
 
     private val updateAnime: UpdateAnime,
+    // AM (PLAYER_ADD_TO_LIBRARY) -->
+    private val setAnimeCategories: SetAnimeCategories,
+    private val addTracks: AddTracks,
+    private val getDuplicateLibraryAnime: GetDuplicateLibraryAnime,
+    // <-- AM (PLAYER_ADD_TO_LIBRARY)
+    // AM (LIVE_EPISODE_NAMES)
+    private val episodeNameRepository: EpisodeNameRepository,
     private val upsertHistory: UpsertHistory,
     private val updateEpisode: UpdateEpisode,
     // AM (RECENT_EPISODE_POSITIONS) -->
@@ -1963,6 +1975,8 @@ class PlayerViewModel(
                 // <-- AM (EPISODE_NAMES)
             )
         }
+        // AM (LIVE_EPISODE_NAMES)
+        observePlaylistNames(resolvedOrder.displayNameByEpisodeId, ownerById.keys.ifEmpty { setOf(anime.id) })
         // <-- AM (CUSTOM_EPISODE_ORDER)
     }
 
@@ -1983,6 +1997,33 @@ class PlayerViewModel(
     // AM (EPISODE_NAMES) -->
     /** The episode's name as the list shows it - see PlayerStateData.displayNameOf. */
     fun displayNameOf(episode: Episode): String = stateData.value.displayNameOf(episode)
+
+    // AM (LIVE_EPISODE_NAMES) -->
+    private var playlistNamesJob: Job? = null
+
+    /**
+     * Keeps the playlist's names current while the player lives.
+     *
+     * The playlist is resolved once and never refetched, so an episode renamed
+     * afterwards - from its entry screen, while this player sits in the
+     * background - kept showing the old name in the episode list dialog until
+     * the player was restarted. Custom names are the only part of a name that
+     * can change without the playlist itself changing, so watching them is
+     * enough: [base] is what the resolve produced (the source's name, or the
+     * entry's own for a single-episode source) and a custom name takes
+     * precedence over it, exactly as GetEpisodeOrder orders the two.
+     */
+    private fun observePlaylistNames(base: Map<Long, String>, ownerIds: Set<Long>) {
+        playlistNamesJob?.cancel()
+        playlistNamesJob = viewModelScope.launchIO {
+            episodeNameRepository.getByAnimeIdsAsFlow(ownerIds.toList())
+                .distinctUntilChanged()
+                .collect { customNames ->
+                    updateStateData { it.copy(playlistEpisodeNames = base + customNames) }
+                }
+        }
+    }
+    // <-- AM (LIVE_EPISODE_NAMES)
     // <-- AM (EPISODE_NAMES)
 
     private fun setupEpisode(episode: Episode) {
@@ -5365,6 +5406,10 @@ class PlayerViewModel(
     /** The episode whose history row has been written this session. */
     private var historyWrittenForEpisodeId: Long? = null
 
+    // AM (SYNC_ON_OPEN_RUNS_ONCE)
+    /** The episode a "sync on episode open" run has already been requested for. */
+    private var syncRequestedForEpisodeId: Long? = null
+
     /**
      * Writes the current position now, for the moments where durability actually
      * matters. Resets the cadence so an event-driven save and the backstop never
@@ -5483,13 +5528,6 @@ class PlayerViewModel(
         if (uiData.value.isLoadingEpisode) return
         val currentEpisode = stateData.value.currentEpisode ?: return
         if (episodeId == -1L) return
-        // DEBUG (POSITION_BLEED_TRACE) -->
-        logcat(LogPriority.INFO) {
-            "PositionTrace: onSecondReached pos=$position " +
-                "animeId=${currentEpisode.anime_id} episodeId=${currentEpisode.id} " +
-                "isCasting=$isCasting"
-        }
-        // <-- DEBUG (POSITION_BLEED_TRACE)
         val duration = if (isCasting) castUiData.value.duration.toInt() else playbackData.value.duration
         if (duration == 0) return
 
@@ -5659,12 +5697,6 @@ class PlayerViewModel(
 
     /** Saves [episode] progress if not in incognito mode, or has at least one tracker. */
     private suspend fun saveEpisodeProgress(episode: Episode, writeSeenState: Boolean = false) {
-        // DEBUG (POSITION_BLEED_TRACE) -->
-        logcat(LogPriority.INFO) {
-            "PositionTrace: saveEpisodeProgress WRITE animeId=${episode.anime_id} " +
-                "episodeId=${episode.id} lastSecondSeen=${episode.last_second_seen}"
-        }
-        // <-- DEBUG (POSITION_BLEED_TRACE)
         val stateData = stateData.value
         if (!stateData.incognitoMode || stateData.hasTrackers) {
             // AM (RECENT_EPISODE_POSITIONS) -->
@@ -5698,16 +5730,37 @@ class PlayerViewModel(
                     episode.last_second_seen != fresh.lastSecondSeen
                 )
             // <-- AM (RECENT_EPISODE_POSITIONS)
-            updateEpisode.await(
-                EpisodeUpdate(
-                    id = episode.id!!,
-                    seen = if (writeSeenState) episode.seen else null,
-                    bookmark = if (writeSeenState) episode.bookmark else null,
-                    fillermark = episode.fillermark,
-                    lastSecondSeen = episode.last_second_seen,
-                    totalSeconds = episode.total_seconds,
-                ),
-            )
+            // AM (SAVE_ONLY_WHAT_CHANGED) -->
+            // Every field is sent as null unless it actually differs from the row,
+            // and the write is skipped outright when nothing does. This path runs
+            // on a cadence AND on pause, seek, episode change and teardown, so
+            // saves that re-state the same position were routine - each one an
+            // UPDATE that rewrote unchanged columns and, through the episodes.sq
+            // version trigger, bumped `version` and woke every flow watching the
+            // episode list for a change that was not one.
+            val changedFillermark = episode.fillermark.takeIf { fresh == null || it != fresh.fillermark }
+            val changedTotalSeconds = episode.total_seconds.takeIf { fresh == null || it != fresh.totalSeconds }
+            val changedPosition = episode.last_second_seen.takeIf { fresh == null || it != fresh.lastSecondSeen }
+            val changedSeen = episode.seen.takeIf { writeSeenState && (fresh == null || it != fresh.seen) }
+            val changedBookmark = episode.bookmark.takeIf { writeSeenState && (fresh == null || it != fresh.bookmark) }
+            val hasChanges = changedFillermark != null ||
+                changedTotalSeconds != null ||
+                changedPosition != null ||
+                changedSeen != null ||
+                changedBookmark != null
+            if (hasChanges) {
+                updateEpisode.await(
+                    EpisodeUpdate(
+                        id = episode.id!!,
+                        seen = changedSeen,
+                        bookmark = changedBookmark,
+                        fillermark = changedFillermark,
+                        lastSecondSeen = changedPosition,
+                        totalSeconds = changedTotalSeconds,
+                    ),
+                )
+            }
+            // <-- AM (SAVE_ONLY_WHAT_CHANGED)
             // AM (RECENT_EPISODE_POSITIONS) -->
             // Mirror the DB trigger's version bump locally so our next save's staleness
             // check compares against what the DB will actually have, not last tick's.
@@ -5716,11 +5769,20 @@ class PlayerViewModel(
             }
             // <-- AM (RECENT_EPISODE_POSITIONS)
             // AM (SYNC) -->
-            val isSyncEnabled = syncPreferences.isSyncEnabled()
-            val syncTriggerOpt = syncPreferences.getSyncTriggerOptions()
-            if (isSyncEnabled && syncTriggerOpt.syncOnEpisodeOpen && episode.last_second_seen >= 1L) {
-                SyncDataJob.startNow(context.workManager)
+            // AM (SYNC_ON_OPEN_RUNS_ONCE) -->
+            // "Sync on episode open" means once, on open. This ran on every
+            // progress save instead - a WorkManager enqueue every few seconds for
+            // the whole episode, plus two preference reads per save - because the
+            // only condition was a position past the first second, which stays
+            // true for the rest of the episode. Guarded per episode, like the
+            // history write below.
+            if (episode.last_second_seen >= 1L && syncRequestedForEpisodeId != episode.id) {
+                if (syncPreferences.isSyncEnabled() && syncPreferences.getSyncTriggerOptions().syncOnEpisodeOpen) {
+                    syncRequestedForEpisodeId = episode.id
+                    SyncDataJob.startNow(context.workManager)
+                }
             }
+            // <-- AM (SYNC_ON_OPEN_RUNS_ONCE)
             // <-- AM (SYNC)
         }
     }
@@ -5744,6 +5806,106 @@ class PlayerViewModel(
             )
         }
     }
+
+    // AM (PLAYER_ADD_TO_LIBRARY) -->
+    /**
+     * The entry screen's heart, for the episode list dialog, on the playlist's
+     * own entry - and the same behaviour as there, including what it asks.
+     *
+     * The tap itself writes nothing: it opens the categories dialog, whose
+     * checked set is the entry's library membership (at least one category puts
+     * it in, none takes it out), so the same button adds and removes without a
+     * misread tap doing either. Duplicates in the library are raised first, as
+     * on the entry screen. With no categories to choose from there is nothing to
+     * ask, and the entry is simply added or removed.
+     *
+     * See AnimeViewModel.toggleFavorite and applyFavoriteCategories, which this
+     * follows.
+     */
+    fun toggleCurrentAnimeFavorite(checkDuplicate: Boolean = true) {
+        val anime = stateData.value.currentAnime ?: return
+        viewModelScope.launchIO {
+            if (!anime.favorite && checkDuplicate) {
+                val duplicates = getDuplicateLibraryAnime(anime)
+                if (duplicates.isNotEmpty()) {
+                    setDialog(Dialogs.DuplicateAnime(anime, duplicates))
+                    return@launchIO
+                }
+            }
+
+            val categories = getCategories.await()
+            if (categories.isEmpty()) {
+                // Nothing to ask: add or remove outright.
+                applyFavoriteCategories(anime, emptyList(), hadCategoriesToChooseFrom = false)
+                return@launchIO
+            }
+
+            // Whatever the entry is already filed under, which outlives a
+            // removal, falling back to the default category for one that has
+            // none - so the common case is one tap on OK.
+            val checked = getCategories.await(anime.id).map { it.id }.ifEmpty {
+                listOfNotNull(libraryPreferences.defaultCategory.get().toLong().takeIf { it > 0 })
+            }
+            setDialog(
+                Dialogs.ChangeCategory(
+                    anime = anime,
+                    initialSelection = categories.mapAsCheckboxState { it.id in checked },
+                ),
+            )
+        }
+    }
+
+    /**
+     * The categories dialog's confirm: [categoryIds] decides membership. Empty
+     * removes the entry (and offers to delete its downloads), anything else puts
+     * it in the library with exactly those categories.
+     *
+     * [hadCategoriesToChooseFrom] separates "the user cleared every box" from
+     * "there were no boxes": with no categories at all an empty list is just
+     * what adding looks like, so it must not read as a removal.
+     */
+    fun applyFavoriteCategories(
+        anime: Anime,
+        categoryIds: List<Long>,
+        hadCategoriesToChooseFrom: Boolean = true,
+    ) {
+        viewModelScope.launchIO {
+            if (categoryIds.isEmpty()) {
+                if (!anime.favorite) {
+                    // Nothing checked on an entry that is not in the library:
+                    // with boxes to check that is a cleared dialog and means
+                    // nothing was asked for; with none it is what adding looks
+                    // like, so add it uncategorised.
+                    if (hadCategoriesToChooseFrom) return@launchIO
+                    if (!updateAnime.awaitUpdateFavorite(anime.id, true)) return@launchIO
+                    updateStateData { it.copy(currentAnime = anime.copy(favorite = true)) }
+                    stateData.value.currentSource?.let { addTracks.bindEnhancedTrackers(anime, it) }
+                    return@launchIO
+                }
+                if (!updateAnime.awaitUpdateFavorite(anime.id, false)) return@launchIO
+                // Category rows left alone on purpose - see
+                // AnimeViewModel.applyFavoriteCategories: they are what the
+                // dialog offers back if the entry is added again.
+                updateStateData { it.copy(currentAnime = anime.copy(favorite = false)) }
+                // Only worth asking when there is something to delete.
+                if (downloadManager.getDownloadCount(anime) > 0) {
+                    setDialog(Dialogs.DeleteDownloadsAfterRemoval(anime))
+                }
+                return@launchIO
+            }
+            setAnimeCategories.await(anime.id, categoryIds)
+            if (anime.favorite) return@launchIO
+            if (!updateAnime.awaitUpdateFavorite(anime.id, true)) return@launchIO
+            updateStateData { it.copy(currentAnime = anime.copy(favorite = true)) }
+            stateData.value.currentSource?.let { addTracks.bindEnhancedTrackers(anime, it) }
+        }
+    }
+
+    fun deleteDownloadsOf(anime: Anime) {
+        val source = stateData.value.currentSource ?: return
+        downloadManager.deleteAnime(anime, source)
+    }
+    // <-- AM (PLAYER_ADD_TO_LIBRARY)
 
     fun bookmarkEpisode(episodeId: Long?, bookmarked: Boolean) {
         viewModelScope.launchNonCancellable {

@@ -84,6 +84,41 @@ class ManageEntrySeasons(
         write(host, seasons(host).filter { it.number != seasonNumber })
     }
 
+    /**
+     * Deletes the seasons among [vacated] that now hold nothing and were never
+     * named - what a quick-added season becomes once its sources or episodes
+     * move on.
+     *
+     * A name is the user saying the season means something even while empty, so
+     * named seasons stay; so does the default. Only seasons an action just
+     * emptied are considered, never every empty season: a season added in the
+     * manager and not yet filled would otherwise vanish under the user.
+     */
+    suspend fun pruneEmpty(host: Anime, vacated: Set<Long>) {
+        if (vacated.isEmpty()) return
+        val order = getEpisodeOrder.awaitResolved(host, applyScanlatorFilter = false)
+        val holdsEpisodes = order.seasonByEpisodeId.values.toHashSet()
+        val holdsSources = if (host.source == MERGED_SOURCE_ID) {
+            mergeChildRepository.getChildSeasonsByMergeParentId(host.id).values.toHashSet()
+        } else {
+            emptySet()
+        }
+        val prune = order.seasons
+            .filter {
+                it.number in vacated &&
+                    it.number != MERGE_DEFAULT_SEASON_NUMBER &&
+                    it.name == null &&
+                    // An implicit season has no stored row to delete.
+                    it.sortOrder != null &&
+                    it.number !in holdsEpisodes &&
+                    it.number !in holdsSources
+            }
+            .mapTo(HashSet()) { it.number }
+        if (prune.isEmpty()) return
+        prune.forEach { entrySeasonRepository.delete(host.id, it) }
+        write(host, order.seasons.filterNot { it.number in prune })
+    }
+
     private suspend fun write(host: Anime, ordered: List<EntrySeason>) {
         entrySeasonRepository.upsertAll(
             host.id,

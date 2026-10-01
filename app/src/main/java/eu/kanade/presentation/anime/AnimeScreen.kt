@@ -103,6 +103,7 @@ import eu.kanade.tachiyomi.util.system.copyToClipboard
 import kotlinx.coroutines.delay
 // AM (NOW_PLAYING_INDICATOR) -->
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 // <-- AM (NOW_PLAYING_INDICATOR)
@@ -658,7 +659,7 @@ private fun AnimeScreenSmallImpl(
     // <-- AM (CUSTOM_EPISODE_ORDER)
 
     // AM (NOW_PLAYING_INDICATOR) -->
-    val nowPlayingEpisodeId = rememberNowPlayingEpisodeId(state.anime.id)
+    val nowPlaying = rememberNowPlaying(state.anime.id)
     // <-- AM (NOW_PLAYING_INDICATOR)
 
     var toolbarHeight by remember { mutableIntStateOf(0) }
@@ -1076,7 +1077,7 @@ private fun AnimeScreenSmallImpl(
                                 showPreviews = state.showPreviews,
                                 // <-- AY
                                 // AM (NOW_PLAYING_INDICATOR) -->
-                                nowPlayingEpisodeId = nowPlayingEpisodeId,
+                                nowPlaying = nowPlaying,
                                 // <-- AM (NOW_PLAYING_INDICATOR)
                                 // AM (CUSTOM_EPISODE_ORDER) -->
                                 episodeSwipeStartAction = if (state.isReordering) {
@@ -1305,7 +1306,7 @@ fun AnimeScreenLargeImpl(
     // <-- AM (EPISODE_SEARCH)
 
     // AM (NOW_PLAYING_INDICATOR) -->
-    val nowPlayingEpisodeId = rememberNowPlayingEpisodeId(state.anime.id)
+    val nowPlaying = rememberNowPlaying(state.anime.id)
     // <-- AM (NOW_PLAYING_INDICATOR)
 
     val insetPadding = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal).asPaddingValues()
@@ -1706,7 +1707,7 @@ fun AnimeScreenLargeImpl(
                                         showPreviews = state.showPreviews,
                                         // <-- AY
                                         // AM (NOW_PLAYING_INDICATOR) -->
-                                        nowPlayingEpisodeId = nowPlayingEpisodeId,
+                                        nowPlaying = nowPlaying,
                                         // <-- AM (NOW_PLAYING_INDICATOR)
                                         // AM (CUSTOM_EPISODE_ORDER) -->
                                         episodeSwipeStartAction = if (state.isReordering) {
@@ -1857,8 +1858,8 @@ private fun SharedAnimeBottomActionMenu(
  * <-- AM (NOW_PLAYING_INDICATOR_DISMISSED_FIX)
  */
 @Composable
-private fun rememberNowPlayingEpisodeId(animeId: Long): Long? {
-    val nowPlaying by produceState<Pair<Long?, Long?>?>(
+private fun rememberNowPlaying(animeId: Long): NowPlayingEpisode? {
+    val nowPlaying by produceState<NowPlayingEpisode?>(
         initialValue = null,
         key1 = Unit,
     ) {
@@ -1870,19 +1871,53 @@ private fun rememberNowPlayingEpisodeId(animeId: Long): Long? {
                     combine(
                         holder.state,
                         holder.hasExternalScreenConsumerFlow,
-                    ) { mediaState, hasScreenConsumer ->
+                        // AM (PLAYLIST_PROGRESS): the position comes from the
+                        // holder's own 1s sampler, not from state.positionMs -
+                        // that one follows the 15s MediaSession timer, which is
+                        // fine for the system controls (they extrapolate) but
+                        // would make a mm:ss label jump in 15s steps. Collected
+                        // only while this screen is composed.
+                        holder.livePositionMs,
+                    ) { mediaState, hasScreenConsumer, positionMs ->
                         if (!hasScreenConsumer && mediaState.paused) {
                             null
                         } else {
-                            mediaState.animeId to mediaState.episodeId
+                            NowPlayingEpisode(
+                                animeId = mediaState.animeId,
+                                episodeId = mediaState.episodeId,
+                                positionMs = positionMs,
+                                durationMs = mediaState.durationMs.toLong(),
+                            )
                         }
                     }
                 }
             }
+            // livePositionMs samples whole seconds, so this only drops repeats -
+            // a paused player re-emitting the same second, say.
+            .distinctUntilChanged()
             .collect { value = it }
     }
-    return nowPlaying?.takeIf { it.first == animeId }?.second
+    return nowPlaying?.takeIf { it.animeId == animeId }
 }
+
+// AM (PLAYLIST_PROGRESS) -->
+/**
+ * The episode playing right now, with its live position - which is the only
+ * place that position exists once the episode counts as seen: every mark-seen
+ * path wipes `last_second_seen`, and the player stops writing it (see
+ * PlayerViewModel.onSecondReached and preserveWatchingPosition), so a row being
+ * watched past the seen threshold has nothing in the database to show.
+ *
+ * [positionMs] comes from PlayerMediaHolder.livePositionMs, so it follows
+ * playback by the second rather than by the database's 5s write cadence.
+ */
+private data class NowPlayingEpisode(
+    val animeId: Long?,
+    val episodeId: Long?,
+    val positionMs: Long,
+    val durationMs: Long,
+)
+// <-- AM (PLAYLIST_PROGRESS)
 // <-- AM (NOW_PLAYING_INDICATOR)
 
 private fun LazyGridScope.sharedSeasons(
@@ -1923,7 +1958,7 @@ private fun LazyGridScope.sharedEpisodeItems(
     showPreviews: Boolean,
     // <-- AY
     // AM (NOW_PLAYING_INDICATOR) -->
-    nowPlayingEpisodeId: Long?,
+    nowPlaying: NowPlayingEpisode?,
     // <-- AM (NOW_PLAYING_INDICATOR)
     episodeSwipeStartAction: LibraryPreferences.EpisodeSwipeAction,
     episodeSwipeEndAction: LibraryPreferences.EpisodeSwipeAction,
@@ -1998,6 +2033,36 @@ private fun LazyGridScope.sharedEpisodeItems(
                     }
                 }
                 // <-- AM (FILE_SIZE)
+                // AM (PLAYLIST_PROGRESS) -->
+                // Progress shows whenever there is a position to show, seen or not.
+                // Two things used to hide it: the row ignored any episode marked
+                // seen, and an episode is marked seen BEFORE it ends, so a row lost
+                // its progress while still being watched.
+                //
+                // For the episode playing right now the position comes from the
+                // player rather than the database: once an episode counts as seen
+                // every mark-seen path wipes last_second_seen and the player stops
+                // writing it (see PlayerViewModel.onSecondReached and
+                // preserveWatchingPosition), so the database has nothing left to
+                // show. Every other row reads its stored position, which a finished
+                // episode no longer has - so no row gains a stray "0:00".
+                val isCurrentlyPlaying = item.episode.id == nowPlaying?.episodeId
+                val progressMs = nowPlaying?.positionMs?.takeIf { isCurrentlyPlaying && it > 0L }
+                    ?: item.episode.lastSecondSeen.takeIf { it > 0L }
+                val progressTotalMs = nowPlaying?.durationMs?.takeIf { isCurrentlyPlaying && it > 0L }
+                    ?: item.episode.totalSeconds
+                val watchProgressText = progressMs?.let {
+                    // AY -->
+                    if (progressTotalMs > 0L) {
+                        stringResource(AYMR.strings.episode_progress, formatTime(it), formatTime(progressTotalMs))
+                    } else {
+                        // A position with no known length - watched before the
+                        // episode's duration was recorded.
+                        stringResource(AYMR.strings.episode_progress_no_total, formatTime(it))
+                    }
+                    // <-- AY
+                }
+                // <-- AM (PLAYLIST_PROGRESS)
                 // AM (CUSTOM_EPISODE_ORDER) -->
                 // Local so reorder mode can wrap it with a drag handle without
                 // duplicating the call.
@@ -2015,17 +2080,8 @@ private fun LazyGridScope.sharedEpisodeItems(
                         // <-- AM (EPISODE_NAMES)
                     },
                     date = relativeDateText(item.episode.dateUpload),
-                    watchProgress = item.episode.lastSecondSeen
-                        .takeIf { !item.episode.seen && it > 0L }
-                        ?.let {
-                            // AY -->
-                            stringResource(
-                                AYMR.strings.episode_progress,
-                                formatTime(it),
-                                formatTime(item.episode.totalSeconds),
-                            )
-                            // <-- AY
-                        },
+                    // AM (PLAYLIST_PROGRESS)
+                    watchProgress = watchProgressText,
                     scanlator = item.episode.scanlator.takeIf { !it.isNullOrBlank() },
                     // AY -->
                     summary = item.episode.summary.takeIf { !it.isNullOrBlank() && showSummaries },
@@ -2122,7 +2178,7 @@ private fun LazyGridScope.sharedEpisodeItems(
                     // <-- AM (EPISODE_VIEW_MODE)
                     // <-- AM (MINIMAL_EPISODE_LIST)
                     // AM (NOW_PLAYING_INDICATOR) -->
-                    isCurrentlyPlaying = item.episode.id == nowPlayingEpisodeId,
+                    isCurrentlyPlaying = isCurrentlyPlaying,
                     // <-- AM (NOW_PLAYING_INDICATOR)
                     // AM (CUSTOM_EPISODE_ORDER) -->
                     modifier = rowModifier,
