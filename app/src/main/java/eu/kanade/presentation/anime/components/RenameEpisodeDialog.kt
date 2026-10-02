@@ -61,15 +61,14 @@ fun RenameEpisodeDialog(
     // <-- AM (MERGE_EPISODE_EXCLUSION)
 ) {
     // AM (RENAME_SELECTS_ALL) -->
-    // Selects the whole name when the field is tapped, so typing replaces it -
-    // renaming is almost always writing a new name rather than editing the
-    // source's, and clearing it by hand first was the common first move.
+    // The whole name is selected the first time the field is tapped, so typing
+    // replaces it - renaming an episode is almost always writing a new name
+    // rather than editing the source's, and clearing it by hand first was the
+    // common first move.
     //
-    // On the tap, not on opening: the dialog carries other actions (edit tags,
-    // open entry, remove from merge) and should not steal focus and raise the
-    // keyboard for someone who came for one of those. Tapping an
-    // already-focused field still just moves the caret, since focus did not
-    // change.
+    // No LaunchedEffect focus request here any more: focusing on open put a
+    // caret in the field and raised the keyboard over a dialog the user may
+    // only have wanted to read. Selection now comes from the tap itself, below.
     var name by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(currentName))
     }
@@ -151,14 +150,14 @@ fun RenameEpisodeDialog(
         // <-- AM (TAG_LIMIT)
         text = {
             // AM (RENAME_SELECTS_ALL) -->
-            // The first tap is taken by the overlay rather than the field. Doing
-            // this from onFocusChanged did not work: the same tap that focuses a
-            // text field also places the caret where it landed, and that runs
-            // after the focus callback, so the selection was set and then
-            // immediately replaced by a cursor. Swallowing the tap means no
-            // caret is ever placed - the overlay selects everything and asks for
-            // focus itself. Once focused the overlay is gone, so tapping again
-            // moves the caret as normal.
+            // The first tap is taken by the overlay rather than the field.
+            // Setting the selection from onFocusChanged did not work: the same
+            // tap that focuses a text field also places the caret where it
+            // landed, and that runs after the focus callback, so the selection
+            // was set and then immediately replaced by a cursor. Swallowing the
+            // tap means no caret is ever placed - the overlay selects
+            // everything and asks for focus itself. Once focused the overlay is
+            // gone, so tapping again moves the caret as normal.
             Box {
                 OutlinedTextField(
                     value = name,
