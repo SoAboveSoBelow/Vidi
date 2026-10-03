@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -27,7 +26,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.DialogProperties
 import androidx.recyclerview.widget.ConcatAdapter
 import androidx.recyclerview.widget.LinearLayoutManager
 import aniyomi.domain.merge.model.DedupeMode
@@ -37,6 +35,7 @@ import aniyomi.domain.season.model.isProvisionalSeason
 import aniyomi.domain.season.model.provisionalSeasonNumber
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import eu.kanade.presentation.anime.season.ChangeSeasonDialog
+import eu.kanade.presentation.components.AlertDialog
 import eu.kanade.presentation.theme.colorscheme.AndroidViewColorScheme
 import eu.kanade.tachiyomi.databinding.MergeSettingsDialogBinding
 import eu.kanade.tachiyomi.ui.anime.AnimeViewModel
@@ -306,9 +305,6 @@ fun MergeSettingsDialog(
                 // <-- AM (MERGE_EPISODE_EXCLUSION)
             }
         },
-        properties = DialogProperties(
-            usePlatformDefaultWidth = true,
-        ),
     )
 
     // AM (NAMED_SEASONS) -->

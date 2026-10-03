@@ -4,7 +4,6 @@ package eu.kanade.presentation.more.settings.screen
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -19,6 +18,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
+import eu.kanade.presentation.components.AlertDialog
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.tachiyomi.data.connection.Connection
 import eu.kanade.tachiyomi.ui.setting.connection.DiscordLoginScreen

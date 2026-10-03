@@ -90,6 +90,40 @@ fun AdaptiveSheet(
 ) {
     val isTabletUi = isTabletUi()
 
+    // AM (APP_DIALOG_LAYER) -->
+    // Rendered into LocalAppDialogLayer when there is one, instead of a Dialog.
+    //
+    // This is the app's shared sheet primitive, so every sheet built on it comes
+    // down into the composition together - which is what lets the player draw above
+    // them. A Dialog is its own platform window and sits above the Activity's whole
+    // content view by construction, so the player, which lives in that view, can
+    // never be on top of one however it is composed or elevated.
+    //
+    // The content is identical either way: AdaptiveSheetImpl does the layout, the
+    // swipe-dismiss and the scrim, and it does not care whether it is in a window.
+    // What the window was providing is back-to-dismiss and the IME inset, and the
+    // layer entry supplies both - see AppDialogLayer.
+    val layer = LocalAppDialogLayer.current
+    if (layer != null) {
+        AppDialogLayerEntry(onDismissRequest = onDismissRequest) {
+            AdaptiveSheetImpl(
+                isTabletUi = isTabletUi,
+                enableSwipeDismiss = enableSwipeDismiss,
+                onDismissRequest = onDismissRequest,
+                // fitsKeyboard asked the WINDOW not to fit the system decor so the
+                // IME inset reached the content. In the composition there is no
+                // window to ask: the inset is already live here, so the padding is
+                // all that is needed and it means the same thing.
+                modifier = if (fitsKeyboard) modifier.imePadding() else modifier,
+                dismissThreshold = dismissThreshold,
+            ) {
+                content()
+            }
+        }
+        return
+    }
+    // <-- AM (APP_DIALOG_LAYER)
+
     Dialog(
         onDismissRequest = onDismissRequest,
         // AM (TAG_LIMIT) -->

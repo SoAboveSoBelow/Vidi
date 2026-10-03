@@ -431,6 +431,20 @@ class PlayerViewModel(
     private val _aspectRatio = MutableStateFlow<Double?>(null)
     val aspectRatio = _aspectRatio.asStateFlow()
 
+    // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+    // Where mpv is ACTUALLY drawing the video inside the surface right now,
+    // straight from its own osd-dimensions rather than derived from the video's
+    // dimensions. The dummy pip's entry/exit morph needs this rect to scale the
+    // right thing, and every derivation of it is wrong in cases that ship:
+    // video-params/w,h are STORAGE dimensions (anamorphic content is drawn at a
+    // different shape), rotation metadata turns the rect on its side, and the
+    // Crop/Stretch aspect modes set panscan/video-aspect-override so the drawn
+    // rect is not the video's aspect at all. mpv already knows the answer after
+    // applying all of it, so nothing here recomputes it.
+    // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
+    private val _videoOutputRect = MutableStateFlow<VideoOutputRect?>(null)
+    val videoOutputRect = _videoOutputRect.asStateFlow()
+
     private val _eventFlow = MutableSharedFlow<Event>()
     val eventFlow = _eventFlow.asSharedFlow()
 
@@ -842,6 +856,37 @@ class PlayerViewModel(
                     }
                 }
                 .launchIn(viewModelScope)
+
+            // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+            // osd-dimensions is a node map; its sub-properties are observable
+            // individually the same way video-params' are just below. w/h are the
+            // surface mpv rendered into, ml/mt/mr/mb the letterbox margins left
+            // around the video inside it - so the drawn rect is the surface minus
+            // the margins, already accounting for display aspect, rotation,
+            // panscan and any aspect override.
+            combine(
+                propFlow<Int>("osd-dimensions/w"),
+                propFlow<Int>("osd-dimensions/h"),
+                propFlow<Int>("osd-dimensions/ml"),
+                propFlow<Int>("osd-dimensions/mt"),
+                propFlow<Int>("osd-dimensions/mr"),
+                propFlow<Int>("osd-dimensions/mb"),
+            ) { values -> values }
+                .onEach { values ->
+                    val surfaceWidth = values[0] ?: return@onEach
+                    val surfaceHeight = values[1] ?: return@onEach
+                    if (surfaceWidth <= 0 || surfaceHeight <= 0) return@onEach
+                    _videoOutputRect.value = VideoOutputRect(
+                        surfaceWidth = surfaceWidth,
+                        surfaceHeight = surfaceHeight,
+                        marginLeft = values[2] ?: 0,
+                        marginTop = values[3] ?: 0,
+                        marginRight = values[4] ?: 0,
+                        marginBottom = values[5] ?: 0,
+                    )
+                }
+                .launchIn(viewModelScope)
+            // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
 
             propFlow<Int>("video-params/w")
                 .filterNotNull()
@@ -4725,7 +4770,15 @@ class PlayerViewModel(
         updatePlaybackData { it.copy(paused = true) }
 
         // AM (PERSIST_ON_CADENCE) -->
-        persistPositionNow()
+        // AM (IDLE_SESSION_COST_FIX) -->
+        // Was persistPositionNow() here. Moved to PlayerMediaHolder's PauseChanged
+        // observer, which sees every pause rather than only the ones routed through
+        // this function - see that observer's own note. Leaving it here as well would
+        // mean two writes for every pause that does come through here, with the holder
+        // covering the rest, which is exactly the kind of split-writer arrangement
+        // HOLDER_PAUSE_STATE_SYNC_FIX and MEDIASESSION_SINGLE_WRITER_FIX removed
+        // elsewhere in this flow.
+        // <-- AM (IDLE_SESSION_COST_FIX)
         // <-- AM (PERSIST_ON_CADENCE)
     }
     // <-- AM (PAUSE_DURING_LOAD_WINS)
@@ -5415,7 +5468,12 @@ class PlayerViewModel(
      * matters. Resets the cadence so an event-driven save and the backstop never
      * double up.
      */
-    private fun persistPositionNow(positionSeconds: Int = playbackData.value.position) {
+    // AM (IDLE_SESSION_COST_FIX) -->
+    // Public now: PlayerMediaHolder's PauseChanged observer is the single pause-time
+    // flush, since it is the only place that sees every pause regardless of cause.
+    // See that observer for why it moved out of pauseInternal().
+    // <-- AM (IDLE_SESSION_COST_FIX)
+    fun persistPositionNow(positionSeconds: Int = playbackData.value.position) {
         val episode = stateData.value.currentEpisode ?: return
         if (uiData.value.isLoadingEpisode) return
 
@@ -6537,3 +6595,30 @@ class PlayerViewModel(
         data class UpdateDiscordRPC(val paused: Boolean, val position: Int? = null) : Event
     }
 }
+
+// AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+/**
+ * mpv's own report of the surface it rendered into and the letterbox margins it
+ * left around the video inside it (osd-dimensions).
+ *
+ * Top-level rather than nested in [PlayerViewModel.State] so the dummy pip can
+ * take it as a plain parameter without depending on the whole state object.
+ */
+data class VideoOutputRect(
+    val surfaceWidth: Int,
+    val surfaceHeight: Int,
+    val marginLeft: Int,
+    val marginTop: Int,
+    val marginRight: Int,
+    val marginBottom: Int,
+) {
+    /** Width of the drawn video inside the surface, in surface px. */
+    val videoWidth: Int get() = (surfaceWidth - marginLeft - marginRight).coerceAtLeast(0)
+
+    /** Height of the drawn video inside the surface, in surface px. */
+    val videoHeight: Int get() = (surfaceHeight - marginTop - marginBottom).coerceAtLeast(0)
+
+    /** True when the rect describes a real, non-degenerate drawn video. */
+    val isUsable: Boolean get() = videoWidth > 0 && videoHeight > 0
+}
+// <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)

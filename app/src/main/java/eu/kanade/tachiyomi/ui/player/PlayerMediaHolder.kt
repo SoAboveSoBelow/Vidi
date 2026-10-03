@@ -172,6 +172,30 @@ class PlayerMediaHolder(
     // <-- AM (PLAYER_OVERLAY_MIGRATION)
     // <-- AM (EXTERNAL_SCREEN_CONSUMER_FIX)
 
+    // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
+    /**
+     * The mini player's resting on-screen rect, or null when no window is up.
+     *
+     * Written by PlayerHostScreen from the window's own report, read by MainActivity
+     * when it builds PiP params: entering real PiP while the mini player is up has
+     * to hand the system THAT rect as the source-rect hint, not the fullscreen
+     * video's, or it has nothing to morph from and resizes the whole window instead.
+     *
+     * Lives here because the window and the Activity have no other connection -
+     * DummyPipWindow deliberately knows nothing about the holder, and MainActivity
+     * cannot reach into the composition.
+     *
+     * A flow rather than a plain var because the Activity has to re-register params
+     * with the OS when it changes: an auto-enter uses whatever was last pushed, so a
+     * stale rect would be the one the system animates from.
+     */
+    private val _dummyPipWindowRect = MutableStateFlow<DummyPipWindowRect?>(null)
+    val dummyPipWindowRectFlow = _dummyPipWindowRect.asStateFlow()
+    var dummyPipWindowRect: DummyPipWindowRect?
+        get() = _dummyPipWindowRect.value
+        set(value) { _dummyPipWindowRect.value = value }
+    // <-- AM (DUMMY_PIP_REPORTS_WINDOW_RECT)
+
     // AM (DUMMY_PIP) -->
     // True while the floating in-app mini-player (triggered from
     // PlayerScreen's back handler when pipOnExit is enabled - see
@@ -230,6 +254,11 @@ class PlayerMediaHolder(
         // AM (PLAYLIST_PROGRESS)
         /** How often [livePositionMs] samples mpv. One second: it feeds a mm:ss label. */
         private const val POSITION_SAMPLE_INTERVAL_MS = 1_000L
+
+        // AM (IDLE_SESSION_COST_FIX) -->
+        /** How often the live media state is pushed while playback is actually running. */
+        private const val LIVE_PUSH_INTERVAL_MS = 15_000L
+        // <-- AM (IDLE_SESSION_COST_FIX)
 
         // AM (NOW_PLAYING_INDICATOR) -->
         // Backing StateFlow so UI (e.g. the episode list) can react to a holder
@@ -848,6 +877,30 @@ class PlayerMediaHolder(
                     // <-- AM (HOLDER_PAUSE_STATE_SYNC_FIX)
                     updateState { it.copy(paused = event.paused) }
                     pushLiveMediaState()
+                    // AM (IDLE_SESSION_COST_FIX) -->
+                    // The persist flush lives here rather than in
+                    // PlayerViewModel.pauseInternal() (where PERSIST_ON_CADENCE
+                    // originally put it) for the same reason state.paused itself moved
+                    // here under HOLDER_PAUSE_STATE_SYNC_FIX: pauseInternal() is only
+                    // one of the ways playback pauses. mpv's own audio-focus-loss
+                    // handling, the no-Activity MediaSession fallback path and the
+                    // Bluetooth-disconnect pause all bypass it, and those are exactly
+                    // the pauses most likely to be followed by the process going away
+                    // without warning. This event carries mpv's own pause edge, so
+                    // every cause is covered, present and future, without hunting down
+                    // call sites.
+                    //
+                    // Reads time-pos from mpv rather than taking playbackData's
+                    // position: that field is fed by per-second time-pos events which
+                    // have already stopped by the time this runs, so it can be up to a
+                    // second behind the frame the user is actually looking at. Once the
+                    // session can be reclaimed while paused, this persisted value is
+                    // what the next cold open resumes from, so it is worth being exact.
+                    if (event.paused) {
+                        val seconds = runCatching { existing.mpv.getPropertyInt("time-pos") }.getOrNull()
+                        if (seconds != null) _viewModel?.persistPositionNow(seconds)
+                    }
+                    // <-- AM (IDLE_SESSION_COST_FIX)
                 }
                 .launchIn(holderScope)
 
@@ -856,12 +909,36 @@ class PlayerMediaHolder(
                 .onEach { pushLiveMediaState() }
                 .launchIn(holderScope)
 
+            // AM (IDLE_SESSION_COST_FIX) -->
+            // This tick used to run unconditionally for the life of the holder. While
+            // paused nothing it pushes can change - position, duration and pause state
+            // are all frozen, and the PauseChanged observer above already pushes the
+            // transition itself - so every tick was a thread wakeup, three JNI property
+            // reads and a full setMetadata() (album art bitmap included, re-parceled
+            // into system_server and rescaled there on each receipt) to deliver a
+            // byte-identical state. Across an overnight pause that is thousands of
+            // pushes describing nothing that moved.
+            //
+            // Gated structurally rather than by a flag checked inside the loop: the
+            // loop only exists while unpaused, and collectLatest cancels it on the
+            // pause edge, so no tick can land after a pause and there is no separate
+            // piece of state that can fall out of step with mpv's own. The system
+            // media controls extrapolate position from the last PlaybackState they
+            // were given, so a paused state pinned at a fixed position stays correct
+            // indefinitely without being retold.
             holderScope.launch {
-                while (true) {
-                    delay(15_000)
-                    pushLiveMediaState()
-                }
+                state
+                    .map { it.paused }
+                    .distinctUntilChanged()
+                    .collectLatest { paused ->
+                        if (paused) return@collectLatest
+                        while (true) {
+                            delay(LIVE_PUSH_INTERVAL_MS)
+                            pushLiveMediaState()
+                        }
+                    }
             }
+            // <-- AM (IDLE_SESSION_COST_FIX)
             // <-- AM (BACKGROUND_SEEKBAR_TICK_FIX)
             // AM (BACKGROUND_AUTOPLAY_FIX) -->
             // Removed: existed only because PlayerViewModel.eofReached()'s own

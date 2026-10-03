@@ -3,7 +3,9 @@ package eu.kanade.tachiyomi.ui.player
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.runtime.Composable
@@ -13,6 +15,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -20,7 +23,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.core.graphics.toColorInt
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import animiru.domain.player.model.AudioChannels
@@ -107,6 +114,13 @@ fun PlayerScreen(
     val uiData by viewModel.uiData.collectAsStateWithLifecycle()
     val playbackData by viewModel.playbackData.collectAsStateWithLifecycle()
     val castState by viewModel.castManager.castState.collectAsStateWithLifecycle()
+
+    // AM (FIXED_SURFACE_SIZE) -->
+    // mpv's rotation-corrected display aspect - the shape the video is actually
+    // drawn at, which is the shape the fixed-size surface is pinned to. Null until
+    // mpv reports one.
+    val videoDisplayAspect by viewModel.aspectRatio.collectAsStateWithLifecycle()
+    // <-- AM (FIXED_SURFACE_SIZE)
 
     // Common
     val showFailedHosters by playerPreferences.showFailedHosters.collectAsState()
@@ -398,14 +412,140 @@ fun PlayerScreen(
             // construct at the same instant, one losing PlayerMediaHolder.adopt()'s
             // first-wins race).
             // <-- AM (REDUNDANT_SURFACE_REBUILD_FIX)
-            key(viewModel.mpv) {
-                MpvSurface(
-                    modifier = Modifier.fillMaxSize(),
-                    player = viewModel.player,
-                    videoOutput = viewModel.videoOutput,
-                    onSurfaceAttachedChanged = { attached -> viewModel.isSurfaceAttached = attached },
+            // AM (FIXED_SURFACE_SIZE) -->
+            // The surface is laid out at ONE fixed pixel size for the whole session
+            // and changes its visible size by transform instead.
+            //
+            // The blink: TextureView ties its buffer to its VIEW size - onSizeChanged
+            // pushes the new size straight into the SurfaceTexture, and MpvSurface
+            // then tells mpv about it (android-surface-size), so mpv reconfigures its
+            // output. Between the reallocation and the next frame decoded at the new
+            // size there is nothing to draw, and PlayerScreen's black backdrop shows
+            // through. That is the media blinking on every resize - rotation included,
+            // which is how it was confirmed, with no PiP involved at all.
+            //
+            // A SurfaceView would not do this: the system keeps presenting the last
+            // buffer across a resize, and SurfaceHolder.setFixedSize decouples buffer
+            // from view outright. That is what mpv-android and other players use. This
+            // app moved to TextureView so the dummy pip could transform the video with
+            // a Compose graphicsLayer - which bought one convenient animation and paid
+            // for it with this.
+            //
+            // Keeping the view's size constant gets the same result without
+            // re-opening that: no onSizeChanged, so no reallocation, so no gap, and
+            // mpv is told the size exactly once.
+            //
+            // Sized from the window's LONG edge so one buffer covers both
+            // orientations, then scaled down uniformly to fit whichever one is
+            // current. Fullscreen is unchanged: a uniform fit of a video-shaped box
+            // is the same rect mpv was drawing inside its letterboxed surface before,
+            // and the black around it is the backdrop this Box already draws.
+            //
+            // remember() on aspect and long edge, not on the live size: that is the
+            // whole point. The window resizing must NOT recompute it.
+            val density = LocalDensity.current
+            BoxWithConstraints(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                val windowWidthPx = with(density) { maxWidth.toPx() }
+                val windowHeightPx = with(density) { maxHeight.toPx() }
+                // AM (FIXED_SURFACE_SIZE) -->
+                // One branch, always. The first version switched between a
+                // fillMaxSize surface and a fixed-size one once mpv reported an
+                // aspect, which is a different composable position - so the
+                // AndroidView was destroyed and rebuilt, and the rebuilt view adopted
+                // the persistent texture through a path that never told mpv its size.
+                //
+                // A fallback aspect keeps it on one path from the first frame, so the
+                // surface is created once and lives for the session. When the real
+                // aspect arrives the pinned size changes, which resizes the view once
+                // - a single reallocation, before there is anything on screen to
+                // blink - and onSurfaceTextureSizeChanged pushes the new size as
+                // normal.
+                val aspect = videoDisplayAspect?.toFloat()?.takeIf { it > 0.001f }
+                    ?: FALLBACK_VIDEO_ASPECT
+                // Widest the video can ever need is the window's long edge; its
+                // height follows from the aspect, so the buffer is the video's own
+                // shape and mpv has no margin to letterbox into.
+                //
+                // Rounded to whole px before being used as a remember key: rotation
+                // swaps width and height so the long edge is the same number, but a
+                // sub-pixel difference would still re-key this and resize the
+                // surface, which is the one thing it exists to avoid.
+                //
+                // AM (PINNED_SURFACE_SURVIVES_PIP) -->
+                // The LARGEST long edge seen, not the current window's.
+                //
+                // Rotation keeps the long edge the same number, so keying on the
+                // window's was enough for it - but entering real PiP genuinely
+                // shrinks the window, which re-keyed this and reallocated the buffer
+                // on every entry. That gap was previously masked: with no source-rect
+                // hint the system scaled the whole outgoing window through the
+                // transition, so there was always something on screen. Once the hint
+                // is correct the system hands over promptly and the gap is visible.
+                //
+                // Taking the maximum makes it monotonic: a PiP window is smaller than
+                // the one it came from, so it cannot move this, and the buffer
+                // survives the entry untouched. The cost is rendering at the larger
+                // resolution and letting the system scale down, which is what pinning
+                // means and is the same work the fullscreen case already does.
+                //
+                // Not derived from the display's real metrics on purpose: those need
+                // API-level branching and still disagree with the window in
+                // multi-window. Growing on demand needs none of that, and
+                // self-corrects if the app happens to start in a small window - at
+                // the price of one reallocation at that moment.
+                val windowLongEdgePx = maxOf(windowWidthPx, windowHeightPx).roundToInt()
+                val largestLongEdgePx = remember { mutableIntStateOf(0) }
+                LaunchedEffect(windowLongEdgePx) {
+                    if (windowLongEdgePx > largestLongEdgePx.intValue) {
+                        largestLongEdgePx.intValue = windowLongEdgePx
+                    }
+                }
+                // maxOf so the very first composition is already correct rather than
+                // waiting a frame for the effect above.
+                val longEdgePx = maxOf(largestLongEdgePx.intValue, windowLongEdgePx)
+                // <-- AM (PINNED_SURFACE_SURVIVES_PIP)
+                val fixedWidthPx = remember(aspect, longEdgePx) { longEdgePx.toFloat() }
+                val fixedHeightPx = remember(aspect, longEdgePx) { longEdgePx / aspect }
+                val fitScale = minOf(
+                    windowWidthPx / fixedWidthPx,
+                    windowHeightPx / fixedHeightPx,
                 )
+                Box(
+                    modifier = Modifier
+                        // requiredSize, NOT size: size is clamped by the parent's
+                        // constraints, so asking for the long edge inside the short
+                        // edge of the window silently gave back the window's width
+                        // instead. The buffer then still tracked the window - no
+                        // pinning at all - while fitScale went on dividing by the
+                        // size that was asked for, shrinking the picture away from
+                        // every edge. requiredSize is the one that ignores the
+                        // incoming constraints, which is exactly what a surface
+                        // deliberately larger than its container needs.
+                        .requiredSize(
+                            width = with(density) { fixedWidthPx.toDp() },
+                            height = with(density) { fixedHeightPx.toDp() },
+                        )
+                        .graphicsLayer {
+                            scaleX = fitScale
+                            scaleY = fitScale
+                        },
+                ) {
+                    key(viewModel.mpv) {
+                        MpvSurface(
+                            modifier = Modifier.fillMaxSize(),
+                            player = viewModel.player,
+                            videoOutput = viewModel.videoOutput,
+                            onSurfaceAttachedChanged = { attached ->
+                                viewModel.isSurfaceAttached = attached
+                            },
+                        )
+                    }
+                }
             }
+            // <-- AM (FIXED_SURFACE_SIZE)
             // <-- AM (SERVICE_OWNED_PLAYER)
 
             GestureHandler(
@@ -474,7 +614,35 @@ fun PlayerScreen(
                 // a tap, same as before). The LEAK_FIX collector stays as
                 // the guard that keeps the VM-side state honest against
                 // side-effect showControls() calls.
-                if (!dummyPipActive) {
+                // AM (SMALL_WINDOW_NO_CONTROLS) -->
+                // Same reasoning as the dummy-pip guard above, for the window the
+                // system resizes us into: real PiP.
+                //
+                // Hiding the controls by state cannot work there, and not because
+                // the hide runs too late to be moved earlier - because it can never
+                // be early enough by construction. The system owns the resize, it
+                // gives no callback before it, and controlsShown=false starts
+                // PlayerControls' 300ms exit fade rather than removing anything. So
+                // whatever moment is chosen, there are frames where the controls are
+                // drawn inside the small window, fading. That is the flash, and
+                // every version of "hide it sooner" is a race against an animation
+                // the OS is driving.
+                //
+                // This is not a race because it is not keyed on an event at all: the
+                // controls' existence is a function of the size they would be laid
+                // out in, read from the configuration the resize itself produces. The
+                // first composition at PiP size already has no controls in it, so
+                // there is no frame for them to appear in.
+                //
+                // Deliberately a size test rather than an isInPictureInPictureMode
+                // test: anything this small cannot host these controls usefully, and
+                // phrasing it as the size covers split-screen and freeform windows
+                // without the player knowing anything about PiP.
+                val configuration = LocalConfiguration.current
+                val windowFitsControls = configuration.screenWidthDp >= MIN_CONTROLS_WIDTH_DP &&
+                    configuration.screenHeightDp >= MIN_CONTROLS_HEIGHT_DP
+                if (!dummyPipActive && windowFitsControls) {
+                    // <-- AM (SMALL_WINDOW_NO_CONTROLS)
                     PlayerControls(
                         stateData = stateData,
                         uiData = uiData,
@@ -952,3 +1120,20 @@ fun PlayerScreen(
         }
     }
 }
+
+// AM (SMALL_WINDOW_NO_CONTROLS) -->
+// Below either of these the player's own controls are not composed at all - see the
+// guard in PlayerScreen for why this is a size test and not a PiP test.
+//
+// Chosen to sit well clear of both ends rather than tuned to a device: a real PiP
+// window is a couple of hundred dp at most, while a phone in landscape is 640dp+
+// wide and in portrait 300dp+ wide with far more height.
+private const val MIN_CONTROLS_WIDTH_DP = 280
+private const val MIN_CONTROLS_HEIGHT_DP = 180
+// <-- AM (SMALL_WINDOW_NO_CONTROLS)
+
+// AM (FIXED_SURFACE_SIZE) -->
+// Shape the surface is pinned to before mpv has reported a real one. Only ever
+// visible for the moment before the first frame's aspect arrives.
+private const val FALLBACK_VIDEO_ASPECT = 16f / 9f
+// <-- AM (FIXED_SURFACE_SIZE)

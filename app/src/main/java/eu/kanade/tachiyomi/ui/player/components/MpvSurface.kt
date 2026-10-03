@@ -73,6 +73,30 @@ fun MpvSurface(
                         // one as the permanent one instead.
                         player.persistentSurfaceTexture?.let { existing ->
                             setSurfaceTexture(existing)
+                            // AM (FIXED_SURFACE_SIZE) -->
+                            // Tell mpv the size on this path too.
+                            //
+                            // This branch adopts a texture that was sized for
+                            // whatever view last held it, and it used to return
+                            // without pushing android-surface-size - so whenever a
+                            // new view adopted the persistent texture at a different
+                            // size, mpv kept rendering for the OLD dimensions and
+                            // letterboxed the video inside them. That letterboxed
+                            // result then got mapped onto the new buffer, which looks
+                            // like bars on all four sides and the video not filling
+                            // the space it is given.
+                            //
+                            // It went unnoticed while the view was always
+                            // fillMaxSize, because the old and new sizes were then
+                            // almost always the same.
+                            //
+                            // setDefaultBufferSize as well: the adopted texture
+                            // carries the previous buffer dimensions, and nothing
+                            // else updates them when the view is not the one that
+                            // created it.
+                            existing.setDefaultBufferSize(width, height)
+                            mpv.setPropertyString("android-surface-size", "${width}x$height")
+                            // <-- AM (FIXED_SURFACE_SIZE)
                             onSurfaceAttachedChanged(true)
                             return
                         }

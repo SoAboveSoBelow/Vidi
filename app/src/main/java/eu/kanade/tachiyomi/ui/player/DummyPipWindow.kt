@@ -124,6 +124,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.geometry.toRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Color
@@ -147,6 +155,7 @@ import kotlin.reflect.KProperty
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 /**
@@ -164,7 +173,39 @@ class DummyPipActions(
     val onDismiss: () -> Unit,
     /** Hide the window, keep playback + notification alive (headphones button). */
     val onEnterBackground: () -> Unit,
+    // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
+    /**
+     * The window's current on-screen rect in container px, or null when no window is
+     * up (fullscreen, dismissed, or mid-morph).
+     *
+     * Exists for real PiP's `setSourceRectHint`: the system needs to know which part
+     * of the screen is becoming the PiP window, and while the mini player is up that
+     * is this window rather than the fullscreen video. Without it that path passes no
+     * hint at all and the system resizes the whole window generically, which is the
+     * entire screen appearing to shrink.
+     *
+     * Reported only when the window is at REST - never mid-drag, mid-resize or
+     * mid-animation. Not for cheapness: the consumer re-registers PiP params with the
+     * OS on every change, and a rect from halfway through a drag describes a position
+     * the window is not going to be in. At-rest is also the only state the window can
+     * actually be in when the user reaches for Home.
+     */
+    val onWindowRectChanged: (DummyPipWindowRect?) -> Unit = {},
+    // <-- AM (DUMMY_PIP_REPORTS_WINDOW_RECT)
 )
+
+// AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
+/**
+ * The mini player's on-screen rect, in the container's px. Plain floats rather than
+ * a graphics Rect so neither this file nor its consumers depend on which one.
+ */
+data class DummyPipWindowRect(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+)
+// <-- AM (DUMMY_PIP_REPORTS_WINDOW_RECT)
 
 /**
  * External handle for requesting an animated expand-to-fullscreen from
@@ -209,6 +250,12 @@ private const val PIP_BASE_WIDTH_PERCENT = 0.6f
 private const val PIP_MAX_WIDTH_PERCENT = 1f
 private const val MAX_SIZE_SCALE = PIP_MAX_WIDTH_PERCENT / PIP_BASE_WIDTH_PERCENT
 private const val FALLBACK_ASPECT_RATIO = 16f / 9f
+// AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+// How far mpv's reported surface size may differ from this container's own px
+// and still count as "this is the fullscreen render" - rounding between the two,
+// nothing more.
+private const val SURFACE_MATCH_SLOP_PX = 2f
+// <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
 // Minimum size, modeled on AOSP's PipBoundsAlgorithm (NOT a fixed min
 // width, and not total pixels either - the config comment calls it
 // "adaptive size based loosely on area"): a minimum EDGE plus a constant
@@ -289,8 +336,35 @@ private val PIP_TOP_ROW_SPACING = 16.dp
 
 // Enter/exit morph + double-tap toggle speeds, relaxed after on-device
 // comparison: 250/200ms read as "a lot faster than the real pip".
-private const val ENTER_EXIT_MORPH_MS = 300
-private const val TOGGLE_SIZE_MS = 350
+// AM (DUMMY_PIP_AOSP_DURATIONS) -->
+// Taken from AOSP rather than tuned by feel. PipTaskOrganizer reads these from
+// the Shell's own config.xml (libs/WindowManager/Shell/res/values/config.xml):
+//   config_pipEnterAnimationDuration     425
+//   config_pipExitAnimationDuration      250
+//   config_pipResizeAnimationDuration    425
+//   config_pipCrossfadeAnimationDuration 150
+// and PipAnimationController drives them with Interpolators.FAST_OUT_SLOW_IN,
+// which is the same curve as FastOutSlowInEasing - so the easing here was
+// already right and only the timings were not.
+//
+// The single ENTER_EXIT_MORPH_MS this replaces was the real error: real PiP does
+// NOT use one duration in both directions. Entering is the slow, deliberate one
+// and exiting is the quick one, nearly 2:1. A single 300 split the difference and
+// got both wrong in opposite directions - a third too fast going in, a fifth too
+// slow coming out.
+private const val PIP_ENTER_MORPH_MS = 425
+private const val PIP_EXIT_MORPH_MS = 250
+// The double-tap size toggle is a resize, so it takes the resize duration, not a
+// number of its own. 350 was short of it.
+private const val TOGGLE_SIZE_MS = 425
+// AM (DUMMY_PIP_TOGGLE_FULL_WINDOW_COLLAPSES) -->
+// How close to the maximum counts as being at it, in sizeScale units - the
+// fitted maximum is a computed float and a pinch lands on it approximately.
+private const val TOGGLE_AT_MAX_EPSILON = 0.01f
+// <-- AM (DUMMY_PIP_TOGGLE_FULL_WINDOW_COLLAPSES)
+// No equivalent of real PiP's 150ms crossfade exists here yet; noted because it
+// is likely part of why its transitions read as smoother at any duration.
+// <-- AM (DUMMY_PIP_AOSP_DURATIONS)
 // AM (DUMMY_PIP_UNIFIED_DISMISS_FADE) -->
 // Real PiP's dismissal (X, swipe-to-dismiss) is a quick in-place FADE,
 // ~150ms - no sliding, no morph. All three dummy-pip exits that tear
@@ -426,6 +500,40 @@ private class BaseRelativeScale(
 // only the scale (the old code) walked the window off the pinch
 // midpoint whenever the gesture added a few degrees of tilt.
 // <-- AM (DUMMY_PIP_PINCH_ROTATION_ANCHOR_FIX)
+// AM (DUMMY_PIP_PRESCALED_CORNERS) -->
+/**
+ * A rounded rectangle whose corners are elliptical in local space by the inverse of
+ * the scale they will be drawn under, so that they land circular on screen.
+ *
+ * [RoundedCornerShape] gives each corner a single size, which is only correct when
+ * the layer's x and y scales match. A [RoundRect]'s [CornerRadius] takes the two
+ * separately, which is all this needs.
+ */
+private data class PreScaledCornerShape(
+    private val radiusPx: Float,
+    private val scaleX: Float,
+    private val scaleY: Float,
+) : Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: LayoutDirection,
+        density: Density,
+    ): Outline {
+        if (radiusPx <= 0f) return Outline.Rectangle(size.toRect())
+        // Half the shorter side is the largest radius a rect can carry; past that
+        // the corners would overlap.
+        val radiusX = (radiusPx / scaleX.coerceAtLeast(0.0001f)).coerceAtMost(size.width / 2f)
+        val radiusY = (radiusPx / scaleY.coerceAtLeast(0.0001f)).coerceAtMost(size.height / 2f)
+        return Outline.Rounded(
+            RoundRect(
+                rect = size.toRect(),
+                cornerRadius = CornerRadius(radiusX, radiusY),
+            ),
+        )
+    }
+}
+// <-- AM (DUMMY_PIP_PRESCALED_CORNERS)
+
 private fun Offset.rotatedByDegrees(degrees: Float): Offset {
     if (degrees == 0f) return this
     val rad = Math.toRadians(degrees.toDouble())
@@ -439,6 +547,26 @@ fun DummyPipContainer(
     isPipRequested: Boolean,
     videoWidth: Int,
     videoHeight: Int,
+    // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+    /**
+     * mpv's rotation-corrected DISPLAY aspect, which is the shape the video is
+     * actually drawn at - [videoWidth]/[videoHeight] are storage dimensions and
+     * disagree with it for anamorphic or rotation-tagged content. Null until mpv
+     * reports one.
+     *
+     * Deliberately the source for the WINDOW's shape rather than [videoOutputRect]:
+     * the drawn rect depends on the surface it was drawn into, so deriving the
+     * window from it and then resizing the surface to that window would feed back
+     * on itself. The display aspect is a property of the video alone.
+     */
+    videoDisplayAspect: Float?,
+    /**
+     * Where mpv actually drew the video inside the current surface. Used ONLY by
+     * the entry/exit morph, which has to scale the drawn rect rather than a guess
+     * at where it should be.
+     */
+    videoOutputRect: VideoOutputRect?,
+    // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
     isPaused: Boolean,
     actions: DummyPipActions,
     controller: DummyPipController = rememberDummyPipController(),
@@ -540,12 +668,38 @@ fun DummyPipContainer(
 
         // Same live video aspect ratio MainActivity's real-PIP builder uses,
         // animated so late-arriving dimensions don't snap the window's shape.
-        val targetAspectRatio = if (videoWidth > 0 && videoHeight > 0) {
-            videoWidth.toFloat() / videoHeight.toFloat()
-        } else {
-            FALLBACK_ASPECT_RATIO
+        // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+        // Display aspect first: videoWidth/videoHeight are storage dimensions, so
+        // a 1920x1080 anamorphic source stored at 1440x1080 produced a 4:3 window
+        // for a 16:9 video, and a rotation-tagged portrait clip came out
+        // landscape. Those two stay as the fallback for the window shape before
+        // mpv has reported an aspect at all.
+        val targetAspectRatio = when {
+            videoDisplayAspect != null && videoDisplayAspect > 0.001f -> videoDisplayAspect
+            videoWidth > 0 && videoHeight > 0 -> videoWidth.toFloat() / videoHeight.toFloat()
+            else -> FALLBACK_ASPECT_RATIO
         }
+        // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
         val aspectRatio by animateFloatAsState(targetValue = targetAspectRatio, label = "dummyPipAspectRatio")
+
+        // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+        // The morph always scales the FULLSCREEN render - down on entry, back up
+        // on exit - so the rect it needs is the one mpv drew while the surface was
+        // still fullscreen. osd-dimensions tracks the LIVE surface, which has
+        // already become the pip window by the time the exit morph runs, so the
+        // fullscreen reading is latched here instead of read live. "Describes the
+        // fullscreen render" is exactly "its surface matches this container", so
+        // that is the condition, with a couple of px of slop for rounding.
+        var morphVideoRect by remember { mutableStateOf<VideoOutputRect?>(null) }
+        LaunchedEffect(videoOutputRect, screenWidthPx, screenHeightPx) {
+            val rect = videoOutputRect ?: return@LaunchedEffect
+            if (!rect.isUsable) return@LaunchedEffect
+            val matchesContainer =
+                abs(rect.surfaceWidth - screenWidthPx) <= SURFACE_MATCH_SLOP_PX &&
+                    abs(rect.surfaceHeight - screenHeightPx) <= SURFACE_MATCH_SLOP_PX
+            if (matchesContainer) morphVideoRect = rect
+        }
+        // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
 
         // Latest-value refs for the long-lived gesture coroutine below -
         // pointerInput(Unit) never relaunches, so it must read these
@@ -606,6 +760,18 @@ fun DummyPipContainer(
         val lastAdjustedScaleDelegate = remember { BaseRelativeScale(lastAdjustedWidthPx, currentBaseWidth) }
         var lastAdjustedScale by lastAdjustedScaleDelegate
         var toggledExpanded by remember { mutableStateOf(false) }
+        // AM (DUMMY_PIP_TOGGLE_RESTORES_PRE_EXPAND) -->
+        // The size and docked side the window had when the double-tap expansion
+        // started, so collapsing can put both back. Null whenever no expansion is
+        // outstanding.
+        var preExpandScale by remember { mutableStateOf<Float?>(null) }
+        var preExpandDockRight by remember { mutableStateOf<Boolean?>(null) }
+        // <-- AM (DUMMY_PIP_TOGGLE_RESTORES_PRE_EXPAND)
+        // AM (DUMMY_PIP_EXIT_REVEAL_UNGROW_FIX) -->
+        // The reveal-grow factor in force when an exit morph started, so the morph
+        // can unwind it smoothly. 1f whenever no exit is in flight.
+        var exitRevealScale by remember { mutableFloatStateOf(1f) }
+        // <-- AM (DUMMY_PIP_EXIT_REVEAL_UNGROW_FIX)
         // True while a pinch resize is in flight - drives the
         // full-screen touch blocker below (real PiP swallows touches to
         // everything behind the window during a resize).
@@ -699,6 +865,20 @@ fun DummyPipContainer(
         // union of whichever bar/cutout actually occupies that edge (so
         // an offset only exists where something is really there), plus
         // the edge margin. Every dock/clamp below routes through these.
+        // AM (DUMMY_PIP_STASH_FLUSH_TO_EDGE) -->
+        // Stashing docks against the screen edge itself, not the resting bounds.
+        // boundLeft/boundRight include PIP_EDGE_MARGIN, a 16dp cosmetic gap that
+        // keeps a RESTING window off the edge - but a stashed window is supposed
+        // to be tucked away, and parking it at the resting bound left that 16dp
+        // of empty space between the screen edge and the sliver, so ~48dp of
+        // screen was given over to a window that is meant to be hidden. The
+        // physical insets (nav bar, cutout) are still respected because those are
+        // obstructions rather than style.
+        fun stashLeftPx() = maxOf(currentNavBarLeft.value, currentCutoutLeft.value)
+        fun stashRightPx() = currentScreenWidth.value -
+            maxOf(currentNavBarRight.value, currentCutoutRight.value)
+        // <-- AM (DUMMY_PIP_STASH_FLUSH_TO_EDGE)
+
         fun boundLeftPx() = maxOf(currentNavBarLeft.value, currentCutoutLeft.value) + currentEdgeMargin.value
         fun boundRightPx() = currentScreenWidth.value -
             maxOf(currentNavBarRight.value, currentCutoutRight.value) - currentEdgeMargin.value
@@ -752,12 +932,22 @@ fun DummyPipContainer(
         // inside the bounds. Single source for the composition-side
         // target AND the gesture loop's settled check, so the two can't
         // disagree.
-        fun controlsRevealGrowFactor(): Float {
+        // AM (DUMMY_PIP_REVEAL_TARGET_EXTRACTED) -->
+        // The absolute reveal-grow size, lifted out of controlsRevealGrowFactor()
+        // so the double-tap collapse can aim at the same size the controls reveal
+        // grows a small window to - one definition, two callers, no chance of the
+        // two drifting apart.
+        fun controlsRevealTargetWidthPx(): Float {
             val shortEdge = minOf(currentScreenWidth.value, currentScreenHeight.value)
-            val targetW = minOf(
+            return minOf(
                 sizeWidthForAspect(shortEdge * CONTROLS_REVEAL_TARGET_EDGE_FRACTION),
                 maxWindowWidthPx(),
             )
+        }
+        // <-- AM (DUMMY_PIP_REVEAL_TARGET_EXTRACTED)
+
+        fun controlsRevealGrowFactor(): Float {
+            val targetW = controlsRevealTargetWidthPx()
             val w = windowWidthPx()
             return if (w > 0f && w < targetW) targetW / w else 1f
         }
@@ -878,9 +1068,9 @@ fun DummyPipContainer(
             // Stash sliver also clears a bar/cutout on that edge (the
             // camera hole is exactly where a left/right stash peeks).
             val targetX = if (left) {
-                boundLeftPx() - w / 2f + stashPeekPx
+                stashLeftPx() - w / 2f + stashPeekPx
             } else {
-                boundRightPx() + w / 2f - stashPeekPx
+                stashRightPx() + w / 2f - stashPeekPx
             }
             // Dock wherever along the edge the user released - Samsung's
             // edge-panel handle is user-movable, so no fixed screen
@@ -923,10 +1113,29 @@ fun DummyPipContainer(
         suspend fun runExitMorph() {
             when (mode) {
                 DummyPipMode.Pip -> {
+                    // AM (DUMMY_PIP_EXIT_REVEAL_UNGROW_FIX) -->
+                    // Captured BEFORE controlsShown is cleared. Hiding the
+                    // controls drops the reveal-grow back to 1 with a snapTo
+                    // (shrinking is deliberately instant - an animated shrink
+                    // fights a pinch that is starting), so by the time the morph
+                    // below runs, the grown size is already gone. The window
+                    // therefore jumped from its grown size to its real size in
+                    // one frame and only then started morphing. Holding the value
+                    // here lets the layer unwind it across the morph instead - see
+                    // where this is read.
+                    //
+                    // Recomputed from controlsRevealGrowFactor() rather than read
+                    // off the reveal Animatable: that is declared several hundred
+                    // lines further down, past this function. The factor is a pure
+                    // function of the window's current size, which this does not
+                    // change, so it returns the same value the animation settled
+                    // on.
+                    exitRevealScale = if (controlsShown) controlsRevealGrowFactor() else 1f
+                    // <-- AM (DUMMY_PIP_EXIT_REVEAL_UNGROW_FIX)
                     controlsShown = false
                     pipRotation = 0f
                     mode = DummyPipMode.AnimatingOut
-                    transition.animateTo(0f, tween(ENTER_EXIT_MORPH_MS, easing = FastOutSlowInEasing))
+                    transition.animateTo(0f, tween(PIP_EXIT_MORPH_MS, easing = FastOutSlowInEasing))
                     // Flips isDummyPipActive false - the LaunchedEffect
                     // below then lands mode in Fullscreen.
                     currentActions.value.onExpand()
@@ -969,69 +1178,115 @@ fun DummyPipContainer(
                 MAX_SIZE_SCALE,
                 maxWindowWidthPx() / currentBaseWidth.value,
             )
-            // Real PiP semantics: expand to max; collapse back to the
-            // last user-adjusted size (pinch commits set it - the
-            // expansion itself never does). Toggling mid-expansion
-            // reverses back to that same remembered size.
+            // AM (DUMMY_PIP_TOGGLE_RESTORES_PRE_EXPAND) -->
+            // The collapse is now the expansion run backwards, because it
+            // restores what the expansion recorded. It previously aimed at
+            // lastAdjustedScale, which is written only when a PINCH commits a
+            // size - the expansion deliberately never writes it - so with no
+            // pinch in the window's history the delegate fell through to a bare
+            // 1f and the collapse went to base size, somewhere unrelated to
+            // where the user started. Nothing recorded the pre-expansion size at
+            // all, so "collapse" could not have been a reversal.
+            //
+            // Same for position: the settle target below used to be derived from
+            // the live centerX, but expanding to near-full width moves the centre
+            // to the middle of the screen, destroying the very information the
+            // comparison needs. The docked side is captured here instead of
+            // inferred afterwards, which is what makes a window expanded from the
+            // left come back to the left.
+            //
+            // lastAdjustedScale stays the fallback for an expanded state that
+            // outlived its capture (a rotation, a new session).
+            // AM (DUMMY_PIP_TOGGLE_FULL_WINDOW_COLLAPSES) -->
+            // "Expanded" is a question about the window's SIZE, so it is asked of
+            // the size. toggledExpanded alone is a separate piece of state that
+            // only the double-tap maintains, and a pinch commit clears it - so a
+            // window pinched up to the maximum answered "not expanded", and
+            // double-tapping it computed a target it was already at and did
+            // nothing at all. Treating at-max as expanded makes the gesture work
+            // the same way whichever route the window got there by.
+            val alreadyAtMax = sizeScale >= maxScale - TOGGLE_AT_MAX_EPSILON
             val targetScale: Float
-            if (toggledExpanded) {
-                targetScale = lastAdjustedScale
+            val targetDockRight: Boolean
+            if (toggledExpanded || alreadyAtMax) {
+                // AM (DUMMY_PIP_COLLAPSE_TO_REVEAL_SIZE) -->
+                // With a recorded pre-expansion size the collapse is a true
+                // reversal and restores it. Without one - a window pinched up to
+                // the maximum, which the double-tap never expanded - it shrinks
+                // to the controls reveal-grow size.
+                //
+                // lastAdjustedScale is NOT the fallback any more, and could not
+                // have been: pinch commits are exactly what write it, so a window
+                // pinched to the maximum had it set to the maximum, and a collapse
+                // aiming there computed the size it was already at. The at-max
+                // check alone did not fix the dead double-tap for that reason.
+                targetScale = preExpandScale
+                    ?: (controlsRevealTargetWidthPx() / currentBaseWidth.value)
+                // <-- AM (DUMMY_PIP_COLLAPSE_TO_REVEAL_SIZE)
+                targetDockRight = preExpandDockRight ?: (centerX >= currentScreenWidth.value / 2f)
+                preExpandScale = null
+                preExpandDockRight = null
                 toggledExpanded = false
             } else {
+                preExpandScale = sizeScale
+                preExpandDockRight = centerX >= currentScreenWidth.value / 2f
                 targetScale = maxScale
+                targetDockRight = preExpandDockRight == true
                 toggledExpanded = true
             }
+            // <-- AM (DUMMY_PIP_TOGGLE_RESTORES_PRE_EXPAND)
             cancelMove()
-            // Center-anchored: centerX/centerY stay put, the size change
-            // expands/shrinks around them - then settle back fully
-            // on-screen (via animatePosition, so the per-axis jobs are
-            // tracked and cancellable like everything else).
-            // Settle targets computed for the TARGET size (the resize and
-            // the settle run concurrently, so windowWidthPx() - still the
-            // old size - would aim at the wrong edge).
+            // AM (DUMMY_PIP_TOGGLE_ONE_ANIMATION) -->
+            // One animation over the whole rect, replacing two.
+            //
+            // This used to run animatePosition() for centerX/centerY and a
+            // separate sizeJob for the size, concurrently: a SPRING for position
+            // (StiffnessMediumLow) against a 425ms TWEEN for size. Two curves of
+            // different shapes and different lengths, in two separately
+            // cancellable jobs, each computing its own idea of the destination.
+            // The spring reached the target well before the tween finished, so
+            // the window had visibly arrived while the size interpolation was
+            // still running - which reads as the move being instant and the
+            // resize not playing at all. It also made the two directions behave
+            // differently for no reason visible in the code, because which
+            // animation dominated depended on how far each had to travel.
+            //
+            // A toggle is one thing: move the window from the rect it is in to
+            // the rect it should be in. Driving centre and size off a single
+            // progress value makes it exactly that, and makes collapsing the
+            // literal reverse of expanding - same curve, same duration, endpoints
+            // swapped - rather than two systems that have to be talked into
+            // agreeing.
+            val startScale = sizeScale
+            val startX = centerX
+            val startY = centerY
             val targetW = currentBaseWidth.value * targetScale
             val targetH = targetW / currentAspect.value
-            val targetX = if (centerX < currentScreenWidth.value / 2f) {
-                boundLeftPx() + targetW / 2f
-            } else {
+            val targetX = if (targetDockRight) {
                 boundRightPx() - targetW / 2f
+            } else {
+                boundLeftPx() + targetW / 2f
             }
             val targetY = coerceInSafe(
                 centerY,
                 boundTopPx() + targetH / 2f,
                 boundBottomPx() - targetH / 2f,
             )
+            // Still published for the settle-staleness checks elsewhere, which
+            // ask where an in-flight move is headed.
             settleTargetX = targetX
             settleTargetY = targetY
-            // Position first (its internal cancelMove clears stale jobs),
-            // THEN the size job - launching it first would let
-            // animatePosition's cancelMove kill it immediately.
-            animatePosition(
-                targetX,
-                targetY,
-                specX = spring(stiffness = Spring.StiffnessMediumLow),
-            )
-            // AM (DUMMY_PIP_TOGGLE_PAINT_TIME_FIX) -->
-            // Was animate(sizeScale...): sizeScale is the LAYOUT size, so
-            // every frame relaid out the embedded TextureView - the same
-            // reallocation flashing the overshoot pull-back had before it
-            // moved to paint-time (v18). The toggle now runs the same way:
-            // pinchScale carries the growth visually (zero relayout, and
-            // pinchScale != 1f marks the layer pinching, which correctly
-            // drops the clip/shadow for the duration), then the layout
-            // commits once at the identical final size.
-            // <-- AM (DUMMY_PIP_TOGGLE_PAINT_TIME_FIX)
             toggleRunning = true
-            val startScale = sizeScale
             sizeJob = scope.launch {
                 animate(0f, 1f, 0f, tween(TOGGLE_SIZE_MS, easing = FastOutSlowInEasing)) { v, _ ->
-                    pinchScale = lerp(startScale, targetScale, v) / startScale
+                    sizeScale = lerp(startScale, targetScale, v)
+                    centerX = lerp(startX, targetX, v)
+                    centerY = lerp(startY, targetY, v)
                 }
-                sizeScale = targetScale
-                pinchScale = 1f
                 toggleRunning = false
                 lastToggleEndTime = android.os.SystemClock.uptimeMillis()
             }
+            // <-- AM (DUMMY_PIP_TOGGLE_ONE_ANIMATION)
         }
 
         // Entry/exit driven by the external session flag. Entry morphs
@@ -1058,7 +1313,7 @@ fun DummyPipContainer(
                     pipRotation = 0f
                     pinchScale = 1f
                     dismissAlpha.snapTo(1f)
-                    transition.animateTo(1f, tween(ENTER_EXIT_MORPH_MS, easing = FastOutSlowInEasing))
+                    transition.animateTo(1f, tween(PIP_ENTER_MORPH_MS, easing = FastOutSlowInEasing))
                     if (mode == DummyPipMode.AnimatingIn) mode = DummyPipMode.Pip
                 }
             } else {
@@ -1206,9 +1461,9 @@ fun DummyPipContainer(
                 DummyPipMode.StashedLeft, DummyPipMode.StashedRight -> {
                     val w = windowWidthPx()
                     centerX = if (mode == DummyPipMode.StashedLeft) {
-                        boundLeftPx() - w / 2f + stashPeekPx
+                        stashLeftPx() - w / 2f + stashPeekPx
                     } else {
-                        boundRightPx() + w / 2f - stashPeekPx
+                        stashRightPx() + w / 2f - stashPeekPx
                     }
                     centerY = centerY / oldH * screenHeightPx
                 }
@@ -1365,35 +1620,47 @@ fun DummyPipContainer(
         } else {
             1f
         }
-        // Growing animates; SHRINKING is instant (snapTo). An animated
-        // shrink keeps running while a pinch starts (the pinch hides the
-        // controls), visibly fighting the gesture - part of the reported
-        // pinch "lag".
+        // AM (DUMMY_PIP_REVEAL_UNGROW_ANIMATES) -->
+        // Was: grow animates, shrink always snapTo. That is the whole of the
+        // "it expands smoothly but the collapse is instant" report - the reveal
+        // grow is what a tap on a small window visibly resizes, and un-growing
+        // was a single frame by construction, not by accident.
+        //
+        // The reason given for snapping is real but narrower than the rule it
+        // justified: an animated shrink that is still running when a pinch
+        // starts fights the gesture, because the pinch hides the controls and
+        // the two then drive the same scale. That is an argument for snapping
+        // WHEN A GESTURE IS TAKING OVER, which is what this does now - keyed on
+        // the gesture flags so a pinch or drag starting mid-shrink re-enters and
+        // snaps the rest of the way immediately. Every other route to hiding the
+        // controls - the auto-hide timer, a second tap - animates back down over
+        // the same curve and duration it came up on, so the two directions
+        // mirror each other.
         val controlsRevealScaleAnim = remember { Animatable(1f) }
-        LaunchedEffect(revealScaleTarget) {
-            if (revealScaleTarget > controlsRevealScaleAnim.value) {
-                controlsRevealScaleAnim.animateTo(revealScaleTarget, tween(CONTROLS_REVEAL_GROW_MS))
-            } else {
+        LaunchedEffect(revealScaleTarget, resizeActive, dragActive) {
+            if (resizeActive || dragActive) {
                 controlsRevealScaleAnim.snapTo(revealScaleTarget)
+            } else {
+                controlsRevealScaleAnim.animateTo(revealScaleTarget, tween(CONTROLS_REVEAL_GROW_MS))
             }
         }
+        // <-- AM (DUMMY_PIP_REVEAL_UNGROW_ANIMATES)
         val controlsRevealScale = controlsRevealScaleAnim.value
         // <-- AM (DUMMY_PIP_CONTROLS_REVEAL_GROW_FIX)
 
-        LaunchedEffect(Unit) {
-            snapshotFlow {
-                val pipLike = mode == DummyPipMode.Pip ||
-                    mode == DummyPipMode.StashedLeft ||
-                    mode == DummyPipMode.StashedRight
-                if (pipLike) {
-                    cornerRadiusPx /
-                        (pinchScale * controlsRevealScaleAnim.value).coerceAtLeast(0.01f)
-                } else {
-                    0f
-                }
-            }.collect { pipViewCornerRadiusPx.floatValue = it }
-        }
-        // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
+        // AM (DUMMY_PIP_PRESCALED_CORNERS) -->
+        // The effect that fed the TextureView's outline radius is gone: the layer's
+        // own clip carries the corners now, with its radii pre-divided per axis.
+        // Keeping the View outline as well would round them a second time, and that
+        // one can only be elliptical - a View outline takes a single radius, and this
+        // layer's scale is non-uniform. It also lagged by a frame, reaching the view
+        // through a recomposition while the scale updates at draw time, which is the
+        // other half of the corner flicker during a resize.
+        //
+        // pipViewCornerRadiusPx stays at its initial 0f, so MpvSurface leaves
+        // clipToOutline off and the TextureView renders exactly as it did before that
+        // mechanism existed.
+        // <-- AM (DUMMY_PIP_PRESCALED_CORNERS)
 
         // AM (DUMMY_PIP_CONTROLS_AFTER_GROW_FIX) -->
         // Real PiP's controls don't slide around mid-growth: they appear
@@ -1402,6 +1669,78 @@ fun DummyPipContainer(
         // settled at its target.
         val controlsSettled = abs(controlsRevealScale - revealScaleTarget) < 0.01f
         // <-- AM (DUMMY_PIP_CONTROLS_AFTER_GROW_FIX)
+
+        // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
+        // Publishes the window's resting rect for real PiP's source-rect hint - see
+        // DummyPipActions.onWindowRectChanged.
+        //
+        // Emits null for every state that is not a window sitting still: fullscreen,
+        // either morph, and any live gesture or settle animation. A rect captured
+        // mid-drag names a place the window is about to leave, and the consumer
+        // pushes it to the OS as a standing registration, so a wrong one persists
+        // until the next emission.
+        //
+        // The rect is the GROWN one when the controls are revealed, because that is
+        // what is actually on screen. Same derivation as the controls overlay just
+        // below - edge-anchored, so a window docked bottom-right grows up and left
+        // rather than off the screen.
+        val currentWindowRectCallback = rememberUpdatedState(actions.onWindowRectChanged)
+        LaunchedEffect(Unit) {
+            snapshotFlow {
+                val settledWindow = (
+                    mode == DummyPipMode.Pip ||
+                        mode == DummyPipMode.StashedLeft ||
+                        mode == DummyPipMode.StashedRight
+                    ) &&
+                    !dragActive &&
+                    !resizeActive &&
+                    !toggleRunning &&
+                    !pullBackRunning &&
+                    moveJobX?.isActive != true &&
+                    moveJobY?.isActive != true
+                if (!settledWindow) return@snapshotFlow null
+                val scale = controlsRevealScaleAnim.value
+                val anchorX = if (centerX > screenWidthPx / 2f) 1f else 0f
+                val anchorY = if (centerY > screenHeightPx / 2f) 1f else 0f
+                val left = centerX - pipWidthPx / 2f + anchorX * pipWidthPx * (1f - scale)
+                val top = centerY - pipHeightPx / 2f + anchorY * pipHeightPx * (1f - scale)
+                DummyPipWindowRect(
+                    left = left,
+                    top = top,
+                    right = left + pipWidthPx * scale,
+                    bottom = top + pipHeightPx * scale,
+                )
+            }.distinctUntilChanged().collect { currentWindowRectCallback.value(it) }
+        }
+        // <-- AM (DUMMY_PIP_REPORTS_WINDOW_RECT)
+
+        // AM (DUMMY_PIP_OUTSIDE_TAP_HIDES_CONTROLS) -->
+        // Tapping away from the window puts the controls away, like real PiP.
+        // Nothing did this before: controlsShown was only cleared by the 3s
+        // auto-hide, a mode change or a button, so the controls sat there through
+        // any amount of interaction with the app behind them.
+        //
+        // Deliberately does NOT consume the event - a tap outside the pip belongs
+        // to whatever is underneath, and swallowing it would make the window feel
+        // modal. Hit-tested against the window's own GROWN rect rather than
+        // relying on sibling ordering, since the gesture overlay consumes the
+        // window's own touches but this listener sees them anyway with
+        // requireUnconsumed = false.
+        if (mode == DummyPipMode.Pip && controlsShown) {
+            Box(
+                Modifier.fillMaxSize().pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val halfW = pipWidthPx * controlsRevealScale / 2f
+                        val halfH = pipHeightPx * controlsRevealScale / 2f
+                        val outside = abs(down.position.x - centerX) > halfW ||
+                            abs(down.position.y - centerY) > halfH
+                        if (outside) controlsShown = false
+                    }
+                },
+            )
+        }
+        // <-- AM (DUMMY_PIP_OUTSIDE_TAP_HIDES_CONTROLS)
 
         // ---- Background touch blocker (only while pinch-resizing) ----
         // Real PiP swallows every touch outside the window during a
@@ -1425,170 +1764,292 @@ fun DummyPipContainer(
             )
         }
 
+        // AM (DUMMY_PIP_TOO_SMALL_RENDERS_FULLSCREEN) -->
+        // Whether this container can host a mini player at all, asked of the
+        // CONSTRAINTS rather than of any event.
+        //
+        // This is what the jump on entering real PiP from the mini player was. Until
+        // onPictureInPictureModeChanged fires and flips isDummyPipActive, the player
+        // is still drawn with the mini-player transform - so at the end of the
+        // system's collapse the window IS the PiP rect while the content is still a
+        // small video inside a screen-sized layout, and the callback then corrects it
+        // in one frame. The collapse looks right and then the content jumps to fill.
+        //
+        // It cannot be fixed by flipping that flag earlier: doing it immediately
+        // before enterPictureInPictureMode runs in the same call stack, so Compose
+        // has not recomposed and the system captures the old geometry anyway, and
+        // onUserLeaveHint never fires for Recents. Anything that works by getting in
+        // first is a race against the OS.
+        //
+        // Asking the constraints removes the timing from it entirely. A PiP window is
+        // far too small to host even the minimum mini player, so the same layout pass
+        // that shrinks the window already answers "no" - the transform is identity on
+        // the first frame at the new size, and there is nothing left for the callback
+        // to correct. DUMMY_PIP_REALPIP_SIZE_CLAMP_FIX already draws this exact
+        // distinction for the fit clamp ("a surface too small to even host the
+        // minimum pip isn't a full-screen surface"); this applies it to rendering.
+        //
+        // Deliberately NOT written back into `mode`: that is gesture state and the
+        // window must still be in Pip when the real screen size returns. Only what is
+        // DRAWN derives from this.
+        val containerHostsWindow = minOf(screenWidthPx, screenHeightPx) >= minWindowWidthPx()
+        val renderMode = if (containerHostsWindow) mode else DummyPipMode.Fullscreen
+        // <-- AM (DUMMY_PIP_TOO_SMALL_RENDERS_FULLSCREEN)
+
         // ---- Video surface (same composable, same MpvSurface, both modes) ----
         Box(
-            modifier = when (mode) {
+            // AM (DUMMY_PIP_PINNED_SURFACE_PROBE) -->
+            // DIAGNOSTIC, not a finished implementation. Answers one question:
+            // does video still render when the pip window is a persistent
+            // transform over a fullscreen-sized layout, rather than a real small
+            // layout?
+            //
+            // It matters because TextureView ties its buffer size to its VIEW
+            // size - TextureView#onSizeChanged pushes the new size straight into
+            // the SurfaceTexture - so the only way to stop the buffer being
+            // reallocated mid-morph (the stale-stretch this whole thread is
+            // chasing) is for the view never to change size. There is no
+            // transaction binding "new buffer committed" to "bounds changed" the
+            // way SurfaceControl gives real PiP; with a TextureView those are
+            // independent and something has to be shown in between.
+            //
+            // That structure is what DUMMY_PIP_REAL_SIZE_REVERT backed out,
+            // recording only that it "broke video rendering outright twice" with
+            // no reproduction and no cause. The TextureView migration predates
+            // that revert by three weeks, so the obvious explanation - a
+            // SurfaceView's separate compositor window ignoring ancestor
+            // transforms - does not apply, and nothing else in the history says
+            // what did. Hence measuring rather than assuming.
+            //
+            // The buffer now stays at fullscreen size for the whole session, so
+            // the inner content layer's letterbox crop has to stay applied at
+            // rest too, not just during the morph - the bars are really still in
+            // the buffer. That is handled by widening the morph wrapper below to
+            // every non-fullscreen mode.
+            //
+            // Corners are deliberately left to the TextureView outline path
+            // (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) rather than the layer clip:
+            // the layer clip lives in unscaled layer-local space, and under a
+            // non-uniform scale a rounded rect there comes out elliptical. If
+            // the probe succeeds that needs solving properly; it is not what is
+            // being measured here.
+            modifier = when (renderMode) {
                 DummyPipMode.Fullscreen -> Modifier.fillMaxSize()
-                DummyPipMode.AnimatingIn, DummyPipMode.AnimatingOut -> Modifier
+                else -> Modifier
                     .fillMaxSize()
                     .graphicsLayer {
                         val t = transition.value
-                        // Entry/exit morph on the FULLSCREEN layout: the
-                        // TextureView keeps its fullscreen surface for the
-                        // whole animation and only relayouts to the small
-                        // window once, at t=1 (the flip to Pip swaps to an
-                        // identical visual rect). The old small-layout
-                        // morph resized the surface AT t=0 and the
-                        // reallocation flashed through the entry.
-                        //
-                        // NOTE the per-axis scales DIFFER (screen and
-                        // window have different aspect ratios) - the
-                        // video would be squished mid-morph if the
-                        // content weren't counter-scaled (see the inner
-                        // content layer below).
-                        scaleX = lerp(1f, pipWidthPx / screenWidthPx, t)
-                        scaleY = lerp(1f, pipHeightPx / screenHeightPx, t)
-                        transformOrigin = TransformOrigin(0f, 0f)
-                        translationX = lerp(0f, centerX - pipWidthPx / 2f, t)
-                        translationY = lerp(0f, centerY - pipHeightPx / 2f, t)
-                        clip = t > 0f
-                        shape = RoundedCornerShape(cornerRadiusPx * t)
-                        shadowElevation = elevationPx * t
-                    }
-                else ->
-                Modifier
-                    .size(
-                        width = with(density) { pipWidthPx.toDp() },
-                        height = with(density) { pipHeightPx.toDp() },
-                    )
-                    .offset {
-                        IntOffset(
-                            (centerX - pipWidthPx / 2f).roundToInt(),
-                            (centerY - pipHeightPx / 2f).roundToInt(),
-                        )
-                    }
-                    // ONE layer for everything: morph + reveal-grow +
-                    // transient pinch zoom + Samsung tilt. A single layer
-                    // is load-bearing, not a simplification: with two
-                    // nested layers the embedded TextureView (AndroidView
-                    // interop) got its clip applied in a space that cut
-                    // off tilted corners and hid the pinch overshoot past
-                    // the screen edge. In ONE layer the clip is in
-                    // layer-local space, so the rounded-rect window
-                    // rotates and scales as a whole - corners stay
-                    // visible, overshoot renders past the screen edge.
-                    //
-                    // Origin juggling: the morph needs (0,0) while t<1;
-                    // pinch/tilt needs center; the reveal-grow needs the
-                    // nearest screen edge. These never overlap - pinch
-                    // hides the controls (reveal scale snaps to 1), so
-                    // whenever pinch/tilt is non-identity the reveal
-                    // origin is irrelevant, and whenever the reveal-grow
-                    // is animating, pinch/tilt is identity.
-                    .graphicsLayer {
-                        val t = transition.value
                         val pinching = pinchScale != 1f || pipRotation != 0f
-                        alpha = dismissAlpha.value
-                        scaleX = lerp(screenWidthPx / pipWidthPx, 1f, t) * controlsRevealScale * pinchScale
-                        scaleY = lerp(screenHeightPx / pipHeightPx, 1f, t) * controlsRevealScale * pinchScale
-                        rotationZ = pipRotation
-                        transformOrigin = when {
-                            t < 1f -> TransformOrigin(0f, 0f)
-                            pinching -> TransformOrigin(0.5f, 0.5f)
-                            else -> TransformOrigin(
-                                if (centerX > screenWidthPx / 2f) 1f else 0f,
-                                if (centerY > screenHeightPx / 2f) 1f else 0f,
-                            )
+                        // Scaling the fullscreen box about its own centre by the
+                        // window/screen ratio produces a rect of exactly the
+                        // window's size centred on the box; translating by the
+                        // difference of the centres then puts it on the window.
+                        // Simpler than the origin juggling the old Pip branch
+                        // needed, and pinch/tilt about the window centre is the
+                        // same point as the box centre, so they compose without
+                        // special cases.
+                        val windowScaleX = lerp(1f, pipWidthPx / screenWidthPx, t)
+                        val windowScaleY = lerp(1f, pipHeightPx / screenHeightPx, t)
+                        // The reveal-grow is anchored at the window edge nearest
+                        // the screen edge it is docked against, not at the
+                        // window's centre - a corner-docked window growing from
+                        // its centre pushes half of itself off the screen, and
+                        // the controls overlay positions itself assuming that
+                        // edge anchoring (see its grown-rect math below).
+                        //
+                        // One transformOrigin cannot express both "scale the box
+                        // onto the window" (centre) and "grow about an edge", so
+                        // the edge anchoring is folded into the translation
+                        // instead: growing by r about a point d away from the
+                        // centre is the same as growing about the centre and
+                        // shifting by d*(1-r). Falls out to zero when r is 1,
+                        // which is every moment the controls are hidden.
+                        val revealAnchorX = if (centerX > screenWidthPx / 2f) 1f else -1f
+                        val revealAnchorY = if (centerY > screenHeightPx / 2f) 1f else -1f
+                        // AM (DUMMY_PIP_EXIT_REVEAL_UNGROW_FIX) -->
+                        // On the way out the grow is unwound BY the morph rather
+                        // than before it: t carries it from the size it had when
+                        // expand was pressed back to 1 over the same tween. In
+                        // every other mode t is 1 and this is exactly
+                        // controlsRevealScale, unchanged.
+                        val revealScale = if (mode == DummyPipMode.AnimatingOut) {
+                            lerp(1f, exitRevealScale, t)
+                        } else {
+                            controlsRevealScale
                         }
-                        translationX = lerp(-(centerX - pipWidthPx / 2f), 0f, t)
-                        translationY = lerp(-(centerY - pipHeightPx / 2f), 0f, t)
-                        // The layer's OUTLINE clip still comes OFF while
-                        // pinching/tilted: with an embedded TextureView
-                        // (AndroidView interop) the layer clip is applied
-                        // to the view in a space that does NOT scale with
-                        // the layer - it invisibly cropped the pinch
-                        // overshoot at the layout bounds, so the window
-                        // could never grow past the screen edge. The
-                        // rounded corners no longer disappear with it,
-                        // though - they're carried by an outline on the
-                        // TextureView itself during the gesture (see
-                        // DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX below and in
-                        // MpvSurface.kt). An offscreen DstIn content mask
-                        // was tried here first and did NOT work: a
-                        // TextureView's content is composited as its own
-                        // hardware layer and never lands in the Compose
-                        // layer's offscreen buffer, so the mask simply
-                        // never touches the video.
-                        clip = t > 0f && !pinching
-                        shape = RoundedCornerShape(cornerRadiusPx * t)
-                        // The shadow is dropped while pinching/tilted:
-                        // re-rendering the elevation shadow on a
-                        // per-frame transforming TextureView layer was
-                        // the visible tilt/pinch lag.
+                        // <-- AM (DUMMY_PIP_EXIT_REVEAL_UNGROW_FIX)
+                        val revealShiftX = revealAnchorX * (pipWidthPx / 2f) * (1f - revealScale)
+                        val revealShiftY = revealAnchorY * (pipHeightPx / 2f) * (1f - revealScale)
+                        alpha = dismissAlpha.value
+                        scaleX = windowScaleX * revealScale * pinchScale
+                        scaleY = windowScaleY * revealScale * pinchScale
+                        rotationZ = pipRotation
+                        transformOrigin = TransformOrigin(0.5f, 0.5f)
+                        translationX = lerp(0f, centerX - screenWidthPx / 2f + revealShiftX, t)
+                        translationY = lerp(0f, centerY - screenHeightPx / 2f + revealShiftY, t)
+                        // The clip is what removes the letterbox bars. The inner
+                        // layer scales the surface so the video band exactly
+                        // fills this layer's own bounds, which means the bars sit
+                        // outside them - clipping to the bounds crops precisely
+                        // the bars and nothing else. With the clip off they were
+                        // simply drawn outside the window.
+                        //
+                        // AM (DUMMY_PIP_PRESCALED_CORNERS) -->
+                        // Rounded, with the corner radii PRE-DIVIDED by this layer's
+                        // own scale, one axis at a time.
+                        //
+                        // A clip shape is defined in the layer's unscaled local space,
+                        // and this layer's scale is non-uniform (a screen-shaped box
+                        // mapped onto a window-shaped rect), so a single radius comes
+                        // out stretched into an ellipse on screen. The fix is not a
+                        // different node - it is a corner that is deliberately
+                        // elliptical in local space, by exactly the inverse of the
+                        // scale, so the scale turns it back into a circle.
+                        //
+                        // A plain RoundedCornerShape cannot express that: its corners
+                        // take one size each. A RoundRect's CornerRadius takes separate
+                        // x and y, which is what PreScaledCornerShape builds.
+                        //
+                        // Nothing structural changes: same node, same layout, same
+                        // scales, so the pinch is untouched.
+                        clip = t > 0f
+                        shape = PreScaledCornerShape(
+                            radiusPx = cornerRadiusPx * t,
+                            scaleX = windowScaleX * revealScale * pinchScale,
+                            scaleY = windowScaleY * revealScale * pinchScale,
+                        )
+                        // <-- AM (DUMMY_PIP_PRESCALED_CORNERS)
                         shadowElevation = if (t > 0f && !pinching) elevationPx * t else 0f
                     }
             },
         ) {
-            if (mode == DummyPipMode.AnimatingIn || mode == DummyPipMode.AnimatingOut) {
-                // AM (DUMMY_PIP_MORPH_LETTERBOX_FIX) -->
-                // Aspect-preserving cover-scale, corrected. The old version
-                // treated the WHOLE fullscreen surface as the content
-                // (u = max(sx, sy)) - but mpv letterboxes the video inside
-                // that surface, so mid-morph the transitioning window
-                // (converging to the video's aspect) was mostly filled by
-                // the surface's black bars while the actual video band
-                // shrank ahead of the window: the visible "video gets
-                // compressed/stretched mid-morph, snaps at settle" flicker.
-                // Real PiP center-crops - the video FILLS the window at
-                // every frame of the morph.
-                //
-                // This does that by morphing the EFFECTIVE content rect
-                // from the full surface (t=0: exact identity, the
-                // letterboxed fullscreen as-is) to the centered video band
-                // (t=1: exact cover - pipW/pipH equals the video's aspect,
-                // so cover == fit == the real Pip layout, and the mode flip
-                // lands with zero snap), scaling the content so that rect
-                // always covers the current window. Center-anchored like
-                // before: band center and window center coincide through
-                // the container's own transform, so scale alone suffices.
-                // <-- AM (DUMMY_PIP_MORPH_LETTERBOX_FIX)
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
+            // AM (DUMMY_PIP_PINNED_SURFACE_PROBE) -->
+            // Every non-fullscreen mode, not just the two animating ones. With
+            // the buffer pinned at fullscreen size the letterbox bars are still
+            // really in it once the window is at rest, so the crop that used to
+            // be needed only for the duration of the morph is now permanent.
+            // <-- AM (DUMMY_PIP_PINNED_SURFACE_PROBE)
+            // AM (DUMMY_PIP_SINGLE_CONTENT_SLOT) -->
+            // ONE call site for content(), in every mode.
+            //
+            // This used to be an if/else with content() inside both branches, which
+            // meant the entire player subtree moved composable position whenever the
+            // mode flipped - so Compose disposed it and created it again from
+            // scratch, taking MpvSurface's AndroidView and its surface with it.
+            // Entering real PiP from the mini player does exactly that flip (see
+            // MainActivity's DUMMY_PIP_AUTO_ENTER_RESTORED, which forces
+            // isDummyPipActive false on entry), which is why the video blinked on
+            // that path and not when entering from fullscreen, where no flip
+            // happens. The comment on the old else branch even claimed the subtree's
+            // structure was unchanged and the TextureView never recreated - true of
+            // that branch in isolation, not of switching between the two.
+            //
+            // The Box is now always composed and its layer returns early in
+            // Fullscreen, which is identity, so fullscreen renders exactly as before
+            // at the cost of one no-op render layer.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        if (renderMode == DummyPipMode.Fullscreen) return@graphicsLayer
+                        // <-- AM (DUMMY_PIP_SINGLE_CONTENT_SLOT)
+                        // AM (DUMMY_PIP_MORPH_LETTERBOX_FIX) -->
+                        // Aspect-preserving cover-scale, corrected. The old version
+                        // treated the WHOLE fullscreen surface as the content
+                        // (u = max(sx, sy)) - but mpv letterboxes the video inside
+                        // that surface, so mid-morph the transitioning window
+                        // (converging to the video's aspect) was mostly filled by
+                        // the surface's black bars while the actual video band
+                        // shrank ahead of the window: the visible "video gets
+                        // compressed/stretched mid-morph, snaps at settle" flicker.
+                        // Real PiP center-crops - the video FILLS the window at
+                        // every frame of the morph.
+                        //
+                        // This does that by morphing the EFFECTIVE content rect
+                        // from the full surface (t=0: exact identity, the
+                        // letterboxed fullscreen as-is) to the centered video band
+                        // (t=1: exact cover - pipW/pipH equals the video's aspect,
+                        // so cover == fit == the real Pip layout, and the mode flip
+                        // lands with zero snap), scaling the content so that rect
+                        // always covers the current window. Center-anchored like
+                        // before: band center and window center coincide through
+                        // the container's own transform, so scale alone suffices.
+                        // <-- AM (DUMMY_PIP_MORPH_LETTERBOX_FIX)
                             val t = transition.value
                             val sx = lerp(1f, pipWidthPx / screenWidthPx, t)
                             val sy = lerp(1f, pipHeightPx / screenHeightPx, t)
-                            val videoAspect = pipWidthPx / pipHeightPx
-                            val screenAspect = screenWidthPx / screenHeightPx
-                            // The rect mpv actually draws the video into
-                            // inside the fullscreen surface (fit = centered,
-                            // letterboxed).
+                            // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+                            // The band is mpv's OWN drawn rect now, mapped from
+                            // surface px into this box's px, rather than
+                            // recomputed from an aspect ratio. The derivation
+                            // this replaces assumed fit-with-centred-bars
+                            // unconditionally - wrong for anamorphic and
+                            // rotation-tagged content (it was fed storage
+                            // dimensions), and wrong by construction whenever
+                            // the Crop or Stretch aspect modes are on, since
+                            // panscan and video-aspect-override mean the drawn
+                            // rect is not the video's aspect at all. Those cases
+                            // could never land on an exact cover at t=1, which
+                            // is a mismatch no amount of tuning the formula
+                            // fixes.
+                            //
+                            // The margins are also honoured per side instead of
+                            // assumed symmetric: an off-centre rect needs its
+                            // centre moved onto the window's, which is what the
+                            // translation below does (scaled by t so t=0 stays
+                            // exactly identity).
+                            val rect = morphVideoRect
                             val bandW: Float
                             val bandH: Float
-                            if (videoAspect >= screenAspect) {
-                                bandW = screenWidthPx
-                                bandH = screenWidthPx / videoAspect
+                            val bandCenterX: Float
+                            val bandCenterY: Float
+                            if (rect != null && rect.isUsable &&
+                                rect.surfaceWidth > 0 && rect.surfaceHeight > 0
+                            ) {
+                                val toBoxX = screenWidthPx / rect.surfaceWidth
+                                val toBoxY = screenHeightPx / rect.surfaceHeight
+                                bandW = rect.videoWidth * toBoxX
+                                bandH = rect.videoHeight * toBoxY
+                                bandCenterX = (rect.marginLeft + rect.videoWidth / 2f) * toBoxX
+                                bandCenterY = (rect.marginTop + rect.videoHeight / 2f) * toBoxY
                             } else {
-                                bandW = screenHeightPx * videoAspect
-                                bandH = screenHeightPx
+                                // Before mpv has reported a rect: the previous
+                                // fit-and-centre assumption, unchanged.
+                                val videoAspect = pipWidthPx / pipHeightPx
+                                val screenAspect = screenWidthPx / screenHeightPx
+                                if (videoAspect >= screenAspect) {
+                                    bandW = screenWidthPx
+                                    bandH = screenWidthPx / videoAspect
+                                } else {
+                                    bandW = screenHeightPx * videoAspect
+                                    bandH = screenHeightPx
+                                }
+                                bandCenterX = screenWidthPx / 2f
+                                bandCenterY = screenHeightPx / 2f
                             }
+                            // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
                             val effW = lerp(screenWidthPx, bandW, t)
                             val effH = lerp(screenHeightPx, bandH, t)
                             val u = maxOf(sx * screenWidthPx / effW, sy * screenHeightPx / effH)
                             scaleX = u / sx
                             scaleY = u / sy
                             transformOrigin = TransformOrigin(0.5f, 0.5f)
-                        },
-                ) {
-                    content()
-                }
-            } else {
+                            // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+                            // Scale happens about the box's centre, so a band
+                            // centre sitting d away from it ends up d * scale
+                            // away; this cancels that so the band centre lands on
+                            // the window centre at t=1, and contributes nothing at
+                            // t=0.
+                            translationX = -(bandCenterX - screenWidthPx / 2f) * (u / sx) * t
+                            translationY = -(bandCenterY - screenHeightPx / 2f) * (u / sy) * t
+                            // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
+                    },
+            ) {
                 // AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX) -->
-                // Provides the live corner radius to the MpvSurface deep
-                // inside content() - provider wraps the CALL, so the
-                // player subtree's composition structure is unchanged and
-                // the TextureView is never re-created.
+                // Provides the live corner radius to the MpvSurface deep inside
+                // content(). The provider wraps the CALL, so the player subtree's
+                // own structure is untouched - and now that there is only one call
+                // site, the TextureView really is never recreated.
                 // <-- AM (DUMMY_PIP_VIEW_OUTLINE_CORNERS_FIX)
                 CompositionLocalProvider(LocalDummyPipCornerRadiusPx provides pipViewCornerRadiusPx) {
                     content()
@@ -1613,7 +2074,7 @@ fun DummyPipContainer(
         // around the edge-anchored transformOrigin (ox, oy), so its
         // visible top-left moves by (ox*w*(1-s), oy*h*(1-s)) and its
         // visible size is (w*s, h*s).
-        if (mode == DummyPipMode.Pip) {
+        if (renderMode == DummyPipMode.Pip) {
             val grownWidthPx = pipWidthPx * controlsRevealScale
             val grownHeightPx = pipHeightPx * controlsRevealScale
             Box(
@@ -2507,9 +2968,9 @@ fun DummyPipContainer(
                             if (dragged) {
                                 val w = windowWidthPx()
                                 val stashedX = if (isLeft) {
-                                    boundLeftPx() - w / 2f + stashPeekPx
+                                    stashLeftPx() - w / 2f + stashPeekPx
                                 } else {
-                                    boundRightPx() + w / 2f - stashPeekPx
+                                    stashRightPx() + w / 2f - stashPeekPx
                                 }
                                 if (abs(centerX - stashedX) > pullThresholdPx) {
                                     // Pulled away from the edge: genuinely

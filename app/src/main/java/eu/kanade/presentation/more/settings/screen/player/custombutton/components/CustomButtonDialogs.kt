@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -23,6 +22,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.input.TextFieldValue
 import dev.icerock.moko.resources.StringResource
+import eu.kanade.presentation.components.AlertDialog
 import eu.kanade.presentation.more.settings.screen.player.editor.codeeditor.githubTheme
 import eu.kanade.presentation.more.settings.screen.player.editor.codeeditor.luaHighlight
 import eu.kanade.presentation.more.settings.screen.player.editor.codeeditor.toAnnotatedString

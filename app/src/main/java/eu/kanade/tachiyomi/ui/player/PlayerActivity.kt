@@ -102,6 +102,7 @@ import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
+import kotlin.math.roundToInt
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.seconds
 
@@ -425,6 +426,11 @@ class PlayerActivity : BaseActivity() {
     }
 
     companion object {
+        // AM (REAL_PIP_DISPLAY_ASPECT_FIX) -->
+        /** Denominator used to express mpv's Double display aspect as a [Rational]. */
+        private const val ASPECT_RATIONAL_DENOMINATOR = 1000
+        // <-- AM (REAL_PIP_DISPLAY_ASPECT_FIX)
+
         // AM (LIVE_INSTANCE_REOPEN_FIX) -->
         /**
          * Tracks whether any PlayerActivity instance currently exists - incremented in
@@ -1813,6 +1819,42 @@ class PlayerActivity : BaseActivity() {
         }
     }
 
+    // AM (REAL_PIP_SOURCE_RECT_FIX) -->
+    /**
+     * [pipRect] narrowed to the rect the video actually occupies inside it - the
+     * content bounds with mpv's letterbox bars taken off.
+     *
+     * Falls back to the full content rect when mpv has not reported an aspect yet:
+     * a hint that is merely imprecise still gets a morph, where passing none at all
+     * makes the system cross-fade instead.
+     */
+    private fun videoSourceRectHint(): Rect? {
+        val content = pipRect ?: return null
+        val aspect = viewModel.aspectRatio.value?.takeIf { it > 0.001 } ?: return content
+        val width = content.width().toDouble()
+        val height = content.height().toDouble()
+        if (width <= 0.0 || height <= 0.0) return content
+        // Same fit mpv does inside the surface: match the axis that runs out first.
+        val videoWidth: Double
+        val videoHeight: Double
+        if (width / height >= aspect) {
+            videoWidth = height * aspect
+            videoHeight = height
+        } else {
+            videoWidth = width
+            videoHeight = width / aspect
+        }
+        val insetX = ((width - videoWidth) / 2.0).roundToInt()
+        val insetY = ((height - videoHeight) / 2.0).roundToInt()
+        return Rect(
+            content.left + insetX,
+            content.top + insetY,
+            content.right - insetX,
+            content.bottom - insetY,
+        )
+    }
+    // <-- AM (REAL_PIP_SOURCE_RECT_FIX)
+
     fun createPipParams(
         forceDisableAutoEnter: Boolean = false,
         // AM (PIP_AUTOENTER_SELF_POISON_FIX) -->
@@ -1889,17 +1931,58 @@ class PlayerActivity : BaseActivity() {
                 playlistPosition = viewModel.stateData.value.currentPlaylistIndex,
             ),
         )
-        builder.setSourceRectHint(pipRect)
-        viewModel.stateData.value.let {
-            val rational = if (it.videoWidth > 0 && it.videoHeight > 0) {
-                Rational(it.videoWidth, it.videoHeight)
-            } else {
-                Rational(16, 9)
-            }
-            if (rational.toDouble() in 0.42..2.38) {
-                builder.setAspectRatio(rational)
+        // AM (REAL_PIP_SOURCE_RECT_FIX) -->
+        // The VIDEO's rect, not the whole content view's.
+        //
+        // This is what the brief stretch on real PiP entry was. sourceRectHint tells
+        // the system which part of the screen is becoming the PiP window, and it was
+        // handed the entire content view - which, fullscreen, is screen-shaped and
+        // includes mpv's letterbox bars. The window the system builds is the video's
+        // shape (setAspectRatio below), so it was asked to morph a screen-shaped
+        // region into a video-shaped one, and did the only thing it can: squashed it.
+        //
+        // No amount of work on our own morph code could reach this - the system owns
+        // that animation end to end, and the only lever is telling it the truth about
+        // which rect is moving. With both ends the same shape it is a plain uniform
+        // scale with nothing to distort.
+        builder.setSourceRectHint(videoSourceRectHint())
+        // <-- AM (REAL_PIP_SOURCE_RECT_FIX)
+        // AM (REAL_PIP_DISPLAY_ASPECT_FIX) -->
+        // Was Rational(videoWidth, videoHeight) - STORAGE dimensions. An
+        // anamorphic source stored at 1440x1080 for a 16:9 picture asked the
+        // system for a 4:3 window, and a rotation-tagged portrait clip asked for
+        // a landscape one. That is not a transient mis-shape during the
+        // transition: the real PiP window stays the wrong shape for as long as
+        // PiP is up, with mpv letterboxing inside it to compensate.
+        //
+        // aspectRatio is mpv's own display aspect with rotation already applied -
+        // the same value the dummy pip window takes its shape from, so the two
+        // now agree instead of disagreeing for exactly the content where it
+        // shows. Storage dimensions stay as the fallback for the window before
+        // mpv has reported an aspect at all.
+        //
+        // Rational needs integers; the display aspect is a Double, so it is
+        // taken over a fixed denominator. 1000 is far finer than the 0.42..2.38
+        // range below can distinguish and well inside Rational's Int domain.
+        val displayAspect = viewModel.aspectRatio.value?.takeIf { it > 0.001 }
+        val rational = if (displayAspect != null) {
+            Rational(
+                (displayAspect * ASPECT_RATIONAL_DENOMINATOR).roundToInt(),
+                ASPECT_RATIONAL_DENOMINATOR,
+            )
+        } else {
+            viewModel.stateData.value.let {
+                if (it.videoWidth > 0 && it.videoHeight > 0) {
+                    Rational(it.videoWidth, it.videoHeight)
+                } else {
+                    Rational(16, 9)
+                }
             }
         }
+        if (rational.toDouble() in 0.42..2.38) {
+            builder.setAspectRatio(rational)
+        }
+        // <-- AM (REAL_PIP_DISPLAY_ASPECT_FIX)
         return builder.build()
     }
 

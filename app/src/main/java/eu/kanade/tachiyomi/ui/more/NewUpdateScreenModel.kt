@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.ui.more
 
 import android.content.Context
-import android.content.Intent
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,13 +11,12 @@ import dev.zacsweers.metro.AssistedInject
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
-import eu.kanade.tachiyomi.extension.util.ExtensionInstaller
+import eu.kanade.tachiyomi.data.updater.AppUpdateInstaller
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.network.ProgressListener
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.network.newCachelessCallWithProgress
-import eu.kanade.tachiyomi.util.storage.getUriCompat
 import eu.kanade.tachiyomi.util.storage.saveTo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -95,13 +93,20 @@ class NewUpdateScreenModel(
         response.body.source().saveTo(apkFile)
     }
 
+    // AM (SILENT_SELF_UPDATE) -->
+    // Was a bare ACTION_VIEW on the APK, which always raises the system
+    // installer's full "install this application?" dialog - permissions listed
+    // as if granted fresh - for what is this app replacing its own code with a
+    // build signed by the same key. A session install lets the platform skip
+    // that where it will, and still shows it where it won't. The ACTION_VIEW
+    // path stays as the fallback for a session that cannot be opened at all.
     fun installUpdate() {
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(apkFile.getUriCompat(context), ExtensionInstaller.APK_MIME)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+        val installer = AppUpdateInstaller(context)
+        if (!installer.install(apkFile)) {
+            installer.installWithSystemUi(apkFile)
         }
-        context.startActivity(intent)
     }
+    // <-- AM (SILENT_SELF_UPDATE)
 
     @Immutable
     data class State(

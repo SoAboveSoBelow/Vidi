@@ -45,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -72,7 +73,10 @@ import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.connection.service.ConnectionPreferences
 import eu.kanade.domain.source.interactor.GetIncognitoState
 import eu.kanade.domain.ui.UiPreferences
+import eu.kanade.presentation.components.AppDialogHost
 import eu.kanade.presentation.components.AppStateBanners
+import eu.kanade.presentation.components.LocalAppDialogLayer
+import eu.kanade.presentation.components.rememberAppDialogLayer
 import eu.kanade.presentation.components.DownloadedOnlyBannerBackgroundColor
 import eu.kanade.presentation.components.IncognitoModeBannerBackgroundColor
 import eu.kanade.presentation.components.IndexingBannerBackgroundColor
@@ -100,6 +104,7 @@ import eu.kanade.tachiyomi.ui.more.OnboardingScreen
 import eu.kanade.tachiyomi.ui.more.WhatsNewScreen
 import eu.kanade.tachiyomi.ui.player.Dialogs
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
+import eu.kanade.tachiyomi.ui.player.LocalInRealPip
 import eu.kanade.tachiyomi.ui.player.PIP_BACKGROUND_PLAY
 import eu.kanade.tachiyomi.ui.player.PIP_INTENTS_FILTER
 import eu.kanade.tachiyomi.ui.player.PIP_INTENT_ACTION
@@ -128,6 +133,7 @@ import eu.kanade.tachiyomi.util.view.setComposeContent
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -150,6 +156,7 @@ import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
+import kotlin.math.roundToInt
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -429,6 +436,36 @@ class MainActivity : BaseActivity() {
     // behavior specifically, more than most other pieces built this
     // session - if PIP re-enters itself repeatedly/immediately after being
     // dismissed, that's this simplification, not a new unrelated bug.
+    // AM (SELF_PIP_SOURCE_RECT_HINT_FIX) -->
+    /**
+     * The rect a video of [aspect] actually occupies inside a [width] x [height]
+     * window - the window with mpv's letterbox bars taken off, centred.
+     *
+     * Returns the full window when no usable aspect has been reported yet, which is
+     * the previous behaviour: an imprecise hint still gets a morph, where no hint at
+     * all makes the system fall back to resizing the window generically.
+     */
+    private fun videoRectWithin(width: Int, height: Int, aspect: Double?): android.graphics.Rect {
+        val full = android.graphics.Rect(0, 0, width, height)
+        if (aspect == null || aspect <= 0.001 || width <= 0 || height <= 0) return full
+        val w = width.toDouble()
+        val h = height.toDouble()
+        // The same fit mpv performs inside the surface: whichever axis runs out first.
+        val videoWidth: Double
+        val videoHeight: Double
+        if (w / h >= aspect) {
+            videoWidth = h * aspect
+            videoHeight = h
+        } else {
+            videoWidth = w
+            videoHeight = w / aspect
+        }
+        val insetX = ((w - videoWidth) / 2.0).roundToInt()
+        val insetY = ((h - videoHeight) / 2.0).roundToInt()
+        return android.graphics.Rect(insetX, insetY, width - insetX, height - insetY)
+    }
+    // <-- AM (SELF_PIP_SOURCE_RECT_HINT_FIX)
+
     private fun buildSelfPipParams(autoEnter: Boolean): PictureInPictureParams? {
         val holder = PlayerMediaHolder.current
         val viewModel = holder?.viewModel
@@ -453,36 +490,82 @@ class MainActivity : BaseActivity() {
                 builder.setTitle(anime.title).setSubtitle(episode.name)
             }
         }
-        viewModel.stateData.value.let {
-            val rational = if (it.videoWidth > 0 && it.videoHeight > 0) {
-                Rational(it.videoWidth, it.videoHeight)
-            } else {
-                Rational(16, 9)
-            }
-            if (rational.toDouble() in 0.42..2.38) {
-                builder.setAspectRatio(rational)
+        // AM (SELF_PIP_DISPLAY_ASPECT_FIX) -->
+        // Display aspect, not storage dimensions - the same fix as
+        // PlayerActivity.createPipParams()'s own REAL_PIP_DISPLAY_ASPECT_FIX, which
+        // this path had the identical bug as. videoWidth/videoHeight are what the
+        // frames are stored at, so anamorphic content (a 16:9 picture stored
+        // 1440x1080) asked the system for a 4:3 window and a rotation-tagged
+        // portrait clip asked for a landscape one, for as long as PiP was up.
+        //
+        // It also has to agree with the source-rect hint below: the hint is the
+        // video's rect, so if the window were built at a different shape the system
+        // would be morphing between two shapes again, which is the squash this is
+        // all about.
+        val displayAspect = viewModel.aspectRatio.value?.takeIf { it > 0.001 }
+        val rational = if (displayAspect != null) {
+            Rational((displayAspect * SELF_PIP_ASPECT_DENOMINATOR).roundToInt(), SELF_PIP_ASPECT_DENOMINATOR)
+        } else {
+            viewModel.stateData.value.let {
+                if (it.videoWidth > 0 && it.videoHeight > 0) {
+                    Rational(it.videoWidth, it.videoHeight)
+                } else {
+                    Rational(16, 9)
+                }
             }
         }
+        if (rational.toDouble() in 0.42..2.38) {
+            builder.setAspectRatio(rational)
+        }
+        // <-- AM (SELF_PIP_DISPLAY_ASPECT_FIX)
         // AM (SELF_PIP_SOURCE_RECT_HINT_FIX) -->
-        // Was never set at all - confirmed missing, and setSourceRectHint()
-        // is the real, documented Android API for exactly the symptom
-        // reported (a grey gap during PIP entry): without it, the OS has no
-        // idea where the actual video content sits and just resizes the
-        // window generically, waiting for a fresh frame at the new size,
-        // instead of animating a smooth crossfade of the real content it
-        // already has on screen. Only meaningful for entering PIP from
-        // fullscreen (holder.isDummyPipActive already gates the dummy-pip
-        // case out entirely via its own enter-then-restore path elsewhere
-        // in this file) - fullscreen video occupies essentially the whole
-        // window at that point, so the window's own current bounds are a
-        // reasonable hint without needing MpvSurface's exact on-screen
-        // rect specifically.
-        if (!holder.isDummyPipActive) {
+        // The VIDEO's rect, not the window's.
+        //
+        // This used to pass the whole decor view, reasoning that "fullscreen video
+        // occupies essentially the whole window at that point, so the window's own
+        // current bounds are a reasonable hint". That reasoning is wrong, and it is
+        // what makes PiP entry squash the picture: fullscreen video does NOT occupy
+        // the whole window - mpv fits it and fills the rest with black bars - so the
+        // hint described a screen-shaped region while the window the system builds
+        // is video-shaped. Asked to morph one into the other, it scales the entire
+        // window down into the video-shaped target and the picture is squeezed along
+        // with everything else.
+        //
+        // Given the video's own rect, the system animates exactly that rect into the
+        // PiP bounds and cross-fades the rest away, so the picture stays on screen
+        // and only changes size. That is the behaviour this was trying to get.
+        //
+        // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
+        // While the mini player is up it is the thing becoming the PiP window, so
+        // its rect is the hint - not the fullscreen video's, which is not even on
+        // screen. This used to be skipped entirely, leaving the system with no hint
+        // and nothing to morph from, so it resized the whole window generically:
+        // the entire screen appearing to shrink rather than the little window
+        // growing into place.
+        //
+        // The rect comes from the window itself via the holder, and is reported only
+        // at rest, so it describes where the window actually is. Null means no
+        // settled window to morph from (mid-morph, mid-gesture), and no hint is
+        // better than a wrong one.
+        val dummyPipRect = holder.dummyPipWindowRect
+        if (holder.isDummyPipActive) {
+            if (dummyPipRect != null) {
+                builder.setSourceRectHint(
+                    android.graphics.Rect(
+                        dummyPipRect.left.roundToInt(),
+                        dummyPipRect.top.roundToInt(),
+                        dummyPipRect.right.roundToInt(),
+                        dummyPipRect.bottom.roundToInt(),
+                    ),
+                )
+            }
+        } else {
             val decorView = window?.decorView
             if (decorView != null && decorView.width > 0 && decorView.height > 0) {
-                builder.setSourceRectHint(android.graphics.Rect(0, 0, decorView.width, decorView.height))
+                builder.setSourceRectHint(videoRectWithin(decorView.width, decorView.height, displayAspect))
             }
         }
+        // <-- AM (DUMMY_PIP_REPORTS_WINDOW_RECT)
         // <-- AM (SELF_PIP_SOURCE_RECT_HINT_FIX)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             // AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX) -->
@@ -640,9 +723,22 @@ class MainActivity : BaseActivity() {
                     if (holder == null) {
                         updateAutoEnterPipParams()
                     } else {
-                        holder.hasExternalScreenConsumerFlow.collect {
+                        // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
+                        // The mini player's rect is now part of the params, so a push
+                        // is needed when it changes too - an auto-enter animates from
+                        // whatever was last registered, and the window can be dragged
+                        // or resized any number of times between pushes.
+                        //
+                        // It only emits at rest (see DummyPipActions.
+                        // onWindowRectChanged), so this is one push per settle, not
+                        // one per frame of a drag.
+                        combine(
+                            holder.hasExternalScreenConsumerFlow,
+                            holder.dummyPipWindowRectFlow,
+                        ) { _, _ -> }.collect {
                             updateAutoEnterPipParams()
                         }
+                        // <-- AM (DUMMY_PIP_REPORTS_WINDOW_RECT)
                     }
                 }
             }
@@ -716,8 +812,22 @@ class MainActivity : BaseActivity() {
         super.onUserLeaveHint()
     }
 
+    // AM (REAL_PIP_HIDES_APP_UI) -->
+    /**
+     * Whether the Activity is currently in real (system) PiP, as snapshot state so
+     * the composition can leave the app's own UI out while it is.
+     *
+     * Written from [onPictureInPictureModeChanged], which the system calls after the
+     * window has finished resizing.
+     */
+    private var inRealPip by mutableStateOf(false)
+    // <-- AM (REAL_PIP_HIDES_APP_UI)
+
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        // AM (REAL_PIP_HIDES_APP_UI) -->
+        inRealPip = isInPictureInPictureMode
+        // <-- AM (REAL_PIP_HIDES_APP_UI)
         // Matches PlayerActivity.onConfigurationChanged()'s own existing
         // pattern for the same purpose.
         if (isInPictureInPictureMode) {
@@ -1006,6 +1116,18 @@ class MainActivity : BaseActivity() {
                 )
             }
 
+            // AM (APP_DIALOG_LAYER) -->
+            // One layer for every app dialog, provided around the whole Navigator so
+            // any screen's AlertDialog lands in it. See AppDialogLayer.kt for why the
+            // dialogs come down into the composition at all.
+            val appDialogLayer = rememberAppDialogLayer()
+            // AM (REAL_PIP_CONTROLS_LEAK_FIX) -->
+            CompositionLocalProvider(
+                LocalAppDialogLayer provides appDialogLayer,
+                LocalInRealPip provides inRealPip,
+            ) {
+                // <-- AM (REAL_PIP_CONTROLS_LEAK_FIX)
+            // <-- AM (APP_DIALOG_LAYER)
             Navigator(
                 screen = HomeScreen,
                 disposeBehavior = NavigatorDisposeBehavior(disposeNestedNavigators = false, disposeSteps = true),
@@ -1030,24 +1152,53 @@ class MainActivity : BaseActivity() {
                 val scaffoldInsets = WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal)
                 Scaffold(
                     topBar = {
-                        AppStateBanners(
-                            downloadedOnlyMode = downloadOnly,
-                            incognitoMode = incognito,
-                            indexing = indexing,
-                            modifier = Modifier.windowInsetsPadding(scaffoldInsets),
-                        )
+                        // AM (REAL_PIP_HIDES_APP_UI) -->
+                        if (!inRealPip) {
+                            AppStateBanners(
+                                downloadedOnlyMode = downloadOnly,
+                                incognitoMode = incognito,
+                                indexing = indexing,
+                                modifier = Modifier.windowInsetsPadding(scaffoldInsets),
+                            )
+                        }
+                        // <-- AM (REAL_PIP_HIDES_APP_UI)
                     },
                     contentWindowInsets = scaffoldInsets,
                 ) { contentPadding ->
                     // Consume insets already used by app state banners
                     Box {
-                        // Shows current screen
-                        DefaultNavigatorScreenTransition(
-                            navigator = navigator,
-                            modifier = Modifier
-                                .padding(contentPadding)
-                                .consumeWindowInsets(contentPadding),
-                        )
+                        // AM (REAL_PIP_HIDES_APP_UI) -->
+                        // The app's own screens are left OUT of composition while in
+                        // real PiP, so the PiP window contains the player and
+                        // nothing else - which is what the system PiP window is.
+                        //
+                        // This is also what closes dialogs on PiP entry, generally.
+                        // onPictureInPictureModeChanged only reached the PLAYER's own
+                        // sheets/panels/dialogs, through
+                        // PlayerMediaHolder.current.viewModel - every other dialog in
+                        // the app is local state inside whichever screen owns it
+                        // (dozens of independent `remember { mutableStateOf }` sites,
+                        // with no registry to ask), so there was nothing to call.
+                        // Dropping the subtree dismisses all of them at once, for the
+                        // reason they exist at all: a Compose Dialog or Popup is
+                        // hosted by its composable, and it goes away when that
+                        // composable leaves composition. It also covers every dialog
+                        // added later without anyone having to remember this rule.
+                        //
+                        // Those dialogs do not come back on PiP exit, which is the
+                        // intended behaviour rather than a side effect. Screen state
+                        // held in rememberSaveable survives; plain remember does not,
+                        // the same as for any configuration change.
+                        if (!inRealPip) {
+                            // Shows current screen
+                            DefaultNavigatorScreenTransition(
+                                navigator = navigator,
+                                modifier = Modifier
+                                    .padding(contentPadding)
+                                    .consumeWindowInsets(contentPadding),
+                            )
+                        }
+                        // <-- AM (REAL_PIP_HIDES_APP_UI)
 
                         // Draw navigation bar scrim when needed
                         // AM (PLAYER_NAV_SCRIM_Z_ORDER) -->
@@ -1055,7 +1206,12 @@ class MainActivity : BaseActivity() {
                         // player in the Box's z-order. It used to be composed after,
                         // which drew it on top of the fullscreen player's video.
                         // <-- AM (PLAYER_NAV_SCRIM_Z_ORDER)
-                        if (remember { isNavigationBarNeedsScrim() }) {
+                        // AM (REAL_PIP_HIDES_APP_UI) -->
+                        // No nav-bar scrim in the PiP window either - there is no
+                        // nav bar inside it, so it would just be a grey band over
+                        // the bottom of the video.
+                        if (!inRealPip && remember { isNavigationBarNeedsScrim() }) {
+                        // <-- AM (REAL_PIP_HIDES_APP_UI)
                             Spacer(
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
@@ -1065,6 +1221,14 @@ class MainActivity : BaseActivity() {
                                     .background(MaterialTheme.colorScheme.surfaceContainer),
                             )
                         }
+
+                        // AM (APP_DIALOG_LAYER) -->
+                        // Layer 2: above the app's content, BELOW the player hosted
+                        // just after this. That position is the entire fix for the
+                        // player being stuck behind dialog windows - see
+                        // AppDialogLayer.kt.
+                        AppDialogHost(appDialogLayer)
+                        // <-- AM (APP_DIALOG_LAYER)
 
                         // AM (PLAYER_OVERLAY_MIGRATION) -->
                         // Hosted here, outside DefaultNavigatorScreenTransition
@@ -1179,6 +1343,9 @@ class MainActivity : BaseActivity() {
                 )
             }
             // <-- AM (WHATS_NEW)
+            // AM (APP_DIALOG_LAYER) -->
+            }
+            // <-- AM (APP_DIALOG_LAYER)
         }
 
         val startTime = System.currentTimeMillis()
@@ -1437,6 +1604,11 @@ class MainActivity : BaseActivity() {
     }
 
     companion object {
+        // AM (SELF_PIP_DISPLAY_ASPECT_FIX) -->
+        /** Denominator used to express mpv's Double display aspect as a [Rational]. */
+        private const val SELF_PIP_ASPECT_DENOMINATOR = 1000
+        // <-- AM (SELF_PIP_DISPLAY_ASPECT_FIX)
+
         const val INTENT_SEARCH = "eu.kanade.tachiyomi.ANIMESEARCH"
         const val INTENT_SEARCH_QUERY = "query"
         const val INTENT_SEARCH_FILTER = "filter"

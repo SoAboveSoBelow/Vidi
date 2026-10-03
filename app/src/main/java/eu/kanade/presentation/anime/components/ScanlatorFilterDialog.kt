@@ -12,7 +12,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
 import androidx.compose.material.icons.rounded.DisabledByDefault
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
@@ -26,7 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogProperties
+import eu.kanade.presentation.components.AlertDialog
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.TextButton
 import tachiyomi.presentation.core.components.material.padding
@@ -98,9 +97,6 @@ fun ScanlatorFilterDialog(
                 if (state.canScrollForward) HorizontalDivider(modifier = Modifier.align(Alignment.BottomCenter))
             }
         },
-        properties = DialogProperties(
-            usePlatformDefaultWidth = true,
-        ),
         confirmButton = {
             if (sortedAvailableScanlators.isEmpty()) {
                 TextButton(onClick = onDismissRequest) {

@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.BuildConfig
@@ -115,7 +116,14 @@ class PlayerBackgroundPlaybackService : Service() {
             holder.state
                 .map { it.paused }
                 .distinctUntilChanged()
-                .onEach { paused -> if (!paused) updatePlaybackState(isPlaying = true) }
+                // AM (IDLE_SESSION_COST_FIX) -->
+                // Was `if (!paused)` - resume only. Both edges now, so this observer is
+                // the single writer of the Service's foreground state, driven by mpv's
+                // own real pause value rather than by whichever call site happened to
+                // cause the change. The pause edge is what releases the foreground
+                // obligation (see postNotification); the resume edge re-takes it.
+                .onEach { paused -> updatePlaybackState(isPlaying = !paused) }
+                // <-- AM (IDLE_SESSION_COST_FIX)
                 .launchIn(serviceScope)
         }
     }
@@ -211,12 +219,20 @@ class PlayerBackgroundPlaybackService : Service() {
         this.mediaSessionToken = mediaSessionToken
         this.onTogglePlayPause = onTogglePlayPause
         this.onStopRequested = onStopRequested
+        // AM (IDLE_SESSION_COST_FIX) -->
+        // Always a real startForeground() first, whatever the pause state. This Service
+        // is launched with startForegroundService() (see the companion's start()), which
+        // obliges it to enter the foreground within the platform's timeout or be killed
+        // with ForegroundServiceDidNotStartInTimeException - so a session that begins
+        // paused cannot detach on its way in, it has to enter and then step back out.
         ServiceCompat.startForeground(
             this,
             Notifications.ID_BACKGROUND_PLAYBACK,
             buildNotification(),
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
         )
+        if (!isPlaying) postNotification()
+        // <-- AM (IDLE_SESSION_COST_FIX)
         // AM (WAKE_LOCK_TRACKS_PLAYBACK) -->
         // Only when the session actually starts playing - see updatePlaybackState.
         if (isPlaying) acquireWakeLock()
@@ -249,6 +265,52 @@ class PlayerBackgroundPlaybackService : Service() {
         wakeLock = null
     }
 
+    // AM (IDLE_SESSION_COST_FIX) -->
+    /**
+     * Posts the notification, in foreground service state while playing and detached
+     * from it while paused.
+     *
+     * Every post used to be a startForeground() (see NOTIFICATION_REPOST_FIX), which
+     * meant a session that was paused and left alone held the FOREGROUND_SERVICE_TYPE_
+     * MEDIA_PLAYBACK obligation indefinitely. That pins the process at foreground
+     * oom_adj: never frozen by the cached-app freezer, never reclaimable, and billed
+     * for the whole stretch by the system's own accounting regardless of how little it
+     * actually does per hour.
+     *
+     * STOP_FOREGROUND_DETACH gives that obligation up without taking the notification
+     * down with it. The notification stays posted and the MediaSession stays active, so
+     * the shade, the lock screen and Bluetooth controls all keep working and can resume
+     * the session; the process simply stops being special while it is doing nothing.
+     * This is the same shape the platform's own media stack uses - Media3's
+     * MediaSessionService leaves foreground when playback stops and re-enters on play.
+     *
+     * The consequence to be clear about: a paused session is no longer guaranteed to
+     * survive. The system may reclaim the process, taking the notification with it.
+     * That is why the pause edge flushes the position (see PlayerMediaHolder's
+     * PauseChanged observer) - resuming where the user left off is the persisted
+     * value's job, and holding the process alive is only an optimization that makes
+     * the common case instant.
+     *
+     * NOTIFICATION_REPOST_FIX's own reasoning still holds on the playing path, so that
+     * branch is still a startForeground() rather than a bare notify().
+     */
+    private fun postNotification() {
+        val notification = buildNotification()
+        if (isPlaying) {
+            ServiceCompat.startForeground(
+                this,
+                Notifications.ID_BACKGROUND_PLAYBACK,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+            )
+        } else {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            NotificationManagerCompat.from(this)
+                .notify(Notifications.ID_BACKGROUND_PLAYBACK, notification)
+        }
+    }
+    // <-- AM (IDLE_SESSION_COST_FIX)
+
     /** Reflects the current pause state in the notification. */
     fun updatePlaybackState(isPlaying: Boolean) {
         this.isPlaying = isPlaying
@@ -279,12 +341,9 @@ class PlayerBackgroundPlaybackService : Service() {
         // genuinely guarantees a notification exists whenever content updates,
         // rather than assuming one already does.
         // <-- AM (NOTIFICATION_REPOST_FIX)
-        ServiceCompat.startForeground(
-            this,
-            Notifications.ID_BACKGROUND_PLAYBACK,
-            buildNotification(),
-            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-        )
+        // AM (IDLE_SESSION_COST_FIX) -->
+        postNotification()
+        // <-- AM (IDLE_SESSION_COST_FIX)
     }
 
     /** Keeps notification text and reopen-intent ids in sync when the episode changes mid-session. */
@@ -296,12 +355,12 @@ class PlayerBackgroundPlaybackService : Service() {
         // AM (NOTIFICATION_REPOST_FIX) -->
         // See updatePlaybackState()'s own doc comment above - same fix, same reason.
         // <-- AM (NOTIFICATION_REPOST_FIX)
-        ServiceCompat.startForeground(
-            this,
-            Notifications.ID_BACKGROUND_PLAYBACK,
-            buildNotification(),
-            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-        )
+        // AM (IDLE_SESSION_COST_FIX) -->
+        // Routed through postNotification() so an episode change while paused updates
+        // the notification without silently re-entering the foreground state the pause
+        // edge just gave up.
+        postNotification()
+        // <-- AM (IDLE_SESSION_COST_FIX)
     }
 
     fun stopBackgroundPlayback() {

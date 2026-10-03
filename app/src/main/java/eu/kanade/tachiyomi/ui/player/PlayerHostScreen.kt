@@ -389,8 +389,18 @@ fun PlayerHostScreen(
     // itself while pip is up, and follow controlsShown again the instant it
     // clears, so neither the old "bars stuck on after expand" nor the
     // "controls without bars" desync can occur anymore.
-    LaunchedEffect(isDummyPipActive, currentViewModel) {
-        if (isDummyPipActive) {
+    // AM (REAL_PIP_CONTROLS_LEAK_FIX) -->
+    // Real PiP is included in the same guard. The side-effect showControls() calls
+    // this exists to fight back against happen in there too - which is why the play,
+    // next and previous buttons turned up in the PiP window after everything else had
+    // hidden, and then sat there until the auto-hide timeout.
+    //
+    // Keeping the ViewModel state honest is only half of it; PlayerScreen also stops
+    // composing the controls in either state, because hiding by state plays a fade.
+    val inRealPip = LocalInRealPip.current
+    LaunchedEffect(isDummyPipActive, inRealPip, currentViewModel) {
+        if (isDummyPipActive || inRealPip) {
+            // <-- AM (REAL_PIP_CONTROLS_LEAK_FIX)
             currentViewModel.uiData.collect { uiData ->
                 if (uiData.controlsShown) {
                     currentViewModel.hideControls()
@@ -449,13 +459,28 @@ fun PlayerHostScreen(
                 holder?.hasExternalScreenConsumer = false
                 PlayerMediaHolder.clearPlaybackRequest()
             },
+            // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
+            // Straight onto the holder, which is the only thing MainActivity can
+            // see - the window itself never touches the holder, same as every other
+            // action here.
+            onWindowRectChanged = { rect -> holder?.dummyPipWindowRect = rect },
+            // <-- AM (DUMMY_PIP_REPORTS_WINDOW_RECT)
         )
     }
+
+    // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+    val videoOutputRect by currentViewModel.videoOutputRect.collectAsStateWithLifecycle()
+    val videoDisplayAspect by currentViewModel.aspectRatio.collectAsStateWithLifecycle()
+    // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
 
     DummyPipContainer(
         isPipRequested = isDummyPipActive,
         videoWidth = videoState.videoWidth,
         videoHeight = videoState.videoHeight,
+        // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
+        videoDisplayAspect = videoDisplayAspect?.toFloat(),
+        videoOutputRect = videoOutputRect,
+        // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
         isPaused = playbackData.paused,
         actions = dummyPipActions,
         controller = dummyPipController,

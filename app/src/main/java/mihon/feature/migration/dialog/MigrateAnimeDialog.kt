@@ -11,7 +11,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -38,6 +37,7 @@ import eu.kanade.domain.anime.model.hasCustomBackground
 import eu.kanade.domain.anime.model.hasCustomCover
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.presentation.anime.components.IndicatorSize
+import eu.kanade.presentation.components.AlertDialog
 import eu.kanade.tachiyomi.animesource.model.FetchType
 import eu.kanade.tachiyomi.data.cache.BackgroundCache
 import eu.kanade.tachiyomi.data.cache.CoverCache

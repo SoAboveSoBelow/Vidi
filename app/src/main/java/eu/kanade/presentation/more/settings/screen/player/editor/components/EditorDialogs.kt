@@ -1,6 +1,5 @@
 package eu.kanade.presentation.more.settings.screen.player.editor.components
 
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -15,6 +14,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import eu.kanade.presentation.components.AlertDialog
 import eu.kanade.presentation.more.settings.screen.player.editor.FileCreationResult
 import kotlinx.coroutines.delay
 import tachiyomi.i18n.MR

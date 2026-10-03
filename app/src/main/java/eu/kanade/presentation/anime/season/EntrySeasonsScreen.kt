@@ -16,7 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DragHandle
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,6 +36,7 @@ import androidx.compose.ui.Modifier
 import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
 import aniyomi.domain.season.model.EntrySeason
 import eu.kanade.presentation.category.components.CategoryFloatingActionButton
+import eu.kanade.presentation.components.AlertDialog
 import eu.kanade.presentation.components.AppBar
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
