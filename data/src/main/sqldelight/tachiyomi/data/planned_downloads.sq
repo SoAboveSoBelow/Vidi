@@ -1,0 +1,80 @@
+-- AM (PLANNED_DOWNLOADS) -->
+-- Episodes you want downloaded that nothing is currently working on.
+--
+-- This is intent; the download queue is execution. The queue is deliberately
+-- transient - it lives in a SharedPreferences blob (DownloadStore), is worked
+-- through in order, and pausing it pauses everything - so it is the wrong place to
+-- park something indefinitely. Intent lives here instead: a real table, with
+-- foreign keys, that survives whatever happens to the queue.
+--
+-- Three things produce rows, and the origin records which, so the UI can say why
+-- an episode is here:
+--   0 RESTORED - a backup said this was downloaded on the device it came from.
+--   1 HELD     - cancelled out of the queue, which holds rather than discards.
+--   2 PLANNED  - chosen directly, without queueing it yet.
+--
+-- Origin does not change behaviour. Removal is removal whatever put the row here,
+-- and a completed download clears it the same way a dismissal does - which is also
+-- what stops a restored episode coming back after you delete the file, since its
+-- row no longer exists to say you ever had it.
+--
+-- Both foreign keys cascade: the intent is meaningless once the entry or the
+-- episode row is gone.
+CREATE TABLE planned_downloads(
+    anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    origin INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(anime_id, episode_id),
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX planned_downloads_episode_id_index ON planned_downloads(episode_id);
+
+-- Aliased EP, not E: a bare E lexes as the exponent of a real literal in the
+-- SQLite dialect, so the parser reads "E.name" as a malformed number. Same
+-- two-letter convention as episode_names.sq.
+--
+-- Carries what DownloadCache needs to recognise the episode on disk - episode
+-- name, scanlator, url and the anime's source title - plus the images the row
+-- shows. A.title is the source's own title; the custom one lives elsewhere, and
+-- the download folder is named after this one.
+getAllDetailed:
+SELECT P.anime_id, P.episode_id, P.origin, P.created_at, A.title, A.source, EP.name, EP.scanlator, EP.url,
+    EP.episode_number, EP.preview_url, A.thumbnail_url
+FROM planned_downloads P
+JOIN animes A ON A._id = P.anime_id
+JOIN episodes EP ON EP._id = P.episode_id
+ORDER BY A.title ASC, EP.episode_number ASC;
+
+getEpisodeIdsByAnimeId:
+SELECT episode_id
+FROM planned_downloads
+WHERE anime_id = :animeId;
+
+count:
+SELECT COUNT(*)
+FROM planned_downloads;
+
+upsert:
+INSERT OR REPLACE INTO planned_downloads(anime_id, episode_id, origin, created_at)
+VALUES (:animeId, :episodeId, :origin, :createdAt);
+
+-- Keyed by the episode alone. An episode id identifies a row on its own, and
+-- requiring the anime id to agree as well meant a caller holding a different anime
+-- object for the same episode - a merge parent rather than the child that owns it,
+-- say - silently deleted nothing.
+deleteByEpisodeId:
+DELETE FROM planned_downloads
+WHERE episode_id = :episodeId;
+
+deleteByAnimeId:
+DELETE FROM planned_downloads
+WHERE anime_id = :animeId;
+
+deleteAll:
+DELETE FROM planned_downloads;
+-- <-- AM (PLANNED_DOWNLOADS)

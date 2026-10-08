@@ -141,13 +141,13 @@ fun AnimeEpisodeListItem(
     val doubleClickAction = onDoubleClick
     // <-- AM (EPISODE_NAMES)
 
-    SwipeableActionsBox(
-        modifier = modifier.clipToBounds(),
-        startActions = listOfNotNull(start),
-        endActions = listOfNotNull(end),
-        swipeThreshold = swipeActionThreshold,
-        backgroundUntilSwipeThreshold = MaterialTheme.colorScheme.surfaceContainerLowest,
+    // AM (SWIPE_GESTURE) -->
+    SwipeBox(
+        start = start,
+        end = end,
+        modifier = modifier,
     ) {
+        // <-- AM (SWIPE_GESTURE)
         Row(
             // AY -->
             verticalAlignment = Alignment.CenterVertically,
@@ -321,6 +321,41 @@ fun AnimeEpisodeListItem(
         }
     }
 }
+
+// AM (SWIPE_GESTURE) -->
+/**
+ * Wraps a row in its swipe actions, and only then.
+ *
+ * With no action on either side there is nothing to swipe to, but the box's own
+ * horizontal draggable takes the gesture regardless: the row shifts a little and goes
+ * nowhere, and no ancestor ever sees the drag. That is harmless on a plain screen and
+ * not harmless inside a pager - on the download queue's tabs it makes swiping between
+ * queue and hold a fight with every row under the finger - so the box goes in only
+ * when it has something to reveal.
+ */
+@Composable
+private fun SwipeBox(
+    start: me.saket.swipe.SwipeAction?,
+    end: me.saket.swipe.SwipeAction?,
+    modifier: Modifier,
+    content: @Composable () -> Unit,
+) {
+    if (start == null && end == null) {
+        Box(modifier = modifier) { content() }
+        return
+    }
+
+    SwipeableActionsBox(
+        modifier = modifier.clipToBounds(),
+        startActions = listOfNotNull(start),
+        endActions = listOfNotNull(end),
+        swipeThreshold = swipeActionThreshold,
+        backgroundUntilSwipeThreshold = MaterialTheme.colorScheme.surfaceContainerLowest,
+    ) {
+        content()
+    }
+}
+// <-- AM (SWIPE_GESTURE)
 
 // AY -->
 @Composable

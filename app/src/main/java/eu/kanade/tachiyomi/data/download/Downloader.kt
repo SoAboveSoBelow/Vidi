@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.core.net.toUri
+import animiru.domain.download.repository.PlannedDownloadRepository
 import aniyomi.core.common.torrent.TorrentPreferences
 import aniyomi.core.common.torrent.TorrentServerApi
 import aniyomi.core.common.torrent.TorrentServerUtils
@@ -114,6 +115,9 @@ class Downloader(
     // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
     private val playerPreferences: PlayerPreferences,
     // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
+    // AM (PLANNED_DOWNLOADS) -->
+    private val plannedDownloadRepository: PlannedDownloadRepository,
+    // <-- AM (PLANNED_DOWNLOADS)
 ) {
 
     /**
@@ -434,6 +438,17 @@ class Downloader(
             // <-- AY
 
             cache.addEpisode(episodeDirname, animeDir, download.anime)
+
+            // AM (PLANNED_DOWNLOADS) -->
+            // The episode is downloaded, so the intent to download it is spent.
+            // Dropped here, where the answer is certain, rather than by a listener
+            // re-checking the list afterwards - and keyed by the episode alone: the
+            // previous version also required download.anime.id to match the stored
+            // anime_id, which it does not for a merged or seasoned entry, whose
+            // downloads carry the parent while the row names the child that owns the
+            // episode. That mismatch deleted nothing and left the row behind.
+            plannedDownloadRepository.remove(download.episode.id)
+            // <-- AM (PLANNED_DOWNLOADS)
 
             DiskUtil.createNoMediaFile(tmpDir, context)
 

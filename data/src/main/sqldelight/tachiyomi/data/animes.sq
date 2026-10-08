@@ -228,6 +228,17 @@ FROM animes
 WHERE parent_id = :parentId;
 -- <-- AY
 
+-- AM (SEASON_PARENT_LINK) -->
+-- Sets one entry's season parent outright, including to NULL. The general
+-- `update` above writes parent_id through coalesce(:parentId, parent_id), so it
+-- can only ever set a parent, never clear one - which is why relinking seasons
+-- after a restore needs a query of its own.
+setParentId:
+UPDATE animes
+SET parent_id = :parentId
+WHERE _id = :animeId;
+-- <-- AM (SEASON_PARENT_LINK)
+
 -- AM (MERGED_SOURCES) -->
 -- Second keepSeenAnime guard below: a merge parent owns no episodes, so the
 -- first guard can never match it and the exclude-seen-entries toggle would

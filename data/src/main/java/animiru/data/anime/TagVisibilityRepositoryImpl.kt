@@ -3,6 +3,7 @@ package animiru.data.anime
 
 import animiru.domain.anime.model.TagVisibility
 import animiru.domain.anime.repository.TagVisibilityRepository
+import app.cash.sqldelight.async.coroutines.awaitAsList
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
@@ -23,6 +24,13 @@ class TagVisibilityRepositoryImpl(
             animeId,
             ::TagVisibility,
         ).subscribeToList()
+    }
+
+    override suspend fun getByAnimeId(animeId: Long): List<TagVisibility> {
+        return database.anime_tag_visibilityQueries.getByAnimeId(
+            animeId,
+            ::TagVisibility,
+        ).awaitAsList()
     }
 
     override suspend fun upsertAll(animeId: Long, visibilityByTag: Map<String, Boolean>) {

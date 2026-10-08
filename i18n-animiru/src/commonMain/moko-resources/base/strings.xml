@@ -369,6 +369,16 @@
     <string name="whats_new_load_failed">Couldn\'t load the release notes. Check your connection and try again.</string>
     <string name="whats_new_unavailable">No release notes are available for this version.</string>
 
+
+    <!-- Downloads -->
+    <string name="label_downloads">Downloads</string>
+    <string name="tab_download_queue">Queue</string>
+    <string name="tab_download_hold">On hold</string>
+    <string name="action_download_all_for_series">Download all for series</string>
+    <string name="action_remove_from_hold">Remove from hold</string>
+    <string name="action_remove_all_for_series_from_hold">Remove all for series from hold</string>
+    <string name="information_no_held_downloads">Nothing on hold. Cancelling a download puts it here instead of discarding it.</string>
+
     <!-- Release history -->
     <string name="release_history">Release history</string>
     <string name="release_history_installed">Installed</string>

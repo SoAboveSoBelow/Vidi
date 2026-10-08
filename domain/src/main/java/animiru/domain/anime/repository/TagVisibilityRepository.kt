@@ -9,6 +9,9 @@ interface TagVisibilityRepository {
     /** Overrides for [animeId]. Empty for an entry whose tags the user hasn't moved. */
     fun getByAnimeIdAsFlow(animeId: Long): Flow<List<TagVisibility>>
 
+    /** One-shot [getByAnimeIdAsFlow], for callers walking the library rather than displaying it. */
+    suspend fun getByAnimeId(animeId: Long): List<TagVisibility>
+
     /**
      * Pins each tag in [visibilityByTag] to its mapped side, in one transaction -
      * a multi-tag edit is one edit, so the split never redraws half-applied.

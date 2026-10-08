@@ -132,7 +132,10 @@ class BottomActionItem(
  * carries that same title permanently.
  */
 @Composable
-private fun BottomActionBar(
+// AM (DOWNLOAD_RESTORE): internal rather than private so the download-restore
+// screen can describe its own two actions instead of growing a second bar that
+// only looks like this one.
+internal fun BottomActionBar(
     visible: Boolean,
     actions: List<BottomActionItem>,
     modifier: Modifier = Modifier,

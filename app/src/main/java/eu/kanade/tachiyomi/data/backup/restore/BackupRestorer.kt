@@ -15,10 +15,14 @@ import eu.kanade.tachiyomi.data.backup.models.BackupExtensionStore
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
 import eu.kanade.tachiyomi.data.backup.models.BackupSourcePreferences
 import eu.kanade.tachiyomi.data.backup.restore.restorers.AnimeRestorer
+import eu.kanade.tachiyomi.data.backup.restore.restorers.BackupEntryResolver
 import eu.kanade.tachiyomi.data.backup.restore.restorers.CategoriesRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.CustomButtonRestorer
+import eu.kanade.tachiyomi.data.backup.restore.restorers.DownloadStateRestorer
+import eu.kanade.tachiyomi.data.backup.restore.restorers.EntryExtrasRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.ExtensionStoreRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.ExtensionsRestorer
+import eu.kanade.tachiyomi.data.backup.restore.restorers.MergeRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.PreferenceRestorer
 import eu.kanade.tachiyomi.data.download.DownloadCache
 import kotlinx.coroutines.CoroutineScope
@@ -30,6 +34,8 @@ import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.createFileInCacheDir
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.data.Database
+import tachiyomi.domain.anime.interactor.GetAnimeByUrlAndSourceId
+import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.aniyomi.AYMR
 import java.io.File
@@ -59,6 +65,13 @@ class BackupRestorer(
     private val customButtonRestorer: CustomButtonRestorer,
     private val extensionsRestorer: ExtensionsRestorer,
     // <-- AY
+    // AM -->
+    private val mergeRestorer: MergeRestorer,
+    private val entryExtrasRestorer: EntryExtrasRestorer,
+    private val downloadStateRestorer: DownloadStateRestorer,
+    private val getAnimeByUrlAndSourceId: GetAnimeByUrlAndSourceId,
+    private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
+    // <-- AM
 ) {
 
     @AssistedFactory
@@ -132,6 +145,11 @@ class BackupRestorer(
             restoreAmount += 1
         }
         // <-- AY
+        // AM -->
+        if (needsSecondPass(options)) {
+            restoreAmount += 1
+        }
+        // <-- AM
 
         coroutineScope {
             if (options.categories) {
@@ -160,7 +178,63 @@ class BackupRestorer(
 
             // TODO: optionally trigger online library + tracker update
         }
+
+        // AM -->
+        // Second pass. Everything below is a reference from one restored row to
+        // another - a merge child to its parent, an exclusion to an episode, a
+        // reordered episode to the entry it was reordered in - and the ids on both
+        // ends are assigned by the pass above. It therefore cannot run inside that
+        // coroutineScope: the rows have to be settled first, and sequencing it here
+        // is the only thing that guarantees they are.
+        if (needsSecondPass(options)) {
+            restoreEntryStructure(backup.backupAnime, options)
+        }
+        // <-- AM
     }
+
+    // AM -->
+    private fun needsSecondPass(options: RestoreOptions): Boolean = options.libraryEntries
+
+    /**
+     * Restores what hangs off an entry rather than being part of it: merge
+     * membership and settings, seasons, custom episode order and names, pinned
+     * tags, and which episodes were downloaded elsewhere.
+     *
+     * Entries the user chose not to restore, and references to episodes a source
+     * no longer lists, resolve to nothing and are skipped - a backup naming
+     * something absent is ordinary, not a failure.
+     */
+    private suspend fun restoreEntryStructure(
+        backupAnimes: List<BackupAnime>,
+        options: RestoreOptions,
+    ) = coroutineScope {
+        val resolver = BackupEntryResolver(getAnimeByUrlAndSourceId, getEpisodesByAnimeId)
+
+        backupAnimes.forEach { backupAnime ->
+            ensureActive()
+
+            val anime = resolver.anime(backupAnime.source, backupAnime.url) ?: return@forEach
+
+            try {
+                entryExtrasRestorer.restore(anime, backupAnime, resolver)
+                mergeRestorer.restore(anime, backupAnime, resolver)
+                downloadStateRestorer.restore(anime, backupAnime, resolver)
+            } catch (e: Exception) {
+                ensureActive()
+                val sourceName = sourceMapping[backupAnime.source] ?: backupAnime.source.toString()
+                errors.add(Date() to "${backupAnime.title} [$sourceName]: ${e.message}")
+            }
+        }
+
+        val progress = restoreProgress.incrementAndFetch()
+        notifier.showRestoreProgress(
+            context.stringResource(MR.strings.label_library),
+            progress,
+            restoreAmount,
+            isSync,
+        )
+    }
+    // <-- AM
 
     private fun CoroutineScope.restoreCategories(backupCategories: List<BackupCategory>) = launch {
         ensureActive()
@@ -179,6 +253,11 @@ class BackupRestorer(
         backupAnimes: List<BackupAnime>,
         backupCategories: List<BackupCategory>,
     ) = launch {
+        // AM (SEASON_PARENT_LINK): the backup's own row id for each entry mapped to
+        // the one this device assigned. Seasons name their parent by the former, so
+        // they can only be linked once every entry has been through the loop below.
+        val restoredIdByBackupId = mutableMapOf<Long, Long>()
+
         animeRestorer.sortByNew(backupAnimes)
             .chunked(100)
             .forEach { chunk ->
@@ -186,13 +265,11 @@ class BackupRestorer(
                     database.transaction {
                         chunk.forEach {
                             ensureActive()
-                            // AY -->
-                            val seasons = backupAnimes.filter { s -> s.parentId == it.id }
-                            // <-- AY
                             // AM (CUSTOM_INFORMATION) -->
                             val customInfo = it.getCustomAnimeInfo()
                             // <-- AM (CUSTOM_INFORMATION)
-                            animeRestorer.restore(it, backupCategories, customInfo, seasons)
+                            val restored = animeRestorer.restore(it, backupCategories, customInfo)
+                            it.id?.let { backupId -> restoredIdByBackupId[backupId] = restored.id }
                         }
                     }
                     true
@@ -208,14 +285,12 @@ class BackupRestorer(
                     chunk.forEach {
                         ensureActive()
 
-                        // AY -->
-                        val seasons = backupAnimes.filter { s -> s.parentId == it.id }
-                        // <-- AY
                         try {
                             // AM (CUSTOM_INFORMATION) -->
                             val customInfo = it.getCustomAnimeInfo()
                             // <-- AM (CUSTOM_INFORMATION)
-                            animeRestorer.restore(it, backupCategories, customInfo, seasons)
+                            val restored = animeRestorer.restore(it, backupCategories, customInfo)
+                            it.id?.let { backupId -> restoredIdByBackupId[backupId] = restored.id }
                         } catch (e: Exception) {
                             ensureActive()
                             val sourceName = sourceMapping[it.source] ?: it.source.toString()
@@ -228,7 +303,45 @@ class BackupRestorer(
 
                 notifier.showRestoreProgress(chunk.last().title, restoreProgress.load(), restoreAmount, isSync)
             }
+
+        // AM (SEASON_PARENT_LINK) -->
+        linkSeasonsToParents(backupAnimes, restoredIdByBackupId)
+        // <-- AM (SEASON_PARENT_LINK)
     }
+
+    // AM (SEASON_PARENT_LINK) -->
+    /**
+     * Reattaches restored seasons to their restored parents.
+     *
+     * A backup names a season's parent by the row id it had on the device the
+     * backup came from, which means nothing here - so the link is resolved through
+     * the ids this restore assigned, after every entry exists.
+     *
+     * Two cases are deliberately left alone rather than guessed at. An entry with
+     * no id in the backup predates the field and cannot be matched to anything; and
+     * a parent that was not restored - because the user deselected it, or it failed
+     * - leaves the season's existing parent untouched, since clearing it would
+     * break an entry that was already correctly arranged on this device.
+     */
+    private suspend fun linkSeasonsToParents(
+        backupAnimes: List<BackupAnime>,
+        restoredIdByBackupId: Map<Long, Long>,
+    ) {
+        backupAnimes.forEach { backupAnime ->
+            val backupParentId = backupAnime.parentId ?: return@forEach
+            val backupId = backupAnime.id ?: return@forEach
+            val animeId = restoredIdByBackupId[backupId] ?: return@forEach
+            val parentId = restoredIdByBackupId[backupParentId] ?: return@forEach
+
+            try {
+                animeRestorer.linkToParent(animeId = animeId, parentId = parentId)
+            } catch (e: Exception) {
+                val sourceName = sourceMapping[backupAnime.source] ?: backupAnime.source.toString()
+                errors.add(Date() to "${backupAnime.title} [$sourceName]: ${e.message}")
+            }
+        }
+    }
+    // <-- AM (SEASON_PARENT_LINK)
 
     private fun CoroutineScope.restoreAppPreferences(
         preferences: List<BackupPreference>,

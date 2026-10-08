@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.data.download
 
 import android.content.Context
+import animiru.domain.download.model.PlannedDownloadOrigin
+import animiru.domain.download.repository.PlannedDownloadRepository
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -55,6 +57,9 @@ class DownloadManager(
     private val downloadPreferences: DownloadPreferences,
     private val downloader: Downloader,
     private val pendingDeleter: DownloadPendingDeleter,
+    // AM (PLANNED_DOWNLOADS) -->
+    private val plannedDownloadRepository: PlannedDownloadRepository,
+    // <-- AM (PLANNED_DOWNLOADS)
 ) {
 
     val isRunning: Boolean
@@ -94,6 +99,16 @@ class DownloadManager(
      * Empties the download queue.
      */
     fun clearQueue() {
+        // AM (PLANNED_DOWNLOADS): emptying the queue holds its contents for the same
+        // reason cancelling one does - the action stops work, it does not mean you
+        // stopped wanting the episodes. Captured before the queue is cleared.
+        val queued = downloader.queueState.value
+        if (queued.isNotEmpty()) {
+            val held = queued.map { it.anime.id to it.episode.id }
+            launchIO {
+                plannedDownloadRepository.addAll(held, PlannedDownloadOrigin.Held)
+            }
+        }
         downloader.clearQueue()
         downloader.stop()
     }
@@ -267,9 +282,33 @@ class DownloadManager(
     }
     // <-- AM (STORAGE_SCREEN)
 
+    // AM (PLANNED_DOWNLOADS) -->
+    /**
+     * Takes [downloads] out of the queue and holds them instead of discarding them.
+     *
+     * Cancelling is the ordinary way to stop a download, and losing the intent with
+     * it is what made the queue unable to park anything - pausing is global, so the
+     * only way to stop one episode was to forget you wanted it. Holding keeps the
+     * intent while the rest of the queue carries on; removing it from the hold list
+     * is the separate, deliberate step.
+     *
+     * Hooked here rather than in [removeFromDownloadQueue], which [deleteEpisodes]
+     * also calls - deleting downloaded files must not create intent to download them
+     * again.
+     */
     fun cancelQueuedDownloads(downloads: List<Download>) {
+        holdAndRemoveFromQueue(downloads)
+    }
+
+    private fun holdAndRemoveFromQueue(downloads: List<Download>) {
+        if (downloads.isEmpty()) return
+        val held = downloads.map { it.anime.id to it.episode.id }
+        launchIO {
+            plannedDownloadRepository.addAll(held, PlannedDownloadOrigin.Held)
+        }
         removeFromDownloadQueue(downloads.map { it.episode })
     }
+    // <-- AM (PLANNED_DOWNLOADS)
 
     /**
      * Deletes the directories of a list of downloaded episodes.

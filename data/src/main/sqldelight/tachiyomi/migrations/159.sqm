@@ -1,0 +1,14 @@
+-- AM (ART_PROVENANCE) -->
+-- Drops the frame-grab provenance table added in 157 and extended in 158.
+--
+-- Recording where a cover was cut from only pays off with a background job to cut
+-- it again, a progress screen, and a retry path for the frames that cannot be
+-- reproduced - a lot of machinery for something most libraries never use. The
+-- feature is withdrawn rather than left half-built.
+--
+-- Removed by a new migration rather than by rewriting 157 and deleting 158:
+-- devices that already ran those are at schema version 158, and presenting them a
+-- schema that stops at 157 makes SQLite take its downgrade path, which throws on
+-- open. Applied migrations are history; this is the correction.
+DROP TABLE IF EXISTS custom_art_source;
+-- <-- AM (ART_PROVENANCE)

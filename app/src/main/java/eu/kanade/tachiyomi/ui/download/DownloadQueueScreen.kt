@@ -1,14 +1,18 @@
 package eu.kanade.tachiyomi.ui.download
 
-import android.view.LayoutInflater
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.filled.PlayArrow
@@ -16,11 +20,14 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.SmallExtendedFloatingActionButton
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,17 +40,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Velocity
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.view.ViewCompat
-import androidx.core.view.updatePadding
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.recyclerview.widget.LinearLayoutManager
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metrox.viewmodel.metroViewModel
@@ -51,28 +52,41 @@ import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.components.DropdownMenu
 import eu.kanade.presentation.components.NestedMenuItem
+import eu.kanade.presentation.more.download.DownloadHoldList
+import eu.kanade.presentation.more.download.DownloadQueueList
 import eu.kanade.presentation.util.Screen
-import eu.kanade.tachiyomi.databinding.DownloadListBinding
+import eu.kanade.tachiyomi.ui.anime.AnimeScreen
+import kotlinx.coroutines.launch
 import tachiyomi.core.common.util.lang.launchUI
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
-import tachiyomi.presentation.core.components.Pill
 import tachiyomi.presentation.core.components.material.Scaffold
+import tachiyomi.presentation.core.components.material.TabText
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.EmptyScreen
-import kotlin.math.roundToInt
 
 object DownloadQueueScreen : Screen() {
 
     @Composable
     override fun Content() {
         val navigator = LocalNavigator.currentOrThrow
-        val scope = rememberCoroutineScope()
         val viewModel = metroViewModel<DownloadQueueViewModel>()
         val downloadList by viewModel.state.collectAsStateWithLifecycle()
         val downloadCount by remember {
-            derivedStateOf { downloadList.sumOf { it.subItems.size } }
+            derivedStateOf { downloadList.sumOf { it.downloads.size } }
         }
+
+        // AM (PLANNED_DOWNLOADS) -->
+        val holdViewModel = metroViewModel<DownloadHoldViewModel>()
+        val holdList by holdViewModel.state.collectAsState()
+        val holdCount by remember {
+            derivedStateOf { holdList.sumOf { it.entries.size } }
+        }
+        val pagerState = rememberPagerState { 2 }
+        val onQueueTab by remember { derivedStateOf { pagerState.currentPage == QUEUE_PAGE } }
+        val tabScope = rememberCoroutineScope()
+        // <-- AM (PLANNED_DOWNLOADS)
 
         val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
         var fabExpanded by remember { mutableStateOf(true) }
@@ -101,29 +115,21 @@ object DownloadQueueScreen : Screen() {
         Scaffold(
             topBar = {
                 AppBar(
+                    // AM (PLANNED_DOWNLOADS): one title for both tabs; the counts
+                    // live on the tabs themselves, where they say which list they
+                    // belong to.
                     titleContent = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = stringResource(MR.strings.label_download_queue),
-                                maxLines = 1,
-                                modifier = Modifier.weight(1f, false),
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (downloadCount > 0) {
-                                val pillAlpha = if (isSystemInDarkTheme()) 0.12f else 0.08f
-                                Pill(
-                                    text = "$downloadCount",
-                                    modifier = Modifier.padding(start = 4.dp),
-                                    color = MaterialTheme.colorScheme.onBackground
-                                        .copy(alpha = pillAlpha),
-                                    fontSize = 14.sp,
-                                )
-                            }
-                        }
+                        Text(
+                            text = stringResource(AMMR.strings.label_downloads),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     },
                     navigateUp = navigator::pop,
                     actions = {
-                        if (downloadList.isNotEmpty()) {
+                        // AM (PLANNED_DOWNLOADS): sorting is a queue concept - the
+                        // hold list has no order being worked through.
+                        if (onQueueTab && downloadList.isNotEmpty()) {
                             var sortExpanded by remember { mutableStateOf(false) }
                             val onDismissRequest = { sortExpanded = false }
                             DropdownMenu(
@@ -137,7 +143,7 @@ object DownloadQueueScreen : Screen() {
                                             text = { Text(text = stringResource(MR.strings.action_newest)) },
                                             onClick = {
                                                 viewModel.reorderQueue(
-                                                    { it.download.episode.dateUpload },
+                                                    { it.episode.dateUpload },
                                                     true,
                                                 )
                                                 closeMenu()
@@ -147,7 +153,7 @@ object DownloadQueueScreen : Screen() {
                                             text = { Text(text = stringResource(MR.strings.action_oldest)) },
                                             onClick = {
                                                 viewModel.reorderQueue(
-                                                    { it.download.episode.dateUpload },
+                                                    { it.episode.dateUpload },
                                                     false,
                                                 )
                                                 closeMenu()
@@ -162,7 +168,7 @@ object DownloadQueueScreen : Screen() {
                                             text = { Text(text = stringResource(MR.strings.action_asc)) },
                                             onClick = {
                                                 viewModel.reorderQueue(
-                                                    { it.download.episode.episodeNumber },
+                                                    { it.episode.episodeNumber },
                                                     false,
                                                 )
                                                 closeMenu()
@@ -172,7 +178,7 @@ object DownloadQueueScreen : Screen() {
                                             text = { Text(text = stringResource(MR.strings.action_desc)) },
                                             onClick = {
                                                 viewModel.reorderQueue(
-                                                    { it.download.episode.episodeNumber },
+                                                    { it.episode.episodeNumber },
                                                     true,
                                                 )
                                                 closeMenu()
@@ -202,7 +208,7 @@ object DownloadQueueScreen : Screen() {
             },
             floatingActionButton = {
                 AnimatedVisibility(
-                    visible = downloadList.isNotEmpty(),
+                    visible = onQueueTab && downloadList.isNotEmpty(),
                     enter = fadeIn(),
                     exit = fadeOut(),
                 ) {
@@ -238,57 +244,111 @@ object DownloadQueueScreen : Screen() {
                 }
             },
         ) { contentPadding ->
-            if (downloadList.isEmpty()) {
-                EmptyScreen(
-                    stringRes = MR.strings.information_no_downloads,
-                    modifier = Modifier.padding(contentPadding),
-                )
-                return@Scaffold
-            }
+            val downloadStates by viewModel.downloadStates.collectAsState()
+            // AM (EPISODE_NAMES) -->
+            val queueDisplayNames by viewModel.displayNames.collectAsState()
+            val holdDisplayNames by holdViewModel.displayNames.collectAsState()
+            // <-- AM (EPISODE_NAMES)
 
-            val density = LocalDensity.current
-            val layoutDirection = LocalLayoutDirection.current
-            val left = with(density) { contentPadding.calculateLeftPadding(layoutDirection).toPx().roundToInt() }
-            val top = with(density) { contentPadding.calculateTopPadding().toPx().roundToInt() }
-            val right = with(density) { contentPadding.calculateRightPadding(layoutDirection).toPx().roundToInt() }
-            val bottom = with(density) { contentPadding.calculateBottomPadding().toPx().roundToInt() }
-
-            Box(modifier = Modifier.nestedScroll(nestedScrollConnection)) {
-                AndroidView(
-                    modifier = Modifier.fillMaxWidth(),
-                    factory = { context ->
-                        viewModel.controllerBinding = DownloadListBinding.inflate(LayoutInflater.from(context))
-                        viewModel.adapter = DownloadAdapter(viewModel.listener)
-                        viewModel.controllerBinding.root.adapter = viewModel.adapter
-                        viewModel.adapter?.isHandleDragEnabled = true
-                        viewModel.controllerBinding.root.layoutManager = LinearLayoutManager(context)
-
-                        ViewCompat.setNestedScrollingEnabled(viewModel.controllerBinding.root, true)
-
-                        scope.launchUI {
-                            viewModel.getDownloadStatusFlow()
-                                .collect(viewModel::onStatusChange)
-                        }
-                        scope.launchUI {
-                            viewModel.getDownloadProgressFlow()
-                                .collect(viewModel::onUpdateDownloadProgress)
-                        }
-
-                        viewModel.controllerBinding.root
-                    },
-                    update = {
-                        viewModel.controllerBinding.root
-                            .updatePadding(
-                                left = left,
-                                top = top,
-                                right = right,
-                                bottom = bottom,
+            // AM (PLANNED_DOWNLOADS) -->
+            // PrimaryTabRow and HorizontalPager directly, rather than the shared
+            // TabbedScreen: that component owns its own toolbar and has no slot for
+            // this screen's FAB or its sort menu, so using it would have meant
+            // extending a component the app's root tabs depend on in order to host
+            // one pushed screen.
+            Column(
+                modifier = Modifier.padding(
+                    top = contentPadding.calculateTopPadding(),
+                    start = contentPadding.calculateStartPadding(LocalLayoutDirection.current),
+                    end = contentPadding.calculateEndPadding(LocalLayoutDirection.current),
+                ),
+            ) {
+                PrimaryTabRow(
+                    selectedTabIndex = pagerState.currentPage,
+                    modifier = Modifier.zIndex(1f),
+                ) {
+                    Tab(
+                        selected = pagerState.currentPage == QUEUE_PAGE,
+                        onClick = { tabScope.launch { pagerState.animateScrollToPage(QUEUE_PAGE) } },
+                        text = {
+                            TabText(
+                                text = stringResource(AMMR.strings.tab_download_queue),
+                                badgeCount = downloadCount.takeIf { it > 0 },
                             )
+                        },
+                        unselectedContentColor = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Tab(
+                        selected = pagerState.currentPage == HOLD_PAGE,
+                        onClick = { tabScope.launch { pagerState.animateScrollToPage(HOLD_PAGE) } },
+                        text = {
+                            TabText(
+                                text = stringResource(AMMR.strings.tab_download_hold),
+                                badgeCount = holdCount.takeIf { it > 0 },
+                            )
+                        },
+                        unselectedContentColor = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
 
-                        viewModel.adapter?.updateDataSet(downloadList)
-                    },
-                )
+                val pagePadding = PaddingValues(bottom = contentPadding.calculateBottomPadding())
+
+                HorizontalPager(
+                    modifier = Modifier.fillMaxSize(),
+                    state = pagerState,
+                    verticalAlignment = Alignment.Top,
+                ) { page ->
+                    when (page) {
+                        QUEUE_PAGE -> if (downloadList.isEmpty()) {
+                            EmptyScreen(
+                                stringRes = MR.strings.information_no_downloads,
+                                modifier = Modifier.padding(pagePadding),
+                            )
+                        } else {
+                            DownloadQueueList(
+                                groups = downloadList,
+                                downloadStates = downloadStates,
+                                displayNames = queueDisplayNames,
+                                contentPadding = pagePadding,
+                                onReorder = viewModel::reorderTo,
+                                onMoveToTop = { viewModel.moveToTop(it.episodeId) },
+                                onMoveToBottom = { viewModel.moveToBottom(it.episodeId) },
+                                onMoveSeriesToTop = { viewModel.moveSeriesToTop(it.animeId) },
+                                onMoveSeriesToBottom = { viewModel.moveSeriesToBottom(it.animeId) },
+                                onCancel = { viewModel.cancel(it.episodeId) },
+                                onCancelSeries = { viewModel.cancelSeries(it.animeId) },
+                                onOpenEntry = { navigator.push(AnimeScreen(it.animeId)) },
+                                modifier = Modifier.nestedScroll(nestedScrollConnection),
+                            )
+                        }
+
+                        else -> if (holdList.isEmpty()) {
+                            EmptyScreen(
+                                stringRes = AMMR.strings.information_no_held_downloads,
+                                modifier = Modifier.padding(pagePadding),
+                            )
+                        } else {
+                            DownloadHoldList(
+                                groups = holdList,
+                                contentPadding = pagePadding,
+                                displayNames = holdDisplayNames,
+                                onDownload = holdViewModel::download,
+                                onDownloadSeries = { holdViewModel.downloadSeries(it.animeId) },
+                                onDismiss = holdViewModel::dismiss,
+                                onDismissSeries = { holdViewModel.dismissSeries(it.animeId) },
+                                onOpenEntry = { navigator.push(AnimeScreen(it.animeId)) },
+                                modifier = Modifier.nestedScroll(nestedScrollConnection),
+                            )
+                        }
+                    }
+                }
             }
+            // <-- AM (PLANNED_DOWNLOADS)
         }
     }
 }
+
+// AM (PLANNED_DOWNLOADS) -->
+private const val QUEUE_PAGE = 0
+private const val HOLD_PAGE = 1
+// <-- AM (PLANNED_DOWNLOADS)

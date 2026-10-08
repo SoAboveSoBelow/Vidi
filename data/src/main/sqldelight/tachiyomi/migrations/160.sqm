@@ -1,0 +1,28 @@
+-- AM (PLANNED_DOWNLOADS) -->
+-- pending_download_restore generalised into planned_downloads: the same intent
+-- store, no longer restore-only. See planned_downloads.sq.
+--
+-- Existing rows can only have come from a restore, so they carry origin 0
+-- (RESTORED). Copied rather than renamed because the table gains a column, and a
+-- copy keeps the new schema in one place instead of an ALTER that the .sq file
+-- would then have to describe out of order.
+CREATE TABLE planned_downloads(
+    anime_id INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    origin INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(anime_id, episode_id),
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX planned_downloads_episode_id_index ON planned_downloads(episode_id);
+
+INSERT INTO planned_downloads(anime_id, episode_id, origin, created_at)
+SELECT anime_id, episode_id, 0, created_at
+FROM pending_download_restore;
+
+DROP TABLE pending_download_restore;
+-- <-- AM (PLANNED_DOWNLOADS)

@@ -87,19 +87,28 @@ data class RestoreOptions(
             // <-- AY
         )
 
+        // Indexed with a default rather than directly: a job queued by an older
+        // build carries a shorter array, and bare indexing would crash on upgrade
+        // instead of falling back for the options that build did not know about.
         fun fromBooleanArray(array: BooleanArray) = RestoreOptions(
-            libraryEntries = array[0],
-            categories = array[1],
-            appSettings = array[2],
-            extensionStores = array[3],
+            libraryEntries = array.optionAt(0, true),
+            categories = array.optionAt(1, true),
+            appSettings = array.optionAt(2, true),
+            extensionStores = array.optionAt(3, true),
             // AY -->
-            customButtons = array[4],
+            customButtons = array.optionAt(4, true),
             // <-- AY
-            sourceSettings = array[5],
+            sourceSettings = array.optionAt(5, true),
             // AY -->
-            extensions = array[6],
+            extensions = array.optionAt(6, false),
             // <-- AY
         )
+
+        // AM -->
+        private fun BooleanArray.optionAt(index: Int, default: Boolean): Boolean {
+            return if (index in indices) this[index] else default
+        }
+        // <-- AM
     }
 
     data class Entry(

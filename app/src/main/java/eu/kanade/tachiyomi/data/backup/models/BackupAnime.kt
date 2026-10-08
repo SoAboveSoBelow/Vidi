@@ -57,6 +57,7 @@ data class BackupAnime(
     @ProtoNumber(205) var customGenre: List<String>? = null,
     // AM (TAG_LIMIT) -->
     @ProtoNumber(210) var customAddedGenre: List<String>? = null,
+    @ProtoNumber(211) var tagVisibility: List<BackupTagVisibility> = emptyList(),
     // <-- AM (TAG_LIMIT)
     // <-- AM (CUSTOM_INFORMATION)
     // Since ProtoNumber 108 was previously used in the past, we cannot reuse it. May cause issues with aniyomi
@@ -75,6 +76,23 @@ data class BackupAnime(
     @ProtoNumber(506) var seasonSourceOrder: Long = 0,
     @ProtoNumber(507) var fetchType: FetchType = FetchType.Episodes,
     // <-- AY
+
+    // AM -->
+    // Vidi specific values. 700 band: Mihon grows by ones from 112, Aniyomi owns
+    // 500 and TachiyomiSY owns 600 and 800, so 700 is the one range no fork in
+    // this lineage has claimed. Keeping Vidi's own structural features in a band
+    // of their own is what stops a backup read by another fork, or an upstream
+    // field added later, from landing on top of them.
+    // 700 and 701 were frame-grab provenance for the cover and background, since
+    // withdrawn. Not reused: a backup written while they existed still carries
+    // them, and a reader that reinterpreted those bytes as something else would
+    // decode them wrong rather than ignore them.
+    @ProtoNumber(702) var entrySeasons: List<BackupEntrySeason> = emptyList(),
+    @ProtoNumber(703) var episodeOrder: List<BackupEpisodeOrder> = emptyList(),
+    @ProtoNumber(704) var mergeChildren: List<BackupMergeChild> = emptyList(),
+    @ProtoNumber(705) var mergeSettings: BackupMergeSettings? = null,
+    @ProtoNumber(706) var mergeExclusions: List<BackupMergeExclusion> = emptyList(),
+    // <-- AM
 ) {
     fun getAnimeImpl(): Anime {
         return Anime.create().copy(

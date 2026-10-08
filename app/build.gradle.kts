@@ -135,6 +135,25 @@ android {
 
             matchingFallbacks.addAll(commonMatchingFallbacks)
         }
+        // AM (DEBUG_CLONE) -->
+        // A second debug install, identical to debug but under its own
+        // applicationId, so one device can hold two independent libraries. Testing
+        // backup and restore needs somewhere to restore *into*: restoring over the
+        // library a backup came from proves nothing, since every entry is already
+        // there and the restorer's merge path hides whatever the file failed to
+        // carry. With a clone, "back up here, restore there, compare" is the test.
+        //
+        // Falls back to the debug build type rather than release, so the library
+        // modules it depends on resolve to their debug variants as debug does.
+        create("debugClone") {
+            initWith(debug)
+
+            applicationIdSuffix = ".dev2"
+            versionNameSuffix = debug.versionNameSuffix
+
+            matchingFallbacks.addAll(listOf(debug.name))
+        }
+        // <-- AM (DEBUG_CLONE)
     }
 
     sourceSets {

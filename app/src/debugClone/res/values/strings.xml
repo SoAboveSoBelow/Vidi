@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- AM (DEBUG_CLONE): overrides the name from app/src/main/res so the two
+         debug installs are told apart in the launcher, not just by package name. -->
+    <string name="app_name" translatable="false">Vidi Clone</string>
+</resources>

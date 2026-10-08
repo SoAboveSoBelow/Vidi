@@ -145,27 +145,36 @@ data class BackupOptions(
         )
         // <-- AY
 
+        // Indexed with a default rather than directly: a job queued by an older
+        // build carries a shorter array, and bare indexing would crash on upgrade
+        // instead of falling back for the options that build did not know about.
         fun fromBooleanArray(array: BooleanArray) = BackupOptions(
-            libraryEntries = array[0],
-            categories = array[1],
-            episodes = array[2],
-            tracking = array[3],
-            history = array[4],
-            seenEntries = array[5],
-            appSettings = array[6],
-            extensionStores = array[7],
+            libraryEntries = array.optionAt(0, true),
+            categories = array.optionAt(1, true),
+            episodes = array.optionAt(2, true),
+            tracking = array.optionAt(3, true),
+            history = array.optionAt(4, true),
+            seenEntries = array.optionAt(5, true),
+            appSettings = array.optionAt(6, true),
+            extensionStores = array.optionAt(7, true),
             // AY -->
-            customButton = array[8],
+            customButton = array.optionAt(8, true),
             // <-- AY
-            sourceSettings = array[9],
-            privateSettings = array[10],
+            sourceSettings = array.optionAt(9, true),
+            privateSettings = array.optionAt(10, false),
             // AY -->
-            extensions = array[11],
+            extensions = array.optionAt(11, false),
             // <-- AY
             // AM (CUSTOM_INFORMATION) -->
-            customInfo = array[12],
+            customInfo = array.optionAt(12, false),
             // <-- AM (CUSTOM_INFORMATION)
         )
+
+        // AM -->
+        private fun BooleanArray.optionAt(index: Int, default: Boolean): Boolean {
+            return if (index in indices) this[index] else default
+        }
+        // <-- AM
     }
 
     data class Entry(

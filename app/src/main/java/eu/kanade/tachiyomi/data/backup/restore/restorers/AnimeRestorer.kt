@@ -62,38 +62,39 @@ class AnimeRestorer(
             )
     }
 
+    /**
+     * Restores one entry and returns it, so the caller can map the backup's own
+     * row id to the one this device just assigned.
+     *
+     * AM (SEASON_PARENT_LINK): a season used to be restored twice - once here as
+     * an entry in its own right, and again from its parent's pass, which set the
+     * correct new parentId. Both wrote the same row, so which value survived
+     * depended on the order [sortByNew] happened to produce, and the standalone
+     * pass wrote the parent id straight out of the backup: an id from the *source*
+     * device, pointing at whatever occupies it here. Seasons therefore came back
+     * attached to the wrong entry or to nothing.
+     *
+     * Now every entry is restored exactly once, with no parent set at all, and the
+     * caller relinks them once all the ids are known (see [linkToParent]). Order
+     * cannot matter, because nothing is written until every row exists.
+     */
     suspend fun restore(
         backupAnime: BackupAnime,
         backupCategories: List<BackupCategory>,
         // AM (CUSTOM_INFORMATION) -->
         customInfo: CustomAnimeInfo?,
         // <-- AM (CUSTOM_INFORMATION)
-        // AY -->
-        backupSeasons: List<BackupAnime>,
-        // <-- AY
-    ) {
-        database.transaction {
+    ): Anime {
+        return database.transactionWithResult {
             val dbAnime = findExistingAnime(backupAnime)
-            val anime = backupAnime.getAnimeImpl()
+            // AM (SEASON_PARENT_LINK): dropped here rather than trusted - it is an
+            // id from another device's database.
+            val anime = backupAnime.getAnimeImpl().copy(parentId = null)
             val restoredAnime = if (dbAnime == null) {
                 restoreNewAnime(anime)
             } else {
                 restoreExistingAnime(anime, dbAnime)
             }
-
-            // AY -->
-            backupSeasons.forEach { bs ->
-                val dbAnime = findExistingAnime(bs)
-                val anime = bs.getAnimeImpl().copy(
-                    parentId = restoredAnime.id,
-                )
-                if (dbAnime == null) {
-                    restoreNewAnime(anime)
-                } else {
-                    restoreExistingAnime(anime, dbAnime)
-                }
-            }
-            // <-- AY
 
             restoreAnimeDetails(
                 anime = restoredAnime,
@@ -107,13 +108,32 @@ class AnimeRestorer(
                 customInfo = customInfo,
                 // <-- AM (CUSTOM_INFORMATION)
             )
+
+            restoredAnime
         }
     }
+
+    // AM (SEASON_PARENT_LINK) -->
+    /**
+     * Attaches a restored season to its restored parent.
+     *
+     * Uses a setter of its own because animes.update writes parent_id through
+     * coalesce(:parentId, parent_id), which can set a parent but never clear or
+     * replace one with null.
+     */
+    suspend fun linkToParent(animeId: Long, parentId: Long?) {
+        database.animesQueries.setParentId(parentId = parentId, animeId = animeId)
+    }
+    // <-- AM (SEASON_PARENT_LINK)
 
     private suspend fun findExistingAnime(backupAnime: BackupAnime): Anime? {
         return getAnimeByUrlAndSourceId.await(backupAnime.url, backupAnime.source)
     }
 
+    // AM (SEASON_PARENT_LINK): the parentId forced through below is now always null,
+    // since restore() strips it - and animes.update coalesces a null parent_id, so an
+    // entry that already had a parent on this device keeps it until linkToParent
+    // either confirms or replaces it.
     private suspend fun restoreExistingAnime(anime: Anime, dbAnime: Anime): Anime {
         return if (anime.version > dbAnime.version) {
             updateAnime(

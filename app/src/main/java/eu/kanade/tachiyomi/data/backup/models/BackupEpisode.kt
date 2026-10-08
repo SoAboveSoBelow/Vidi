@@ -36,6 +36,14 @@ class BackupEpisode(
     @ProtoNumber(502) var summary: String? = null,
     @ProtoNumber(503) var previewUrl: String? = null,
     // <-- AY
+
+    // AM -->
+    // Vidi specific values; see the band note on BackupAnime.
+    @ProtoNumber(700) var customName: String? = null,
+    // 701 was frame-grab provenance for the thumbnail, since withdrawn. Not
+    // reused, for the reason given on BackupAnime.
+    @ProtoNumber(702) var wasDownloaded: Boolean = false,
+    // <-- AM
 ) {
     fun toEpisodeImpl(): Episode {
         return Episode.create().copy(

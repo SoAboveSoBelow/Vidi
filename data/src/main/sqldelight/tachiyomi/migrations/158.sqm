@@ -1,0 +1,12 @@
+-- AM (ART_PROVENANCE) -->
+-- The episode a frame was cut from does not always belong to the entry the art
+-- is on. Playing a merged entry plays a child's episode, and the same is true of
+-- a seasoned entry, so a cover captured mid-playback can name an episode that
+-- lives under a different anime row. Recording only the url left that episode
+-- unresolvable, since episodes.url is unique within an anime and not globally.
+--
+-- NULL means what the original single-column form assumed: the episode belongs
+-- to the same entry as the art. Existing rows are therefore correct as they
+-- stand and need no backfill.
+ALTER TABLE custom_art_source ADD COLUMN episode_anime_id INTEGER;
+-- <-- AM (ART_PROVENANCE)
