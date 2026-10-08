@@ -22,7 +22,8 @@ package eu.kanade.presentation.components
 //   1. app content (the Navigator)
 //   2. app dialogs and sheets   <- this host
 //   3. the player, fullscreen or dummy pip
-//   4. the player's own sheets, panels and dialogs
+//   4. the player's own sheets, panels and dialogs   <- a second host, see
+//      LocalPlayerDialogLayer
 //
 // Within this layer, entries draw in the order they were opened, so the last
 // dialog opened is on top - the same as the window behaviour it replaces, which is
@@ -75,6 +76,24 @@ import androidx.compose.ui.unit.dp
  * working unchanged.
  */
 val LocalAppDialogLayer: ProvidableCompositionLocal<AppDialogLayer?> = compositionLocalOf { null }
+
+/**
+ * Layer 4: the same mechanism one step up, for dialogs opened BY the player,
+ * which have to sit above it rather than under it.
+ *
+ * The player's own dialogs are app dialogs - the categories dialog and the
+ * duplicate sheet are the entry screen's, reused - so they resolve
+ * [LocalAppDialogLayer] and land in layer 2, under the player, where they are
+ * invisible but still scrimmed and still swallowing back presses. The player
+ * swaps this in for [LocalAppDialogLayer] around its own subtree
+ * (PlayerOverlayHost), so an app dialog opened from inside the player goes to
+ * the host composed after it instead.
+ *
+ * Null where there is no such host (PlayerActivity, the spike screens, a
+ * preview), which makes those dialogs fall back to their own platform windows
+ * - above the player there too, which is the point.
+ */
+val LocalPlayerDialogLayer: ProvidableCompositionLocal<AppDialogLayer?> = compositionLocalOf { null }
 
 /** The open entries, in the order they were opened. */
 class AppDialogLayer {

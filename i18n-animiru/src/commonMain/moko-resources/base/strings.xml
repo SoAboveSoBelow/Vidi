@@ -377,7 +377,7 @@
     <string name="action_download_all_for_series">Download all for series</string>
     <string name="action_remove_from_hold">Remove from hold</string>
     <string name="action_remove_all_for_series_from_hold">Remove all for series from hold</string>
-    <string name="information_no_held_downloads">Nothing on hold. Cancelling a download puts it here instead of discarding it.</string>
+    <string name="information_no_held_downloads">Nothing on hold</string>
 
     <!-- Release history -->
     <string name="release_history">Release history</string>

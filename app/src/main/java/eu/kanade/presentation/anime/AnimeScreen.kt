@@ -157,6 +157,9 @@ fun AnimeScreen(
     // <-- AY
     onDownloadEpisode: ((List<EpisodeList.Item>, EpisodeDownloadAction) -> Unit)?,
     onAddToLibraryClicked: () -> Unit,
+    // AM (HEART_OPENS_CATEGORIES) -->
+    onLongClickFavorite: () -> Unit,
+    // <-- AM (HEART_OPENS_CATEGORIES)
     onWebViewClicked: (() -> Unit)?,
     onWebViewLongClicked: (() -> Unit)?,
     // AY -->
@@ -280,6 +283,8 @@ fun AnimeScreen(
             onEpisodeClicked = onEpisodeClicked,
             onDownloadEpisode = onDownloadEpisode,
             onAddToLibraryClicked = onAddToLibraryClicked,
+            // AM (HEART_OPENS_CATEGORIES)
+            onLongClickFavorite = onLongClickFavorite,
             onWebViewClicked = onWebViewClicked,
             onWebViewLongClicked = onWebViewLongClicked,
             onTrackingClicked = onTrackingClicked,
@@ -374,6 +379,8 @@ fun AnimeScreen(
             onEpisodeClicked = onEpisodeClicked,
             onDownloadEpisode = onDownloadEpisode,
             onAddToLibraryClicked = onAddToLibraryClicked,
+            // AM (HEART_OPENS_CATEGORIES)
+            onLongClickFavorite = onLongClickFavorite,
             onWebViewClicked = onWebViewClicked,
             onWebViewLongClicked = onWebViewLongClicked,
             onTrackingClicked = onTrackingClicked,
@@ -471,6 +478,9 @@ private fun AnimeScreenSmallImpl(
     // <-- AY
     onDownloadEpisode: ((List<EpisodeList.Item>, EpisodeDownloadAction) -> Unit)?,
     onAddToLibraryClicked: () -> Unit,
+    // AM (HEART_OPENS_CATEGORIES) -->
+    onLongClickFavorite: () -> Unit,
+    // <-- AM (HEART_OPENS_CATEGORIES)
     onWebViewClicked: (() -> Unit)?,
     onWebViewLongClicked: (() -> Unit)?,
     // AY -->
@@ -899,11 +909,12 @@ private fun AnimeScreenSmallImpl(
                             isSyncingTrackers = state.isSyncingTrackers,
                             // <-- AM
                             onAddToLibraryClicked = onAddToLibraryClicked,
+                            // AM (HEART_OPENS_CATEGORIES)
+                            onLongClickFavorite = onLongClickFavorite,
                             onWebViewClicked = onWebViewClicked,
                             onWebViewLongClicked = onWebViewLongClicked,
                             onTrackingClicked = onTrackingClicked,
                             onEditIntervalClicked = onEditIntervalClicked,
-                            onEditCategory = onEditCategoryClicked,
                             // AY -->
                             modifier = Modifier.ignorePadding(offsetGridPaddingPx),
                             // <-- AY
@@ -1135,6 +1146,9 @@ fun AnimeScreenLargeImpl(
     // <-- AY
     onDownloadEpisode: ((List<EpisodeList.Item>, EpisodeDownloadAction) -> Unit)?,
     onAddToLibraryClicked: () -> Unit,
+    // AM (HEART_OPENS_CATEGORIES) -->
+    onLongClickFavorite: () -> Unit,
+    // <-- AM (HEART_OPENS_CATEGORIES)
     onWebViewClicked: (() -> Unit)?,
     onWebViewLongClicked: (() -> Unit)?,
     // AY -->
@@ -1535,11 +1549,12 @@ fun AnimeScreenLargeImpl(
                                 isSyncingTrackers = state.isSyncingTrackers,
                                 // <-- AM
                                 onAddToLibraryClicked = onAddToLibraryClicked,
+                                // AM (HEART_OPENS_CATEGORIES)
+                                onLongClickFavorite = onLongClickFavorite,
                                 onWebViewClicked = onWebViewClicked,
                                 onWebViewLongClicked = onWebViewLongClicked,
                                 onTrackingClicked = onTrackingClicked,
                                 onEditIntervalClicked = onEditIntervalClicked,
-                                onEditCategory = onEditCategoryClicked,
                             )
                             ExpandableAnimeDescription(
                                 defaultExpandState = true,

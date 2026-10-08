@@ -884,6 +884,64 @@ class AnimeViewModel(
     }
 
     /**
+     * The heart's LONG PRESS: ask instead of acting. Opens the categories
+     * dialog, whose checked set decides library membership - at least one
+     * category means in the library, none means out of it - and nothing is
+     * written until it is confirmed.
+     *
+     * A tap is the plain add/remove again ([toggleFavorite]), which is also
+     * what this falls back to when there are no categories to choose from:
+     * the dialog would otherwise be an empty list with no way to add.
+     *
+     * [checkDuplicate] is off when the duplicate dialog has already been
+     * answered, which re-enters here rather than adding outright - the long
+     * press asked for the categories dialog, so that is what it gets.
+     */
+    fun showFavoriteCategoriesDialog(checkDuplicate: Boolean = true) {
+        val anime = successState?.anime ?: return
+        viewModelScope.launchIO {
+            val allCategories = getCategories()
+            if (allCategories.isEmpty()) {
+                toggleFavorite()
+                return@launchIO
+            }
+            if (!anime.favorite && checkDuplicate) {
+                val duplicates = getDuplicateLibraryAnime(anime)
+                if (duplicates.isNotEmpty()) {
+                    updateSuccessState {
+                        it.copy(
+                            dialog = Dialog.DuplicateAnime(
+                                anime = anime,
+                                duplicates = duplicates,
+                                fromCategoriesPrompt = true,
+                            ),
+                        )
+                    }
+                    return@launchIO
+                }
+            }
+            // Whatever the entry is already filed under, which outlives a
+            // removal - so adding something back offers the categories it
+            // had. An entry that has none falls back to the default, if
+            // there is one, so the common case is one tap on OK.
+            val checked = getAnimeCategoryIds(anime).ifEmpty {
+                listOfNotNull(libraryPreferences.defaultCategory.get().toLong().takeIf { id -> id > 0 })
+            }
+            updateSuccessState {
+                it.copy(
+                    dialog = Dialog.ChangeCategory(
+                        anime = anime,
+                        initialSelection = allCategories.mapAsCheckboxState { category ->
+                            category.id in checked
+                        },
+                        removeOnEmpty = true,
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
      * The heart's categories dialog confirm. The checked set is the entry's
      * library membership: at least one category puts it in (and sets them),
      * none takes it out. Nothing else in the dialog writes anything, so Cancel
@@ -926,47 +984,6 @@ class AnimeViewModel(
         val state = successState ?: return
         viewModelScope.launchIO {
             val anime = state.anime
-
-            // AM (HEART_OPENS_CATEGORIES) -->
-            // The heart asks instead of acting: it opens the categories dialog,
-            // whose checked set decides library membership - at least one
-            // category means in the library, none means out of it. Nothing is
-            // written until that dialog is confirmed, so a misread tap on a
-            // filled heart no longer removes anything.
-            //
-            // Unless there are no categories to choose from, where there is
-            // nothing to ask and the old immediate add/remove stands - the
-            // dialog would otherwise be an empty list with no way to add.
-            val allCategories = getCategories()
-            if (allCategories.isNotEmpty()) {
-                if (!isFavorited && checkDuplicate) {
-                    val duplicates = getDuplicateLibraryAnime(anime)
-                    if (duplicates.isNotEmpty()) {
-                        updateSuccessState { it.copy(dialog = Dialog.DuplicateAnime(anime, duplicates)) }
-                        return@launchIO
-                    }
-                }
-                // Whatever the entry is already filed under, which outlives a
-                // removal - so adding something back offers the categories it
-                // had. An entry that has none falls back to the default, if
-                // there is one, so the common case is one tap on OK.
-                val checked = getAnimeCategoryIds(anime).ifEmpty {
-                    listOfNotNull(libraryPreferences.defaultCategory.get().toLong().takeIf { id -> id > 0 })
-                }
-                updateSuccessState {
-                    it.copy(
-                        dialog = Dialog.ChangeCategory(
-                            anime = anime,
-                            initialSelection = allCategories.mapAsCheckboxState { category ->
-                                category.id in checked
-                            },
-                            removeOnEmpty = true,
-                        ),
-                    )
-                }
-                return@launchIO
-            }
-            // <-- AM (HEART_OPENS_CATEGORIES)
 
             if (isFavorited) {
                 // Remove from library
@@ -2494,7 +2511,18 @@ class AnimeViewModel(
             // <-- AM (HEART_OPENS_CATEGORIES)
         ) : Dialog
         data class DeleteEpisodes(val episodes: List<Episode>) : Dialog
-        data class DuplicateAnime(val anime: Anime, val duplicates: List<AnimeWithEpisodeCount>) : Dialog
+        data class DuplicateAnime(
+            val anime: Anime,
+            val duplicates: List<AnimeWithEpisodeCount>,
+            // AM (HEART_OPENS_CATEGORIES) -->
+            /**
+             * Whether the heart's long press raised this. Confirming then
+             * goes back to the categories dialog it was on its way to,
+             * rather than adding the entry outright as a tap would.
+             */
+            val fromCategoriesPrompt: Boolean = false,
+            // <-- AM (HEART_OPENS_CATEGORIES)
+        ) : Dialog
         data class Migrate(val target: Anime, val current: Anime) : Dialog
         data class SetFetchInterval(val anime: Anime) : Dialog
 

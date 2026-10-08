@@ -76,6 +76,7 @@ import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.components.AppDialogHost
 import eu.kanade.presentation.components.AppStateBanners
 import eu.kanade.presentation.components.LocalAppDialogLayer
+import eu.kanade.presentation.components.LocalPlayerDialogLayer
 import eu.kanade.presentation.components.rememberAppDialogLayer
 import eu.kanade.presentation.components.DownloadedOnlyBannerBackgroundColor
 import eu.kanade.presentation.components.IncognitoModeBannerBackgroundColor
@@ -1121,9 +1122,17 @@ class MainActivity : BaseActivity() {
             // any screen's AlertDialog lands in it. See AppDialogLayer.kt for why the
             // dialogs come down into the composition at all.
             val appDialogLayer = rememberAppDialogLayer()
+            // AM (PLAYER_DIALOG_LAYER) -->
+            // Layer 4's layer. Provided app-wide, but only the player's own
+            // subtree swaps it in for LocalAppDialogLayer - see
+            // LocalPlayerDialogLayer and PlayerOverlayHost.
+            val playerDialogLayer = rememberAppDialogLayer()
+            // <-- AM (PLAYER_DIALOG_LAYER)
             // AM (REAL_PIP_CONTROLS_LEAK_FIX) -->
             CompositionLocalProvider(
                 LocalAppDialogLayer provides appDialogLayer,
+                // AM (PLAYER_DIALOG_LAYER)
+                LocalPlayerDialogLayer provides playerDialogLayer,
                 LocalInRealPip provides inRealPip,
             ) {
                 // <-- AM (REAL_PIP_CONTROLS_LEAK_FIX)
@@ -1241,6 +1250,16 @@ class MainActivity : BaseActivity() {
                         // currently showing.
                         PlayerOverlayHost()
                         // <-- AM (PLAYER_OVERLAY_MIGRATION)
+
+                        // AM (PLAYER_DIALOG_LAYER) -->
+                        // Layer 4: above the player, for the app dialogs the
+                        // player itself opens (the categories dialog and the
+                        // duplicate sheet). Composed after PlayerOverlayHost
+                        // for the same reason AppDialogHost is composed
+                        // before it - position in this Box is the whole
+                        // mechanism.
+                        AppDialogHost(playerDialogLayer)
+                        // <-- AM (PLAYER_DIALOG_LAYER)
                     }
                 }
 

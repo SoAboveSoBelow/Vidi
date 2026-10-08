@@ -62,6 +62,7 @@ package eu.kanade.tachiyomi.ui.player
 import android.content.pm.ActivityInfo
 import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,6 +73,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import eu.kanade.presentation.components.LocalAppDialogLayer
+import eu.kanade.presentation.components.LocalPlayerDialogLayer
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SerializableHoster.Companion.serialize
 import eu.kanade.tachiyomi.ui.main.MainActivity
@@ -116,14 +119,24 @@ fun PlayerOverlayHost() {
     // the reconciliation LaunchedEffect inside PlayerHostScreen routes
     // them (changeEpisode / changeAnime / no-op) instead.
     // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
-    PlayerHostScreen(
-        animeId = currentRequest.animeId,
-        episodeId = currentRequest.episodeId,
-        hosterList = currentRequest.hosterList,
-        hosterIndex = currentRequest.hosterIndex,
-        videoIndex = currentRequest.videoIndex,
-        forceResume = currentRequest.forceResume,
-    )
+    // AM (PLAYER_DIALOG_LAYER) -->
+    // Everything inside the player opens its dialogs into layer 4, hosted
+    // after this composable in MainActivity's Box, instead of the app's layer
+    // 2 which is hosted before it - an app dialog raised from the player (the
+    // categories dialog, the duplicate sheet) belongs ABOVE the player, not
+    // under it. Null outside a host, where the platform-window fallback does
+    // the same job. See AppDialogLayer.kt.
+    CompositionLocalProvider(LocalAppDialogLayer provides LocalPlayerDialogLayer.current) {
+        // <-- AM (PLAYER_DIALOG_LAYER)
+        PlayerHostScreen(
+            animeId = currentRequest.animeId,
+            episodeId = currentRequest.episodeId,
+            hosterList = currentRequest.hosterList,
+            hosterIndex = currentRequest.hosterIndex,
+            videoIndex = currentRequest.videoIndex,
+            forceResume = currentRequest.forceResume,
+        )
+    }
 }
 
 // AM (DUMMY_PIP_REBUILD) -->

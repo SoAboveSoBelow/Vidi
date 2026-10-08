@@ -172,6 +172,12 @@ class AnimeScreen(
                 viewModel.toggleFavorite()
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             },
+            // AM (HEART_OPENS_CATEGORIES) -->
+            onLongClickFavorite = {
+                viewModel.showFavoriteCategoriesDialog()
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            },
+            // <-- AM (HEART_OPENS_CATEGORIES)
             onWebViewClicked = {
                 openAnimeInWebView(
                     navigator,
@@ -362,7 +368,15 @@ class AnimeScreen(
                 DuplicateAnimeDialog(
                     duplicates = dialog.duplicates,
                     onDismissRequest = onDismissRequest,
-                    onConfirm = { viewModel.toggleFavorite(onRemoved = {}, checkDuplicate = false) },
+                    // AM (HEART_OPENS_CATEGORIES): back to the categories
+                    // dialog when the long press is what raised this.
+                    onConfirm = {
+                        if (dialog.fromCategoriesPrompt) {
+                            viewModel.showFavoriteCategoriesDialog(checkDuplicate = false)
+                        } else {
+                            viewModel.toggleFavorite(onRemoved = {}, checkDuplicate = false)
+                        }
+                    },
                     onOpenAnime = { navigator.push(AnimeScreen(it.id)) },
                     onMigrate = { viewModel.showMigrateDialog(it) },
                 )

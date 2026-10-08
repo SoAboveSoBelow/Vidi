@@ -209,7 +209,14 @@ fun AnimeActionRow(
     onTrackingClicked: (() -> Unit)?,
     // <-- AY
     onEditIntervalClicked: (() -> Unit)?,
-    onEditCategory: (() -> Unit)?,
+    // AM (HEART_OPENS_CATEGORIES) -->
+    /**
+     * The heart's long press. Opens the categories dialog whose checked set is
+     * library membership, which is what a tap used to do - the tap adds or
+     * removes outright again.
+     */
+    onLongClickFavorite: (() -> Unit)?,
+    // <-- AM (HEART_OPENS_CATEGORIES)
     modifier: Modifier = Modifier,
 ) {
     val defaultActionButtonColor = MaterialTheme.colorScheme.onSurface.copy(alpha = DISABLED_ALPHA)
@@ -234,7 +241,7 @@ fun AnimeActionRow(
             icon = if (favorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
             color = if (favorite) MaterialTheme.colorScheme.primary else defaultActionButtonColor,
             onClick = onAddToLibraryClicked,
-            onLongClick = onEditCategory,
+            onLongClick = onLongClickFavorite,
         )
         AnimeActionButton(
             title = when (nextUpdateDays) {
