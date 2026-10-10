@@ -47,4 +47,7 @@ data class Backup(
     @ProtoNumber(505) var backupExtensionStores: List<BackupExtensionStore> = emptyList(),
     @ProtoNumber(506) var backupCustomButton: List<BackupCustomButtons> = emptyList(),
     // <-- AY
+    // AM (JS_PROJECT_SOURCES) -->
+    @ProtoNumber(507) var backupJsProjects: List<BackupJsProject> = emptyList(),
+    // <-- AM (JS_PROJECT_SOURCES)
 )

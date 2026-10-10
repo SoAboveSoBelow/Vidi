@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.source
 
+import aniyomi.source.js.JsProjectRepository
+import aniyomi.source.js.JsProjectSource
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
@@ -16,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -35,6 +38,9 @@ class AndroidSourceManager(
     // AM (MERGED_SOURCES) -->
     private val mergedSource: MergedSource,
     // <-- AM (MERGED_SOURCES)
+    // AM (JS_PROJECT_SOURCES) -->
+    private val jsProjectRepository: JsProjectRepository,
+    // <-- AM (JS_PROJECT_SOURCES)
     private val downloadManager: Lazy<DownloadManager>,
 ) : SourceManager {
 
@@ -49,10 +55,25 @@ class AndroidSourceManager(
 
     override val sources: Flow<List<AnimeSource>> = sourcesMapFlow.map { it.values.toList() }
 
+    // AM (JS_PROJECT_SOURCES) -->
+    /**
+     * Live project sources, closed when replaced: each one owns a QuickJS
+     * context and a thread, so dropping the reference without closing would leak
+     * both on every rebuild.
+     */
+    private var projectSources: List<JsProjectSource> = emptyList()
+    // <-- AM (JS_PROJECT_SOURCES)
+
     init {
         scope.launch {
-            extensionManager.installedExtensionsFlow
-                .collectLatest { extensions ->
+            // AM (JS_PROJECT_SOURCES) -->
+            jsProjectRepository.refresh()
+            combine(
+                extensionManager.installedExtensionsFlow,
+                jsProjectRepository.activeProjects,
+            ) { extensions, projects -> extensions to projects }
+                .collectLatest { (extensions, projects) ->
+                    // <-- AM (JS_PROJECT_SOURCES)
                     val mutableMap = ConcurrentHashMap<Long, AnimeSource>(
                         mapOf(
                             LocalSource.ID to localSource,
@@ -67,6 +88,21 @@ class AndroidSourceManager(
                             registerStubSource(StubSource.from(it))
                         }
                     }
+                    // AM (JS_PROJECT_SOURCES) -->
+                    // Registered after extensions, so an id collision could only
+                    // ever favour the extension - and cannot happen anyway, since
+                    // generateId masks the sign bit and project ids set it.
+                    // Updated in place rather than replaced - see
+                    // JsProjectRepository.sourcesFor. Closing and recreating
+                    // here orphaned whatever screen was already holding one.
+                    projectSources = jsProjectRepository.sourcesFor(projects)
+                    projectSources.forEach {
+                        mutableMap[it.id] = it
+                        // Without a stub, deleting a project leaves its library
+                        // entries with no resolvable source name.
+                        registerStubSource(StubSource.from(it))
+                    }
+                    // <-- AM (JS_PROJECT_SOURCES)
                     sourcesMapFlow.value = mutableMap
                     _isInitialized.value = true
                 }

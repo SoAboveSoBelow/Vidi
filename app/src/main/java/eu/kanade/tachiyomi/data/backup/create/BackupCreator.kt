@@ -13,6 +13,7 @@ import eu.kanade.tachiyomi.data.backup.create.creators.CategoriesBackupCreator
 import eu.kanade.tachiyomi.data.backup.create.creators.CustomButtonBackupCreator
 import eu.kanade.tachiyomi.data.backup.create.creators.ExtensionStoresBackupCreator
 import eu.kanade.tachiyomi.data.backup.create.creators.ExtensionsBackupCreator
+import eu.kanade.tachiyomi.data.backup.create.creators.JsProjectsBackupCreator
 import eu.kanade.tachiyomi.data.backup.create.creators.PreferenceBackupCreator
 import eu.kanade.tachiyomi.data.backup.create.creators.SourcesBackupCreator
 import eu.kanade.tachiyomi.data.backup.models.Backup
@@ -20,6 +21,7 @@ import eu.kanade.tachiyomi.data.backup.models.BackupAnime
 import eu.kanade.tachiyomi.data.backup.models.BackupCategory
 import eu.kanade.tachiyomi.data.backup.models.BackupCustomButtons
 import eu.kanade.tachiyomi.data.backup.models.BackupExtension
+import eu.kanade.tachiyomi.data.backup.models.BackupJsProject
 import eu.kanade.tachiyomi.data.backup.models.BackupExtensionStore
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
 import eu.kanade.tachiyomi.data.backup.models.BackupSource
@@ -59,6 +61,9 @@ class BackupCreator(
     // AY -->
     private val customButtonBackupCreator: CustomButtonBackupCreator,
     private val extensionsBackupCreator: ExtensionsBackupCreator,
+    // AM (JS_PROJECT_SOURCES) -->
+    private val jsProjectsBackupCreator: JsProjectsBackupCreator,
+    // <-- AM (JS_PROJECT_SOURCES)
     // <-- AY
 ) {
     @AssistedFactory
@@ -106,6 +111,9 @@ class BackupCreator(
                 backupExtensionStores = backupExtensionStores(options),
                 backupCustomButton = backupCustomButtons(options),
                 // <-- AY
+                // AM (JS_PROJECT_SOURCES) -->
+                backupJsProjects = backupJsProjects(options),
+                // <-- AM (JS_PROJECT_SOURCES)
             )
 
             val byteArray = parser.encodeToByteArray(Backup.serializer(), backup)
@@ -185,6 +193,19 @@ class BackupCreator(
         return extensionsBackupCreator()
     }
     // <-- AY
+
+    // AM (JS_PROJECT_SOURCES) -->
+    /**
+     * Rides the extensions toggle rather than adding one of its own: both are
+     * "the sources I installed or wrote", and projects are a few KB of text
+     * where extension APKs are megabytes, so nothing is gained by splitting it.
+     */
+    private fun backupJsProjects(options: BackupOptions): List<BackupJsProject> {
+        if (!options.extensions) return emptyList()
+
+        return jsProjectsBackupCreator()
+    }
+    // <-- AM (JS_PROJECT_SOURCES)
 
     companion object {
         private const val MAX_AUTO_BACKUPS: Int = 4

@@ -1,5 +1,6 @@
 package mihon.app.di
 
+import aniyomi.source.js.JsProjectRepository
 import android.content.Context
 import animiru.domain.player.service.AdvancedPlayerPreferences
 import animiru.domain.player.service.AudioPreferences
@@ -143,6 +144,11 @@ interface AppGraph : ViewModelGraph {
     val trustExtension: TrustExtension
 
     val sourceManager: SourceManager
+
+    // AM (JS_PROJECT_SOURCES) -->
+    val jsProjectRepository: JsProjectRepository
+    // <-- AM (JS_PROJECT_SOURCES)
+
     val trackerManager: TrackerManager
     val extensionManager: ExtensionManager
     val downloadCache: DownloadCache

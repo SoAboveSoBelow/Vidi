@@ -11,6 +11,7 @@ import eu.kanade.tachiyomi.data.backup.models.BackupAnime
 import eu.kanade.tachiyomi.data.backup.models.BackupCategory
 import eu.kanade.tachiyomi.data.backup.models.BackupCustomButtons
 import eu.kanade.tachiyomi.data.backup.models.BackupExtension
+import eu.kanade.tachiyomi.data.backup.models.BackupJsProject
 import eu.kanade.tachiyomi.data.backup.models.BackupExtensionStore
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
 import eu.kanade.tachiyomi.data.backup.models.BackupSourcePreferences
@@ -22,6 +23,7 @@ import eu.kanade.tachiyomi.data.backup.restore.restorers.DownloadStateRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.EntryExtrasRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.ExtensionStoreRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.ExtensionsRestorer
+import eu.kanade.tachiyomi.data.backup.restore.restorers.JsProjectsRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.MergeRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.PreferenceRestorer
 import eu.kanade.tachiyomi.data.download.DownloadCache
@@ -64,6 +66,9 @@ class BackupRestorer(
     // AY -->
     private val customButtonRestorer: CustomButtonRestorer,
     private val extensionsRestorer: ExtensionsRestorer,
+    // AM (JS_PROJECT_SOURCES) -->
+    private val jsProjectsRestorer: JsProjectsRestorer,
+    // <-- AM (JS_PROJECT_SOURCES)
     // <-- AY
     // AM -->
     private val mergeRestorer: MergeRestorer,
@@ -172,7 +177,7 @@ class BackupRestorer(
                 restoreCustomButtons(backup.backupCustomButton)
             }
             if (options.extensions) {
-                restoreExtensions(backup.backupExtensions)
+                restoreExtensions(backup.backupExtensions, backup.backupJsProjects)
             }
             // <-- AY
 
@@ -418,9 +423,19 @@ class BackupRestorer(
         )
     }
 
-    private fun CoroutineScope.restoreExtensions(extensions: List<BackupExtension>) = launch {
+    private fun CoroutineScope.restoreExtensions(
+        extensions: List<BackupExtension>,
+        // AM (JS_PROJECT_SOURCES) -->
+        jsProjects: List<BackupJsProject>,
+        // <-- AM (JS_PROJECT_SOURCES)
+    ) = launch {
         ensureActive()
         extensionsRestorer.restoreExtensions(extensions)
+        // AM (JS_PROJECT_SOURCES) -->
+        // Folded into this step on purpose: a separate launch would need its own
+        // entry in restoreAmount, and the progress total is computed elsewhere.
+        jsProjectsRestorer.restoreJsProjects(jsProjects)
+        // <-- AM (JS_PROJECT_SOURCES)
 
         val progress = restoreProgress.incrementAndFetch()
         notifier.showRestoreProgress(

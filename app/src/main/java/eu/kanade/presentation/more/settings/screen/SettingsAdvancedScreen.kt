@@ -23,7 +23,9 @@ import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.presentation.components.AlertDialog
+import aniyomi.source.js.JsSpikes
 import eu.kanade.presentation.more.settings.Preference
+import eu.kanade.presentation.more.settings.screen.advanced.JsProjectsScreen
 import eu.kanade.presentation.more.settings.screen.advanced.ClearDatabaseScreen
 import eu.kanade.presentation.more.settings.screen.debug.DebugInfoScreen
 import eu.kanade.tachiyomi.data.library.MetadataUpdateJob
@@ -42,6 +44,7 @@ import eu.kanade.tachiyomi.network.PREF_DOH_QUAD101
 import eu.kanade.tachiyomi.network.PREF_DOH_QUAD9
 import eu.kanade.tachiyomi.network.PREF_DOH_SHECAN
 import eu.kanade.tachiyomi.ui.more.OnboardingScreen
+import eu.kanade.tachiyomi.util.system.isDebugBuildType
 import eu.kanade.tachiyomi.util.system.isShizukuInstalled
 import eu.kanade.tachiyomi.util.system.powerManager
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
@@ -55,6 +58,8 @@ import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
+import tachiyomi.core.common.util.lang.launchIO
+import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
 import java.io.File
@@ -118,6 +123,33 @@ object SettingsAdvancedScreen : SearchableSettings {
             getNetworkGroup(networkPreferences = networkPreferences),
             getLibraryGroup(libraryPreferences = libraryPreferences),
             getExtensionsGroup(basePreferences = basePreferences),
+        ) + listOfNotNull(
+            // AM (JS_SOURCE_SPIKE) -->
+            Preference.PreferenceItem.TextPreference(
+                title = "JavaScript projects",
+                subtitle = "Your own code, saved as projects and run by the app as sources",
+                onClick = { navigator.push(JsProjectsScreen()) },
+            ).takeIf { isDebugBuildType },
+            Preference.PreferenceItem.TextPreference(
+                title = "Run JS engine spikes",
+                subtitle = "All nine in order; each reports under its own tag in logcat",
+                onClick = {
+                    // Not the composition scope: the nine spikes take the best
+                    // part of a minute, and leaving this screen while they run
+                    // cancelled them - which surfaced as an engine failure in
+                    // logcat rather than as what it was.
+                    launchIO {
+                        val report = JsSpikes(
+                            context = context,
+                            network = graph.networkHelper,
+                            repository = graph.jsProjectRepository,
+                            sourceManager = graph.sourceManager,
+                        ).run()
+                        withUIContext { context.toast(report) }
+                    }
+                },
+            ).takeIf { isDebugBuildType },
+            // <-- AM (JS_SOURCE_SPIKE)
         )
     }
 
