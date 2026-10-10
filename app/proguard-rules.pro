@@ -18,6 +18,13 @@
 -keep,allowoptimization class org.jsoup.** { public protected *; }
 -keep,allowoptimization class rx.** { public protected *; }
 -keep,allowoptimization class app.cash.quickjs.** { public protected *; }
+# AM (JS_PROJECT_SOURCES) -->
+# QuickJs.set/get bind these interfaces reflectively and expose each declared
+# method to JavaScript under its own name, so the prelude and every project
+# call them by name. Minification renames them and every __dom/__http/__entry
+# call in JavaScript fails at runtime, which no build-time check catches.
+-keep,allowoptimization interface aniyomi.core.common.jsengine.** { *; }
+# <-- AM (JS_PROJECT_SOURCES)
 -keep,allowoptimization class uy.kohesive.injekt.** { public protected *; }
 -keep,allowoptimization class com.squareup.zstd.** { public protected *; }
 # AY -->

@@ -129,7 +129,7 @@ object SettingsAdvancedScreen : SearchableSettings {
                 title = "JavaScript projects",
                 subtitle = "Your own code, saved as projects and run by the app as sources",
                 onClick = { navigator.push(JsProjectsScreen()) },
-            ).takeIf { isDebugBuildType },
+            ),
             Preference.PreferenceItem.TextPreference(
                 title = "Run JS engine spikes",
                 subtitle = "All nine in order; each reports under its own tag in logcat",
