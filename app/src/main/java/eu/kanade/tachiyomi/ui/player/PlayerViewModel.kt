@@ -160,6 +160,7 @@ import kotlinx.serialization.json.Json
 import logcat.LogPriority
 import mihon.domain.library.model.search.QueryNode
 import mihon.feature.library.matches
+import animiru.domain.episode.interactor.GetEpisodeTags
 import mihon.feature.library.EpisodeSearchFields
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -226,6 +227,8 @@ class PlayerViewModel(
     // <-- AM (MERGED_SOURCES)
     // AM (CUSTOM_EPISODE_ORDER) -->
     private val getEpisodeOrder: GetEpisodeOrder,
+    // AM (EPISODE_TAGS)
+    private val getEpisodeTags: GetEpisodeTags,
     // <-- AM (CUSTOM_EPISODE_ORDER)
     private val getCategories: GetCategories,
     private val getTracks: GetTracks,
@@ -1947,6 +1950,10 @@ class PlayerViewModel(
             filtered += listOf(selectedEpisode)
         }
 
+        // AM (EPISODE_TAGS): resolved once for the host, then used both by the
+        // scope below and by the playlist dialog's own search.
+        val episodeTags = getEpisodeTags.await(anime)
+
         // AM (PLAYLIST_SEARCH_SCOPE) -->
         // The submitted search, last. Derived here rather than handed a frozen
         // list of ids, so a rehost or the shuffle rebuild re-applies it without
@@ -1974,7 +1981,11 @@ class PlayerViewModel(
                         scanlator = episode.scanlator,
                         anime = owner,
                         sourceName = ownerSourceNames[owner.source] ?: hostSourceName,
-                        tags = owner.genre.orEmpty(),
+                        // AM (EPISODE_TAGS): the same resolved tags the entry
+                        // screen matches on, so a playlist scope reads the same
+                        // as the episode list it came from.
+                        tags = episode.id?.let { episodeTags.byEpisodeId[it] }
+                            ?: owner.genre.orEmpty(),
                     ),
                 )
             }.let { if (it.any { episode -> episode.id == episodeId }) it else it + selectedEpisode }
@@ -2018,6 +2029,8 @@ class PlayerViewModel(
                 // AM (EPISODE_NAMES) -->
                 playlistEpisodeNames = resolvedOrder.displayNameByEpisodeId,
                 // <-- AM (EPISODE_NAMES)
+                // AM (EPISODE_TAGS)
+                playlistEpisodeTags = episodeTags.byEpisodeId,
             )
         }
         // AM (LIVE_EPISODE_NAMES)
@@ -6351,6 +6364,8 @@ class PlayerViewModel(
         // AM (EPISODE_NAMES) -->
         /** Display names for the playlist - custom names and single-episode source titles. */
         val playlistEpisodeNames: Map<Long, String> = emptyMap(),
+        // AM (EPISODE_TAGS)
+        val playlistEpisodeTags: Map<Long, List<String>> = emptyMap(),
         // <-- AM (EPISODE_NAMES)
         // AM (SHUFFLE_FOLLOWS_SEED) -->
         /** The shuffle seed [currentPlaylist] was ordered by; 0 means unshuffled. */
@@ -6446,7 +6461,8 @@ class PlayerViewModel(
                 anime = owner,
                 sourceName = playlistOwnerSourceNames[owner.source]
                     ?: currentSource?.name.orEmpty(),
-                tags = owner.genre.orEmpty(),
+                // AM (EPISODE_TAGS)
+                tags = episode.id?.let { playlistEpisodeTags[it] } ?: owner.genre.orEmpty(),
             )
         }
         // <-- AM (EPISODE_TAG_SEARCH)

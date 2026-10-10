@@ -16,6 +16,7 @@ import kotlinx.serialization.protobuf.ProtoBuf
 import nl.adaptivity.xmlutil.XmlDeclMode
 import nl.adaptivity.xmlutil.core.XmlVersion
 import nl.adaptivity.xmlutil.serialization.XML
+import tachiyomi.data.Anime_tag_lock
 import tachiyomi.data.Animes
 import tachiyomi.data.Database
 import tachiyomi.data.DateColumnAdapter
@@ -60,6 +61,10 @@ object AppBindings {
             ),
             episodesAdapter = Episodes.Adapter(
                 memoAdapter = MemoColumnAdapter,
+            ),
+            // AM (TAG_LOCKS)
+            anime_tag_lockAdapter = Anime_tag_lock.Adapter(
+                visible_tagsAdapter = StringListColumnAdapter,
             ),
         )
     }

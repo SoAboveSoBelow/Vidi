@@ -9,9 +9,15 @@ import androidx.compose.ui.util.fastAny
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import animiru.domain.anime.interactor.GetDisplayedTags
+import animiru.domain.episode.interactor.GetEpisodeTags
+import animiru.domain.episode.interactor.SetEpisodeTags
+import animiru.domain.episode.model.EpisodeTag
+import animiru.domain.episode.model.EpisodeTagResolution
+import animiru.domain.episode.repository.EpisodeTagRepository
 import animiru.domain.anime.interactor.GetTagSourceCounts
 import animiru.domain.anime.interactor.SetTagVisibility
 import animiru.domain.anime.model.DisplayedTags
+import animiru.domain.anime.repository.TagVisibilityRepository
 import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
 import aniyomi.core.common.torrent.TorrentPreferences
@@ -241,7 +247,14 @@ class AnimeViewModel(
     private val syncMergedEntryInfo: SyncMergedEntryInfo,
     // AM (TAG_LIMIT) -->
     private val getDisplayedTags: GetDisplayedTags,
+    // AM (EPISODE_TAGS) -->
+    private val getEpisodeTags: GetEpisodeTags,
+    private val setEpisodeTags: SetEpisodeTags,
+    private val episodeTagRepository: EpisodeTagRepository,
+    // <-- AM (EPISODE_TAGS)
     private val setTagVisibility: SetTagVisibility,
+    // AM (TAG_LOCKS)
+    private val tagVisibilityRepository: TagVisibilityRepository,
     private val getTagSourceCounts: GetTagSourceCounts,
     // <-- AM (TAG_LIMIT)
     private val removeFromMerge: RemoveFromMerge,
@@ -429,10 +442,12 @@ class AnimeViewModel(
                             // AM (NAMED_SEASONS) -->
                             // Pickers left open across a trip to the season
                             // manager must offer seasons added there.
-                            dialog = when (val dialog = it.dialog) {
-                                is Dialog.MergeSettings -> dialog.copy(seasons = order.seasons)
-                                is Dialog.ChangeEpisodeSeason -> dialog.copy(seasons = order.seasons)
-                                else -> dialog
+                            dialogStack = it.dialogStack.map { open ->
+                                when (open) {
+                                    is Dialog.MergeSettings -> open.copy(seasons = order.seasons)
+                                    is Dialog.ChangeEpisodeSeason -> open.copy(seasons = order.seasons)
+                                    else -> open
+                                }
                             },
                             // <-- AM (NAMED_SEASONS)
                             episodeSeasonById = order.seasonByEpisodeId,
@@ -470,7 +485,21 @@ class AnimeViewModel(
                     getDisplayedTags.subscribe(
                         animeId = targetId ?: animeId,
                         tags = state
-                            .map { (it as? State.Success)?.let { s -> s.tagsTarget ?: s.anime }?.genre }
+                            .map { current ->
+                                val success = current as? State.Success ?: return@map null
+                                val entry = success.tagsTarget ?: success.anime
+                                // AM (EPISODE_TAGS): tags that exist only because
+                                // the user put them on episodes are the entry's
+                                // too - they rank after its own, most-tagged
+                                // first. Only on the entry itself: the popout
+                                // pointed at a child shows that child's tags.
+                                val episodeOnly = if (success.tagsTarget == null) {
+                                    success.episodeTags.episodeOnly
+                                } else {
+                                    emptyList()
+                                }
+                                entry.genre.orEmpty() + episodeOnly
+                            }
                             .distinctUntilChanged(),
                     )
                 }
@@ -478,7 +507,29 @@ class AnimeViewModel(
                     updateSuccessState { it.copy(displayedTags = displayedTags) }
                 }
         }
+
+        // AM (TAG_LOCKS) -->
+        viewModelScope.launchIO {
+            state.map { (it as? State.Success)?.tagsTarget?.id }
+                .distinctUntilChanged()
+                .flatMapLatest { targetId ->
+                    tagVisibilityRepository.lockedVisibleTagsAsFlow(targetId ?: animeId)
+                }
+                .collectLatest { lockedVisible ->
+                    updateSuccessState { it.copy(tagsLocked = lockedVisible != null) }
+                }
+        }
+        // <-- AM (TAG_LOCKS)
         // <-- AM (TAG_LIMIT)
+
+        // AM (EPISODE_TAGS) -->
+        viewModelScope.launchIO {
+            val host = getAnime.await(animeId) ?: return@launchIO
+            getEpisodeTags.subscribe(host).collectLatest { resolution ->
+                updateSuccessState { it.copy(episodeTags = resolution) }
+            }
+        }
+        // <-- AM (EPISODE_TAGS)
 
         viewModelScope.launchIO {
             getExcludedScanlators.subscribe(animeId)
@@ -558,7 +609,7 @@ class AnimeViewModel(
                     seasons = seasons,
                     isRefreshingData = needRefreshInfo || needRefreshEpisode || needRefreshSeason,
                     // <-- AY
-                    dialog = null,
+                    dialogStack = emptyList(),
                     hideMissingEpisodes = libraryPreferences.hideMissingEpisodes.get(),
                     // AM (CUSTOM_EPISODE_ORDER) -->
                     isPreordered = order.isPreordered,
@@ -850,6 +901,8 @@ class AnimeViewModel(
                     description = description?.trimOrNull(),
                     genre = custom?.genre,
                     addedGenre = custom?.addedGenre,
+                    // AM (TAG_BLACKLIST)
+                    blacklistedGenre = custom?.blacklistedGenre,
                     status = status.takeUnless { it == state.anime.ogStatus },
                 ),
             )
@@ -910,10 +963,12 @@ class AnimeViewModel(
                 if (duplicates.isNotEmpty()) {
                     updateSuccessState {
                         it.copy(
-                            dialog = Dialog.DuplicateAnime(
-                                anime = anime,
-                                duplicates = duplicates,
-                                fromCategoriesPrompt = true,
+                            dialogStack = listOf(
+                                Dialog.DuplicateAnime(
+                                    anime = anime,
+                                    duplicates = duplicates,
+                                    fromCategoriesPrompt = true,
+                                ),
                             ),
                         )
                     }
@@ -929,12 +984,14 @@ class AnimeViewModel(
             }
             updateSuccessState {
                 it.copy(
-                    dialog = Dialog.ChangeCategory(
-                        anime = anime,
-                        initialSelection = allCategories.mapAsCheckboxState { category ->
-                            category.id in checked
-                        },
-                        removeOnEmpty = true,
+                    dialogStack = listOf(
+                        Dialog.ChangeCategory(
+                            anime = anime,
+                            initialSelection = allCategories.mapAsCheckboxState { category ->
+                                category.id in checked
+                            },
+                            removeOnEmpty = true,
+                        ),
                     ),
                 )
             }
@@ -1013,7 +1070,7 @@ class AnimeViewModel(
                     val duplicates = getDuplicateLibraryAnime(anime)
 
                     if (duplicates.isNotEmpty()) {
-                        updateSuccessState { it.copy(dialog = Dialog.DuplicateAnime(anime, duplicates)) }
+                        updateSuccessState { it.copy(dialogStack = listOf(Dialog.DuplicateAnime(anime, duplicates))) }
                         return@launchIO
                     }
                 }
@@ -1064,9 +1121,11 @@ class AnimeViewModel(
             val selection = getAnimeCategoryIds(anime)
             updateSuccessState { successState ->
                 successState.copy(
-                    dialog = Dialog.ChangeCategory(
-                        anime = anime,
-                        initialSelection = categories.mapAsCheckboxState { it.id in selection },
+                    dialogStack = listOf(
+                        Dialog.ChangeCategory(
+                            anime = anime,
+                            initialSelection = categories.mapAsCheckboxState { it.id in selection },
+                        ),
                     ),
                 )
             }
@@ -1076,7 +1135,7 @@ class AnimeViewModel(
     fun showSetFetchIntervalDialog() {
         val anime = successState?.anime ?: return
         updateSuccessState {
-            it.copy(dialog = Dialog.SetFetchInterval(anime))
+            it.copy(dialogStack = listOf(Dialog.SetFetchInterval(anime)))
         }
     }
 
@@ -1112,7 +1171,7 @@ class AnimeViewModel(
 
     // AM (CLEAR_ANIME) -->
     fun showClearAnimeDialog() {
-        updateSuccessState { it.copy(dialog = Dialog.ClearAnime) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.ClearAnime)) }
     }
 
     /**
@@ -2554,7 +2613,23 @@ class AnimeViewModel(
          * anything but a multi-source merge; the split itself is read live from
          * state so a move redraws without reopening.
          */
-        data class Tags(val sourceCounts: Map<String, Int>) : Dialog
+        data class Tags(
+            val sourceCounts: Map<String, Int>,
+            // AM (EPISODE_TAGS) -->
+            /**
+             * The lowercased tags this popout may delete, fixed when it opens so
+             * it can never answer for a scope it is not about.
+             */
+            val deletableTags: Set<String> = emptySet(),
+            // AM (TAG_BLACKLIST)
+            /** Tags thrown away on this entry, shown in their own section. */
+            val blacklistedTags: List<String> = emptyList(),
+            /** The episode whose tags these are, or null for the entry's own. */
+            val episodeId: Long? = null,
+            /** Shown as a chip that is not a tag - see the fillermark note in the dialog. */
+            val isFillermarked: Boolean = false,
+            // <-- AM (EPISODE_TAGS)
+        ) : Dialog
         // <-- AM (TAG_LIMIT)
 
         // AM (MERGE_SETTINGS) -->
@@ -2594,12 +2669,41 @@ class AnimeViewModel(
              */
             val isMerged: Boolean = false,
             // <-- AM (MERGE_EPISODE_EXCLUSION)
+            // AM (ICON_ACTION_LABELS) -->
+            /** Drives which way the fillermark button reads; kept live while the dialog is open. */
+            val isFillermarked: Boolean = false,
+            /** The season the episode is in now, marked as current in the season picker. */
+            val seasonNumber: Long? = null,
+            // <-- AM (ICON_ACTION_LABELS)
         ) : Dialog
         // <-- AM (EPISODE_NAMES)
 
         // AM (CUSTOM_EPISODE_ORDER) -->
         /** [seasons] every season in display order; new ones are added in the season manager. */
-        data class ChangeEpisodeSeason(val seasons: List<EntrySeason>) : Dialog
+        data class ChangeEpisodeSeason(
+            val seasons: List<EntrySeason>,
+            // AM (ICON_ACTION_LABELS) -->
+            /**
+             * The one episode being moved, when the picker was opened from the
+             * quick-edit dialog. Null means the reorder selection, as before.
+             */
+            val episodeId: Long? = null,
+            /** Marked as current. Null for a selection, which may span seasons. */
+            val selectedSeason: Long? = null,
+            // <-- AM (ICON_ACTION_LABELS)
+        ) : Dialog
+
+        // AM (ICON_ACTION_LABELS) -->
+        /**
+         * Asks before taking an episode out of a merged entry's order.
+         *
+         * The action became an icon, which is easier to hit by accident than the
+         * text button it replaced, and it is the only thing in that strip that
+         * changes the entry rather than flipping a flag. Declining comes back to
+         * the strip it was asked from.
+         */
+        data class ConfirmRemoveEpisodeFromMerge(val episodeId: Long) : Dialog
+        // <-- AM (ICON_ACTION_LABELS)
         // <-- AM (CUSTOM_EPISODE_ORDER)
     }
 
@@ -2631,10 +2735,19 @@ class AnimeViewModel(
 
     fun dismissDialog() {
         // AM (TAG_LIMIT) -->
-        updateSuccessState { it.copy(tagsTarget = null) }
+        updateSuccessState { it.copy(tagsTarget = null, episodeDisplayedTags = null) }
         // <-- AM (TAG_LIMIT)
-        updateSuccessState { it.copy(dialog = null) }
+        // AM (ICON_ACTION_LABELS): pops the top only - a dialog opened over
+        // another leaves that one on screen, where it already was.
+        updateSuccessState { it.copy(dialogStack = it.dialogStack.dropLast(1)) }
     }
+
+    // AM (ICON_ACTION_LABELS) -->
+    /** Closes every open dialog - what an action finishing does, unlike backing out of one. */
+    private fun dismissAllDialogs() {
+        updateSuccessState { it.copy(tagsTarget = null, episodeDisplayedTags = null, dialogStack = emptyList()) }
+    }
+    // <-- AM (ICON_ACTION_LABELS)
 
     // AM (CUSTOM_EPISODE_ORDER) -->
     /**
@@ -2738,8 +2851,78 @@ class AnimeViewModel(
     fun showChangeEpisodeSeasonDialog() {
         val state = successState ?: return
         if (!state.isReordering || state.selectedEpisodes.isEmpty()) return
-        updateSuccessState { it.copy(dialog = Dialog.ChangeEpisodeSeason(seasons = state.entrySeasons)) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.ChangeEpisodeSeason(seasons = state.entrySeasons))) }
     }
+
+    // AM (ICON_ACTION_LABELS) -->
+    /**
+     * The same picker for one episode, from the quick-edit dialog - so moving a
+     * single episode between seasons no longer means entering reorder mode and
+     * selecting it first.
+     */
+    fun showChangeEpisodeSeasonDialog(episodeId: Long) {
+        val state = successState ?: return
+        updateSuccessState {
+            it.copy(
+                dialogStack = it.dialogStack + Dialog.ChangeEpisodeSeason(
+                    seasons = state.entrySeasons,
+                    episodeId = episodeId,
+                    selectedSeason = state.episodeSeasonById[episodeId],
+                ),
+            )
+        }
+    }
+
+    /**
+     * Moves one episode to the end of [targetSeason].
+     *
+     * Inside reorder mode this goes through [moveEpisodes], so the move joins
+     * that session and "discard changes" still undoes it. Outside it - which is
+     * where the quick-edit dialog lives - there is no session to join, so the
+     * move is written straight through and is undone by moving the episode back.
+     */
+    fun moveEpisodeToSeason(episodeId: Long, targetSeason: Long) {
+        val state = successState ?: return
+        // The picker's own dismiss ran first and popped just the picker;
+        // picking a season finishes the task, so the strip under it goes too.
+        dismissAllDialogs()
+        if (state.isReordering) {
+            moveEpisodes(listOf(episodeId), targetSeason, MoveEpisodesInOrder.Placement.AtEnd)
+            return
+        }
+        viewModelScope.launchIO { awaitMoveEpisode(state, episodeId, targetSeason) }
+    }
+
+    private suspend fun awaitMoveEpisode(state: State.Success, episodeId: Long, targetSeason: Long) {
+        val anime = state.anime
+        val from = state.episodeSeasonById[episodeId]
+        moveEpisodesInOrder.await(anime, listOf(episodeId), targetSeason, MoveEpisodesInOrder.Placement.AtEnd)
+        // The season it left may now be empty, and an unnamed empty season
+        // would otherwise keep showing in every picker with nothing in it.
+        if (from != null && from != targetSeason) {
+            manageEntrySeasons.pruneEmpty(anime, setOf(from))
+        }
+    }
+
+    /**
+     * Creates the season the picker offered and moves one episode into it - the
+     * single-episode twin of [moveSelectionToNextSeason], sharing its guard
+     * against a second tap landing before the first write.
+     */
+    fun moveEpisodeToNextSeason(episodeId: Long) {
+        val state = successState ?: return
+        if (!isCreatingSeason.compareAndSet(false, true)) return
+        dismissAllDialogs()
+        viewModelScope.launchIO {
+            try {
+                val number = manageEntrySeasons.create(state.anime, name = null)
+                awaitMoveEpisode(state, episodeId, number)
+            } finally {
+                isCreatingSeason.set(false)
+            }
+        }
+    }
+    // <-- AM (ICON_ACTION_LABELS)
 
     /**
      * Moves the whole selection - across every season it spans - to the end
@@ -2861,17 +3044,48 @@ class AnimeViewModel(
     fun showRenameEpisodeDialog(episodeId: Long, currentName: String, ownerAnimeId: Long) {
         updateSuccessState {
             it.copy(
-                dialog = Dialog.RenameEpisode(
-                    episodeId = episodeId,
-                    currentName = currentName,
-                    ownerAnimeId = ownerAnimeId,
-                    // AM (MERGE_EPISODE_EXCLUSION) -->
-                    isMerged = it.anime.source == MergedSource.ID,
-                    // <-- AM (MERGE_EPISODE_EXCLUSION)
+                dialogStack = listOf(
+                    Dialog.RenameEpisode(
+                        episodeId = episodeId,
+                        currentName = currentName,
+                        ownerAnimeId = ownerAnimeId,
+                        // AM (MERGE_EPISODE_EXCLUSION) -->
+                        isMerged = it.anime.source == MergedSource.ID,
+                        // <-- AM (MERGE_EPISODE_EXCLUSION)
+                        // AM (ICON_ACTION_LABELS) -->
+                        isFillermarked = it.episodes
+                            .firstOrNull { item -> item.episode.id == episodeId }
+                            ?.episode
+                            ?.fillermark == true,
+                        seasonNumber = it.episodeSeasonById[episodeId],
+                        // <-- AM (ICON_ACTION_LABELS)
+                    ),
                 ),
             )
         }
     }
+
+    // AM (ICON_ACTION_LABELS) -->
+    /**
+     * Flips one episode's fillermark from the quick-edit dialog, which stays
+     * open - the button reading the other way is the confirmation that it
+     * landed, so the dialog's own copy of the flag moves with it rather than
+     * waiting for the episode list to come back round.
+     */
+    fun toggleEpisodeFillermark(episodeId: Long) {
+        val state = successState ?: return
+        val episode = state.episodes.firstOrNull { it.episode.id == episodeId }?.episode ?: return
+        fillermarkEpisodes(listOf(episode), !episode.fillermark)
+        updateSuccessState {
+            val dialog = it.dialog
+            if (dialog is Dialog.RenameEpisode && dialog.episodeId == episodeId) {
+                it.withTopDialog(dialog.copy(isFillermarked = !episode.fillermark))
+            } else {
+                it
+            }
+        }
+    }
+    // <-- AM (ICON_ACTION_LABELS)
 
     /**
      * Sets an episode's display name, or clears it when blank. Global to the
@@ -2892,9 +3106,25 @@ class AnimeViewModel(
      * driven by GetEpisodeOrder.subscribe, which watches the removals, so the
      * row disappears without this having to touch the list.
      */
+    // AM (ICON_ACTION_LABELS) -->
+    /** Asks first; [removeEpisodeFromMerge] is what the confirmation calls. */
+    fun showRemoveEpisodeFromMergeDialog(episodeId: Long) {
+        val state = successState ?: return
+        if (state.anime.source != MergedSource.ID) return
+        updateSuccessState {
+            it.copy(
+                dialogStack = it.dialogStack + Dialog.ConfirmRemoveEpisodeFromMerge(episodeId),
+            )
+        }
+    }
+    // <-- AM (ICON_ACTION_LABELS)
+
     fun removeEpisodeFromMerge(episodeId: Long) {
         val anime = successState?.anime ?: return
         if (anime.source != MergedSource.ID) return
+        // AM (ICON_ACTION_LABELS): confirmed, so the strip this was asked from
+        // closes with it rather than being left behind.
+        dismissAllDialogs()
         viewModelScope.launchIO {
             val result = removeEpisodeFromMerge.await(anime.id, episodeId)
             val message = when (result) {
@@ -2917,7 +3147,7 @@ class AnimeViewModel(
             val removedEpisodes = getRemovedMergeEpisodes.await(anime.id)
             updateSuccessState { state ->
                 val dialog = state.dialog as? Dialog.MergeSettings ?: return@updateSuccessState state
-                state.copy(dialog = dialog.copy(removedEpisodes = removedEpisodes))
+                state.withTopDialog(dialog.copy(removedEpisodes = removedEpisodes))
             }
         }
     }
@@ -2942,17 +3172,155 @@ class AnimeViewModel(
                 ?.takeIf { it != state.anime.id }
                 ?.let { getAnime.await(it) }
             val id = target?.id ?: state.anime.id
-            val counts = getTagSourceCounts.await(id)
+            // AM (EPISODE_TAGS): source counts are empty for an ordinary entry
+            // and for a single-source merge, which is exactly where the episode
+            // count is the number worth showing - so one falls back to the other
+            // rather than the chip trying to carry both.
+            val counts = getTagSourceCounts.await(id).ifEmpty { state.episodeTags.counts }
             val added = getCustomAnimeInfo.get(id)?.addedGenre.orEmpty()
             updateSuccessState {
                 it.copy(
                     tagsTarget = target,
                     addedTags = added.mapTo(mutableSetOf(), String::lowercase),
-                    dialog = Dialog.Tags(sourceCounts = counts),
+                    dialogStack = it.dialogStack + Dialog.Tags(
+                        sourceCounts = counts,
+                        // AM (EPISODE_TAGS)
+                        // AM (TAG_BLACKLIST): any of the entry's tags can go in
+                        // the bin - the user's own are removed, a source's are
+                        // blacklisted - so this is no longer a subset.
+                        deletableTags = (it.displayedTags.visible + it.displayedTags.hidden)
+                            .mapTo(HashSet(), String::lowercase),
+                        blacklistedTags = getCustomAnimeInfo.get(id)?.blacklistedGenre.orEmpty(),
+                    ),
                 )
             }
         }
     }
+
+    // AM (EPISODE_TAGS) -->
+    /**
+     * Opens the popout for one EPISODE rather than for an entry.
+     *
+     * It lists everything the owning entry has, not only what the episode shows:
+     * Visible is what this episode actually carries, Hidden is the rest of the
+     * owner's tags - the ones hidden by default because every episode would
+     * carry them, and the ones the user took off this episode. A tag cannot be
+     * put back if it is not on screen to put back.
+     *
+     * Pinned marks the tags this episode has a row of its own for, which is what
+     * separates a tag the user placed or removed here from one it merely
+     * inherits.
+     */
+    fun showEpisodeTagsDialog(episodeId: Long, ownerAnimeId: Long) {
+        val state = successState ?: return
+        viewModelScope.launchIO {
+            val owner = getAnime.await(ownerAnimeId) ?: return@launchIO
+            val episode = state.episodes.firstOrNull { it.episode.id == episodeId }?.episode
+            val visible = state.episodeTags.byEpisodeId[episodeId].orEmpty()
+            val shown = visible.mapTo(HashSet(), String::lowercase)
+            val hidden = owner.genre.orEmpty().filterNot { it.lowercase() in shown }
+            val rows = episodeTagRepository.getByEpisodeId(episodeId)
+            updateSuccessState {
+                it.copy(
+                    episodeDisplayedTags = DisplayedTags(
+                        visible = visible,
+                        hidden = hidden,
+                        pinned = rows.mapTo(HashSet()) { row -> row.tag.lowercase() },
+                    ),
+                    addedTags = rows.filter { row -> row.visible }
+                        .mapTo(mutableSetOf()) { row -> row.tag.lowercase() },
+                    dialogStack = it.dialogStack + Dialog.Tags(
+                        sourceCounts = it.episodeTags.counts,
+                        deletableTags = deletableEpisodeTags(rows, owner),
+                        episodeId = episodeId,
+                        isFillermarked = episode?.fillermark == true,
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * The tags on an episode that deleting would actually remove: the ones the
+     * user typed in, which exist nowhere else.
+     *
+     * A tag the owner lists is never deletable from an episode, even once that
+     * episode has a row of its own for it - the row says this episode carries
+     * it, not that the user invented it, and a bin next to a source's tag
+     * promises something it cannot do. Taking it off the episode is Hide.
+     */
+    private fun deletableEpisodeTags(rows: List<EpisodeTag>, owner: Anime): Set<String> {
+        val inherited = owner.genre.orEmpty().mapTo(HashSet()) { it.lowercase() }
+        return rows.asSequence()
+            .filter { it.visible && it.tag.lowercase() !in inherited }
+            .mapTo(HashSet()) { it.tag.lowercase() }
+    }
+
+    /** The episode the popout is about, if it is about one. */
+    private val State.Success.tagsEpisodeId: Long?
+        get() = (dialog as? Dialog.Tags)?.episodeId
+
+    /** Re-reads the popout's split after an edit to one episode's rows. */
+    private suspend fun refreshEpisodeTags(episodeId: Long) {
+        val state = successState ?: return
+        val owner = state.episodes.firstOrNull { it.episode.id == episodeId }?.owner ?: state.anime
+        val resolution = getEpisodeTags.await(state.anime)
+        val visible = resolution.byEpisodeId[episodeId].orEmpty()
+        val shown = visible.mapTo(HashSet(), String::lowercase)
+        val hidden = owner.genre.orEmpty().filterNot { it.lowercase() in shown }
+        val rows = episodeTagRepository.getByEpisodeId(episodeId)
+        updateSuccessState {
+            it.copy(
+                episodeTags = resolution,
+                episodeDisplayedTags = DisplayedTags(
+                    visible = visible,
+                    hidden = hidden,
+                    pinned = rows.mapTo(HashSet()) { row -> row.tag.lowercase() },
+                ),
+                addedTags = rows.filter { row -> row.visible }
+                    .mapTo(mutableSetOf()) { row -> row.tag.lowercase() },
+            ).let { updated ->
+                // AM (EPISODE_TAGS): the open popout's own copy moves with the rows.
+                val dialog = updated.dialog as? Dialog.Tags
+                if (dialog?.episodeId == episodeId) {
+                    updated.withTopDialog(dialog.copy(deletableTags = deletableEpisodeTags(rows, owner)))
+                } else {
+                    updated
+                }
+            }
+        }
+    }
+
+    /** Puts a tag on the open popout's episode, or takes it off this one episode. */
+    private fun setEpisodeTagsVisible(episodeId: Long, tags: Collection<String>, visible: Boolean) {
+        val state = successState ?: return
+        // Written against what the episode would carry on its own, so putting a
+        // tag back where it started clears the row instead of storing agreement.
+        val default = state.episodeTags.defaultByEpisodeId[episodeId].orEmpty()
+        viewModelScope.launchIO {
+            setEpisodeTags.set(episodeId, tags, carried = visible, default = default)
+            refreshEpisodeTags(episodeId)
+        }
+    }
+
+    /** Clears this episode's own rows for [tags], handing them back to what it inherits. */
+    private fun resetEpisodeTags(episodeId: Long, tags: Collection<String>) {
+        viewModelScope.launchIO {
+            setEpisodeTags.reset(episodeId, tags)
+            refreshEpisodeTags(episodeId)
+        }
+    }
+
+    /** Flips the fillermark from the popout's own chip, which is not a tag. */
+    fun toggleTagsFillermark() {
+        val episodeId = successState?.tagsEpisodeId ?: return
+        toggleEpisodeFillermark(episodeId)
+        updateSuccessState {
+            val dialog = it.dialog as? Dialog.Tags ?: return@updateSuccessState it
+            it.withTopDialog(dialog.copy(isFillermarked = !dialog.isFillermarked))
+        }
+    }
+    // <-- AM (EPISODE_TAGS)
 
     /**
      * Re-ranks any merge this entry is a source of, so a tag added to or deleted from a
@@ -2995,12 +3363,40 @@ class AnimeViewModel(
         }
     }
 
+    // AM (TAG_BLACKLIST) -->
+    /** Takes tags back out of the blacklist, so the entry picks them up again. */
+    fun restoreTags(tags: Collection<String>) {
+        val state = successState ?: return
+        val target = state.tagsAnime
+        val custom = getCustomAnimeInfo.get(target.id) ?: return
+        val blacklisted = custom.blacklistedGenre.orEmpty()
+        if (blacklisted.isEmpty()) return
+        viewModelScope.launchIO {
+            setCustomAnimeInfo.set(
+                custom.copy(
+                    blacklistedGenre = blacklisted
+                        .filterNot { kept -> tags.any { it.equals(kept, ignoreCase = true) } }
+                        .ifEmpty { null },
+                ),
+            )
+            syncMergesOf(target.id)
+            refreshTagsAnime { it }
+            refreshBlacklist(target.id)
+        }
+    }
+    // <-- AM (TAG_BLACKLIST)
+
     /** The entry the popout is editing: the target if it has one, else this screen's. */
     private val State.Success.tagsAnime: Anime get() = tagsTarget ?: anime
 
     /** Moves a selection of tags together. The popout stays open. */
     fun setTagsVisible(tags: Collection<String>, visible: Boolean) {
-        val anime = successState?.tagsAnime ?: return
+        val state = successState ?: return
+        // AM (EPISODE_TAGS): on an episode this is not a display split at all -
+        // moving a tag to Visible puts it on the episode, moving it to Hidden
+        // takes it off this one episode and leaves the owner's others alone.
+        state.tagsEpisodeId?.let { return setEpisodeTagsVisible(it, tags, visible) }
+        val anime = state.tagsAnime
         viewModelScope.launchIO {
             setTagVisibility.awaitAll(anime, tags, visible)
         }
@@ -3023,6 +3419,10 @@ class AnimeViewModel(
         val trimmed = tag.trim()
         if (trimmed.isEmpty()) return
         val state = successState ?: return
+        // AM (EPISODE_TAGS): a tag typed into the episode's popout goes on that
+        // episode, not on the entry - and so stops the owner's other episodes
+        // inheriting it, which is the whole point of placing it here.
+        state.tagsEpisodeId?.let { return setEpisodeTagsVisible(it, listOf(trimmed), visible = true) }
         val target = state.tagsAnime
         viewModelScope.launchIO {
             val existing = target.genre.orEmpty()
@@ -3037,6 +3437,11 @@ class AnimeViewModel(
                         description = custom?.description,
                         genre = custom?.genre,
                         addedGenre = custom?.addedGenre.orEmpty() + trimmed,
+                        // AM (TAG_BLACKLIST): adding a tag by hand takes it back
+                        // out of the bin, which is what typing it again means.
+                        blacklistedGenre = custom?.blacklistedGenre
+                            ?.filterNot { it.equals(trimmed, ignoreCase = true) }
+                            ?.ifEmpty { null },
                         status = custom?.status,
                     ),
                 )
@@ -3057,56 +3462,110 @@ class AnimeViewModel(
      */
     fun deleteAddedTags(tags: Collection<String>) {
         val state = successState ?: return
+        // AM (EPISODE_TAGS): deleting on an episode clears that episode's own
+        // rows, so it goes back to inheriting whatever the owner has.
+        state.tagsEpisodeId?.let { return resetEpisodeTags(it, tags) }
         val target = state.tagsAnime
-        val custom = getCustomAnimeInfo.get(target.id) ?: return
-        val added = custom.addedGenre.orEmpty()
-        if (added.isEmpty()) return
-        val doomed = tags.filter { tag -> added.any { it.equals(tag, ignoreCase = true) } }
+        val custom = getCustomAnimeInfo.get(target.id)
+        val added = custom?.addedGenre.orEmpty()
+        val doomed = tags.filter { it.isNotBlank() }
         if (doomed.isEmpty()) return
+        // AM (TAG_BLACKLIST): the bin takes any tag now, and what it does
+        // depends on where the tag came from. One the user typed is simply
+        // removed. One the source supplies cannot be - the next refresh brings
+        // it straight back - so it is blacklisted instead, which drops it
+        // everywhere the entry's tags are read and keeps it out of a merge's
+        // ranking. The Blacklist section is how it is seen and taken back.
+        val isOwn = { tag: String -> added.any { it.equals(tag, ignoreCase = true) } }
+        val (own, fromSource) = doomed.partition(isOwn)
         viewModelScope.launchIO {
+            val base = custom ?: CustomAnimeInfo(id = target.id, title = null)
             setCustomAnimeInfo.set(
-                custom.copy(
+                base.copy(
                     addedGenre = added
-                        .filterNot { kept -> doomed.any { it.equals(kept, ignoreCase = true) } }
+                        .filterNot { kept -> own.any { it.equals(kept, ignoreCase = true) } }
+                        .ifEmpty { null },
+                    blacklistedGenre = (base.blacklistedGenre.orEmpty() + fromSource)
+                        .distinctBy(String::lowercase)
                         .ifEmpty { null },
                 ),
             )
             // The pins would otherwise outlive the tags they were placed on.
             setTagVisibility.unpinAll(target, doomed)
+            // AM (EPISODE_TAGS): a chip that is only on the entry because its
+            // episodes carry it comes off those episodes too - deleting it from
+            // the entry is deleting it, not hiding it.
+            doomed.forEach { setEpisodeTags.deleteFromEntry(target.id, it) }
             syncMergesOf(target.id)
             val gone = doomed.mapTo(mutableSetOf(), String::lowercase)
             refreshTagsAnime { it - gone }
+            // AM (TAG_BLACKLIST): the open popout carries its own copy, so it
+            // has to be told - the section would otherwise stay as it was until
+            // the sheet was closed and opened again.
+            refreshBlacklist(target.id)
         }
     }
+
+    // AM (TAG_BLACKLIST) -->
+    /** Re-reads the blacklist into the open popout, if one is open on this entry. */
+    private fun refreshBlacklist(animeId: Long) {
+        val blacklisted = getCustomAnimeInfo.get(animeId)?.blacklistedGenre.orEmpty()
+        updateSuccessState {
+            val dialog = it.dialog as? Dialog.Tags ?: return@updateSuccessState it
+            val blacklistedKeys = blacklisted.mapTo(HashSet(), String::lowercase)
+            it.withTopDialog(
+                dialog.copy(
+                    blacklistedTags = blacklisted,
+                    // A blacklisted tag is no longer one of the entry's, so the
+                    // bin stops offering it and Restore takes its place; one
+                    // brought back rejoins the entry's tags and the bin again.
+                    deletableTags = (it.displayedTags.visible + it.displayedTags.hidden)
+                        .mapTo(HashSet(), String::lowercase)
+                        .minus(blacklistedKeys),
+                ),
+            )
+        }
+    }
+    // <-- AM (TAG_BLACKLIST)
 
     /**
      * Pins a selection where it already sits, so the global setting changing no
      * longer moves it. The current placement is read from state rather than passed
      * in: state is what the popout is showing, so the two cannot disagree.
      */
-    fun pinTags(tags: Collection<String>) {
+    // AM (TAG_LOCKS) -->
+    /**
+     * Flips the entry's tag lock.
+     *
+     * Writes nothing per tag and moves nothing: locked only means a tag with no
+     * stored side takes Hidden rather than competing for the cap's slots, so
+     * neither a refresh nor a new tag can push an existing one out of the row.
+     */
+    fun toggleTagLock() {
         val state = successState ?: return
-        val visible = state.displayedTags.visible.toSet()
+        if (state.tagsEpisodeId != null) return
+        val anime = state.tagsAnime
+        // Locking records the row as it looks right now, so everything showing
+        // keeps showing; unlocking drops the record and hands the entry back to
+        // the cap. Neither touches the user's own per-tag choices.
+        val snapshot = state.displayedTags.visible.takeUnless { state.tagsLocked }
         viewModelScope.launchIO {
-            setTagVisibility.pinAll(state.tagsAnime, tags.associateWith { it in visible })
+            tagVisibilityRepository.setLocked(anime.id, snapshot)
         }
     }
+    // <-- AM (TAG_LOCKS)
 
     /** Returns a selection of tags to the global cap. */
     fun unpinTags(tags: Collection<String>) {
-        val anime = successState?.tagsAnime ?: return
+        val state = successState ?: return
+        // AM (EPISODE_TAGS)
+        state.tagsEpisodeId?.let { return resetEpisodeTags(it, tags) }
+        val anime = state.tagsAnime
         viewModelScope.launchIO {
             setTagVisibility.unpinAll(anime, tags)
         }
     }
 
-    /** Returns every tag to the global cap, dropping this entry's own choices. */
-    fun resetTagVisibility() {
-        val anime = successState?.tagsAnime ?: return
-        viewModelScope.launchIO {
-            setTagVisibility.reset(anime.id)
-        }
-    }
     // <-- AM (TAG_LIMIT)
 
     fun showMergeSettingsDialog() {
@@ -3128,14 +3587,16 @@ class AnimeViewModel(
             // <-- AM (MERGE_EPISODE_EXCLUSION)
             updateSuccessState { state ->
                 state.copy(
-                    dialog = Dialog.MergeSettings(
-                        sources = sources,
-                        dedupeMode = settings.dedupeMode,
-                        infoAnimeId = settings.infoAnimeId,
-                        seasons = state.entrySeasons,
-                        // AM (MERGE_EPISODE_EXCLUSION) -->
-                        removedEpisodes = removedEpisodes,
-                        // <-- AM (MERGE_EPISODE_EXCLUSION)
+                    dialogStack = listOf(
+                        Dialog.MergeSettings(
+                            sources = sources,
+                            dedupeMode = settings.dedupeMode,
+                            infoAnimeId = settings.infoAnimeId,
+                            seasons = state.entrySeasons,
+                            // AM (MERGE_EPISODE_EXCLUSION) -->
+                            removedEpisodes = removedEpisodes,
+                            // <-- AM (MERGE_EPISODE_EXCLUSION)
+                        ),
                     ),
                 )
             }
@@ -3157,7 +3618,7 @@ class AnimeViewModel(
         val dialog = successState?.dialog as? Dialog.MergeSettings ?: return
         val savedOrder = dialog.sources.map { it.anime.id }
         val savedSeasons = dialog.sources.associate { it.anime.id to it.seasonNumber }
-        updateSuccessState { it.copy(dialog = null) }
+        updateSuccessState { it.copy(dialogStack = emptyList()) }
         viewModelScope.launchIO {
             if (result.order != savedOrder) {
                 // AM (CUSTOM_EPISODE_ORDER): this is all the episode relayout
@@ -3219,7 +3680,7 @@ class AnimeViewModel(
     /** Immediate, not staged, and closes the dialog - as in Komikku. */
     fun removeSourceFromMerge(child: Anime) {
         val anime = successState?.anime ?: return
-        updateSuccessState { it.copy(dialog = null) }
+        updateSuccessState { it.copy(dialogStack = emptyList()) }
         viewModelScope.launchIO {
             // AM (NAMED_SEASONS): read before the removal - afterwards there is
             // no row left to say which season the source held.
@@ -3231,31 +3692,31 @@ class AnimeViewModel(
     // <-- AM (MERGE_SETTINGS)
 
     fun showDeleteEpisodeDialog(episodes: List<Episode>) {
-        updateSuccessState { it.copy(dialog = Dialog.DeleteEpisodes(episodes)) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.DeleteEpisodes(episodes))) }
     }
 
     fun showSettingsDialog() {
         updateSuccessState {
             // AY -->
             when (it.anime.fetchType) {
-                FetchType.Seasons -> it.copy(dialog = Dialog.SeasonSettingsSheet)
-                FetchType.Episodes -> it.copy(dialog = Dialog.EpisodeSettingsSheet)
+                FetchType.Seasons -> it.copy(dialogStack = listOf(Dialog.SeasonSettingsSheet))
+                FetchType.Episodes -> it.copy(dialogStack = listOf(Dialog.EpisodeSettingsSheet))
             }
             // <-- AY
         }
     }
 
     fun showTrackDialog() {
-        updateSuccessState { it.copy(dialog = Dialog.TrackSheet) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.TrackSheet)) }
     }
 
     fun showImagesDialog() {
-        updateSuccessState { it.copy(dialog = Dialog.FullImages) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.FullImages)) }
     }
 
     fun showMigrateDialog(duplicate: Anime) {
         val anime = successState?.anime ?: return
-        updateSuccessState { it.copy(dialog = Dialog.Migrate(target = anime, current = duplicate)) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.Migrate(target = anime, current = duplicate))) }
     }
 
     fun setExcludedScanlators(excludedScanlators: Set<String>) {
@@ -3266,17 +3727,17 @@ class AnimeViewModel(
 
     // AY -->
     fun showAnimeSkipIntroDialog() {
-        updateSuccessState { it.copy(dialog = Dialog.ChangeAnimeSkipIntro) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.ChangeAnimeSkipIntro)) }
     }
 
     private fun showQualitiesDialog(episode: Episode) {
-        updateSuccessState { it.copy(dialog = Dialog.ShowQualities(episode, it.anime, it.source)) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.ShowQualities(episode, it.anime, it.source))) }
     }
     // <-- AY
 
     // AM (CUSTOM_INFORMATION) -->
     fun showEditAnimeInfoDialog() {
-        updateSuccessState { it.copy(dialog = Dialog.EditAnimeInfo(it.anime)) }
+        updateSuccessState { it.copy(dialogStack = listOf(Dialog.EditAnimeInfo(it.anime))) }
     }
     // <-- AM (CUSTOM_INFORMATION)
 
@@ -3320,7 +3781,21 @@ class AnimeViewModel(
             val isSyncingTrackers: Boolean = false,
             // <-- AM
             val isRefreshingData: Boolean = false,
-            val dialog: Dialog? = null,
+            // AM (ICON_ACTION_LABELS) -->
+            /**
+             * The open dialogs, oldest first.
+             *
+             * A stack rather than one slot because the quick-edit dialog opens
+             * others over itself - tags, seasons, the removal confirmation -
+             * and the one underneath should still be on screen, drawn under the
+             * new one, rather than being torn down and rebuilt when the top
+             * closes. AppDialogHost already draws every entry in the order it
+             * was opened, so stacking needs nothing more than composing them
+             * all; [dialog] stays as the top of the stack for everything that
+             * only cares which dialog is frontmost.
+             */
+            val dialogStack: List<Dialog> = emptyList(),
+            // <-- AM (ICON_ACTION_LABELS)
             val hasPromptedToAddBefore: Boolean = false,
             val hideMissingEpisodes: Boolean = false,
             // AM (TAG_LIMIT) -->
@@ -3330,6 +3805,21 @@ class AnimeViewModel(
              * that owns an episode when it was opened from the rename dialog.
              */
             val displayedTags: DisplayedTags = DisplayedTags.Empty,
+            // AM (TAG_LOCKS)
+            /** Whether the entry's tag row is frozen - see anime_tag_lock.sq. */
+            val tagsLocked: Boolean = false,
+            // AM (EPISODE_TAGS) -->
+            /** What each of this host's episodes is tagged with - see resolveEpisodeTags. */
+            val episodeTags: EpisodeTagResolution = EpisodeTagResolution.Empty,
+            /**
+             * The split the popout shows while it is pointed at one EPISODE rather
+             * than an entry. Null the rest of the time, when [displayedTags] is
+             * what it shows. Separate rather than overwriting that one so the
+             * entry's own split is still there underneath, unrecomputed, when the
+             * episode popout closes.
+             */
+            val episodeDisplayedTags: DisplayedTags? = null,
+            // <-- AM (EPISODE_TAGS)
             // AM (TAG_LIMIT) -->
             /**
              * The entry the popout is editing, when that is not the one on screen.
@@ -3411,6 +3901,20 @@ class AnimeViewModel(
             val isReordering: Boolean
                 get() = reorderSession != null
             // <-- AM (CUSTOM_EPISODE_ORDER)
+
+            // AM (ICON_ACTION_LABELS) -->
+            /** The frontmost open dialog, for callers that only care which one that is. */
+            val dialog: Dialog?
+                get() = dialogStack.lastOrNull()
+
+            /**
+             * Swaps the frontmost dialog for an updated copy of itself, leaving
+             * anything underneath it alone - what a dialog redrawing with new
+             * contents does, as opposed to one opening or closing.
+             */
+            fun withTopDialog(dialog: Dialog): Success =
+                copy(dialogStack = dialogStack.dropLast(1) + dialog)
+            // <-- AM (ICON_ACTION_LABELS)
 
             val processedEpisodes by lazy {
                 // AM (CUSTOM_EPISODE_ORDER) -->

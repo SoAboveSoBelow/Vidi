@@ -1,0 +1,70 @@
+-- AM (EPISODE_TAGS) -->
+import kotlin.Boolean;
+
+-- Tags the user set on individual episodes, and the episodes they took an
+-- inherited tag off. Sparse: an episode nobody has tagged has no rows and
+-- shows exactly its owner's tags, as it always did.
+--
+-- visible = 1 is a tag the user put on this episode. visible = 0 is the user
+-- taking an inherited tag off this one episode. Which of the two a row is can
+-- be read off the owner's tag list, so there is no third column saying so.
+--
+-- Keyed by episode alone, not by (host, episode), matching episode_names: a
+-- tag belongs to the episode and reads the same everywhere it appears - its own
+-- entry, every merge the entry is a source of, and the player's playlist. The
+-- alternative, per-host rows like episode_order's, would let one episode carry
+-- different tags in different merges, which is a question nobody has asked.
+--
+-- The tag is stored as the user typed it, and matched NOCASE so a tag added as
+-- "Filler" is the same tag as an inherited "filler".
+CREATE TABLE episode_tags(
+    episode_id INTEGER NOT NULL,
+    tag TEXT NOT NULL COLLATE NOCASE,
+    visible INTEGER AS Boolean NOT NULL,
+    PRIMARY KEY(episode_id, tag),
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX episode_tags_episode_id_index ON episode_tags(episode_id);
+
+getByEpisodeId:
+SELECT episode_id, tag, visible
+FROM episode_tags
+WHERE episode_id = :episodeId;
+
+-- Every row for one entry's episodes, for the entry's own tag row and counts.
+getByAnimeId:
+SELECT ET.episode_id, ET.tag, ET.visible
+FROM episode_tags ET
+JOIN episodes EP ON EP._id = ET.episode_id
+WHERE EP.anime_id = :animeId;
+
+-- The same for a merged entry, across every source it unions.
+getByMergeParentId:
+SELECT ET.episode_id, ET.tag, ET.visible
+FROM episode_tags ET
+JOIN episodes EP ON EP._id = ET.episode_id
+JOIN merge_children MC ON MC.anime_id = EP.anime_id
+WHERE MC.merge_parent_id = :mergeParentId;
+
+upsert:
+INSERT OR REPLACE INTO episode_tags(episode_id, tag, visible)
+VALUES (:episodeId, :tag, :visible);
+
+delete:
+DELETE FROM episode_tags
+WHERE episode_id = :episodeId AND tag = :tag;
+
+-- Drops one tag from every episode of an entry - what deleting the entry's
+-- aggregated chip does, which hands those episodes back to the inherited tag.
+deleteByAnimeIdAndTag:
+DELETE FROM episode_tags
+WHERE tag = :tag AND episode_id IN (
+    SELECT _id FROM episodes WHERE anime_id = :animeId
+);
+
+deleteByEpisodeId:
+DELETE FROM episode_tags
+WHERE episode_id = :episodeId;
+-- <-- AM (EPISODE_TAGS)

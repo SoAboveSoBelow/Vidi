@@ -34,6 +34,7 @@ import eu.kanade.presentation.anime.SeasonSettingsDialog
 import eu.kanade.presentation.anime.components.AnimeImagesDialog
 import eu.kanade.presentation.anime.season.ChangeSeasonDialog
 import eu.kanade.presentation.anime.components.ClearAnimeDialog
+import eu.kanade.presentation.anime.components.ConfirmRemoveFromMergeDialog
 // AM (MERGE_SEASONS) -->
 import eu.kanade.presentation.anime.components.RenameEpisodeDialog
 import eu.kanade.tachiyomi.ui.anime.merged.MergeSettingsDialog
@@ -134,6 +135,336 @@ class AnimeScreen(
                 } catch (e: Exception) {
                     logcat(LogPriority.ERROR, e) { "Failed to get anime URL" }
                 }
+            }
+        }
+
+        var showScanlatorsDialog by remember { mutableStateOf(false) }
+
+        val onDismissRequest = {
+            viewModel.dismissDialog()
+            // AY -->
+            if (viewModel.autoOpenTrack && viewModel.isFromChangeCategory &&
+                successState.anime.fetchType == FetchType.Episodes
+            ) {
+                viewModel.isFromChangeCategory = false
+                viewModel.showTrackDialog()
+            }
+            // <-- AY
+        }
+
+        // AM (ICON_ACTION_LABELS) -->
+        // Every open dialog is composed, oldest first, so one opened over
+        // another draws on top of it with the one underneath still on screen -
+        // AppDialogLayer draws its entries in the order they registered, which
+        // is this order. Dismissing pops the top, which is the only one taking
+        // input, since the topmost entry's scrim and back handler win.
+        //
+        // Composed BEFORE the screen's content, deliberately. The tag popout is
+        // composed with the content rather than here (its actions touch the
+        // episode search field's local state), so it registers after everything
+        // in this block and draws over it - which is what lets the quick-edit
+        // dialog stay on screen underneath the popout it opened instead of
+        // being torn down and rebuilt around it.
+        successState.dialogStack.forEach { dialog ->
+            when (dialog) {
+                is AnimeViewModel.Dialog.ChangeCategory -> {
+                    ChangeCategoryDialog(
+                        initialSelection = dialog.initialSelection,
+                        onDismissRequest = onDismissRequest,
+                        onEditCategories = { navigator.push(CategoryScreen()) },
+                        // AM (HEART_OPENS_CATEGORIES): the heart's dialog decides
+                        // membership by what is checked; "Set categories" on an
+                        // entry already in the library only moves it between them.
+                        onConfirm = { include, _ ->
+                            if (dialog.removeOnEmpty) {
+                                viewModel.applyFavoriteCategories(dialog.anime, include)
+                            } else {
+                                viewModel.moveAnimeToCategoriesAndAddToLibrary(dialog.anime, include)
+                            }
+                        },
+                    )
+                }
+                is AnimeViewModel.Dialog.DeleteEpisodes -> {
+                    DeleteEpisodesDialog(
+                        onDismissRequest = onDismissRequest,
+                        onConfirm = {
+                            viewModel.toggleAllSelection(false)
+                            viewModel.deleteEpisodes(dialog.episodes)
+                        },
+                    )
+                }
+
+                is AnimeViewModel.Dialog.DuplicateAnime -> {
+                    DuplicateAnimeDialog(
+                        duplicates = dialog.duplicates,
+                        onDismissRequest = onDismissRequest,
+                        // AM (HEART_OPENS_CATEGORIES): back to the categories
+                        // dialog when the long press is what raised this.
+                        onConfirm = {
+                            if (dialog.fromCategoriesPrompt) {
+                                viewModel.showFavoriteCategoriesDialog(checkDuplicate = false)
+                            } else {
+                                viewModel.toggleFavorite(onRemoved = {}, checkDuplicate = false)
+                            }
+                        },
+                        onOpenAnime = { navigator.push(AnimeScreen(it.id)) },
+                        onMigrate = { viewModel.showMigrateDialog(it) },
+                    )
+                }
+
+                is AnimeViewModel.Dialog.Migrate -> {
+                    MigrateAnimeDialog(
+                        current = dialog.current,
+                        target = dialog.target,
+                        // Initiated from the context of [dialog.target] so we show [dialog.current].
+                        onClickTitle = { navigator.push(AnimeScreen(dialog.current.id)) },
+                        // AY -->
+                        onClickSeasons = { navigator.push(MigrateSeasonSelectScreen(dialog.current, dialog.target)) },
+                        // <-- AY
+                        onDismissRequest = onDismissRequest,
+                    )
+                }
+                AnimeViewModel.Dialog.EpisodeSettingsSheet -> EpisodeSettingsDialog(
+                    onDismissRequest = onDismissRequest,
+                    anime = successState.anime,
+                    onDownloadFilterChanged = viewModel::setDownloadedFilter,
+                    onUnseenFilterChanged = viewModel::setUnseenFilter,
+                    onBookmarkedFilterChanged = viewModel::setBookmarkedFilter,
+                    // AY -->
+                    onFillermarkedFilterChanged = viewModel::setFillermarkedFilter,
+                    // <-- AY
+                    onSortModeChanged = viewModel::setSorting,
+                    onDisplayModeChanged = viewModel::setDisplayMode,
+                    // AY -->
+                    onShowPreviewsEnabled = viewModel::showEpisodePreviews,
+                    onShowSummariesEnabled = viewModel::showEpisodeSummaries,
+                    // <-- AY
+                    onSetAsDefault = viewModel::setCurrentSettingsAsDefault,
+                    onResetToDefault = viewModel::resetToDefaultSettings,
+                    scanlatorFilterActive = successState.scanlatorFilterActive,
+                    onScanlatorFilterClicked = { showScanlatorsDialog = true },
+                )
+                // AY -->
+                AnimeViewModel.Dialog.SeasonSettingsSheet -> SeasonSettingsDialog(
+                    onDismissRequest = onDismissRequest,
+                    anime = successState.anime,
+                    onDownloadFilterChanged = viewModel::setSeasonDownloadedFilter,
+                    onUnseenFilterChanged = viewModel::setSeasonUnseenFilter,
+                    onStartedFilterChanged = viewModel::setSeasonStartedFilter,
+                    onCompletedFilterChanged = viewModel::setSeasonCompletedFilter,
+                    onBookmarkedFilterChanged = viewModel::setSeasonBookmarkedFilter,
+                    onFillermarkedFilterChanged = viewModel::setSeasonFillermarkedFilter,
+                    onSortModeChanged = viewModel::setSeasonSorting,
+                    onDisplayGridModeChanged = viewModel::setSeasonDisplayGridMode,
+                    onDisplayGridSizeChanged = viewModel::setSeasonDisplayGridSize,
+                    onOverlayDownloadedChanged = viewModel::setSeasonDownloadOverlay,
+                    onOverlayUnseenChanged = viewModel::setSeasonUnseenOverlay,
+                    onOverlayLocalChanged = viewModel::setSeasonLocalOverlay,
+                    onOverlayLangChanged = viewModel::setSeasonLangOverlay,
+                    onOverlayContinueChanged = viewModel::setSeasonContinueOverlay,
+                    onDisplayModeChanged = viewModel::setSeasonDisplayMode,
+                    onSetAsDefault = viewModel::setSeasonCurrentSettingsAsDefault,
+                )
+                // <-- AY
+                AnimeViewModel.Dialog.TrackSheet -> {
+                    NavigatorAdaptiveSheet(
+                        screen = TrackInfoDialogHomeScreen(
+                            animeId = successState.anime.id,
+                            animeTitle = successState.anime.title,
+                            // AM -->
+                            isSeason = successState.anime.fetchType == FetchType.Seasons,
+                            // <-- AM
+                            sourceId = successState.source.id,
+                        ),
+                        enableSwipeDismiss = { it.lastItem is TrackInfoDialogHomeScreen },
+                        onDismissRequest = onDismissRequest,
+                    )
+                }
+                AnimeViewModel.Dialog.FullImages -> {
+                    val vm = assistedMetroViewModel<AnimeImageViewModel, AnimeImageViewModel.Factory> {
+                        create(animeId = animeId)
+                    }
+                    val anime by vm.state.collectAsStateWithLifecycle()
+                    if (anime != null) {
+                        val getContent = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) {
+                            if (it == null) return@rememberLauncherForActivityResult
+                            vm.editImage(context, it)
+                        }
+                        AnimeImagesDialog(
+                            anime = anime!!,
+                            snackbarHostState = vm.snackbarHostState,
+                            // AY -->
+                            pagerState = vm.pagerState,
+                            // <-- AY
+                            isCustomCover = remember(anime) { anime!!.hasCustomCover() },
+                            // AY -->
+                            isCustomBackground = remember(anime) { anime!!.hasCustomBackground() },
+                            // <-- AY
+                            onShareClick = { vm.shareImage(context) },
+                            onSaveClick = { vm.saveImage(context) },
+                            onEditClick = {
+                                when (it) {
+                                    EditCoverAction.EDIT -> getContent.launch("image/*")
+                                    EditCoverAction.DELETE -> vm.deleteCustomImage(context)
+                                }
+                            },
+                            onDismissRequest = onDismissRequest,
+                        )
+                    } else {
+                        LoadingScreen(Modifier.systemBarsPadding())
+                    }
+                }
+                is AnimeViewModel.Dialog.SetFetchInterval -> {
+                    SetIntervalDialog(
+                        interval = dialog.anime.fetchInterval,
+                        nextUpdate = dialog.anime.expectedNextUpdate,
+                        onDismissRequest = onDismissRequest,
+                        onValueChanged = { interval: Int -> viewModel.setFetchInterval(dialog.anime, interval) }
+                            .takeIf { viewModel.isUpdateIntervalEnabled },
+                    )
+                }
+                // AY -->
+                AnimeViewModel.Dialog.ChangeAnimeSkipIntro -> {
+                    fun updateSkipIntroLength(newLength: Long) {
+                        scope.launchIO {
+                            viewModel.setAnimeViewerFlags.awaitSetSkipIntroLength(animeId, newLength)
+                        }
+                    }
+                    SkipIntroLengthDialog(
+                        initialSkipIntroLength = if (!successState.anime.skipIntroDisable &&
+                            successState.anime.skipIntroLength == 0
+                        ) {
+                            viewModel.gesturePreferences.defaultIntroLength.get()
+                        } else {
+                            successState.anime.skipIntroLength
+                        },
+                        onDismissRequest = onDismissRequest,
+                        onValueChanged = {
+                            updateSkipIntroLength(it.toLong())
+                            onDismissRequest()
+                        },
+                    )
+                }
+                is AnimeViewModel.Dialog.ShowQualities -> {
+                    EpisodeOptionsDialogScreen.onDismissDialog = onDismissRequest
+                    val episodeTitle = if (dialog.anime.displayMode == Anime.EPISODE_DISPLAY_NUMBER) {
+                        stringResource(
+                            AYMR.strings.display_mode_episode,
+                            formatEpisodeNumber(dialog.episode.episodeNumber),
+                        )
+                    } else {
+                        dialog.episode.name
+                    }
+                    NavigatorAdaptiveSheet(
+                        screen = EpisodeOptionsDialogScreen(
+                            useExternalDownloader = viewModel.useExternalDownloader,
+                            episodeTitle = episodeTitle,
+                            episodeId = dialog.episode.id,
+                            animeId = dialog.anime.id,
+                            sourceId = dialog.source.id,
+                        ),
+                        onDismissRequest = onDismissRequest,
+                    )
+                }
+                // <-- AY
+                // AM (CUSTOM_INFORMATION) -->
+                is AnimeViewModel.Dialog.EditAnimeInfo -> {
+                    EditAnimeDialog(
+                        anime = successState.anime,
+                        onDismissRequest = viewModel::dismissDialog,
+                        onPositiveClick = viewModel::updateAnimeInfo,
+                    )
+                }
+                // <-- AM (CUSTOM_INFORMATION)
+                // AM (CLEAR_ANIME) -->
+                AnimeViewModel.Dialog.ClearAnime -> {
+                    ClearAnimeDialog(
+                        onDismissRequest = onDismissRequest,
+                        onConfirm = viewModel::clearAnime,
+                    )
+                }
+                // <-- AM (CLEAR_ANIME)
+                // AM (EPISODE_NAMES) -->
+                is AnimeViewModel.Dialog.RenameEpisode -> {
+                    RenameEpisodeDialog(
+                        currentName = dialog.currentName,
+                        onConfirm = { viewModel.renameEpisode(dialog.episodeId, it) },
+                        onDismissRequest = onDismissRequest,
+                        // AM (TAG_LIMIT) -->
+                        // AM (EPISODE_TAGS): the popout opens on the EPISODE now -
+                    // its own tags over what its owner lends it.
+                    onEditTags = { viewModel.showEpisodeTagsDialog(dialog.episodeId, dialog.ownerAnimeId) },
+                        onOpenEntry = { navigator.push(AnimeScreen(dialog.ownerAnimeId)) },
+                        // <-- AM (TAG_LIMIT)
+                        // AM (MERGE_EPISODE_EXCLUSION) -->
+                        onRemoveFromMerge = { viewModel.showRemoveEpisodeFromMergeDialog(dialog.episodeId) }
+                            .takeIf { dialog.isMerged },
+                        // <-- AM (MERGE_EPISODE_EXCLUSION)
+                        // AM (ICON_ACTION_LABELS) -->
+                        onChangeSeason = { viewModel.showChangeEpisodeSeasonDialog(dialog.episodeId) },
+                        onToggleFillermark = { viewModel.toggleEpisodeFillermark(dialog.episodeId) },
+                        isFillermarked = dialog.isFillermarked,
+                        // <-- AM (ICON_ACTION_LABELS)
+                    )
+                }
+                // <-- AM (EPISODE_NAMES)
+                // AM (ICON_ACTION_LABELS) -->
+                is AnimeViewModel.Dialog.ConfirmRemoveEpisodeFromMerge -> {
+                    ConfirmRemoveFromMergeDialog(
+                        onConfirm = { viewModel.removeEpisodeFromMerge(dialog.episodeId) },
+                        onDismissRequest = onDismissRequest,
+                    )
+                }
+                // <-- AM (ICON_ACTION_LABELS)
+                // AM (CUSTOM_EPISODE_ORDER) -->
+                is AnimeViewModel.Dialog.ChangeEpisodeSeason -> {
+                    // AM (ICON_ACTION_LABELS): the same picker either way - the one
+                    // episode the quick-edit dialog opened it for, or the reorder
+                    // selection it has always moved.
+                    val episodeId = dialog.episodeId
+                    ChangeSeasonDialog(
+                        seasons = dialog.seasons,
+                        onSeasonSelected = if (episodeId != null) {
+                            { viewModel.moveEpisodeToSeason(episodeId, it) }
+                        } else {
+                            viewModel::moveSelectionToSeason
+                        },
+                        // AM (NAMED_SEASONS) -->
+                        onCreateNextSeason = if (episodeId != null) {
+                            { viewModel.moveEpisodeToNextSeason(episodeId) }
+                        } else {
+                            viewModel::moveSelectionToNextSeason
+                        },
+                        onEditSeasons = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
+                        // <-- AM (NAMED_SEASONS)
+                        onDismissRequest = onDismissRequest,
+                        selectedSeason = dialog.selectedSeason,
+                    )
+                }
+                // <-- AM (CUSTOM_EPISODE_ORDER)
+                // AM (MERGE_SETTINGS) -->
+                is AnimeViewModel.Dialog.MergeSettings -> {
+                    MergeSettingsDialog(
+                        dialog = dialog,
+                        onDismissRequest = onDismissRequest,
+                        onDeleteClick = viewModel::removeSourceFromMerge,
+                        onPositiveClick = viewModel::applyMergeSettings,
+                        // Pushed without dismissing, as in Komikku: the dialog is
+                        // ViewModel state, so it's back on returning.
+                        onOpenEntryClick = { navigator.push(AnimeScreen(it.id)) },
+                        onEditSeasonsClick = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
+                        // AM (MERGE_EPISODE_EXCLUSION) -->
+                        onRestoreEpisodeClick = viewModel::restoreEpisodeToMerge,
+                        // <-- AM (MERGE_EPISODE_EXCLUSION)
+                    )
+                }
+                // <-- AM (MERGE_SETTINGS)
+                // AM (TAG_LIMIT) -->
+                // Rendered by the entry screen's content instead of here: one of the
+                // tag actions it offers scopes the episode search, whose field state
+                // is local to AnimeScreenSmallImpl / AnimeScreenLargeImpl.
+                is AnimeViewModel.Dialog.Tags -> {}
+                // <-- AM (TAG_LIMIT)
             }
         }
 
@@ -313,301 +644,19 @@ class AnimeScreen(
             // AM (TAG_LIMIT) -->
             onMoreTagsClicked = viewModel::showTagsDialog,
             onSetTagsVisible = viewModel::setTagsVisible,
-            onPinTags = viewModel::pinTags,
             onUnpinTags = viewModel::unpinTags,
+            // AM (TAG_LOCKS)
+            onToggleTagLock = viewModel::toggleTagLock,
+            // AM (TAG_BLACKLIST)
+            onRestoreTags = viewModel::restoreTags,
             onAddTag = viewModel::addTag,
             onDeleteTags = viewModel::deleteAddedTags,
-            onResetTagVisibility = viewModel::resetTagVisibility,
             onDismissTagsDialog = viewModel::dismissDialog,
+            // AM (EPISODE_TAGS)
+            onToggleTagsFillermark = viewModel::toggleTagsFillermark,
             // <-- AM (TAG_LIMIT)
         )
 
-        var showScanlatorsDialog by remember { mutableStateOf(false) }
-
-        val onDismissRequest = {
-            viewModel.dismissDialog()
-            // AY -->
-            if (viewModel.autoOpenTrack && viewModel.isFromChangeCategory &&
-                successState.anime.fetchType == FetchType.Episodes
-            ) {
-                viewModel.isFromChangeCategory = false
-                viewModel.showTrackDialog()
-            }
-            // <-- AY
-        }
-        when (val dialog = successState.dialog) {
-            null -> {}
-            is AnimeViewModel.Dialog.ChangeCategory -> {
-                ChangeCategoryDialog(
-                    initialSelection = dialog.initialSelection,
-                    onDismissRequest = onDismissRequest,
-                    onEditCategories = { navigator.push(CategoryScreen()) },
-                    // AM (HEART_OPENS_CATEGORIES): the heart's dialog decides
-                    // membership by what is checked; "Set categories" on an
-                    // entry already in the library only moves it between them.
-                    onConfirm = { include, _ ->
-                        if (dialog.removeOnEmpty) {
-                            viewModel.applyFavoriteCategories(dialog.anime, include)
-                        } else {
-                            viewModel.moveAnimeToCategoriesAndAddToLibrary(dialog.anime, include)
-                        }
-                    },
-                )
-            }
-            is AnimeViewModel.Dialog.DeleteEpisodes -> {
-                DeleteEpisodesDialog(
-                    onDismissRequest = onDismissRequest,
-                    onConfirm = {
-                        viewModel.toggleAllSelection(false)
-                        viewModel.deleteEpisodes(dialog.episodes)
-                    },
-                )
-            }
-
-            is AnimeViewModel.Dialog.DuplicateAnime -> {
-                DuplicateAnimeDialog(
-                    duplicates = dialog.duplicates,
-                    onDismissRequest = onDismissRequest,
-                    // AM (HEART_OPENS_CATEGORIES): back to the categories
-                    // dialog when the long press is what raised this.
-                    onConfirm = {
-                        if (dialog.fromCategoriesPrompt) {
-                            viewModel.showFavoriteCategoriesDialog(checkDuplicate = false)
-                        } else {
-                            viewModel.toggleFavorite(onRemoved = {}, checkDuplicate = false)
-                        }
-                    },
-                    onOpenAnime = { navigator.push(AnimeScreen(it.id)) },
-                    onMigrate = { viewModel.showMigrateDialog(it) },
-                )
-            }
-
-            is AnimeViewModel.Dialog.Migrate -> {
-                MigrateAnimeDialog(
-                    current = dialog.current,
-                    target = dialog.target,
-                    // Initiated from the context of [dialog.target] so we show [dialog.current].
-                    onClickTitle = { navigator.push(AnimeScreen(dialog.current.id)) },
-                    // AY -->
-                    onClickSeasons = { navigator.push(MigrateSeasonSelectScreen(dialog.current, dialog.target)) },
-                    // <-- AY
-                    onDismissRequest = onDismissRequest,
-                )
-            }
-            AnimeViewModel.Dialog.EpisodeSettingsSheet -> EpisodeSettingsDialog(
-                onDismissRequest = onDismissRequest,
-                anime = successState.anime,
-                onDownloadFilterChanged = viewModel::setDownloadedFilter,
-                onUnseenFilterChanged = viewModel::setUnseenFilter,
-                onBookmarkedFilterChanged = viewModel::setBookmarkedFilter,
-                // AY -->
-                onFillermarkedFilterChanged = viewModel::setFillermarkedFilter,
-                // <-- AY
-                onSortModeChanged = viewModel::setSorting,
-                onDisplayModeChanged = viewModel::setDisplayMode,
-                // AY -->
-                onShowPreviewsEnabled = viewModel::showEpisodePreviews,
-                onShowSummariesEnabled = viewModel::showEpisodeSummaries,
-                // <-- AY
-                onSetAsDefault = viewModel::setCurrentSettingsAsDefault,
-                onResetToDefault = viewModel::resetToDefaultSettings,
-                scanlatorFilterActive = successState.scanlatorFilterActive,
-                onScanlatorFilterClicked = { showScanlatorsDialog = true },
-            )
-            // AY -->
-            AnimeViewModel.Dialog.SeasonSettingsSheet -> SeasonSettingsDialog(
-                onDismissRequest = onDismissRequest,
-                anime = successState.anime,
-                onDownloadFilterChanged = viewModel::setSeasonDownloadedFilter,
-                onUnseenFilterChanged = viewModel::setSeasonUnseenFilter,
-                onStartedFilterChanged = viewModel::setSeasonStartedFilter,
-                onCompletedFilterChanged = viewModel::setSeasonCompletedFilter,
-                onBookmarkedFilterChanged = viewModel::setSeasonBookmarkedFilter,
-                onFillermarkedFilterChanged = viewModel::setSeasonFillermarkedFilter,
-                onSortModeChanged = viewModel::setSeasonSorting,
-                onDisplayGridModeChanged = viewModel::setSeasonDisplayGridMode,
-                onDisplayGridSizeChanged = viewModel::setSeasonDisplayGridSize,
-                onOverlayDownloadedChanged = viewModel::setSeasonDownloadOverlay,
-                onOverlayUnseenChanged = viewModel::setSeasonUnseenOverlay,
-                onOverlayLocalChanged = viewModel::setSeasonLocalOverlay,
-                onOverlayLangChanged = viewModel::setSeasonLangOverlay,
-                onOverlayContinueChanged = viewModel::setSeasonContinueOverlay,
-                onDisplayModeChanged = viewModel::setSeasonDisplayMode,
-                onSetAsDefault = viewModel::setSeasonCurrentSettingsAsDefault,
-            )
-            // <-- AY
-            AnimeViewModel.Dialog.TrackSheet -> {
-                NavigatorAdaptiveSheet(
-                    screen = TrackInfoDialogHomeScreen(
-                        animeId = successState.anime.id,
-                        animeTitle = successState.anime.title,
-                        // AM -->
-                        isSeason = successState.anime.fetchType == FetchType.Seasons,
-                        // <-- AM
-                        sourceId = successState.source.id,
-                    ),
-                    enableSwipeDismiss = { it.lastItem is TrackInfoDialogHomeScreen },
-                    onDismissRequest = onDismissRequest,
-                )
-            }
-            AnimeViewModel.Dialog.FullImages -> {
-                val vm = assistedMetroViewModel<AnimeImageViewModel, AnimeImageViewModel.Factory> {
-                    create(animeId = animeId)
-                }
-                val anime by vm.state.collectAsStateWithLifecycle()
-                if (anime != null) {
-                    val getContent = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) {
-                        if (it == null) return@rememberLauncherForActivityResult
-                        vm.editImage(context, it)
-                    }
-                    AnimeImagesDialog(
-                        anime = anime!!,
-                        snackbarHostState = vm.snackbarHostState,
-                        // AY -->
-                        pagerState = vm.pagerState,
-                        // <-- AY
-                        isCustomCover = remember(anime) { anime!!.hasCustomCover() },
-                        // AY -->
-                        isCustomBackground = remember(anime) { anime!!.hasCustomBackground() },
-                        // <-- AY
-                        onShareClick = { vm.shareImage(context) },
-                        onSaveClick = { vm.saveImage(context) },
-                        onEditClick = {
-                            when (it) {
-                                EditCoverAction.EDIT -> getContent.launch("image/*")
-                                EditCoverAction.DELETE -> vm.deleteCustomImage(context)
-                            }
-                        },
-                        onDismissRequest = onDismissRequest,
-                    )
-                } else {
-                    LoadingScreen(Modifier.systemBarsPadding())
-                }
-            }
-            is AnimeViewModel.Dialog.SetFetchInterval -> {
-                SetIntervalDialog(
-                    interval = dialog.anime.fetchInterval,
-                    nextUpdate = dialog.anime.expectedNextUpdate,
-                    onDismissRequest = onDismissRequest,
-                    onValueChanged = { interval: Int -> viewModel.setFetchInterval(dialog.anime, interval) }
-                        .takeIf { viewModel.isUpdateIntervalEnabled },
-                )
-            }
-            // AY -->
-            AnimeViewModel.Dialog.ChangeAnimeSkipIntro -> {
-                fun updateSkipIntroLength(newLength: Long) {
-                    scope.launchIO {
-                        viewModel.setAnimeViewerFlags.awaitSetSkipIntroLength(animeId, newLength)
-                    }
-                }
-                SkipIntroLengthDialog(
-                    initialSkipIntroLength = if (!successState.anime.skipIntroDisable &&
-                        successState.anime.skipIntroLength == 0
-                    ) {
-                        viewModel.gesturePreferences.defaultIntroLength.get()
-                    } else {
-                        successState.anime.skipIntroLength
-                    },
-                    onDismissRequest = onDismissRequest,
-                    onValueChanged = {
-                        updateSkipIntroLength(it.toLong())
-                        onDismissRequest()
-                    },
-                )
-            }
-            is AnimeViewModel.Dialog.ShowQualities -> {
-                EpisodeOptionsDialogScreen.onDismissDialog = onDismissRequest
-                val episodeTitle = if (dialog.anime.displayMode == Anime.EPISODE_DISPLAY_NUMBER) {
-                    stringResource(
-                        AYMR.strings.display_mode_episode,
-                        formatEpisodeNumber(dialog.episode.episodeNumber),
-                    )
-                } else {
-                    dialog.episode.name
-                }
-                NavigatorAdaptiveSheet(
-                    screen = EpisodeOptionsDialogScreen(
-                        useExternalDownloader = viewModel.useExternalDownloader,
-                        episodeTitle = episodeTitle,
-                        episodeId = dialog.episode.id,
-                        animeId = dialog.anime.id,
-                        sourceId = dialog.source.id,
-                    ),
-                    onDismissRequest = onDismissRequest,
-                )
-            }
-            // <-- AY
-            // AM (CUSTOM_INFORMATION) -->
-            is AnimeViewModel.Dialog.EditAnimeInfo -> {
-                EditAnimeDialog(
-                    anime = successState.anime,
-                    onDismissRequest = viewModel::dismissDialog,
-                    onPositiveClick = viewModel::updateAnimeInfo,
-                )
-            }
-            // <-- AM (CUSTOM_INFORMATION)
-            // AM (CLEAR_ANIME) -->
-            AnimeViewModel.Dialog.ClearAnime -> {
-                ClearAnimeDialog(
-                    onDismissRequest = onDismissRequest,
-                    onConfirm = viewModel::clearAnime,
-                )
-            }
-            // <-- AM (CLEAR_ANIME)
-            // AM (EPISODE_NAMES) -->
-            is AnimeViewModel.Dialog.RenameEpisode -> {
-                RenameEpisodeDialog(
-                    currentName = dialog.currentName,
-                    onConfirm = { viewModel.renameEpisode(dialog.episodeId, it) },
-                    onDismissRequest = onDismissRequest,
-                    // AM (TAG_LIMIT) -->
-                    onEditTags = { viewModel.showTagsDialog(dialog.ownerAnimeId) },
-                    onOpenEntry = { navigator.push(AnimeScreen(dialog.ownerAnimeId)) },
-                    // <-- AM (TAG_LIMIT)
-                    // AM (MERGE_EPISODE_EXCLUSION) -->
-                    onRemoveFromMerge = { viewModel.removeEpisodeFromMerge(dialog.episodeId) }
-                        .takeIf { dialog.isMerged },
-                    // <-- AM (MERGE_EPISODE_EXCLUSION)
-                )
-            }
-            // <-- AM (EPISODE_NAMES)
-            // AM (CUSTOM_EPISODE_ORDER) -->
-            is AnimeViewModel.Dialog.ChangeEpisodeSeason -> {
-                ChangeSeasonDialog(
-                    seasons = dialog.seasons,
-                    onSeasonSelected = viewModel::moveSelectionToSeason,
-                    // AM (NAMED_SEASONS) -->
-                    onCreateNextSeason = viewModel::moveSelectionToNextSeason,
-                    onEditSeasons = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
-                    // <-- AM (NAMED_SEASONS)
-                    onDismissRequest = onDismissRequest,
-                )
-            }
-            // <-- AM (CUSTOM_EPISODE_ORDER)
-            // AM (MERGE_SETTINGS) -->
-            is AnimeViewModel.Dialog.MergeSettings -> {
-                MergeSettingsDialog(
-                    dialog = dialog,
-                    onDismissRequest = onDismissRequest,
-                    onDeleteClick = viewModel::removeSourceFromMerge,
-                    onPositiveClick = viewModel::applyMergeSettings,
-                    // Pushed without dismissing, as in Komikku: the dialog is
-                    // ViewModel state, so it's back on returning.
-                    onOpenEntryClick = { navigator.push(AnimeScreen(it.id)) },
-                    onEditSeasonsClick = { navigator.push(EntrySeasonsScreen(successState.anime.id)) },
-                    // AM (MERGE_EPISODE_EXCLUSION) -->
-                    onRestoreEpisodeClick = viewModel::restoreEpisodeToMerge,
-                    // <-- AM (MERGE_EPISODE_EXCLUSION)
-                )
-            }
-            // <-- AM (MERGE_SETTINGS)
-            // AM (TAG_LIMIT) -->
-            // Rendered by the entry screen's content instead of here: one of the
-            // tag actions it offers scopes the episode search, whose field state
-            // is local to AnimeScreenSmallImpl / AnimeScreenLargeImpl.
-            is AnimeViewModel.Dialog.Tags -> {}
-            // <-- AM (TAG_LIMIT)
-        }
 
         if (showScanlatorsDialog) {
             ScanlatorFilterDialog(

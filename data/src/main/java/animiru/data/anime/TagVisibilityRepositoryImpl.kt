@@ -9,6 +9,7 @@ import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import tachiyomi.data.Database
 import tachiyomi.data.subscribeToList
 
@@ -50,5 +51,21 @@ class TagVisibilityRepositoryImpl(
     override suspend fun deleteByAnimeId(animeId: Long) {
         database.anime_tag_visibilityQueries.deleteByAnimeId(animeId)
     }
+
+    // AM (TAG_LOCKS) -->
+    override fun lockedVisibleTagsAsFlow(animeId: Long): Flow<List<String>?> {
+        return database.anime_tag_lockQueries.getByAnimeId(animeId)
+            .subscribeToList()
+            .map { rows -> rows.firstOrNull()?.visible_tags }
+    }
+
+    override suspend fun setLocked(animeId: Long, visibleTags: List<String>?) {
+        if (visibleTags != null) {
+            database.anime_tag_lockQueries.upsert(animeId, visibleTags)
+        } else {
+            database.anime_tag_lockQueries.delete(animeId)
+        }
+    }
+    // <-- AM (TAG_LOCKS)
 }
 // <-- AM (TAG_LIMIT)

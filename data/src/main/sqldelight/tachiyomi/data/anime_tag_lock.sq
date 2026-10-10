@@ -1,0 +1,40 @@
+-- AM (TAG_LOCKS) -->
+import kotlin.String;
+import kotlin.collections.List;
+
+-- Entries whose tag row the user has frozen, and the row it was frozen at.
+--
+-- A row means locked; no row means the tag limit arranges the entry as it
+-- always did, so an entry nobody has locked stores nothing.
+--
+-- visible_tags is the set that was showing at the moment it was locked. It has
+-- to be recorded: "locked" means the row keeps the shape the user was looking
+-- at, and without the shape there is nothing to keep it to. It is deliberately
+-- NOT written into the user's own per-tag rows - those say where the user put a
+-- tag by hand, and burying a snapshot among them would make unlocking either
+-- destroy those choices or leave the entry frozen forever.
+--
+-- What locking changes, then, is only what happens to a tag that is NOT in the
+-- snapshot: it takes Hidden instead of competing for the cap's slots, so a tag
+-- the source adds on the next refresh, or one the user types in, cannot push a
+-- tag out of the row. Nothing already showing stops showing.
+CREATE TABLE anime_tag_lock(
+    anime_id INTEGER NOT NULL PRIMARY KEY,
+    visible_tags TEXT AS List<String> NOT NULL,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+
+getByAnimeId:
+SELECT anime_id, visible_tags
+FROM anime_tag_lock
+WHERE anime_id = :animeId;
+
+upsert:
+INSERT OR REPLACE INTO anime_tag_lock(anime_id, visible_tags)
+VALUES (:animeId, :visibleTags);
+
+delete:
+DELETE FROM anime_tag_lock
+WHERE anime_id = :animeId;
+-- <-- AM (TAG_LOCKS)

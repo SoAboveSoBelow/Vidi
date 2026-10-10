@@ -43,6 +43,8 @@ class BackupEpisode(
     // 701 was frame-grab provenance for the thumbnail, since withdrawn. Not
     // reused, for the reason given on BackupAnime.
     @ProtoNumber(702) var wasDownloaded: Boolean = false,
+    // AM (EPISODE_TAGS)
+    @ProtoNumber(703) var tags: List<BackupEpisodeTag> = emptyList(),
     // <-- AM
 ) {
     fun toEpisodeImpl(): Episode {

@@ -57,6 +57,8 @@ data class BackupAnime(
     @ProtoNumber(205) var customGenre: List<String>? = null,
     // AM (TAG_LIMIT) -->
     @ProtoNumber(210) var customAddedGenre: List<String>? = null,
+    // AM (TAG_BLACKLIST)
+    @ProtoNumber(211) var customBlacklistedGenre: List<String>? = null,
     @ProtoNumber(211) var tagVisibility: List<BackupTagVisibility> = emptyList(),
     // <-- AM (TAG_LIMIT)
     // <-- AM (CUSTOM_INFORMATION)
@@ -139,6 +141,8 @@ data class BackupAnime(
             customDescription != null ||
             customGenre != null ||
             customAddedGenre != null ||
+            // AM (TAG_BLACKLIST)
+            customBlacklistedGenre != null ||
             customStatus != 0
         ) {
             return CustomAnimeInfo(
@@ -149,6 +153,8 @@ data class BackupAnime(
                 description = customDescription,
                 genre = customGenre,
                 addedGenre = customAddedGenre,
+                // AM (TAG_BLACKLIST)
+                blacklistedGenre = customBlacklistedGenre,
                 status = customStatus.takeUnless { it == 0 }?.toLong(),
             )
         }

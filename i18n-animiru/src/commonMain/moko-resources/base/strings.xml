@@ -54,6 +54,7 @@
     <string name="am.quick_edit">Quick Edit</string>
     <string name="am.action_remove_from_merge">Remove from merge</string>
     <string name="am.episode_removed_from_merge">Episode removed from merge</string>
+    <string name="am.confirm_remove_from_merge">Remove from merge?</string>
     <string name="am.source_removed_from_merge">Last episode from %1$s — source removed from merge</string>
     <string name="am.merge_removed_episodes">Removed episodes</string>
     <string name="am.action_restore_to_merge">Restore</string>
@@ -82,8 +83,12 @@
     <string name="am.action_add_tag">Add tag</string>
     <string name="am.action_show_tag">Show this tag</string>
     <string name="am.action_hide_tag">Hide this tag</string>
-    <string name="am.action_pin_tag">Keep where it is</string>
-    <string name="am.action_unpin_tag">Follow the tag limit</string>
+    <string name="am.action_pin_tag">Lock tag positions</string>
+    <string name="am.action_unpin_tag">Unlock tag positions</string>
+    <string name="am.action_select_all_tags">Select all</string>
+    <string name="am.action_restore_tag">Restore</string>
+    <string name="am.entry_tags_blacklisted_count">Blacklist (%1$d)</string>
+    <string name="am.confirm_reset_tags">Reset tags?</string>
     <string name="am.entry_tags">Tags</string>
     <string name="am.entry_tag_name">Tag name</string>
     <string name="am.entry_tags_search">Search tags</string>

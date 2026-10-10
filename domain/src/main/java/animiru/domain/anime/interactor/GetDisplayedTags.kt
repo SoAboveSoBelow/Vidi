@@ -17,19 +17,23 @@ class GetDisplayedTags(
     /**
      * The split for [animeId], reacting to all three of its inputs: the entry's
      * own tags changing (a merge refresh re-ranks them), the user moving a tag,
-     * and the global cap changing in settings.
+     * the global cap changing in settings, and the entry being locked.
      */
     fun subscribe(animeId: Long, tags: Flow<List<String>?>): Flow<DisplayedTags> {
         return combine(
             tags,
             tagVisibilityRepository.getByAnimeIdAsFlow(animeId),
             libraryPreferences.maxTagsShown.changes(),
-        ) { entryTags, overrides, maxShown ->
+            // AM (TAG_LOCKS)
+            tagVisibilityRepository.lockedVisibleTagsAsFlow(animeId),
+        ) { entryTags, overrides, maxShown, lockedVisible ->
             DisplayedTags.from(
                 tags = entryTags,
                 // The sentinel stops here: the split takes a count or nothing.
                 maxShown = maxShown.takeIf { it < LibraryPreferences.UNCAPPED_TAG_LIMIT },
                 overrides = overrides.associate { it.tag.lowercase() to it.visible },
+                // AM (TAG_LOCKS)
+                lockedVisible = lockedVisible,
             )
         }
     }

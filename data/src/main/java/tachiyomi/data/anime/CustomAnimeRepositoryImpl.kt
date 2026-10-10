@@ -51,6 +51,10 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
             animeInfo.description == null &&
             animeInfo.genre == null &&
             animeInfo.addedGenre == null &&
+            // AM (TAG_BLACKLIST): a record that holds nothing BUT a blacklist is
+            // still a record - without this, throwing a source's tag away on an
+            // entry with no other custom info deleted the whole thing.
+            animeInfo.blacklistedGenre == null &&
             animeInfo.status == null
         ) {
             customAnimeMap.remove(animeInfo.id)
@@ -90,6 +94,8 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
         // AM (TAG_LIMIT) -->
         val addedGenre: List<String>? = null,
         // <-- AM (TAG_LIMIT)
+        // AM (TAG_BLACKLIST)
+        val blacklistedGenre: List<String>? = null,
         val status: Long? = null,
     ) {
 
@@ -103,6 +109,8 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
             // AM (TAG_LIMIT) -->
             addedGenre = this@AnimeJson.addedGenre,
             // <-- AM (TAG_LIMIT)
+            // AM (TAG_BLACKLIST)
+            blacklistedGenre = this@AnimeJson.blacklistedGenre,
             status = this@AnimeJson.status?.takeUnless { it == 0L },
         )
     }
@@ -118,6 +126,8 @@ class CustomAnimeRepositoryImpl(context: Context) : CustomAnimeRepository {
             // AM (TAG_LIMIT) -->
             addedGenre = addedGenre,
             // <-- AM (TAG_LIMIT)
+            // AM (TAG_BLACKLIST)
+            blacklistedGenre = blacklistedGenre,
             status = status,
         )
     }

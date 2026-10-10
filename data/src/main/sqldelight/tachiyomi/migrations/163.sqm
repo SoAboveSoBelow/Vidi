@@ -1,0 +1,16 @@
+-- AM (TAG_LOCKS) -->
+-- Per-entry tag lock. See anime_tag_lock.sq for what a row means.
+--
+-- Repeated from 162 deliberately. An earlier build of this work shipped a
+-- different 162 - the per-tag `locked_in_place` column, since abandoned - so a
+-- database that ran THAT one is already past 162 and would never see the table
+-- being created there. IF NOT EXISTS makes this a no-op for anyone who came
+-- through 162 as it now reads, and the fix for anyone who came through the old
+-- one. The abandoned column, where it exists, is left alone: nothing reads it,
+-- and dropping it would fail on every database that never had it.
+CREATE TABLE IF NOT EXISTS anime_tag_lock(
+    anime_id INTEGER NOT NULL PRIMARY KEY,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+-- <-- AM (TAG_LOCKS)

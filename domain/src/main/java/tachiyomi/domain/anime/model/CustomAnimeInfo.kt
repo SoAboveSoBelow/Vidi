@@ -21,6 +21,20 @@ data class CustomAnimeInfo(
      */
     val addedGenre: List<String>? = null,
     // <-- AM (TAG_LIMIT)
+    // AM (TAG_BLACKLIST) -->
+    /**
+     * Tags the user has thrown away on this entry, dropped from [genre] wherever
+     * it is read - the tag row, the popout, tag search, everything.
+     *
+     * Needed because a source's tag cannot simply be deleted: the next refresh
+     * brings it back. Kept here rather than in a table of its own so the drop
+     * happens in the one place the entry's tags are already assembled, which
+     * costs no query and no join - on a merge of a hundred sources carrying a
+     * thousand tags, that is the difference between the thrown-away ones never
+     * being built and being built and then filtered at every reader.
+     */
+    val blacklistedGenre: List<String>? = null,
+    // <-- AM (TAG_BLACKLIST)
     val status: Long? = null,
 )
 // <-- AM (CUSTOM_INFORMATION)

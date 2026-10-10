@@ -2,6 +2,7 @@
 package eu.kanade.tachiyomi.data.backup.restore.restorers
 
 import animiru.domain.anime.repository.TagVisibilityRepository
+import animiru.domain.episode.repository.EpisodeTagRepository
 import aniyomi.domain.episode.repository.EpisodeNameRepository
 import aniyomi.domain.order.model.EpisodeOrderOverride
 import aniyomi.domain.order.repository.EpisodeOrderRepository
@@ -24,6 +25,8 @@ import tachiyomi.domain.anime.model.Anime
 class EntryExtrasRestorer(
     private val entrySeasonRepository: EntrySeasonRepository,
     private val episodeNameRepository: EpisodeNameRepository,
+    // AM (EPISODE_TAGS)
+    private val episodeTagRepository: EpisodeTagRepository,
     private val episodeOrderRepository: EpisodeOrderRepository,
     private val tagVisibilityRepository: TagVisibilityRepository,
 ) {
@@ -32,6 +35,8 @@ class EntryExtrasRestorer(
         restoreSeasons(anime, backupAnime)
         restoreTagVisibility(anime, backupAnime)
         restoreEpisodeNames(anime, backupAnime, resolver)
+        // AM (EPISODE_TAGS)
+        restoreEpisodeTags(anime, backupAnime, resolver)
         restoreEpisodeOrder(anime, backupAnime, resolver)
     }
 
@@ -69,6 +74,28 @@ class EntryExtrasRestorer(
             episodeNameRepository.set(episodeId, customName)
         }
     }
+
+    // AM (EPISODE_TAGS) -->
+    /**
+     * Puts each episode's own tag rows back. Keyed by episode like the custom
+     * names above, so an episode the resolver cannot place is skipped rather
+     * than having its rows land on the wrong one.
+     */
+    private suspend fun restoreEpisodeTags(
+        anime: Anime,
+        backupAnime: BackupAnime,
+        resolver: BackupEntryResolver,
+    ) {
+        backupAnime.episodes.forEach { backupEpisode ->
+            if (backupEpisode.tags.isEmpty()) return@forEach
+            val episodeId = resolver.episodeId(anime.id, backupEpisode.url) ?: return@forEach
+            episodeTagRepository.upsertAll(
+                episodeId = episodeId,
+                tagsByName = backupEpisode.tags.associate { it.tag to it.visible },
+            )
+        }
+    }
+    // <-- AM (EPISODE_TAGS)
 
     private suspend fun restoreEpisodeOrder(
         anime: Anime,

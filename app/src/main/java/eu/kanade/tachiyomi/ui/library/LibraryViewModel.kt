@@ -733,7 +733,15 @@ class LibraryViewModel(
             }
             // Removal of the originals is a follow-up choice, not part of the
             // merge itself - the library screen offers it via snackbar.
-            _mergedAnimeEvent.emit(MergedEntryResult(merged.id, animes))
+            //
+            // AM (MERGE_EXISTING): when the selection already contained a merged
+            // entry, mergeSelection grows THAT entry and returns it, so it is the
+            // merge result, not an original - offering it for removal would drop
+            // the very entry everything was just merged into. Anything else in
+            // the selection is a genuine original.
+            _mergedAnimeEvent.emit(
+                MergedEntryResult(merged.id, animes.fastFilterNot { it.id == merged.id }),
+            )
         }
         clearSelection()
     }

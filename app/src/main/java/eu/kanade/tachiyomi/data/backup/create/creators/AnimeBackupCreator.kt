@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.data.backup.create.creators
 
 import animiru.domain.anime.repository.TagVisibilityRepository
+import animiru.domain.episode.repository.EpisodeTagRepository
 import aniyomi.domain.episode.repository.EpisodeNameRepository
 import aniyomi.domain.merge.repository.MergeChildRepository
 import aniyomi.domain.merge.repository.MergeEpisodeExclusionRepository
@@ -15,6 +16,7 @@ import eu.kanade.tachiyomi.data.backup.create.BackupOptions
 import eu.kanade.tachiyomi.data.backup.models.BackupAnime
 import eu.kanade.tachiyomi.data.backup.models.BackupEntrySeason
 import eu.kanade.tachiyomi.data.backup.models.BackupEpisode
+import eu.kanade.tachiyomi.data.backup.models.BackupEpisodeTag
 import eu.kanade.tachiyomi.data.backup.models.BackupEpisodeOrder
 import eu.kanade.tachiyomi.data.backup.models.BackupHistory
 import eu.kanade.tachiyomi.data.backup.models.BackupMergeChild
@@ -48,6 +50,8 @@ class AnimeBackupCreator(
     private val tagVisibilityRepository: TagVisibilityRepository,
     private val entrySeasonRepository: EntrySeasonRepository,
     private val episodeNameRepository: EpisodeNameRepository,
+    // AM (EPISODE_TAGS)
+    private val episodeTagRepository: EpisodeTagRepository,
     private val episodeOrderRepository: EpisodeOrderRepository,
     private val mergeChildRepository: MergeChildRepository,
     private val mergeSettingsRepository: MergeSettingsRepository,
@@ -233,10 +237,17 @@ class AnimeBackupCreator(
 
         val idByUrl = getEpisodesByAnimeId.await(anime.id).associate { it.url to it.id }
         val customNames = episodeNameRepository.getByAnimeIds(listOf(anime.id))
+        // AM (EPISODE_TAGS): the entry's own episodes only - a merged host's
+        // children are backed up as the entries they are, carrying their own.
+        val tagsByEpisode = episodeTagRepository.getByAnimeId(anime.id).groupBy { it.episodeId }
 
         animeObject.episodes.forEach { backupEpisode ->
             idByUrl[backupEpisode.url]?.let { episodeId ->
                 backupEpisode.customName = customNames[episodeId]
+                // AM (EPISODE_TAGS)
+                backupEpisode.tags = tagsByEpisode[episodeId].orEmpty().map {
+                    BackupEpisodeTag(tag = it.tag, visible = it.visible)
+                }
             }
 
             backupEpisode.wasDownloaded = downloadCache.isEpisodeDownloaded(
@@ -326,6 +337,8 @@ private fun Anime.toBackupAnime(
                 backupAnime.customDescription = it.description
                 backupAnime.customGenre = it.genre
                 backupAnime.customAddedGenre = it.addedGenre
+                // AM (TAG_BLACKLIST)
+                backupAnime.customBlacklistedGenre = it.blacklistedGenre
                 backupAnime.customStatus = it.status?.toInt() ?: 0
             }
         }

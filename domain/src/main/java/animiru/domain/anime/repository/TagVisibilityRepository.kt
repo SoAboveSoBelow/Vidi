@@ -26,5 +26,16 @@ interface TagVisibilityRepository {
 
     /** Drops every override for [animeId], restoring the default split. */
     suspend fun deleteByAnimeId(animeId: Long)
+
+    // AM (TAG_LOCKS) -->
+    /**
+     * The tags that were showing when the entry was locked, or null while it is
+     * not locked - see anime_tag_lock.sq.
+     */
+    fun lockedVisibleTagsAsFlow(animeId: Long): Flow<List<String>?>
+
+    /** Locks the entry at [visibleTags], or unlocks it when that is null. */
+    suspend fun setLocked(animeId: Long, visibleTags: List<String>?)
+    // <-- AM (TAG_LOCKS)
 }
 // <-- AM (TAG_LIMIT)

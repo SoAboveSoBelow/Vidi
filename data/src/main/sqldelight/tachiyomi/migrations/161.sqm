@@ -1,0 +1,14 @@
+-- AM (EPISODE_TAGS) -->
+-- Per-episode tags. See episode_tags.sq for what the two values of `visible`
+-- mean and why the rows are keyed by episode rather than by host.
+CREATE TABLE IF NOT EXISTS episode_tags(
+    episode_id INTEGER NOT NULL,
+    tag TEXT NOT NULL COLLATE NOCASE,
+    visible INTEGER NOT NULL,
+    PRIMARY KEY(episode_id, tag),
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS episode_tags_episode_id_index ON episode_tags(episode_id);
+-- <-- AM (EPISODE_TAGS)

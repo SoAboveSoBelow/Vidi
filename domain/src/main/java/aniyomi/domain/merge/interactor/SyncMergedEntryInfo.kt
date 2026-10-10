@@ -4,6 +4,7 @@ package aniyomi.domain.merge.interactor
 import aniyomi.domain.merge.repository.MergeChildRepository
 import aniyomi.domain.merge.repository.MergeSettingsRepository
 import dev.zacsweers.metro.Inject
+import tachiyomi.domain.anime.interactor.GetCustomAnimeInfo
 import tachiyomi.domain.anime.model.AnimeUpdate
 import tachiyomi.domain.anime.repository.AnimeRepository
 
@@ -39,6 +40,8 @@ class SyncMergedEntryInfo(
     private val animeRepository: AnimeRepository,
     private val mergeChildRepository: MergeChildRepository,
     private val mergeSettingsRepository: MergeSettingsRepository,
+    // AM (TAG_BLACKLIST)
+    private val getCustomAnimeInfo: GetCustomAnimeInfo,
 ) {
     suspend fun await(mergeParentId: Long) {
         // Already ordered by priority ascending.
@@ -47,10 +50,16 @@ class SyncMergedEntryInfo(
         val infoAnimeId = mergeSettingsRepository.get(mergeParentId).infoAnimeId
         val info = children.firstOrNull { it.id == infoAnimeId } ?: children.first()
 
+        // AM (TAG_BLACKLIST): dropped before the ranking rather than after it.
+        // A hundred-source merge can carry a thousand tags; the ones the user
+        // threw away should not be counted, sorted and then stored only to be
+        // filtered again by every reader.
+        val blacklisted = getCustomAnimeInfo.get(mergeParentId)?.blacklistedGenre.orEmpty()
+            .mapTo(HashSet(), String::lowercase)
         val tags = children
             // A source listing a tag twice shouldn't count twice.
             .flatMap { child -> child.genre.orEmpty().map { it.trim() }.distinctBy(String::lowercase) }
-            .filter { it.isNotEmpty() }
+            .filter { it.isNotEmpty() && it.lowercase() !in blacklisted }
             .withIndex()
             .groupBy { (_, tag) -> tag.lowercase() }
             .values

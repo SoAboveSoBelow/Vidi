@@ -248,12 +248,16 @@ fun AnimeScreen(
     // AM (TAG_LIMIT) -->
     onMoreTagsClicked: () -> Unit,
     onSetTagsVisible: (tags: Collection<String>, visible: Boolean) -> Unit,
-    onPinTags: (tags: Collection<String>) -> Unit,
     onUnpinTags: (tags: Collection<String>) -> Unit,
+    // AM (TAG_LOCKS)
+    onToggleTagLock: () -> Unit,
+    // AM (TAG_BLACKLIST)
+    onRestoreTags: (tags: Collection<String>) -> Unit,
     onAddTag: (String) -> Unit,
     onDeleteTags: (tags: Collection<String>) -> Unit,
-    onResetTagVisibility: () -> Unit,
     onDismissTagsDialog: () -> Unit,
+    // AM (EPISODE_TAGS)
+    onToggleTagsFillermark: () -> Unit,
     // <-- AM (TAG_LIMIT)
 ) {
     val context = LocalContext.current
@@ -351,12 +355,16 @@ fun AnimeScreen(
             // AM (TAG_LIMIT) -->
             onMoreTagsClicked = onMoreTagsClicked,
             onSetTagsVisible = onSetTagsVisible,
-            onPinTags = onPinTags,
             onUnpinTags = onUnpinTags,
+            // AM (TAG_LOCKS)
+            onToggleTagLock = onToggleTagLock,
+            // AM (TAG_BLACKLIST)
+            onRestoreTags = onRestoreTags,
             onAddTag = onAddTag,
             onDeleteTags = onDeleteTags,
-            onResetTagVisibility = onResetTagVisibility,
             onDismissTagsDialog = onDismissTagsDialog,
+            // AM (EPISODE_TAGS)
+            onToggleTagsFillermark = onToggleTagsFillermark,
             // <-- AM (TAG_LIMIT)
         )
     } else {
@@ -447,12 +455,16 @@ fun AnimeScreen(
             // AM (TAG_LIMIT) -->
             onMoreTagsClicked = onMoreTagsClicked,
             onSetTagsVisible = onSetTagsVisible,
-            onPinTags = onPinTags,
             onUnpinTags = onUnpinTags,
+            // AM (TAG_LOCKS)
+            onToggleTagLock = onToggleTagLock,
+            // AM (TAG_BLACKLIST)
+            onRestoreTags = onRestoreTags,
             onAddTag = onAddTag,
             onDeleteTags = onDeleteTags,
-            onResetTagVisibility = onResetTagVisibility,
             onDismissTagsDialog = onDismissTagsDialog,
+            // AM (EPISODE_TAGS)
+            onToggleTagsFillermark = onToggleTagsFillermark,
             // <-- AM (TAG_LIMIT)
         )
     }
@@ -570,12 +582,16 @@ private fun AnimeScreenSmallImpl(
     // AM (TAG_LIMIT) -->
     onMoreTagsClicked: () -> Unit,
     onSetTagsVisible: (tags: Collection<String>, visible: Boolean) -> Unit,
-    onPinTags: (tags: Collection<String>) -> Unit,
     onUnpinTags: (tags: Collection<String>) -> Unit,
+    // AM (TAG_LOCKS)
+    onToggleTagLock: () -> Unit,
+    // AM (TAG_BLACKLIST)
+    onRestoreTags: (tags: Collection<String>) -> Unit,
     onAddTag: (String) -> Unit,
     onDeleteTags: (tags: Collection<String>) -> Unit,
-    onResetTagVisibility: () -> Unit,
     onDismissTagsDialog: () -> Unit,
+    // AM (EPISODE_TAGS)
+    onToggleTagsFillermark: () -> Unit,
     // <-- AM (TAG_LIMIT)
 ) {
     // AY -->
@@ -611,17 +627,30 @@ private fun AnimeScreenSmallImpl(
     val tagsDialog = state.dialog
     if (tagsDialog is AnimeViewModel.Dialog.Tags) {
         TagVisibilityDialog(
-            displayedTags = state.displayedTags,
+            // AM (EPISODE_TAGS): pointed at one episode, the split is that
+            // episode's - its own tags against the rest of its owner's.
+            displayedTags = state.episodeDisplayedTags.takeIf { tagsDialog.episodeId != null }
+                ?: state.displayedTags,
             sourceCounts = tagsDialog.sourceCounts,
-            addedTags = state.addedTags,
+            // AM (EPISODE_TAGS)
+            fillermark = tagsDialog.isFillermarked.takeIf { tagsDialog.episodeId != null },
+            onToggleFillermark = onToggleTagsFillermark,
+            // AM (TAG_LOCKS)
+            locked = state.tagsLocked,
+            onToggleLock = onToggleTagLock,
+            // AM (EPISODE_TAGS): the user's own tags in the scope the popout is
+            // actually about - the episode's placed rows, or the entry's added
+            // tags plus the ones it only has because its episodes carry them.
+            deletableTags = tagsDialog.deletableTags,
+            // AM (TAG_BLACKLIST)
+            blacklistedTags = tagsDialog.blacklistedTags,
+            onRestoreTags = onRestoreTags,
             canSearchPlaylist = listItem.size >= MIN_EPISODES_FOR_SEARCH,
             onDismissRequest = onDismissTagsDialog,
             onSetTagsVisible = onSetTagsVisible,
-            onPinTags = onPinTags,
             onUnpinTags = onUnpinTags,
             onAddTag = onAddTag,
             onDeleteTags = onDeleteTags,
-            onResetTagVisibility = onResetTagVisibility,
             onTagSearch = onTagSearch,
             onTagGlobalSearch = onTagGlobalSearch,
             onTagEpisodeSearch = { episodeSearchQuery = it },
@@ -647,7 +676,14 @@ private fun AnimeScreenSmallImpl(
             // under.
             val queryNode = QueryNode.from(query)
             listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
-                queryNode.matches(item.toSearchFields(state.anime, state.source.name))
+                queryNode.matches(
+                    item.toSearchFields(
+                        state.anime,
+                        state.source.name,
+                        // AM (EPISODE_TAGS)
+                        state.episodeTags.byEpisodeId,
+                    ),
+                )
             }
             // <-- AM (EPISODE_TAG_SEARCH)
         }
@@ -1238,12 +1274,16 @@ fun AnimeScreenLargeImpl(
     // AM (TAG_LIMIT) -->
     onMoreTagsClicked: () -> Unit,
     onSetTagsVisible: (tags: Collection<String>, visible: Boolean) -> Unit,
-    onPinTags: (tags: Collection<String>) -> Unit,
     onUnpinTags: (tags: Collection<String>) -> Unit,
+    // AM (TAG_LOCKS)
+    onToggleTagLock: () -> Unit,
+    // AM (TAG_BLACKLIST)
+    onRestoreTags: (tags: Collection<String>) -> Unit,
     onAddTag: (String) -> Unit,
     onDeleteTags: (tags: Collection<String>) -> Unit,
-    onResetTagVisibility: () -> Unit,
     onDismissTagsDialog: () -> Unit,
+    // AM (EPISODE_TAGS)
+    onToggleTagsFillermark: () -> Unit,
     // <-- AM (TAG_LIMIT)
 ) {
     val layoutDirection = LocalLayoutDirection.current
@@ -1276,17 +1316,30 @@ fun AnimeScreenLargeImpl(
     val tagsDialog = state.dialog
     if (tagsDialog is AnimeViewModel.Dialog.Tags) {
         TagVisibilityDialog(
-            displayedTags = state.displayedTags,
+            // AM (EPISODE_TAGS): pointed at one episode, the split is that
+            // episode's - its own tags against the rest of its owner's.
+            displayedTags = state.episodeDisplayedTags.takeIf { tagsDialog.episodeId != null }
+                ?: state.displayedTags,
             sourceCounts = tagsDialog.sourceCounts,
-            addedTags = state.addedTags,
+            // AM (EPISODE_TAGS)
+            fillermark = tagsDialog.isFillermarked.takeIf { tagsDialog.episodeId != null },
+            onToggleFillermark = onToggleTagsFillermark,
+            // AM (TAG_LOCKS)
+            locked = state.tagsLocked,
+            onToggleLock = onToggleTagLock,
+            // AM (EPISODE_TAGS): the user's own tags in the scope the popout is
+            // actually about - the episode's placed rows, or the entry's added
+            // tags plus the ones it only has because its episodes carry them.
+            deletableTags = tagsDialog.deletableTags,
+            // AM (TAG_BLACKLIST)
+            blacklistedTags = tagsDialog.blacklistedTags,
+            onRestoreTags = onRestoreTags,
             canSearchPlaylist = listItem.size >= MIN_EPISODES_FOR_SEARCH,
             onDismissRequest = onDismissTagsDialog,
             onSetTagsVisible = onSetTagsVisible,
-            onPinTags = onPinTags,
             onUnpinTags = onUnpinTags,
             onAddTag = onAddTag,
             onDeleteTags = onDeleteTags,
-            onResetTagVisibility = onResetTagVisibility,
             onTagSearch = onTagSearch,
             onTagGlobalSearch = onTagGlobalSearch,
             onTagEpisodeSearch = { episodeSearchQuery = it },
@@ -1312,7 +1365,14 @@ fun AnimeScreenLargeImpl(
             // under.
             val queryNode = QueryNode.from(query)
             listItem.filterIsInstance<EpisodeList.Item>().filter { item ->
-                queryNode.matches(item.toSearchFields(state.anime, state.source.name))
+                queryNode.matches(
+                    item.toSearchFields(
+                        state.anime,
+                        state.source.name,
+                        // AM (EPISODE_TAGS)
+                        state.episodeTags.byEpisodeId,
+                    ),
+                )
             }
             // <-- AM (EPISODE_TAG_SEARCH)
         }
@@ -2305,6 +2365,11 @@ private fun Modifier.ignorePadding(gridPadding: Int) = layout { measurable, cons
 private fun EpisodeList.Item.toSearchFields(
     fallbackAnime: Anime,
     fallbackSourceName: String,
+    // AM (EPISODE_TAGS): the resolved tags per episode id - manual rows over
+    // what the owner lends, with the tags every episode would carry left out.
+    // Falls back to the owner's own tags for an episode the resolution has not
+    // reached, which is what every episode used to match on.
+    episodeTags: Map<Long, List<String>> = emptyMap(),
 ): EpisodeSearchFields {
     val anime = owner ?: fallbackAnime
     return EpisodeSearchFields(
@@ -2313,7 +2378,7 @@ private fun EpisodeList.Item.toSearchFields(
         scanlator = episode.scanlator,
         anime = anime,
         sourceName = ownerSourceName.ifEmpty { fallbackSourceName },
-        tags = anime.genre.orEmpty(),
+        tags = episodeTags[episode.id] ?: anime.genre.orEmpty(),
     )
 }
 // <-- AM (EPISODE_TAG_SEARCH)

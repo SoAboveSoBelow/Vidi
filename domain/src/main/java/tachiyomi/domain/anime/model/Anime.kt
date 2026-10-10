@@ -90,8 +90,15 @@ data class Anime(
         get() {
             val base = customAnimeInfo?.genre ?: ogGenre
             val added = customAnimeInfo?.addedGenre.orEmpty()
-            if (added.isEmpty()) return base
-            return (base.orEmpty() + added).distinctBy(String::lowercase)
+            // AM (TAG_BLACKLIST): applied last, so a thrown-away tag stays gone
+            // whether it came from the source, a merge's ranking, or was added
+            // by hand and later discarded.
+            val blacklisted = customAnimeInfo?.blacklistedGenre.orEmpty()
+                .mapTo(HashSet(), String::lowercase)
+            if (added.isEmpty() && blacklisted.isEmpty()) return base
+            return (base.orEmpty() + added)
+                .distinctBy(String::lowercase)
+                .filterNot { it.lowercase() in blacklisted }
         }
     // <-- AM (TAG_LIMIT)
 

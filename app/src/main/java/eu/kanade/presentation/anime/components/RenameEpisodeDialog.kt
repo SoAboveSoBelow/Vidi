@@ -8,9 +8,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.outlined.NewLabel
+import androidx.compose.material.icons.outlined.PlaylistRemove
 import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -28,8 +30,10 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import eu.kanade.presentation.components.AlertDialog
+import eu.kanade.presentation.components.LabeledIconButton
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
+import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.stringResource
 
 /**
@@ -54,11 +58,18 @@ fun RenameEpisodeDialog(
     // AM (MERGE_EPISODE_EXCLUSION) -->
     /**
      * Takes this episode out of the merged entry's order. Null on an ordinary
-     * entry, which has no merge to remove it from - the slot carries the
+     * entry, which has no merge to remove it from - the strip carries the
      * dialog's title there instead of standing empty.
      */
     onRemoveFromMerge: (() -> Unit)?,
     // <-- AM (MERGE_EPISODE_EXCLUSION)
+    // AM (ICON_ACTION_LABELS) -->
+    /** Moves this one episode to another season of the entry. */
+    onChangeSeason: () -> Unit,
+    /** Flips this episode's fillermark. [isFillermarked] is what it is now. */
+    onToggleFillermark: () -> Unit,
+    isFillermarked: Boolean,
+    // <-- AM (ICON_ACTION_LABELS)
 ) {
     // AM (RENAME_SELECTS_ALL) -->
     // The whole name is selected the first time the field is tapped, so typing
@@ -88,12 +99,9 @@ fun RenameEpisodeDialog(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                TextButton(
-                    onClick = {
-                        onDismissRequest()
-                        onEditTags()
-                    },
-                ) {
+                // AM (ICON_ACTION_LABELS): no dismiss - the popout opens over
+                // this dialog, so closing it comes back here.
+                TextButton(onClick = onEditTags) {
                     Text(text = stringResource(AMMR.strings.am_action_edit_tags))
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -116,35 +124,71 @@ fun RenameEpisodeDialog(
             // AM (MERGE_EPISODE_EXCLUSION) -->
             // The old "Rename episode" heading is gone - the field's own label
             // already says that, and the heading only repeated it. The row is now
-            // the dialog's top strip: Remove from merge hard left where the
-            // heading was, or, with no merge to remove from, a plain title so the
-            // strip isn't just a lone icon.
+            // the dialog's top strip: the actions that are about the episode
+            // rather than its name.
+            //
+            // AM (ICON_ACTION_LABELS): every one of them is an icon, because the
+            // strip now carries four and the words would not fit across a phone.
+            // Holding any of them names it - see LabeledIconButton.
+            //
+            // Spread evenly rather than pushed to the two ends. Grouped, the
+            // four read as two clumps with a gulf between them and no reason
+            // for the split; evenly spaced they read as one strip of actions,
+            // which is what they are. With no merge to remove from, the title
+            // takes the first slot so the strip does not open on empty space.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.SpaceEvenly,
             ) {
                 if (onRemoveFromMerge != null) {
-                    TextButton(
-                        onClick = {
-                            onDismissRequest()
-                            onRemoveFromMerge()
-                        },
-                    ) {
-                        Text(text = stringResource(AMMR.strings.am_action_remove_from_merge))
-                    }
+                    LabeledIconButton(
+                        // A minus on a list, not a bin: the episode is leaving
+                        // this order, not existing. It is still on its source
+                        // and the merge settings dialog can put it back.
+                        icon = Icons.Outlined.PlaylistRemove,
+                        label = stringResource(AMMR.strings.am_action_remove_from_merge),
+                        // No dismiss: this one asks first, and the confirmation
+                        // comes back here if it is declined.
+                        onClick = onRemoveFromMerge,
+                    )
                 } else {
                     Text(text = stringResource(AMMR.strings.am_quick_edit))
                 }
                 // <-- AM (MERGE_EPISODE_EXCLUSION)
+                // AM (ICON_ACTION_LABELS) -->
+                LabeledIconButton(
+                    // The same Layers the reorder bar's season action uses.
+                    icon = Icons.Default.Layers,
+                    label = stringResource(AMMR.strings.am_action_change_episode_season),
+                    // Opened over this dialog rather than instead of it, so
+                    // backing out of the picker lands back on the strip.
+                    onClick = onChangeSeason,
+                )
+                // Stays open, like the actions above: fillermarking is a flag
+                // the user may want to see take effect, and the icon flipping
+                // is that confirmation.
+                LabeledIconButton(
+                    icon = if (isFillermarked) {
+                        Icons.AutoMirrored.Outlined.LabelOff
+                    } else {
+                        Icons.Outlined.NewLabel
+                    },
+                    label = if (isFillermarked) {
+                        stringResource(AYMR.strings.action_remove_fillermark_episode)
+                    } else {
+                        stringResource(AYMR.strings.action_fillermark_episode)
+                    },
+                    onClick = onToggleFillermark,
+                )
+                // <-- AM (ICON_ACTION_LABELS)
                 // Pushed WITHOUT dismissing: the dialog is ViewModel state, so it is
                 // still here on the way back, as the merge settings dialog does.
-                IconButton(onClick = onOpenEntry) {
-                    Icon(
-                        imageVector = Icons.Outlined.Visibility,
-                        contentDescription = stringResource(AMMR.strings.am_action_open_entry),
-                    )
-                }
+                LabeledIconButton(
+                    icon = Icons.Outlined.Visibility,
+                    label = stringResource(AMMR.strings.am_action_open_entry),
+                    onClick = onOpenEntry,
+                )
             }
         },
         // <-- AM (TAG_LIMIT)

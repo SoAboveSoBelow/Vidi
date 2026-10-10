@@ -29,6 +29,7 @@ data class DisplayedTags(
     /** Whether anything here is the user's choice rather than the cap's. */
     val isCustomised: Boolean = pinned.isNotEmpty()
 
+
     /** Whether a "more" chip is needed at all. */
     val hasHidden: Boolean = hidden.isNotEmpty()
 
@@ -68,10 +69,23 @@ data class DisplayedTags(
             tags: List<String>?,
             maxShown: Int?,
             overrides: Map<String, Boolean> = emptyMap(),
+            // AM (TAG_LOCKS): the tags that were showing when the entry was
+            // locked, or null while it is not locked.
+            //
+            // Locked, the row keeps exactly the shape it was frozen at: every
+            // tag in this set shows, and a tag that is NOT in it takes Hidden
+            // instead of competing for the cap's slots - so a tag a refresh
+            // brings in, or one the user adds, cannot push a tag out of the row,
+            // and nothing that was showing stops showing. Tags the user placed
+            // by hand still outrank all of it, and both sections still re-sort
+            // within themselves as the ranking moves.
+            lockedVisible: List<String>? = null,
         ): DisplayedTags {
             val all = tags.orEmpty()
             if (all.isEmpty()) return Empty
             val pins = all.map { overrides[it.lowercase()] }
+            // AM (TAG_LOCKS)
+            val frozen = lockedVisible?.mapTo(HashSet(), String::lowercase)
             var budget = maxShown?.minus(pins.count { it == true })?.coerceAtLeast(0) ?: 0
             val visible = mutableListOf<String>()
             val hidden = mutableListOf<String>()
@@ -79,6 +93,8 @@ data class DisplayedTags(
                 when {
                     pins[index] == true -> visible += tag
                     pins[index] == false -> hidden += tag
+                    // AM (TAG_LOCKS)
+                    frozen != null -> if (tag.lowercase() in frozen) visible += tag else hidden += tag
                     maxShown == null -> visible += tag
                     index < maxShown && budget > 0 -> {
                         visible += tag

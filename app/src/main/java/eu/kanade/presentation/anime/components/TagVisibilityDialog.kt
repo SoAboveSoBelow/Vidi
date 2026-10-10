@@ -3,6 +3,7 @@ package eu.kanade.presentation.anime.components
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,12 +20,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.NewLabel
+import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Icon
@@ -49,9 +56,11 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import animiru.domain.anime.model.DisplayedTags
 import eu.kanade.presentation.components.AdaptiveSheet
+import eu.kanade.presentation.components.LabeledIconButton
 import eu.kanade.presentation.components.AlertDialog
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
+import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.TextButton
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
@@ -85,15 +94,44 @@ import tachiyomi.presentation.core.util.secondaryItemAlpha
 fun TagVisibilityDialog(
     displayedTags: DisplayedTags,
     sourceCounts: Map<String, Int>,
-    addedTags: Set<String>,
+    // AM (EPISODE_TAGS) -->
+    /**
+     * The lowercased tags this popout can delete - the user's own, in whatever
+     * scope it is pointed at. Carried with the popout rather than read from a
+     * shared "added tags" set, which belonged to whichever entry was last asked
+     * about and so could say yes for a selection in a different scope entirely.
+     */
+    deletableTags: Set<String>,
+    // <-- AM (EPISODE_TAGS)
+    // AM (TAG_BLACKLIST) -->
+    /** Tags thrown away on this entry; empty on an episode, which has no bin. */
+    blacklistedTags: List<String>,
+    onRestoreTags: (tags: Collection<String>) -> Unit,
+    // <-- AM (TAG_BLACKLIST)
+    // AM (EPISODE_TAGS) -->
+    /**
+     * The episode's fillermark, shown as a chip above the sections, or null when
+     * the popout is about an entry rather than an episode.
+     *
+     * Deliberately not a tag: it has no row in episode_tags, it is not in either
+     * section, it cannot be selected, renamed or deleted, and it does not answer
+     * a tag search. It is in here because this is where a user looks to see what
+     * an episode is marked as, and a fillermark is one of those things.
+     */
+    fillermark: Boolean?,
+    onToggleFillermark: () -> Unit,
+    // <-- AM (EPISODE_TAGS)
     canSearchPlaylist: Boolean,
     onDismissRequest: () -> Unit,
     onSetTagsVisible: (tags: Collection<String>, visible: Boolean) -> Unit,
-    onPinTags: (tags: Collection<String>) -> Unit,
     onUnpinTags: (tags: Collection<String>) -> Unit,
+    // AM (TAG_LOCKS) -->
+    /** Whether the entry's tag row is frozen - see anime_tag_lock.sq. */
+    locked: Boolean,
+    onToggleLock: () -> Unit,
+    // <-- AM (TAG_LOCKS)
     onAddTag: (String) -> Unit,
     onDeleteTags: (tags: Collection<String>) -> Unit,
-    onResetTagVisibility: () -> Unit,
     onTagSearch: (String) -> Unit,
     onTagGlobalSearch: (String) -> Unit,
     onTagEpisodeSearch: (String) -> Unit,
@@ -103,6 +141,13 @@ fun TagVisibilityDialog(
     var tagSelected by remember { mutableStateOf("") }
     var selection by remember { mutableStateOf(emptySet<String>()) }
     var showAddTag by remember { mutableStateOf(false) }
+    // AM (TAG_LOCKS): resetting throws away choices that took a while to make,
+    // and the button sits next to Delete in a bar reached by a long press - one
+    // misfire should not be the end of them.
+    var showConfirmReset by remember { mutableStateOf(false) }
+    // AM (TAG_BLACKLIST): closed every time the sheet opens - the discarded tags
+    // are the ones nobody wants to look at, so nothing is built until asked.
+    var blacklistExpanded by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     val inSelectionMode = selection.isNotEmpty()
     // Offered only once the list is long enough to be worth searching. Below that the
@@ -146,10 +191,25 @@ fun TagVisibilityDialog(
                     selectedCount = selection.size,
                     canShow = selection.any { it !in visibleTags },
                     canHide = selection.any { it in visibleTags },
-                    canPin = selection.any { it.lowercase() !in displayedTags.pinned },
-                    canUnpin = selection.any { it.lowercase() in displayedTags.pinned },
-                    canDelete = selection.any { it.lowercase() in addedTags },
+                    // AM (TAG_LOCKS): only tags that actually carry a stored
+                    // choice have anything to hand back.
+                    canReset = selection.any { it.lowercase() in displayedTags.pinned },
+                    canDelete = selection.any { it.lowercase() in deletableTags } &&
+                        selection.none { it in blacklistedTags },
+                    // AM (TAG_BLACKLIST)
+                    canRestore = selection.any { it in blacklistedTags },
                     onClearSelection = { selection = emptySet() },
+                    // AM (TAG_LOCKS) -->
+                    onSelectAll = {
+                        val touchesVisible = selection.any { it in visibleTags }
+                        val touchesHidden = selection.any { it !in visibleTags }
+                        selection = buildSet {
+                            if (touchesVisible) addAll(displayedTags.visible)
+                            if (touchesHidden) addAll(displayedTags.hidden)
+                        }
+                    },
+                    onReset = { showConfirmReset = true },
+                    // <-- AM (TAG_LOCKS)
                     onShow = {
                         onSetTagsVisible(selection, true)
                         selection = emptySet()
@@ -158,28 +218,62 @@ fun TagVisibilityDialog(
                         onSetTagsVisible(selection, false)
                         selection = emptySet()
                     },
-                    onPin = {
-                        onPinTags(selection)
-                        selection = emptySet()
-                    },
-                    onUnpin = {
-                        onUnpinTags(selection)
-                        selection = emptySet()
-                    },
                     onDelete = {
                         onDeleteTags(selection)
+                        selection = emptySet()
+                    },
+                    // AM (TAG_BLACKLIST)
+                    onRestore = {
+                        onRestoreTags(selection)
                         selection = emptySet()
                     },
                 )
             } else {
                 TagSheetHeader(
-                    isCustomised = displayedTags.isCustomised,
                     query = query.takeIf { searchable },
                     onQueryChange = { query = it },
                     onAddTag = { showAddTag = true },
-                    onReset = onResetTagVisibility,
+                    // AM (TAG_LOCKS) -->
+                    // One toggle for the whole entry, beside the fillermark. Not
+                    // offered on an episode, whose tags are set by hand anyway -
+                    // there is no cap arranging them for a lock to hold against.
+                    locked = locked,
+                    showLock = fillermark == null,
+                    onToggleLock = onToggleLock,
+                    // <-- AM (TAG_LOCKS)
+                    // AM (EPISODE_TAGS)
+                    fillermark = fillermark,
+                    onToggleFillermark = onToggleFillermark,
                 )
             }
+
+            // AM (TAG_LOCKS) -->
+            if (showConfirmReset) {
+                // Empty when this came from the header's unlock, which is about
+                // the whole list rather than a selection.
+                val resetting = selection.ifEmpty { displayedTags.visible + displayedTags.hidden }.toSet()
+                AlertDialog(
+                    onDismissRequest = { showConfirmReset = false },
+                    title = { Text(text = stringResource(AMMR.strings.am_confirm_reset_tags)) },
+                    dismissButton = {
+                        TextButton(onClick = { showConfirmReset = false }) {
+                            Text(text = stringResource(MR.strings.action_cancel))
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showConfirmReset = false
+                                onUnpinTags(resetting)
+                                selection = emptySet()
+                            },
+                        ) {
+                            Text(text = stringResource(MR.strings.action_reset))
+                        }
+                    },
+                )
+            }
+            // <-- AM (TAG_LOCKS)
 
             if (showAddTag) {
                 AddTagDialog(
@@ -255,6 +349,33 @@ fun TagVisibilityDialog(
                     onTagClick = onTagClick,
                     onTagLongClick = onTagLongClick,
                 )
+
+                // AM (TAG_BLACKLIST) -->
+                // Shown as a header and a count until it is opened, and laid out
+                // only then. The whole reason for throwing tags away is that a
+                // merge of a hundred sources can carry a thousand of them, and
+                // building every discarded chip to sit collapsed under a heading
+                // would hand back exactly the cost the bin was for. The header
+                // itself is only there once something is in it.
+                if (blacklistedTags.isNotEmpty()) {
+                    TagBlacklistSection(
+                        count = blacklistedTags.size,
+                        expanded = blacklistExpanded,
+                        onToggle = { blacklistExpanded = !blacklistExpanded },
+                    ) {
+                        TagVisibilitySection(
+                            title = null,
+                            tags = blacklistedTags.filterByQuery(query),
+                            sourceCounts = sourceCounts,
+                            pinned = emptySet(),
+                            selection = selection,
+                            emptyText = "",
+                            onTagClick = onTagClick,
+                            onTagLongClick = onTagLongClick,
+                        )
+                    }
+                }
+                // <-- AM (TAG_BLACKLIST)
             }
         }
     }
@@ -294,11 +415,17 @@ private fun DragHandle() {
  */
 @Composable
 private fun TagSheetHeader(
-    isCustomised: Boolean,
     query: String?,
     onQueryChange: (String) -> Unit,
     onAddTag: () -> Unit,
-    onReset: () -> Unit,
+    // AM (TAG_LOCKS) -->
+    locked: Boolean,
+    showLock: Boolean,
+    onToggleLock: () -> Unit,
+    // <-- AM (TAG_LOCKS)
+    // AM (EPISODE_TAGS): null on an entry, which has no fillermark.
+    fillermark: Boolean?,
+    onToggleFillermark: () -> Unit,
 ) {
     Row(
         modifier = Modifier.padding(
@@ -346,13 +473,45 @@ private fun TagSheetHeader(
                 },
             )
         }
-        // Offered only where there is something to undo, so it never reads as an
-        // action that would change an untouched entry.
-        if (isCustomised) {
-            TextButton(onClick = onReset) {
-                Text(text = stringResource(MR.strings.action_reset))
-            }
+        // AM (TAG_LOCKS) -->
+        // A plain toggle: nothing moves and nothing is written per tag when it
+        // is pressed. All it decides is where a tag with no side of its own goes
+        // - Hidden while locked, into the cap's slots while not.
+        if (showLock) {
+            LabeledIconButton(
+                icon = if (locked) Icons.Outlined.Lock else Icons.Outlined.LockOpen,
+                label = if (locked) {
+                    stringResource(AMMR.strings.am_action_unpin_tag)
+                } else {
+                    stringResource(AMMR.strings.am_action_pin_tag)
+                },
+                onClick = onToggleLock,
+                tint = MaterialTheme.colorScheme.primary.takeIf { locked },
+            )
         }
+        // <-- AM (TAG_LOCKS)
+        // AM (EPISODE_TAGS) -->
+        // Beside the add button rather than in either section, because it is not
+        // a tag: no row, no visible/hidden side, nothing the selection mode can
+        // do to it. An icon that flips, the same way it reads in the quick-edit
+        // strip, so the two places that show a fillermark show it alike.
+        if (fillermark != null) {
+            LabeledIconButton(
+                icon = if (fillermark) {
+                    Icons.AutoMirrored.Outlined.LabelOff
+                } else {
+                    Icons.Outlined.NewLabel
+                },
+                label = if (fillermark) {
+                    stringResource(AYMR.strings.action_remove_fillermark_episode)
+                } else {
+                    stringResource(AYMR.strings.action_fillermark_episode)
+                },
+                onClick = onToggleFillermark,
+                tint = MaterialTheme.colorScheme.primary.takeIf { fillermark },
+            )
+        }
+        // <-- AM (EPISODE_TAGS)
         // Top right, and only out of selection mode - in it the bar's own actions
         // own that corner, and adding a tag has nothing to do with a selection.
         IconButton(onClick = onAddTag) {
@@ -403,31 +562,35 @@ private fun AddTagDialog(
 
 /**
  * Replaces the sheet's header while tags are selected: dismiss, the count, then
- * whichever of the four edits apply to what is selected.
+ * whichever edits apply to what is selected.
  *
- * Moving and pinning are both offered because they are different edits: Show and
- * Hide say where a tag goes, Pin says "keep this one where it is" for a tag the cap
- * is only letting through today, and Unpin hands one back to the cap. A mixed
- * selection can legitimately show all four.
+ * AM (TAG_LOCKS): locking is NOT among them any more. A lock is about the whole
+ * list keeping its shape, not about the tag you happen to have selected, so it
+ * moved to the header where it applies to everything. What takes its place here
+ * is Reset, which clears the stored choices on the selected tags - the one
+ * lock-shaped thing that is genuinely per-tag.
  *
  * The icons carry no tint. Colour here would have to mean something, and these
- * four sit beside each other as peers - the icon says which edit it is, the same
- * way every other action bar in the app works.
+ * sit beside each other as peers - the icon says which edit it is, the same way
+ * every other action bar in the app works.
  */
 @Composable
 private fun TagSelectionBar(
     selectedCount: Int,
     canShow: Boolean,
     canHide: Boolean,
-    canPin: Boolean,
-    canUnpin: Boolean,
+    canReset: Boolean,
     canDelete: Boolean,
+    // AM (TAG_BLACKLIST)
+    canRestore: Boolean,
     onClearSelection: () -> Unit,
+    onSelectAll: () -> Unit,
     onShow: () -> Unit,
     onHide: () -> Unit,
-    onPin: () -> Unit,
-    onUnpin: () -> Unit,
+    onReset: () -> Unit,
     onDelete: () -> Unit,
+    // AM (TAG_BLACKLIST)
+    onRestore: () -> Unit,
 ) {
     Row(
         modifier = Modifier.padding(
@@ -447,24 +610,28 @@ private fun TagSelectionBar(
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.weight(1f),
         )
-        if (canPin) {
-            IconButton(onClick = onPin) {
-                // Filled is pinned and outlined is not, as the sources list already
-                // uses them, so each icon shows the state its action leads to.
+        // AM (TAG_LOCKS) -->
+        // Widens the selection to every tag in the sections it already touches -
+        // so a selection made in Hidden takes all of Hidden, and one spanning
+        // both takes both. Selecting thirty tags by hand to move them was the
+        // only way to do it before.
+        IconButton(onClick = onSelectAll) {
+            Icon(
+                imageVector = Icons.Outlined.SelectAll,
+                contentDescription = stringResource(AMMR.strings.am_action_select_all_tags),
+            )
+        }
+        // Only where something would actually change - a selection of tags that
+        // have no stored choice has nothing to reset.
+        if (canReset) {
+            IconButton(onClick = onReset) {
                 Icon(
-                    imageVector = Icons.Filled.PushPin,
-                    contentDescription = stringResource(AMMR.strings.am_action_pin_tag),
+                    imageVector = Icons.Outlined.LockOpen,
+                    contentDescription = stringResource(MR.strings.action_reset),
                 )
             }
         }
-        if (canUnpin) {
-            IconButton(onClick = onUnpin) {
-                Icon(
-                    imageVector = Icons.Outlined.PushPin,
-                    contentDescription = stringResource(AMMR.strings.am_action_unpin_tag),
-                )
-            }
-        }
+        // <-- AM (TAG_LOCKS)
         if (canShow) {
             IconButton(onClick = onShow) {
                 Icon(
@@ -491,12 +658,26 @@ private fun TagSelectionBar(
                 )
             }
         }
+        // AM (TAG_BLACKLIST) -->
+        // The only thing a blacklisted selection can do, and it replaces the bin
+        // rather than sitting beside it - throwing away what is already thrown
+        // away is not an action.
+        if (canRestore) {
+            IconButton(onClick = onRestore) {
+                Icon(
+                    imageVector = Icons.Outlined.Restore,
+                    contentDescription = stringResource(AMMR.strings.am_action_restore_tag),
+                )
+            }
+        }
+        // <-- AM (TAG_BLACKLIST)
     }
 }
 
 @Composable
 private fun TagVisibilitySection(
-    title: String,
+    // AM (TAG_BLACKLIST): null where the caller draws its own heading.
+    title: String?,
     tags: List<String>,
     sourceCounts: Map<String, Int>,
     pinned: Set<String>,
@@ -509,15 +690,18 @@ private fun TagVisibilitySection(
     // spacing or the FlowRow's verticalArrangement - a chip carries no padding of
     // its own, which is what made the rows sit unevenly.
     Column(verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            modifier = Modifier.padding(
-                start = MaterialTheme.padding.medium,
-                end = MaterialTheme.padding.medium,
-                top = MaterialTheme.padding.medium,
-            ),
-        )
+        // AM (TAG_BLACKLIST)
+        if (title != null) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(
+                    start = MaterialTheme.padding.medium,
+                    end = MaterialTheme.padding.medium,
+                    top = MaterialTheme.padding.medium,
+                ),
+            )
+        }
         if (tags.isEmpty()) {
             Text(
                 text = emptyText,
@@ -547,6 +731,52 @@ private fun TagVisibilitySection(
         }
     }
 }
+
+// AM (TAG_BLACKLIST) -->
+/**
+ * The blacklist's heading: a count and a chevron, with [content] composed only
+ * while it is open.
+ *
+ * Collapsed is the default and the point. A thousand discarded chips laid out
+ * under a closed heading would cost exactly what throwing them away was meant
+ * to save, so nothing below the heading exists until it is asked for.
+ */
+@Composable
+private fun TagBlacklistSection(
+    count: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(
+                    horizontal = MaterialTheme.padding.medium,
+                    vertical = MaterialTheme.padding.small,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(AMMR.strings.am_entry_tags_blacklisted_count, count),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = if (expanded) {
+                    Icons.Outlined.KeyboardArrowUp
+                } else {
+                    Icons.Outlined.KeyboardArrowDown
+                },
+                contentDescription = null,
+            )
+        }
+        if (expanded) content()
+    }
+}
+// <-- AM (TAG_BLACKLIST)
 
 /**
  * A tag and its source count, as a chip that also takes a long press.

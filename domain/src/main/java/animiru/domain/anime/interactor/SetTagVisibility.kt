@@ -8,12 +8,11 @@ import tachiyomi.domain.anime.model.Anime
 /**
  * The four edits the tag popout offers.
  *
- * Moving and pinning are separate because they answer different questions. Moving
- * says where a tag belongs, and pins it there as a side effect - the user has just
- * placed it, so it has to stay placed. Pinning says "keep this one where it
- * already is", which matters for a tag the cap happens to show today and would
- * drop if the cap changed. Unpinning is the only way back to the cap for one tag,
- * as [reset] is for a whole entry.
+ * Moving a tag stores which side it belongs on. Clearing that row is the only way
+ * back to the cap for one tag, as [reset] is for a whole entry.
+ *
+ * AM (TAG_LOCKS): keeping the whole list where it is is no longer one of these -
+ * it is the entry's lock, which writes nothing per tag. See anime_tag_lock.sq.
  */
 @Inject
 class SetTagVisibility(
@@ -34,18 +33,6 @@ class SetTagVisibility(
         val known = known(anime, tags)
         if (known.isEmpty()) return
         tagVisibilityRepository.upsertAll(anime.id, known.associateWith { visible })
-    }
-
-    /**
-     * Pins each tag in [visibilityByTag] where it already is, so the cap moving no
-     * longer moves it. Nothing on screen changes at the moment of pinning, which is
-     * the point: it is the difference between a tag that is shown and one that will
-     * stay shown.
-     */
-    suspend fun pinAll(anime: Anime, visibilityByTag: Map<String, Boolean>) {
-        val known = known(anime, visibilityByTag.keys).toSet()
-        if (known.isEmpty()) return
-        tagVisibilityRepository.upsertAll(anime.id, visibilityByTag.filterKeys { it in known })
     }
 
     /**

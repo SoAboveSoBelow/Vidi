@@ -1,0 +1,16 @@
+-- AM (TAG_LOCKS) -->
+-- anime_tag_lock gains the row it was frozen at. Locking has to remember what
+-- was showing, or there is nothing to hold the row to - see anime_tag_lock.sq.
+--
+-- Recreated rather than altered: the table was introduced two migrations ago
+-- and holds nothing worth keeping, and every earlier numbered file is left
+-- exactly as it shipped.
+DROP TABLE IF EXISTS anime_tag_lock;
+
+CREATE TABLE anime_tag_lock(
+    anime_id INTEGER NOT NULL PRIMARY KEY,
+    visible_tags TEXT NOT NULL,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+-- <-- AM (TAG_LOCKS)

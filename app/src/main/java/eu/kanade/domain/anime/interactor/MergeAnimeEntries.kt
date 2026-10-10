@@ -44,6 +44,9 @@ class MergeAnimeEntries(
     // AM (MERGE_MARK_TRANSFER) -->
     private val transferMergeEpisodeMarks: TransferMergeEpisodeMarks,
     // <-- AM (MERGE_MARK_TRANSFER)
+    // AM (MERGE_EXISTING) -->
+    private val transferMergedEntryState: TransferMergedEntryState,
+    // <-- AM (MERGE_EXISTING)
 ) {
 
     // AM (MERGE_EXISTING) -->
@@ -57,7 +60,9 @@ class MergeAnimeEntries(
      *   each merge contributing its sources in its own priority order and the
      *   groups following the selection order - one list on top of the next.
      *   The selected entries are left alone; a source can belong to any number
-     *   of merges, so nothing has to be taken apart.
+     *   of merges, so nothing has to be taken apart. What those merges kept on
+     *   their own parent rows comes across too, the first one leading - see
+     *   [TransferMergedEntryState].
      *
      * A source reached through more than one selected entry is kept once, at
      * its earliest position.
@@ -78,7 +83,20 @@ class MergeAnimeEntries(
                     .forEach { addToMerge(parent, it) }
                 parent
             }
-            else -> createMerge(expandToSources(orderedSelection))
+            else -> {
+                val sources = expandToSources(orderedSelection)
+                val parent = createMerge(sources)
+                // Everything the selected merges kept on their own parent rows -
+                // order, seasons, exclusions, settings, pins, details - belongs to
+                // the entry that replaces them.
+                transferMergedEntryState.await(parent, mergeParents, sources)
+                // The transfer can change which episodes the merge shows (the
+                // first merge's dedupe mode) and where they sit, so the marks
+                // createMerge moved are settled again against the result.
+                syncMergedEntryInfo.await(parent.id)
+                transferMergeEpisodeMarks.await(parent.id)
+                parent
+            }
         }
     }
 
