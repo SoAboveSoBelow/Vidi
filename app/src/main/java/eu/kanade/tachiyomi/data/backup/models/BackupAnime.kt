@@ -57,9 +57,16 @@ data class BackupAnime(
     @ProtoNumber(205) var customGenre: List<String>? = null,
     // AM (TAG_LIMIT) -->
     @ProtoNumber(210) var customAddedGenre: List<String>? = null,
-    // AM (TAG_BLACKLIST)
-    @ProtoNumber(211) var customBlacklistedGenre: List<String>? = null,
-    @ProtoNumber(211) var tagVisibility: List<BackupTagVisibility> = emptyList(),
+    // 211 held tagVisibility, and 0.19.16 added customBlacklistedGenre on top of
+    // it. Both were written under the one number, so a 0.19.16 backup carries
+    // two incompatible shapes at 211: a bare string and a nested message. A
+    // reader bound to either one decodes the other's bytes as its own and the
+    // length prefix it reads is wrong, which desynchronizes the rest of the
+    // anime record rather than losing a single field.
+    // Burned rather than reassigned to one of them: leaving the number unbound
+    // is what lets those backups restore at all, since an unknown field is
+    // skipped by its wire type and costs only the two tag fields. Both moved to
+    // the 700 band below.
     // <-- AM (TAG_LIMIT)
     // <-- AM (CUSTOM_INFORMATION)
     // Since ProtoNumber 108 was previously used in the past, we cannot reuse it. May cause issues with aniyomi
@@ -94,6 +101,9 @@ data class BackupAnime(
     @ProtoNumber(704) var mergeChildren: List<BackupMergeChild> = emptyList(),
     @ProtoNumber(705) var mergeSettings: BackupMergeSettings? = null,
     @ProtoNumber(706) var mergeExclusions: List<BackupMergeExclusion> = emptyList(),
+    // AM (TAG_LIMIT) / AM (TAG_BLACKLIST): rehoused from 211, which is burned.
+    @ProtoNumber(707) var tagVisibility: List<BackupTagVisibility> = emptyList(),
+    @ProtoNumber(708) var customBlacklistedGenre: List<String>? = null,
     // <-- AM
 ) {
     fun getAnimeImpl(): Anime {

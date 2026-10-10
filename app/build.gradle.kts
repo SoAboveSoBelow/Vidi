@@ -43,8 +43,8 @@ android {
     defaultConfig {
         applicationId = "xyz.Quickdev.Vidi.mi"
 
-        versionCode = 156
-        versionName = "0.19.16"
+        versionCode = 157
+        versionName = "0.19.16.1"
 
         buildConfigField("String", "COMMIT_COUNT", "\"${getLatestCommitCount()}\"")
         buildConfigField("String", "COMMIT_SHA", "\"${getLatestCommitSha()}\"")
