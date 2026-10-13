@@ -65,6 +65,17 @@ interface MergeChildRepository {
      */
     suspend fun getAllChildAnimeIds(): Set<Long>
 
+    /**
+     * Ids of every anime that is a child of a merged entry the user has in
+     * their library. These are in the library for the user's purposes while
+     * carrying favorite=0 themselves, so anything answering "does this already
+     * belong to the library" has to consult this as well as the flag.
+     */
+    suspend fun getLibraryChildAnimeIds(): Set<Long>
+
+    /** Reactive [getLibraryChildAnimeIds]; emits on membership and favorite changes. */
+    fun getLibraryChildAnimeIdsAsFlow(): Flow<Set<Long>>
+
     /** Highest priority currently used in [mergeParentId], or null if empty. */
     suspend fun maxPriority(mergeParentId: Long): Long?
 

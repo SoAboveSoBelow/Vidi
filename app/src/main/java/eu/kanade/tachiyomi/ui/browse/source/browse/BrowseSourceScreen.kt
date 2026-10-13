@@ -249,6 +249,8 @@ data class BrowseSourceScreen(
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     }
                 },
+                // AM (MERGED_SOURCES)
+                mergeChildIds = state.mergeChildIds,
             )
         }
 

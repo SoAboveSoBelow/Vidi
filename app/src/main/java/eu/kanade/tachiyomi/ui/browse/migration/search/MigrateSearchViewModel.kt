@@ -8,6 +8,7 @@ import dev.zacsweers.metro.AssistedInject
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
+import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.extension.ExtensionManager
@@ -27,6 +28,8 @@ class MigrateSearchViewModel(
     getAnime: GetAnime,
     preferences: SourcePreferences,
     private val sourceManager: SourceManager,
+    // AM (MERGED_SOURCES)
+    getLibraryMergeChildIds: GetLibraryMergeChildIds,
 ) : SearchViewModel(
     sourcePreferences = sourcePreferences,
     sourceManager = sourceManager,
@@ -34,6 +37,7 @@ class MigrateSearchViewModel(
     networkToLocalAnime = networkToLocalAnime,
     getAnime = getAnime,
     preferences = preferences,
+    getLibraryMergeChildIds = getLibraryMergeChildIds,
 ) {
     @AssistedFactory
     @ManualViewModelAssistedFactoryKey

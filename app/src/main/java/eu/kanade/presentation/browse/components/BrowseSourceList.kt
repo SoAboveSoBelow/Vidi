@@ -21,6 +21,8 @@ import tachiyomi.presentation.core.util.plus
 @Composable
 fun BrowseSourceList(
     animeList: LazyPagingItems<StateFlow<Anime>>,
+    // AM (MERGED_SOURCES)
+    mergeChildIds: Set<Long>,
     // AY -->
     entries: Int,
     topBarHeight: Int,
@@ -50,6 +52,8 @@ fun BrowseSourceList(
                 val anime by animeList[index]?.collectAsState() ?: return@items
                 BrowseSourceListItem(
                     anime = anime,
+                    // AM (MERGED_SOURCES)
+                    inMerge = anime.id in mergeChildIds,
                     onClick = { onAnimeClick(anime) },
                     onLongClick = { onAnimeLongClick(anime) },
                     // AY -->
@@ -73,6 +77,8 @@ fun BrowseSourceList(
 @Composable
 private fun BrowseSourceListItem(
     anime: Anime,
+    // AM (MERGED_SOURCES)
+    inMerge: Boolean,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = onClick,
     // AY -->
@@ -89,9 +95,18 @@ private fun BrowseSourceListItem(
             url = anime.thumbnailUrl,
             lastModified = anime.coverLastModified,
         ),
-        coverAlpha = if (anime.favorite) CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha else 1f,
+        // AM (MERGED_SOURCES): dimmed for a merge child too - the cover is
+        // how the eye reads "already have this" while scrolling, and the
+        // badge is what says in which sense.
+        coverAlpha = if (anime.favorite || inMerge) {
+            CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha
+        } else {
+            1f
+        },
         badge = {
             InLibraryBadge(enabled = anime.favorite)
+            // AM (MERGED_SOURCES)
+            InMergeBadge(enabled = !anime.favorite && inMerge)
         },
         onLongClick = onLongClick,
         onClick = onClick,

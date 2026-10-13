@@ -46,13 +46,14 @@ class SourceRepositoryImpl(
         }
     }
 
-    override fun getSourcesWithFavoriteCount(): Flow<List<Pair<DomainSource, Long>>> {
-        val sourceIdWithFavoriteCountFlow = database.animesQueries
-            .getSourceIdWithFavoriteCount()
+    // AM (MERGED_SOURCES)
+    override fun getSourcesWithLibraryCount(): Flow<List<Pair<DomainSource, Long>>> {
+        val sourceIdWithLibraryCountFlow = database.animesQueries
+            .getSourceIdWithLibraryCount()
             .subscribeToList()
 
-        return combine(sourceIdWithFavoriteCountFlow, sourceManager.sources) { sourceIdWithFavoriteCount, _ ->
-            sourceIdWithFavoriteCount
+        return combine(sourceIdWithLibraryCountFlow, sourceManager.sources) { sourceIdWithLibraryCount, _ ->
+            sourceIdWithLibraryCount
         }
             .map {
                 it.map { (sourceId, count) ->

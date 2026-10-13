@@ -7,6 +7,7 @@ import dev.zacsweers.metro.AssistedInject
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
+import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.extension.ExtensionManager
@@ -24,6 +25,8 @@ class GlobalSearchViewModel(
     networkToLocalAnime: NetworkToLocalAnime,
     getAnime: GetAnime,
     preferences: SourcePreferences,
+    // AM (MERGED_SOURCES)
+    getLibraryMergeChildIds: GetLibraryMergeChildIds,
 ) : SearchViewModel(
     initialState = State(searchQuery = initialQuery),
     sourcePreferences = sourcePreferences,
@@ -32,6 +35,7 @@ class GlobalSearchViewModel(
     networkToLocalAnime = networkToLocalAnime,
     getAnime = getAnime,
     preferences = preferences,
+    getLibraryMergeChildIds = getLibraryMergeChildIds,
 ) {
 
     @AssistedFactory

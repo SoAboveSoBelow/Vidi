@@ -132,6 +132,42 @@ FROM animes
 WHERE favorite = 1
 AND source = :sourceId;
 
+-- AM (MERGED_SOURCES) -->
+-- The two queries above, widened from "favorited" to "in the library by any
+-- route". A source that only exists inside a merged entry carries favorite = 0
+-- once the originals were removed, which hid it from migration entirely: the
+-- source did not appear in the migrate list and its entries could not be
+-- selected, even though the library still plays them through the merge.
+--
+-- Kept as separate queries rather than widening the favorite ones: everything
+-- else that asks about favorite really does mean the flag.
+getSourceIdWithLibraryCount:
+SELECT
+source,
+count(*)
+FROM animes
+WHERE favorite = 1
+OR _id IN (
+    SELECT MC.anime_id FROM merge_children MC
+    JOIN animes P ON P._id = MC.merge_parent_id
+    WHERE P.favorite = 1
+)
+GROUP BY source;
+
+getLibraryEntriesBySourceId:
+SELECT *
+FROM animes
+WHERE source = :sourceId
+AND (
+    favorite = 1
+    OR _id IN (
+        SELECT MC.anime_id FROM merge_children MC
+        JOIN animes P ON P._id = MC.merge_parent_id
+        WHERE P.favorite = 1
+    )
+);
+-- <-- AM (MERGED_SOURCES)
+
 getDuplicateLibraryAnime:
 WITH
 track_dupes AS (
@@ -148,7 +184,24 @@ duplicates AS (
     FROM animes A
     LEFT JOIN track_dupes D
     ON D.anime_id = _id
-    WHERE favorite = 1
+    -- AM (MERGED_SOURCES) -->
+    -- A source held only through a merged entry is in the library as far as the
+    -- user is concerned, so adding the same title again is just as much a
+    -- duplicate as re-adding a favorited one.
+    --
+    -- The merged entry itself is excluded: it is not an entry from any source,
+    -- so it can never be the thing being re-added, and listing it alongside the
+    -- source it is made of would report the same title twice.
+    WHERE source != -1
+    AND (
+        favorite = 1
+        OR _id IN (
+            SELECT MC.anime_id FROM merge_children MC
+            JOIN animes P ON P._id = MC.merge_parent_id
+            WHERE P.favorite = 1
+        )
+    )
+    -- <-- AM (MERGED_SOURCES)
     AND _id != :id
     AND (lower(title) LIKE '%' || lower(:title) || '%' OR D.anime_id IS NOT NULL)
 ),

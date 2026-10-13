@@ -64,6 +64,7 @@ import eu.kanade.tachiyomi.ui.anime.notes.AnimeNotesScreen
 import eu.kanade.tachiyomi.ui.anime.season.EntrySeasonsScreen
 import eu.kanade.tachiyomi.ui.anime.track.TrackInfoDialogHomeScreen
 import eu.kanade.tachiyomi.ui.browse.extension.details.SourcePreferencesScreen
+import eu.kanade.tachiyomi.ui.browse.migration.merge.MigrateMergeScreen
 import eu.kanade.tachiyomi.ui.browse.migration.season.MigrateSeasonSelectScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceScreen
 import eu.kanade.tachiyomi.ui.browse.source.globalsearch.GlobalSearchScreen
@@ -558,7 +559,14 @@ class AnimeScreen(
                 successState.anime.favorite
             },
             onMigrateClicked = {
-                navigator.push(MigrationConfigScreen(successState.anime.id))
+                // AM (MERGED_SOURCES): a merged entry has no catalogue of its
+                // own to search, so migrating one means migrating the sources
+                // inside it - picked first, then handed to the ordinary flow.
+                if (successState.anime.source == MergedSource.ID) {
+                    navigator.push(MigrateMergeScreen(successState.anime.id))
+                } else {
+                    navigator.push(MigrationConfigScreen(successState.anime.id))
+                }
             }.takeIf { successState.anime.favorite },
             // AY -->
             onSettingsClicked = {

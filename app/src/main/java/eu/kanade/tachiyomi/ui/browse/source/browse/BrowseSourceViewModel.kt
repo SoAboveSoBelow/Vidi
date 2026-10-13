@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
@@ -69,6 +70,8 @@ class BrowseSourceViewModel(
     private val getAnime: GetAnime,
     private val updateAnime: UpdateAnime,
     private val addTracks: AddTracks,
+    // AM (MERGED_SOURCES)
+    private val getLibraryMergeChildIds: GetLibraryMergeChildIds,
     getIncognitoState: GetIncognitoState,
 ) : ViewModel() {
 
@@ -106,6 +109,18 @@ class BrowseSourceViewModel(
         if (!getIncognitoState.await(source.id)) {
             sourcePreferences.lastUsedSource.set(source.id)
         }
+
+        // AM (MERGED_SOURCES) -->
+        // Results that are children of a merged entry in the library carry
+        // favorite=0, so the rows themselves cannot say they are already held.
+        // Kept as one set on the state rather than per row: the membership
+        // table is small and this is a single query instead of one per result.
+        viewModelScope.launch {
+            getLibraryMergeChildIds.subscribe().collect { ids ->
+                state.update { it.copy(mergeChildIds = ids) }
+            }
+        }
+        // <-- AM (MERGED_SOURCES)
     }
 
     /**
@@ -367,6 +382,8 @@ class BrowseSourceViewModel(
         val filters: AnimeFilterList = AnimeFilterList(),
         val toolbarQuery: String? = null,
         val dialog: Dialog? = null,
+        // AM (MERGED_SOURCES)
+        val mergeChildIds: Set<Long> = emptySet(),
     ) {
         val isUserQuery get() = listing is Listing.Search && !listing.query.isNullOrEmpty()
     }

@@ -8,7 +8,7 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.binding
 import dev.zacsweers.metrox.viewmodel.ViewModelKey
-import eu.kanade.domain.source.interactor.GetSourcesWithFavoriteCount
+import eu.kanade.domain.source.interactor.GetSourcesWithLibraryCount
 import eu.kanade.domain.source.interactor.SetMigrateSorting
 import eu.kanade.domain.source.service.SourcePreferences
 import kotlinx.coroutines.Dispatchers
@@ -32,14 +32,14 @@ import kotlin.time.Duration.Companion.seconds
 @ContributesIntoMap(AppScope::class, binding = binding<ViewModel>())
 class MigrateSourceViewModel(
     private val preferences: SourcePreferences,
-    private val getSourcesWithFavoriteCount: GetSourcesWithFavoriteCount,
+    private val getSourcesWithLibraryCount: GetSourcesWithLibraryCount,
 ) : ViewModel() {
 
     private val _channel = Channel<Event>(Int.MAX_VALUE)
     val channel = _channel.receiveAsFlow()
 
     val state: StateFlow<State> = combine(
-        getSourcesWithFavoriteCount.subscribe()
+        getSourcesWithLibraryCount.subscribe()
             .catch {
                 logcat(LogPriority.ERROR, it)
                 _channel.send(Event.FailedFetchingSourcesWithCount)

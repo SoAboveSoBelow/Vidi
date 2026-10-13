@@ -52,6 +52,11 @@ import tachiyomi.presentation.core.i18n.pluralStringResource
 import tachiyomi.presentation.core.util.collectAsState
 import kotlin.time.Duration.Companion.milliseconds
 
+// AM (DOUBLE_TAP_ZONE) -->
+/** The side a double-tap seek runs on. The middle fifth is neither, hence null. */
+private enum class SeekZone { Left, Right }
+// <-- AM (DOUBLE_TAP_ZONE)
+
 @Composable
 fun GestureHandler(
     modifier: Modifier = Modifier,
@@ -86,6 +91,16 @@ fun GestureHandler(
     var isDoubleTapSeeking by remember { mutableStateOf(false) }
     var isLongPressing by remember { mutableStateOf(false) }
 
+    // AM (DOUBLE_TAP_ZONE) -->
+    // The zone the running double-tap seek was started in, or null when no seek
+    // is running. Without it, the repeat-tap branch in onPress dispatches every
+    // tap by position across all three zones, so a seek started on the right
+    // turns the whole screen live: a tap in the middle fires the centre gesture
+    // (PlayPause by default) and a tap on the left seeks back, undoing the skip.
+    // Only the zone that started the seek continues it.
+    var doubleTapSeekZone by remember { mutableStateOf<SeekZone?>(null) }
+    // <-- AM (DOUBLE_TAP_ZONE)
+
     LaunchedEffect(playbackData.doubleTapSeekAmount) {
         delay(800.milliseconds)
         isDoubleTapSeeking = true
@@ -100,6 +115,14 @@ fun GestureHandler(
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeGestures)
             .pointerInput(Unit) {
+                // AM (DOUBLE_TAP_ZONE): the zone split, in one place instead of
+                // repeated as bare x comparisons in each handler.
+                fun zoneOf(x: Float): SeekZone? = when {
+                    x > size.width * 3 / 5 -> SeekZone.Right
+                    x < size.width * 2 / 5 -> SeekZone.Left
+                    else -> null
+                }
+
                 detectTapGestures(
                     onTap = {
                         if (isDoubleTapSeeking) return@detectTapGestures
@@ -107,16 +130,24 @@ fun GestureHandler(
                     },
                     onDoubleTap = {
                         if (uiData.isControlsLocked || isDoubleTapSeeking) return@detectTapGestures
-                        if (it.x > size.width * 3 / 5) {
-                            if (!playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
-                            viewModel.handleRightDoubleTap()
-                            isDoubleTapSeeking = true
-                        } else if (it.x < size.width * 2 / 5) {
-                            if (playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
-                            viewModel.handleLeftDoubleTap()
-                            isDoubleTapSeeking = true
-                        } else {
-                            viewModel.handleCenterDoubleTap()
+                        when (zoneOf(it.x)) {
+                            SeekZone.Right -> {
+                                if (!playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
+                                viewModel.handleRightDoubleTap()
+                                // AM (DOUBLE_TAP_ZONE)
+                                doubleTapSeekZone = SeekZone.Right
+                                isDoubleTapSeeking = true
+                            }
+                            SeekZone.Left -> {
+                                if (playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
+                                viewModel.handleLeftDoubleTap()
+                                // AM (DOUBLE_TAP_ZONE)
+                                doubleTapSeekZone = SeekZone.Left
+                                isDoubleTapSeeking = true
+                            }
+                            // The centre gesture is a one-shot: it starts no seek,
+                            // so it claims no zone either.
+                            null -> viewModel.handleCenterDoubleTap()
                         }
                     },
                     onPress = {
@@ -126,18 +157,30 @@ fun GestureHandler(
                         val press = PressInteraction.Press(
                             it.copy(x = if (it.x > size.width * 3 / 5) it.x - size.width * 0.6f else it.x),
                         )
-                        if (!uiData.isControlsLocked && isDoubleTapSeeking && playbackData.doubleTapSeekAmount != 0) {
-                            if (it.x > size.width * 3 / 5) {
-                                if (!playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
-                                viewModel.handleRightDoubleTap()
-                            } else if (it.x < size.width * 2 / 5) {
-                                if (playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
-                                viewModel.handleLeftDoubleTap()
-                            } else {
-                                viewModel.handleCenterDoubleTap()
+                        // AM (DOUBLE_TAP_ZONE): a repeat tap only continues the seek
+                        // when it lands in the zone that started it. Anything else
+                        // ends the seek mode and falls through to onTap, which then
+                        // toggles the controls as an ordinary tap would.
+                        val zone = zoneOf(it.x)
+                        if (!uiData.isControlsLocked &&
+                            isDoubleTapSeeking &&
+                            playbackData.doubleTapSeekAmount != 0 &&
+                            zone != null &&
+                            zone == doubleTapSeekZone
+                        ) {
+                            when (zone) {
+                                SeekZone.Right -> {
+                                    if (!playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
+                                    viewModel.handleRightDoubleTap()
+                                }
+                                SeekZone.Left -> {
+                                    if (playbackData.isSeekingForwards) viewModel.updateSeekAmount(0)
+                                    viewModel.handleLeftDoubleTap()
+                                }
                             }
                         } else {
                             isDoubleTapSeeking = false
+                            doubleTapSeekZone = null
                         }
                         interactionSource.emit(press)
                         tryAwaitRelease()

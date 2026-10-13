@@ -58,6 +58,10 @@
     <string name="am.source_removed_from_merge">Last episode from %1$s — source removed from merge</string>
     <string name="am.merge_removed_episodes">Removed episodes</string>
     <string name="am.action_restore_to_merge">Restore</string>
+    <string name="am.migrate_merge_title">Migrate sources</string>
+    <string name="am.migrate_merge_filter_extension">Extension</string>
+    <string name="am.migrate_merge_filter_all">All extensions</string>
+    <string name="am.migrate_merge_empty">This entry has no sources to migrate.</string>
     <string name="am.entry_seasons_title">Seasons</string>
     <string name="am.entry_season_create">Add season</string>
     <string name="am.entry_season_create_number">Add Season %d</string>

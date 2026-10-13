@@ -27,6 +27,8 @@ import tachiyomi.presentation.core.i18n.stringResource
 fun GlobalSearchCardRow(
     titles: List<Anime>,
     getAnime: @Composable (Anime) -> State<Anime>,
+    // AM (MERGED_SOURCES)
+    mergeChildIds: Set<Long>,
     onClick: (Anime) -> Unit,
     onLongClick: (Anime) -> Unit,
 ) {
@@ -45,6 +47,8 @@ fun GlobalSearchCardRow(
                 title = title.title,
                 cover = title.asAnimeCover(),
                 isFavorite = title.favorite,
+                // AM (MERGED_SOURCES)
+                inMerge = title.id in mergeChildIds,
                 onClick = { onClick(title) },
                 onLongClick = { onLongClick(title) },
             )
@@ -57,6 +61,8 @@ private fun AnimeItem(
     title: String,
     cover: AnimeCover,
     isFavorite: Boolean,
+    // AM (MERGED_SOURCES)
+    inMerge: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -67,8 +73,15 @@ private fun AnimeItem(
             coverData = cover,
             coverBadgeStart = {
                 InLibraryBadge(enabled = isFavorite)
+                // AM (MERGED_SOURCES)
+                InMergeBadge(enabled = !isFavorite && inMerge)
             },
-            coverAlpha = if (isFavorite) CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha else 1f,
+            // AM (MERGED_SOURCES)
+            coverAlpha = if (isFavorite || inMerge) {
+                CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha
+            } else {
+                1f
+            },
             onClick = onClick,
             onLongClick = onLongClick,
         )

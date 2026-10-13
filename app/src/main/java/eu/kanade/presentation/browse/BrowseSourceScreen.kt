@@ -52,6 +52,10 @@ fun BrowseSourceContent(
     onLocalSourceHelpClick: () -> Unit,
     onAnimeClick: (Anime) -> Unit,
     onAnimeLongClick: (Anime) -> Unit,
+    // AM (MERGED_SOURCES): ids of results that already belong to a merged
+    // entry in the library. Defaulted so the screens that pick a migration
+    // target, where merge membership says nothing useful, need not supply it.
+    mergeChildIds: Set<Long> = emptySet(),
 ) {
     val context = LocalContext.current
 
@@ -124,6 +128,8 @@ fun BrowseSourceContent(
         LibraryDisplayMode.ComfortableGrid -> {
             BrowseSourceComfortableGrid(
                 animeList = animeList,
+                // AM (MERGED_SOURCES)
+                mergeChildIds = mergeChildIds,
                 columns = columns,
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
@@ -133,6 +139,8 @@ fun BrowseSourceContent(
         LibraryDisplayMode.List -> {
             BrowseSourceList(
                 animeList = animeList,
+                // AM (MERGED_SOURCES)
+                mergeChildIds = mergeChildIds,
                 // AY -->
                 entries = entries,
                 topBarHeight = topBarHeight,
@@ -145,6 +153,8 @@ fun BrowseSourceContent(
         LibraryDisplayMode.CompactGrid, LibraryDisplayMode.CoverOnlyGrid -> {
             BrowseSourceCompactGrid(
                 animeList = animeList,
+                // AM (MERGED_SOURCES)
+                mergeChildIds = mergeChildIds,
                 columns = columns,
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,

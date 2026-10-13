@@ -275,7 +275,21 @@ private fun AppDialogScrimAndSurface(
                         androidx.compose.material3.ProvideTextStyle(
                             MaterialTheme.typography.bodyMedium,
                         ) {
-                            Box(Modifier.fillMaxWidth()) { text() }
+                            // The text slot takes what is left after the title and
+                            // the button row, and no more: without the weight the
+                            // Column wraps the content's full height and a tall
+                            // dialog (merge settings, whose list is a wrap_content
+                            // RecyclerView) pushes the buttons off the screen.
+                            // fill = false so short dialogs still wrap. This is what
+                            // Material3's own AlertDialogContent does, and the
+                            // bounded height is also what lets a verticalScroll
+                            // inside the slot actually scroll instead of measuring
+                            // itself at full content height.
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .weight(weight = 1f, fill = false),
+                            ) { text() }
                         }
                     }
                     Spacer(Modifier.height(24.dp))

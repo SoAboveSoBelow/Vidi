@@ -28,7 +28,7 @@ import kotlinx.coroutines.flow.update
 import logcat.LogPriority
 import mihon.core.common.utils.mutate
 import tachiyomi.core.common.util.system.logcat
-import tachiyomi.domain.anime.interactor.GetFavorites
+import tachiyomi.domain.anime.interactor.GetLibraryEntriesBySourceId
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.source.service.SourceManager
 import kotlin.time.Duration.Companion.seconds
@@ -37,7 +37,8 @@ import kotlin.time.Duration.Companion.seconds
 class MigrateAnimeViewModel(
     @Assisted private val sourceId: Long,
     private val sourceManager: SourceManager,
-    private val getFavorites: GetFavorites,
+    // AM (MERGED_SOURCES)
+    private val getLibraryEntriesBySourceId: GetLibraryEntriesBySourceId,
 ) : ViewModel() {
 
     @AssistedFactory
@@ -54,7 +55,7 @@ class MigrateAnimeViewModel(
 
     private val selection = MutableStateFlow(emptySet<Long>())
 
-    private val favorites = getFavorites.subscribe(sourceId)
+    private val favorites = getLibraryEntriesBySourceId.subscribe(sourceId)
         .catch {
             logcat(LogPriority.ERROR, it)
             _events.send(MigrationAnimeEvent.FailedFetchingFavorites)
@@ -84,6 +85,22 @@ class MigrateAnimeViewModel(
     fun clearSelection() {
         selection.update { emptySet() }
     }
+
+    // AM (MERGED_SOURCES) -->
+    // The same two actions the library offers while selecting, in the same
+    // place - this screen is the other list you pick library entries from, and
+    // on a source with a hundred entries picking them one at a time is the
+    // only thing standing between the user and a bulk migration.
+    fun selectAll() {
+        val all = state.value.titles.map { it.id }
+        selection.update { all.toSet() }
+    }
+
+    fun invertSelection() {
+        val all = state.value.titles.map { it.id }
+        selection.update { current -> all.filterNot { it in current }.toSet() }
+    }
+    // <-- AM (MERGED_SOURCES)
 
     @Immutable
     data class State(

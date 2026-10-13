@@ -51,6 +51,8 @@ fun GlobalSearchScreen(
     ) { paddingValues ->
         GlobalSearchContent(
             items = state.filteredItems,
+            // AM (MERGED_SOURCES)
+            mergeChildIds = state.mergeChildIds,
             contentPadding = paddingValues,
             getAnime = getAnime,
             onClickSource = onClickSource,
@@ -64,6 +66,8 @@ fun GlobalSearchScreen(
 internal fun GlobalSearchContent(
     items: Map<AnimeSource, SearchItemResult>,
     contentPadding: PaddingValues,
+    // AM (MERGED_SOURCES)
+    mergeChildIds: Set<Long> = emptySet(),
     getAnime: @Composable (Anime) -> State<Anime>,
     onClickSource: (AnimeSource) -> Unit,
     onClickItem: (Anime) -> Unit,
@@ -91,6 +95,7 @@ internal fun GlobalSearchContent(
                             GlobalSearchCardRow(
                                 titles = result.result,
                                 getAnime = getAnime,
+                                mergeChildIds = mergeChildIds,
                                 onClick = onClickItem,
                                 onLongClick = onLongClickItem,
                             )
