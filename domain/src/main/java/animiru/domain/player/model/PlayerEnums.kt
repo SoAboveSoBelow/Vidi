@@ -53,8 +53,45 @@ enum class PlayerOrientation(val titleRes: StringResource) {
 enum class VideoAspect(val titleRes: StringResource) {
     Crop(AYMR.strings.video_crop_screen),
     Fit(AYMR.strings.video_fit_screen),
+
+    // AM (ASPECT_OVERRIDE_PICKER) -->
+    // Retired from the UI, kept in the enum so stored preferences still parse.
+    // Stretching to the screen was only ever a repair for content whose display
+    // aspect is tagged wrong, and it repaired it by coincidence - the panel's shape
+    // has nothing to do with the file's. [VideoAspectOverride] names the real ratio
+    // instead, which fixes such a file on any display. Anyone who had this set is
+    // moved to Fit plus the Screen override, which is the same picture.
+    @Deprecated("Use VideoAspectOverride.Screen", ReplaceWith("VideoAspect.Fit"))
     Stretch(AYMR.strings.video_stretch_screen),
+    // <-- AM (ASPECT_OVERRIDE_PICKER)
 }
+
+// AM (ASPECT_OVERRIDE_PICKER) -->
+/**
+ * A display aspect ratio to impose on the video, for files whose own metadata is
+ * wrong - an anamorphic master tagged square, a 16:9 picture stored in a 4:3 frame.
+ *
+ * Deliberately not automatic: nothing in the container distinguishes genuinely 4:3
+ * content from a squeezed 16:9 master, so guessing would mangle correctly tagged
+ * video. Only the viewer can see that the faces are the wrong shape.
+ *
+ * [ratio] is what mpv's video-aspect-override takes; null means let the file decide,
+ * and [useScreen] defers to the display's own ratio, which is what the old Stretch
+ * mode did.
+ */
+enum class VideoAspectOverride(
+    val titleRes: StringResource,
+    val ratio: Double? = null,
+    val useScreen: Boolean = false,
+) {
+    Auto(AYMR.strings.video_aspect_auto),
+    Ratio4x3(AYMR.strings.video_aspect_4_3, 4.0 / 3.0),
+    Ratio16x9(AYMR.strings.video_aspect_16_9, 16.0 / 9.0),
+    Ratio185(AYMR.strings.video_aspect_1_85, 1.85),
+    Ratio239(AYMR.strings.video_aspect_2_39, 2.39),
+    Screen(AYMR.strings.video_stretch_screen, useScreen = true),
+}
+// <-- AM (ASPECT_OVERRIDE_PICKER)
 
 /**
  * Action performed by a button, like double tap or media controls

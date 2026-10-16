@@ -30,6 +30,9 @@ import eu.kanade.tachiyomi.ui.player.Sheets
 import eu.kanade.tachiyomi.ui.player.components.ChaptersSheet
 import eu.kanade.tachiyomi.ui.player.components.HosterState
 import eu.kanade.tachiyomi.ui.player.components.QualitySheet
+import animiru.domain.player.model.VideoAspect
+import animiru.domain.player.model.VideoAspectOverride
+import eu.kanade.tachiyomi.ui.player.controls.components.sheets.AspectSheet
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.AudioTracksSheet
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.MoreSheet
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.PlaybackSpeedSheet
@@ -61,6 +64,14 @@ fun PlayerSheets(
     onClickHoster: (Int) -> Unit,
     onClickVideo: (Int, Int) -> Unit,
     displayHosters: Pair<Boolean, Boolean>,
+
+    // AM (ASPECT_OVERRIDE_PICKER) -->
+    // aspect sheet
+    selectedAspect: VideoAspect,
+    onSelectAspect: (VideoAspect) -> Unit,
+    selectedAspectOverride: VideoAspectOverride,
+    onSelectAspectOverride: (VideoAspectOverride) -> Unit,
+    // <-- AM (ASPECT_OVERRIDE_PICKER)
 
     // chapters sheet
     chapter: Segment?,
@@ -156,6 +167,18 @@ fun PlayerSheets(
                 dismissSheet = dismissSheet,
             )
         }
+
+        // AM (ASPECT_OVERRIDE_PICKER) -->
+        Sheets.Aspect -> {
+            AspectSheet(
+                selectedAspect = selectedAspect,
+                onSelectAspect = onSelectAspect,
+                selectedOverride = selectedAspectOverride,
+                onSelectOverride = onSelectAspectOverride,
+                onDismissRequest = onDismissRequest,
+            )
+        }
+        // <-- AM (ASPECT_OVERRIDE_PICKER)
 
         Sheets.Chapters -> {
             if (chapter == null) return

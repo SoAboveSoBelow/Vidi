@@ -2,6 +2,7 @@ package animiru.domain.player.service
 
 import animiru.domain.player.model.PlayerOrientation
 import animiru.domain.player.model.VideoAspect
+import animiru.domain.player.model.VideoAspectOverride
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -179,6 +180,13 @@ class PlayerPreferences(
     )
     val invertDuration: Preference<Boolean> = preferenceStore.getBoolean("invert_duration", false)
     val aspectState: Preference<VideoAspect> = preferenceStore.getEnum("pref_player_aspect_state", VideoAspect.Fit)
+
+    // AM (ASPECT_OVERRIDE_PICKER) -->
+    val aspectOverride: Preference<VideoAspectOverride> = preferenceStore.getEnum(
+        "pref_player_aspect_override",
+        VideoAspectOverride.Auto,
+    )
+    // <-- AM (ASPECT_OVERRIDE_PICKER)
 
     // Old
 

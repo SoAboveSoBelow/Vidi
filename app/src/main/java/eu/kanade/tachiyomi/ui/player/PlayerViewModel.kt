@@ -12,6 +12,9 @@ import android.view.WindowManager
 import androidx.compose.runtime.Stable
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.net.toUri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -26,6 +29,7 @@ import animiru.domain.player.model.PlayerOrientation
 import animiru.domain.player.model.SetAsArt
 import animiru.domain.player.model.SingleActionGesture
 import animiru.domain.player.model.VideoAspect
+import animiru.domain.player.model.VideoAspectOverride
 import animiru.domain.player.service.AudioPreferences
 import animiru.domain.player.service.DecoderPreferences
 import animiru.domain.player.service.GesturePreferences
@@ -208,8 +212,10 @@ import java.io.InputStream
 import java.util.Date
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
 
 @AssistedInject
@@ -3647,6 +3653,10 @@ class PlayerViewModel(
         currentFileReachedEof = false
         // <-- AM (EOF_REPLAY_NO_RELOAD)
 
+        // AM (PINCH_ZOOM): the zoom is session state, not per-file - one left on at
+        // the end of an episode would otherwise greet the viewer on the next.
+        resetVideoZoom()
+
         setMpvOptions()
         setMpvMediaTitle()
         setupChapters()
@@ -5048,36 +5058,300 @@ class PlayerViewModel(
         updateUiData { it.copy(isVolumeSliderShown = show) }
     }
 
+    // AM (ASPECT_OVERRIDE_PICKER): two states, not three - Stretch is no longer a
+    // viewing mode. Still here because gestures and custom buttons bind to it.
     private fun cycleAspectRatio() {
-        val newAspectRatio = when (playerPreferences.aspectState.get()) {
-            VideoAspect.Fit -> VideoAspect.Stretch
-            VideoAspect.Stretch -> VideoAspect.Crop
-            VideoAspect.Crop -> VideoAspect.Fit
+        val newAspectRatio = if (playerPreferences.aspectState.get() == VideoAspect.Crop) {
+            VideoAspect.Fit
+        } else {
+            VideoAspect.Crop
         }
 
         setAspectRatio(newAspectRatio)
     }
 
-    fun setAspectRatio(aspect: VideoAspect, showConfirmation: Boolean = true) {
-        val (pan, ratio) = when (aspect) {
-            VideoAspect.Crop -> {
-                1.0 to -1.0
-            }
-            VideoAspect.Fit -> {
-                0.0 to -1.0
-            }
-            VideoAspect.Stretch -> {
-                0.0 to screenAspectRatio
+    // AM (PINCH_ZOOM) -->
+    /**
+     * Zoom and pan are applied by the player's own graphicsLayer, NOT by mpv's
+     * video-zoom/video-pan.
+     *
+     * mpv's window here is not the screen. FIXED_SURFACE_SIZE pins the surface to
+     * the VIDEO's shape and scales that box down to fit, so the black bars are empty
+     * space around the surface and mpv has no margin to letterbox into. video-zoom
+     * therefore magnifies and crops strictly inside the video-shaped box, leaving
+     * the bars exactly where they were however far it is pushed. Scaling the surface
+     * box instead covers them, because that box IS the video.
+     *
+     * The layer scales a buffer mpv has already rendered, so past the fill factor it
+     * magnifies screen-resolution pixels rather than resolving new detail from the
+     * source. Handing that magnification to mpv instead was tried and removed: mpv
+     * and the layer have no shared clock, so every transition between them showed a
+     * frame of disagreement, and the pan had to drag the whole mechanism along
+     * because at fill the surface has no room left to translate. One layer, one
+     * source of truth, nothing to synchronise.
+     */
+    private val _videoZoom = MutableStateFlow(1f)
+    val videoZoom = _videoZoom.asStateFlow()
+
+    /** Pan in window-relative units: 0.5f is half the window across. */
+    private val _videoPan = MutableStateFlow(0f to 0f)
+    val videoPan = _videoPan.asStateFlow()
+
+    /**
+     * What the player's graphicsLayer applies, as SNAPSHOT state rather than a
+     * StateFlow.
+     *
+     * The player reads these inside its graphicsLayer lambda, where Compose defers
+     * the read to the draw phase: writing them invalidates the layer and nothing
+     * recomposes. Through a StateFlow collected in composition they were read during
+     * composition instead, so every pointer event - and those arrive faster than a
+     * 120Hz panel refreshes - recomposed the whole surface subtree.
+     */
+    var layerZoom by mutableFloatStateOf(1f)
+        private set
+    var layerPanX by mutableFloatStateOf(0f)
+        private set
+    var layerPanY by mutableFloatStateOf(0f)
+        private set
+
+    fun setLayerTransform(zoom: Float, panX: Float, panY: Float) {
+        layerZoom = zoom
+        layerPanX = panX
+        layerPanY = panY
+    }
+
+    /** Where a settle animation should land the layer, and a token to start it. */
+    var settleTarget: Triple<Float, Float, Float>? = null
+        private set
+    private val _settleToken = MutableStateFlow(0L)
+    val settleToken = _settleToken.asStateFlow()
+
+    /**
+     * How much of the window the fitted video covers on each axis, pushed in by the
+     * player once it has laid the surface out. One axis is always 1.0 (the fit is
+     * limited by it); the other is smaller, and that shortfall is the bars.
+     */
+    private var coverageX = 1f
+    private var coverageY = 1f
+
+    /** Indicator state last surfaced, to avoid an emission per frame. */
+    private var shownZoomStep = -1
+    private var lastIndicatorAtMs = 0L
+
+    /** The detent a release would land on right now, or null. */
+    private val _pendingZoomDetent = MutableStateFlow<Float?>(null)
+    val pendingZoomDetent = _pendingZoomDetent.asStateFlow()
+
+    fun setVideoCoverage(coverX: Float, coverY: Float) {
+        if (!coverX.isFinite() || !coverY.isFinite() || coverX <= 0f || coverY <= 0f) return
+        if (coverX == coverageX && coverY == coverageY) return
+        coverageX = coverX
+        coverageY = coverY
+        clampPan()
+        publishTransform()
+    }
+
+    /**
+     * The zoom at which the video covers the window on both axes - the point the
+     * black bars disappear. Equals 1x when the video already matches the window's
+     * shape, in which case it is simply not a separate detent.
+     */
+    private fun fillZoom(): Float =
+        (1f / minOf(coverageX, coverageY)).coerceIn(MIN_VIDEO_ZOOM, MAX_VIDEO_ZOOM)
+
+    /**
+     * Largest pan that keeps the zoomed video covering the window, per axis, in the
+     * same window-relative units as [_videoPan].
+     */
+    private fun panLimits(): Pair<Float, Float> {
+        val zoom = _videoZoom.value
+        val maxX = ((coverageX * zoom - 1f) / 2f).coerceAtLeast(0f)
+        val maxY = ((coverageY * zoom - 1f) / 2f).coerceAtLeast(0f)
+        return maxX to maxY
+    }
+
+    private fun clampPan() {
+        val (maxX, maxY) = panLimits()
+        val (panX, panY) = _videoPan.value
+        val clamped = panX.coerceIn(-maxX, maxX) to panY.coerceIn(-maxY, maxY)
+        if (clamped != _videoPan.value) _videoPan.value = clamped
+    }
+
+    /**
+     * The detent [zoom] would be pulled to if the fingers came up now, or null.
+     *
+     * Nothing is snapped while the gesture is live - the pinch stays free the whole
+     * way, and the zone only decides where a release lands. 1x wins where the two
+     * zones overlap.
+     */
+    private fun detentFor(zoom: Float): Float? {
+        if (abs(zoom - MIN_VIDEO_ZOOM) / MIN_VIDEO_ZOOM < ZOOM_DETENT_ZONE) return MIN_VIDEO_ZOOM
+        val fill = fillZoom()
+        if (fill > MIN_VIDEO_ZOOM && abs(zoom - fill) / fill < ZOOM_DETENT_ZONE) return fill
+        return null
+    }
+
+    private fun publishTransform() {
+        val (panX, panY) = _videoPan.value
+        setLayerTransform(_videoZoom.value, panX, panY)
+    }
+
+    /**
+     * One pointer event's worth of pinch: scale and translation together, so a frame
+     * that did both settles the state once.
+     *
+     * Pan deltas arrive as fractions of the window rather than px - the gesture
+     * layer measures in its own coordinate space and the surface is a different
+     * size, so px would not survive the trip.
+     */
+    fun transformVideoBy(scaleFactor: Float = 1f, deltaXFraction: Float = 0f, deltaYFraction: Float = 0f) {
+        val previous = _videoZoom.value
+
+        if (scaleFactor.isFinite() && scaleFactor > 0f && scaleFactor != 1f) {
+            val next = (previous * scaleFactor).coerceIn(MIN_VIDEO_ZOOM, MAX_VIDEO_ZOOM)
+            if (next != previous) {
+                _videoZoom.value = next
+                if (next == MIN_VIDEO_ZOOM) _videoPan.value = 0f to 0f
             }
         }
 
+        val zoom = _videoZoom.value
+        if (zoom > MIN_VIDEO_ZOOM && (deltaXFraction != 0f || deltaYFraction != 0f)) {
+            val (panX, panY) = _videoPan.value
+            _videoPan.value = Pair(
+                panX + deltaXFraction * PAN_SPEED,
+                panY + deltaYFraction * PAN_SPEED,
+            )
+        }
+        clampPan()
+        publishTransform()
+
+        _pendingZoomDetent.value = detentFor(zoom)
+        showZoomIndicator(zoom)
+    }
+
+    private fun showZoomIndicator(zoom: Float, force: Boolean = false) {
+        // Quantised AND time-throttled. Each emission writes uiData, which recomposes
+        // everything reading it and restarts the 2s dismissal coroutine in the
+        // controls; a fast pinch crosses tenths far quicker than anyone can read them.
+        val step = (zoom * ZOOM_INDICATOR_STEP).roundToInt()
+        if (step == shownZoomStep) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastIndicatorAtMs < ZOOM_INDICATOR_MIN_INTERVAL_MS) return
+        lastIndicatorAtMs = now
+        shownZoomStep = step
+        val update = if (zoom == fillZoom() && zoom > MIN_VIDEO_ZOOM) {
+            PlayerUpdates.ShowTextResource(AYMR.strings.player_zoomed_to_fill)
+        } else {
+            PlayerUpdates.ShowText(formatZoom(step))
+        }
+        updateUiData { it.copy(playerUpdate = update) }
+    }
+
+    /**
+     * Called when the fingers come up: pulls the zoom onto its pending detent, if
+     * there is one. Returns true when a settle animation started, which is the
+     * gesture layer's cue to tick the haptics.
+     */
+    fun settleVideoZoom(): Boolean {
+        val target = _pendingZoomDetent.value
+        _pendingZoomDetent.value = null
+        if (target == null || target == _videoZoom.value) return false
+
+        _videoZoom.value = target
+        if (target == MIN_VIDEO_ZOOM) _videoPan.value = 0f to 0f
+        clampPan()
+        shownZoomStep = -1
+        showZoomIndicator(target, force = true)
+        // The layer is NOT moved to the target here; the player animates it there.
+        val (panX, panY) = _videoPan.value
+        settleTarget = Triple(target, panX, panY)
+        _settleToken.value = _settleToken.value + 1
+        return true
+    }
+
+    /** The settle animation has landed. */
+    fun onZoomSettled() {
+        settleTarget = null
+    }
+
+    /**
+     * Back to 1x, unpanned. The zoom is session state rather than per-file, so
+     * without this it would outlive the episode it was applied to.
+     */
+    fun resetVideoZoom() {
+        shownZoomStep = -1
+        _pendingZoomDetent.value = null
+        settleTarget = null
+        _videoZoom.value = MIN_VIDEO_ZOOM
+        _videoPan.value = 0f to 0f
+        publishTransform()
+        // Clears anything an earlier build left on mpv's own transform; the zoom
+        // itself never writes these.
+        clearMpvTransform()
+    }
+
+    private fun clearMpvTransform() {
+        setPropertyDouble("video-zoom", 0.0)
+        setPropertyDouble("video-pan-x", 0.0)
+        setPropertyDouble("video-pan-y", 0.0)
+    }
+
+    /** Tenths of a zoom factor as "1.1x". */
+    private fun formatZoom(step: Int) = "${step / ZOOM_INDICATOR_STEP}.${step % ZOOM_INDICATOR_STEP}x"
+    // <-- AM (PINCH_ZOOM)
+
+    fun setAspectRatio(aspect: VideoAspect, showConfirmation: Boolean = true) {
+        // AM (PINCH_ZOOM): a new aspect mode redraws the fitted video, so the
+        // coverage the pan limits are built on no longer describes it.
+        resetVideoZoom()
+
+        // AM (ASPECT_OVERRIDE_PICKER) -->
+        // Stretch is retired. Anyone whose stored preference still says so is moved
+        // to the equivalent pair - fit the picture, override the ratio to the
+        // screen's - once, here, rather than through a store migration, because this
+        // is the one place the value is ever applied.
+        @Suppress("DEPRECATION")
+        if (aspect == VideoAspect.Stretch) {
+            playerPreferences.aspectOverride.set(VideoAspectOverride.Screen)
+            setAspectRatio(VideoAspect.Fit, showConfirmation)
+            return
+        }
+
+        val pan = if (aspect == VideoAspect.Crop) 1.0 else 0.0
         setPropertyDouble("panscan", pan)
-        setPropertyDouble("video-aspect-override", ratio)
         playerPreferences.aspectState.set(aspect)
+        applyAspectOverride(playerPreferences.aspectOverride.get())
+        // <-- AM (ASPECT_OVERRIDE_PICKER)
         if (showConfirmation) {
             updateUiData { it.copy(playerUpdate = PlayerUpdates.AspectRatio(aspect)) }
         }
     }
+
+    // AM (ASPECT_OVERRIDE_PICKER) -->
+    /**
+     * Imposes a display aspect ratio on the video, for files tagged wrong. Separate
+     * from [setAspectRatio] on purpose: how the picture fits the screen and what
+     * shape the picture actually is are different questions, and conflating them is
+     * what made the old Stretch mode a repair tool disguised as a viewing mode.
+     */
+    fun setAspectOverride(override: VideoAspectOverride, showConfirmation: Boolean = true) {
+        playerPreferences.aspectOverride.set(override)
+        applyAspectOverride(override)
+        if (showConfirmation) {
+            updateUiData { it.copy(playerUpdate = PlayerUpdates.ShowTextResource(override.titleRes)) }
+        }
+    }
+
+    private fun applyAspectOverride(override: VideoAspectOverride) {
+        // -1 hands the decision back to the file, which is mpv's own default.
+        val ratio = when {
+            override.useScreen -> screenAspectRatio
+            else -> override.ratio ?: -1.0
+        }
+        setPropertyDouble("video-aspect-override", ratio)
+    }
+    // <-- AM (ASPECT_OVERRIDE_PICKER)
 
     private fun setSpeed(value: Float) {
         setPropertyFloat("speed", value)
@@ -6579,6 +6853,27 @@ class PlayerViewModel(
 
         /** How long a prefetched, resolved hoster link is trusted. */
         private const val PREFETCH_TTL_MS = 5L * 60L * 1000L
+
+        // AM (PINCH_ZOOM) -->
+        private const val MIN_VIDEO_ZOOM = 1f
+        private const val MAX_VIDEO_ZOOM = 8f
+
+        /** Tenths per whole zoom factor - the indicator's granularity. */
+        private const val ZOOM_INDICATOR_STEP = 10
+
+        /**
+         * How near a detent a release has to end up to be pulled onto it. Wide
+         * because it only affects releases, never the live pinch.
+         */
+        private const val ZOOM_DETENT_ZONE = 0.20f
+
+        /** Pan travel per unit of finger travel. 1f would be content-follows-finger. */
+        private const val PAN_SPEED = 2f
+
+
+        /** Floor between zoom indicator emissions, in ms. */
+        private const val ZOOM_INDICATOR_MIN_INTERVAL_MS = 100L
+        // <-- AM (PINCH_ZOOM)
     }
     // <-- AM (NEXT_EPISODE_PREFETCH)
 

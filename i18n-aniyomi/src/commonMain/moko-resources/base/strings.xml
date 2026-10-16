@@ -122,6 +122,17 @@
     <string name="pref_player_smooth_seek_summary">When enabled, seeking will not focus on keyframes, leading to slower but precise seeking</string>
     <string name="pref_vertical_swipe_switch">Enable Vertical Swipe to Switch Episode</string>
     <string name="pref_vertical_swipe_switch_summary">Swipe up for next episode, swipe down for previous episode. Disables volume and brightness gestures while active</string>
+    <string name="pref_pinch_zoom">Enable Pinch to Zoom</string>
+    <string name="pref_pinch_zoom_summary">Pinch with two fingers to zoom up to 8x, then drag to pan. Resets when the episode changes</string>
+    <string name="player_zoomed_to_fill">Zoomed to fill</string>
+    <string name="video_aspect_auto">Auto (from file)</string>
+    <string name="video_aspect_4_3">4:3</string>
+    <string name="video_aspect_16_9">16:9</string>
+    <string name="video_aspect_1_85">1.85:1</string>
+    <string name="video_aspect_2_39">2.39:1</string>
+    <string name="player_aspect_fill_mode">Fill mode</string>
+    <string name="player_aspect_override">Aspect ratio</string>
+    <string name="player_aspect_override_summary">Only change this if the picture looks squashed or stretched — the file is tagged wrong</string>
     <string name="pref_category_double_tap">Double tap</string>
     <string name="pref_left_double_tap">Double tap (left)</string>
     <string name="pref_center_double_tap">Double tap (center)</string>

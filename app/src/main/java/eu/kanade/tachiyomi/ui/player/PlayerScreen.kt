@@ -1,6 +1,10 @@
 package eu.kanade.tachiyomi.ui.player
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -22,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.graphicsLayer
@@ -29,6 +34,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.core.graphics.toColorInt
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.util.lerp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import animiru.domain.player.model.AudioChannels
 import animiru.domain.player.model.DebandSettings
@@ -105,6 +112,10 @@ fun PlayerScreen(
     val interactionSource = remember { MutableInteractionSource() }
     val uiPreferences = remember { appGraph.uiPreferences }
     val playerPreferences = remember { appGraph.playerPreferences }
+    // AM (ASPECT_OVERRIDE_PICKER) -->
+    val aspectState by playerPreferences.aspectState.collectAsState()
+    val aspectOverride by playerPreferences.aspectOverride.collectAsState()
+    // <-- AM (ASPECT_OVERRIDE_PICKER)
     val audioPreferences = remember { appGraph.audioPreferences }
     val subtitlePreferences = remember { appGraph.subtitlePreferences }
     val decoderPreferences = remember { appGraph.decoderPreferences }
@@ -164,6 +175,15 @@ fun PlayerScreen(
         )
         .collectAsStateWithLifecycle()
     // <-- AM (DUMMY_PIP_BACK_PASSTHROUGH_FIX)
+
+    // AM (PINCH_ZOOM) -->
+    // The dummy pip never reaches onPictureInPictureModeChanged, so it needs the
+    // same reset the real one gets: its entry/exit morph scales off the drawn video
+    // rect, and a zoomed rect is not the one it measured.
+    LaunchedEffect(dummyPipActive) {
+        if (dummyPipActive) viewModel.resetVideoZoom()
+    }
+    // <-- AM (PINCH_ZOOM)
 
     // AM (BACK_HANDLER_STALE_GUARD_FIX) -->
     // hasNavigatedBack exists to prevent a rapid double-tap of back from firing
@@ -445,7 +465,11 @@ fun PlayerScreen(
             // whole point. The window resizing must NOT recompute it.
             val density = LocalDensity.current
             BoxWithConstraints(
-                modifier = Modifier.fillMaxSize(),
+                // AM (PINCH_ZOOM): clipToBounds so a zoomed surface is cropped at the
+                // window edge instead of drawing over the controls around it.
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clipToBounds(),
                 contentAlignment = Alignment.Center,
             ) {
                 val windowWidthPx = with(density) { maxWidth.toPx() }
@@ -513,6 +537,40 @@ fun PlayerScreen(
                     windowWidthPx / fixedWidthPx,
                     windowHeightPx / fixedHeightPx,
                 )
+                // AM (PINCH_ZOOM) -->
+                // The zoom rides on this layer rather than mpv's video-zoom: the
+                // surface is the video's own shape, so the bars are space around it
+                // that only scaling the box itself can cover. See PlayerViewModel's
+                // videoZoom for the full reasoning.
+                // The transform is NOT collected into composition. The player reads
+                // viewModel.layerZoom/layerPanX/layerPanY inside the graphicsLayer
+                // lambda below, where Compose defers the read to the draw phase, so a
+                // pinch frame invalidates the layer and recomposes nothing.
+                //
+                // How much of the window the fitted video covers: the view model
+                // needs it for the pan limits and for the zoom-to-fill detent.
+                LaunchedEffect(fixedWidthPx, fixedHeightPx, fitScale, windowWidthPx, windowHeightPx) {
+                    viewModel.setVideoCoverage(
+                        coverX = fixedWidthPx * fitScale / windowWidthPx,
+                        coverY = fixedHeightPx * fitScale / windowHeightPx,
+                    )
+                }
+                val settleToken by viewModel.settleToken.collectAsStateWithLifecycle()
+                LaunchedEffect(settleToken) {
+                    val target = viewModel.settleTarget ?: return@LaunchedEffect
+                    val fromZoom = viewModel.layerZoom
+                    val fromPanX = viewModel.layerPanX
+                    val fromPanY = viewModel.layerPanY
+                    animate(0f, 1f, animationSpec = tween(ZOOM_SETTLE_MS)) { t, _ ->
+                        viewModel.setLayerTransform(
+                            zoom = lerp(fromZoom, target.first, t),
+                            panX = lerp(fromPanX, target.second, t),
+                            panY = lerp(fromPanY, target.third, t),
+                        )
+                    }
+                    viewModel.onZoomSettled()
+                }
+                // <-- AM (PINCH_ZOOM)
                 Box(
                     modifier = Modifier
                         // requiredSize, NOT size: size is clamped by the parent's
@@ -529,8 +587,14 @@ fun PlayerScreen(
                             height = with(density) { fixedHeightPx.toDp() },
                         )
                         .graphicsLayer {
-                            scaleX = fitScale
-                            scaleY = fitScale
+                            // AM (PINCH_ZOOM): read here, inside the layer block, so
+                            // these are draw-phase reads rather than composition ones.
+                            // Pan is in window-relative units and converts here, where
+                            // the window's px size is known.
+                            scaleX = fitScale * viewModel.layerZoom
+                            scaleY = fitScale * viewModel.layerZoom
+                            translationX = viewModel.layerPanX * windowWidthPx
+                            translationY = viewModel.layerPanY * windowHeightPx
                         },
                 ) {
                     key(viewModel.mpv) {
@@ -553,6 +617,28 @@ fun PlayerScreen(
                 viewModel = viewModel,
                 interactionSource = interactionSource,
             )
+
+            // AM (PINCH_ZOOM) -->
+            // While a release would be pulled onto a detent, the edge of the screen
+            // picks up a faint white border - the hint is "let go here and you land
+            // on it", so it belongs on the frame rather than in the text readout.
+            val pendingDetent by viewModel.pendingZoomDetent.collectAsStateWithLifecycle()
+            val detentBorderAlpha by animateFloatAsState(
+                targetValue = if (pendingDetent != null) ZOOM_DETENT_BORDER_ALPHA else 0f,
+                animationSpec = tween(ZOOM_SETTLE_MS),
+                label = "zoom_detent_border",
+            )
+            if (detentBorderAlpha > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .border(
+                            width = ZOOM_DETENT_BORDER_WIDTH.dp,
+                            color = Color.White.copy(alpha = detentBorderAlpha),
+                        ),
+                )
+            }
+            // <-- AM (PINCH_ZOOM)
 
             DoubleTapToSeekOvals(
                 amount = playbackData.doubleTapSeekAmount,
@@ -680,6 +766,12 @@ fun PlayerScreen(
 
                 PlayerSheets(
                     sheetShown = uiData.sheetShown,
+                    // AM (ASPECT_OVERRIDE_PICKER) -->
+                    selectedAspect = aspectState,
+                    onSelectAspect = { viewModel.setAspectRatio(it) },
+                    selectedAspectOverride = aspectOverride,
+                    onSelectAspectOverride = { viewModel.setAspectOverride(it) },
+                    // <-- AM (ASPECT_OVERRIDE_PICKER)
                     subtitles = subtitles,
                     onAddSubtitle = viewModel::addSubtitle,
                     onSelectSubtitle = viewModel::selectSub,
@@ -1136,4 +1228,13 @@ private const val MIN_CONTROLS_HEIGHT_DP = 180
 // Shape the surface is pinned to before mpv has reported a real one. Only ever
 // visible for the moment before the first frame's aspect arrives.
 private const val FALLBACK_VIDEO_ASPECT = 16f / 9f
+
+// AM (PINCH_ZOOM) -->
+/** How long the pull onto a detent takes after a release. */
+private const val ZOOM_SETTLE_MS = 180
+
+/** The release hint: a faint white frame at the edge of the screen. */
+private const val ZOOM_DETENT_BORDER_ALPHA = 0.35f
+private const val ZOOM_DETENT_BORDER_WIDTH = 3
+// <-- AM (PINCH_ZOOM)
 // <-- AM (FIXED_SURFACE_SIZE)

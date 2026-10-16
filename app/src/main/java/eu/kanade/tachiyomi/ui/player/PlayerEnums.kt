@@ -18,6 +18,8 @@ enum class Sheets {
     Chapters,
     More,
     Screenshot,
+    // AM (ASPECT_OVERRIDE_PICKER)
+    Aspect,
 }
 
 enum class Panels {

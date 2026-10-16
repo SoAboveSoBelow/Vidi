@@ -1999,6 +1999,9 @@ class PlayerActivity : BaseActivity() {
             // AM (PIP_ENTRY_CANCELLED_FIX) -->
             isPipEntryPending = false
             // <-- AM (PIP_ENTRY_CANCELLED_FIX)
+            // AM (PINCH_ZOOM): a zoom left on would follow the video into the pip
+            // window, where there is no gesture surface to undo it.
+            viewModel.resetVideoZoom()
         }
         // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
 

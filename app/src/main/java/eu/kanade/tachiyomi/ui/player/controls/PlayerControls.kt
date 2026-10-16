@@ -546,7 +546,10 @@ fun PlayerControls(
                     onPlaybackSpeedChange = { onPlayerEvent(PlayerEvent.ChangeSpeed(it)) },
                     onOpenSheet = { onPlayerEvent(PlayerEvent.SetSheet(it)) },
                     onPipClick = { onPlayerEvent(PlayerEvent.EnterPip) },
-                    onAspectClick = { onPlayerEvent(PlayerEvent.ChangeAspect) },
+                    // AM (ASPECT_OVERRIDE_PICKER): opens the picker rather than
+                    // cycling blind. ChangeAspect still exists and still toggles
+                    // fit/fill, for gestures and custom buttons bound to it.
+                    onAspectClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.Aspect)) },
                 )
             }
 
