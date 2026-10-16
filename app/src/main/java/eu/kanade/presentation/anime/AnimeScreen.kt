@@ -73,7 +73,6 @@ import eu.kanade.presentation.anime.components.AnimeSeasonListItem
 import eu.kanade.presentation.anime.components.AnimeToolbar
 // AM (CUSTOM_EPISODE_ORDER) -->
 import eu.kanade.presentation.anime.components.EpisodeReorderActions
-import eu.kanade.presentation.anime.components.EpisodeReorderBottomBar
 import eu.kanade.presentation.anime.components.EpisodeReorderRow
 import eu.kanade.presentation.anime.components.EpisodeSeasonSwitcher
 // <-- AM (CUSTOM_EPISODE_ORDER)
@@ -781,7 +780,7 @@ private fun AnimeScreenSmallImpl(
                     isReordering = state.isReordering,
                     onToggleReorder = {
                         if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
-                    }.takeIf { state.anime.fetchType == FetchType.Episodes },
+                    }.takeIf { state.canReorder },
                     // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
@@ -825,40 +824,27 @@ private fun AnimeScreenSmallImpl(
                 // AM (CUSTOM_EPISODE_ORDER) -->
                 val selectedEpisodes = state.selectedEpisodes
                 // <-- AM (CUSTOM_EPISODE_ORDER)
-                // AM (CUSTOM_EPISODE_ORDER) -->
-                if (state.isReordering) {
-                    EpisodeReorderBottomBar(
-                        visible = true,
-                        onChangeSeasonClicked = reorderActions.onChangeSeason
-                            .takeIf { state.selectedEpisodes.isNotEmpty() },
-                        onDiscardClicked = reorderActions.onDiscard
-                            .takeIf { state.reorderSession?.hasChanges == true },
-                        onResetClicked = reorderActions.onReset
-                            .takeIf { state.selectedEpisodes.isNotEmpty() },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    SharedAnimeBottomActionMenu(
-                        selected = selectedEpisodes,
-                        // AY -->
-                        onEpisodeClicked = onEpisodeClicked,
-                        alwaysUseExternalPlayer = alwaysUseExternalPlayer,
-                        // <-- AY
-                        onMultiBookmarkClicked = onMultiBookmarkClicked,
-                        // AY -->
-                        onMultiFillermarkClicked = onMultiFillermarkClicked,
-                        // <-- AY
-                        onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
-                        onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
-                        onDownloadEpisode = onDownloadEpisode,
-                        onMultiDeleteClicked = onMultiDeleteClicked,
-                        // AM (EPISODE_NAMES) -->
-                        onRenameEpisode = onRenameEpisode,
-                        // <-- AM (EPISODE_NAMES)
-                        fillFraction = 1f,
-                    )
-                }
-                // <-- AM (CUSTOM_EPISODE_ORDER)
+                SharedAnimeBottomActionMenu(
+                    selected = selectedEpisodes,
+                    // AY -->
+                    onEpisodeClicked = onEpisodeClicked,
+                    alwaysUseExternalPlayer = alwaysUseExternalPlayer,
+                    // <-- AY
+                    onMultiBookmarkClicked = onMultiBookmarkClicked,
+                    // AY -->
+                    onMultiFillermarkClicked = onMultiFillermarkClicked,
+                    // <-- AY
+                    onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
+                    onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
+                    onDownloadEpisode = onDownloadEpisode,
+                    onMultiDeleteClicked = onMultiDeleteClicked,
+                    // AM (EPISODE_NAMES) -->
+                    onRenameEpisode = onRenameEpisode,
+                    // <-- AM (EPISODE_NAMES)
+                    // AM (CUSTOM_EPISODE_ORDER)
+                    onChangeSeason = reorderActions.onChangeSeason,
+                    fillFraction = 1f,
+                )
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             floatingActionButton = {
@@ -1463,7 +1449,7 @@ fun AnimeScreenLargeImpl(
                     isReordering = state.isReordering,
                     onToggleReorder = {
                         if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
-                    }.takeIf { state.anime.fetchType == FetchType.Episodes },
+                    }.takeIf { state.canReorder },
                     // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
@@ -1508,40 +1494,27 @@ fun AnimeScreenLargeImpl(
                     // AM (CUSTOM_EPISODE_ORDER) -->
                     val selectedEpisodes = state.selectedEpisodes
                     // <-- AM (CUSTOM_EPISODE_ORDER)
-                    // AM (CUSTOM_EPISODE_ORDER) -->
-                    if (state.isReordering) {
-                        EpisodeReorderBottomBar(
-                            visible = true,
-                            onChangeSeasonClicked = reorderActions.onChangeSeason
-                                .takeIf { state.selectedEpisodes.isNotEmpty() },
-                            onDiscardClicked = reorderActions.onDiscard
-                                .takeIf { state.reorderSession?.hasChanges == true },
-                            onResetClicked = reorderActions.onReset
-                                .takeIf { state.selectedEpisodes.isNotEmpty() },
-                            modifier = Modifier.fillMaxWidth(0.5f),
-                        )
-                    } else {
-                        SharedAnimeBottomActionMenu(
-                            selected = selectedEpisodes,
-                            // AY -->
-                            onEpisodeClicked = onEpisodeClicked,
-                            alwaysUseExternalPlayer = alwaysUseExternalPlayer,
-                            // <-- AY
-                            onMultiBookmarkClicked = onMultiBookmarkClicked,
-                            // AY -->
-                            onMultiFillermarkClicked = onMultiFillermarkClicked,
-                            // <-- AY
-                            onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
-                            onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
-                            onDownloadEpisode = onDownloadEpisode,
-                            onMultiDeleteClicked = onMultiDeleteClicked,
-                            // AM (EPISODE_NAMES) -->
-                            onRenameEpisode = onRenameEpisode,
-                            // <-- AM (EPISODE_NAMES)
-                            fillFraction = 0.5f,
-                        )
-                    }
-                    // <-- AM (CUSTOM_EPISODE_ORDER)
+                    SharedAnimeBottomActionMenu(
+                        selected = selectedEpisodes,
+                        // AY -->
+                        onEpisodeClicked = onEpisodeClicked,
+                        alwaysUseExternalPlayer = alwaysUseExternalPlayer,
+                        // <-- AY
+                        onMultiBookmarkClicked = onMultiBookmarkClicked,
+                        // AY -->
+                        onMultiFillermarkClicked = onMultiFillermarkClicked,
+                        // <-- AY
+                        onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
+                        onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
+                        onDownloadEpisode = onDownloadEpisode,
+                        onMultiDeleteClicked = onMultiDeleteClicked,
+                        // AM (EPISODE_NAMES) -->
+                        onRenameEpisode = onRenameEpisode,
+                        // <-- AM (EPISODE_NAMES)
+                        // AM (CUSTOM_EPISODE_ORDER)
+                        onChangeSeason = reorderActions.onChangeSeason,
+                        fillFraction = 0.5f,
+                    )
                 }
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -1842,6 +1815,9 @@ private fun SharedAnimeBottomActionMenu(
     // AM (EPISODE_NAMES) -->
     onRenameEpisode: () -> Unit,
     // <-- AM (EPISODE_NAMES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    onChangeSeason: () -> Unit,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
     fillFraction: Float,
     modifier: Modifier = Modifier,
 ) {
@@ -1894,6 +1870,8 @@ private fun SharedAnimeBottomActionMenu(
         // selection size, so don't offer it.
         onRenameClicked = onRenameEpisode.takeIf { selected.size == 1 },
         // <-- AM (EPISODE_NAMES)
+        // AM (CUSTOM_EPISODE_ORDER)
+        onChangeSeasonClicked = onChangeSeason.takeIf { selected.isNotEmpty() },
     )
 }
 

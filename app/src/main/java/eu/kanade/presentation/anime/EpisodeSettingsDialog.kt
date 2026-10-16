@@ -35,6 +35,7 @@ import mihon.app.di.appGraph
 import tachiyomi.core.common.preference.TriState
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.CheckboxItem
 import tachiyomi.presentation.core.components.LabeledCheckbox
@@ -64,6 +65,10 @@ fun EpisodeSettingsDialog(
     // <-- AY
     onSetAsDefault: (applyToExistingAnime: Boolean) -> Unit,
     onResetToDefault: () -> Unit,
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /** Null when the entry has no stored custom order - the item is then not shown at all. */
+    onDeleteCustomOrdering: (() -> Unit)?,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 ) {
     var showSetAsDefaultDialog by rememberSaveable { mutableStateOf(false) }
     if (showSetAsDefaultDialog) {
@@ -98,6 +103,17 @@ fun EpisodeSettingsDialog(
                     closeMenu()
                 },
             )
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            if (onDeleteCustomOrdering != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(AMMR.strings.am_action_delete_custom_ordering)) },
+                    onClick = {
+                        onDeleteCustomOrdering()
+                        closeMenu()
+                    },
+                )
+            }
+            // <-- AM (CUSTOM_EPISODE_ORDER)
         },
     ) { page ->
         Column(

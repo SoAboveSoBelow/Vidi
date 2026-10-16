@@ -27,12 +27,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.automirrored.outlined.Input
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.CallMerge
@@ -40,7 +39,6 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NewLabel
 import androidx.compose.material.icons.outlined.RemoveDone
@@ -286,6 +284,9 @@ fun AnimeBottomActionMenu(
     // AM (EPISODE_NAMES) -->
     onRenameClicked: (() -> Unit)? = null,
     // <-- AM (EPISODE_NAMES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    onChangeSeasonClicked: (() -> Unit)? = null,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
 ) {
     val context = LocalContext.current
     // AY -->
@@ -428,35 +429,10 @@ fun AnimeBottomActionMenu(
             )
         }
         // <-- AY
-    }
-
-    BottomActionBar(
-        visible = visible,
-        actions = actions,
-        modifier = modifier,
-    )
-}
-
-// AM (CUSTOM_EPISODE_ORDER) -->
-/**
- * Replaces AnimeBottomActionMenu while reordering. None of the normal bulk
- * actions belong here: each clears the selection when it finishes, which would
- * end the mode mid-edit. Shares the bar above, so it looks and behaves
- * (long-press labels) exactly like the menu it replaces.
- *
- * A null action is omitted, matching the menu's own convention: Change season
- * and Reset order act on the selection so need one, and Discard only appears
- * once something has changed.
- */
-@Composable
-fun EpisodeReorderBottomBar(
-    visible: Boolean,
-    onChangeSeasonClicked: (() -> Unit)?,
-    onDiscardClicked: (() -> Unit)?,
-    onResetClicked: (() -> Unit)?,
-    modifier: Modifier = Modifier,
-) {
-    val actions = buildList {
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        // Moving the selection between seasons is an ordinary bulk action on
+        // the selection, not something reorder mode owns, so it sits in this
+        // bar's own overflow with the rest of them.
         if (onChangeSeasonClicked != null) {
             add(
                 BottomActionItem(
@@ -464,29 +440,11 @@ fun EpisodeReorderBottomBar(
                     title = stringResource(AMMR.strings.am_action_change_episode_season),
                     icon = Icons.Default.Layers,
                     onClick = onChangeSeasonClicked,
+                    placement = BottomActionPlacement.Overflow,
                 ),
             )
         }
-        if (onDiscardClicked != null) {
-            add(
-                BottomActionItem(
-                    key = "discard_order",
-                    title = stringResource(AMMR.strings.am_action_discard_order_changes),
-                    icon = Icons.Outlined.History,
-                    onClick = onDiscardClicked,
-                ),
-            )
-        }
-        if (onResetClicked != null) {
-            add(
-                BottomActionItem(
-                    key = "reset_order",
-                    title = stringResource(AMMR.strings.am_action_reset_episode_order),
-                    icon = Icons.Default.RestartAlt,
-                    onClick = onResetClicked,
-                ),
-            )
-        }
+        // <-- AM (CUSTOM_EPISODE_ORDER)
     }
 
     BottomActionBar(
@@ -495,7 +453,7 @@ fun EpisodeReorderBottomBar(
         modifier = modifier,
     )
 }
-// <-- AM (CUSTOM_EPISODE_ORDER)
+
 
 @Composable
 private fun RowScope.Button(

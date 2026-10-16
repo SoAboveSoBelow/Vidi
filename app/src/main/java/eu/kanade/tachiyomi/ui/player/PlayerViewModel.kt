@@ -5646,9 +5646,8 @@ class PlayerViewModel(
         // the threshold is crossed - roughly the last 15% - and had no guard, so
         // updateEpisodeProgressOnComplete() re-ran once a second: a getTracks DB
         // read plus (until the tracker's own lastEpisodeSeen catches up) a refresh
-        // and update over the network per tracker, a full playlist scan for
-        // duplicate episode numbers with an updateEpisode.awaitAll() on the result,
-        // a pending-deleter write, and a seen-state save. It is a once-per-episode
+        // and update over the network per tracker, a pending-deleter write, and a
+        // seen-state save. It is a once-per-episode
         // transition; make it run once.
         if (position >= duration * progress && shouldTrack) {
             runEpisodeCompletion(currentEpisode)
@@ -5706,23 +5705,11 @@ class PlayerViewModel(
         // seen (natural completion), unlike every other saveWatchingProgress call site.
         saveWatchingProgress(currentEp, writeSeenState = true)
 
-        val markDuplicateAsSeen = libraryPreferences.markDuplicateSeenEpisodeAsSeen.get()
-            .contains(LibraryPreferences.MARK_DUPLICATE_EPISODE_SEEN_EXISTING)
-        if (!markDuplicateAsSeen) return
-
-        val duplicateUnseenEpisodes = stateData.value.currentPlaylist
-            .mapNotNull { episode ->
-                if (
-                    !episode.seen &&
-                    episode.isRecognizedNumber &&
-                    episode.episode_number == currentEp.episode_number
-                ) {
-                    EpisodeUpdate(id = episode.id!!, seen = true, lastSecondSeen = 0)
-                } else {
-                    null
-                }
-            }
-        updateEpisode.awaitAll(duplicateUnseenEpisodes)
+        // AM (MERGE_SETTINGS): the sweep that marked every same-numbered episode
+        // in the playlist seen is gone with the "mark duplicate seen episode as
+        // seen" preference. A merge's dedupe mode keeps one copy of a number in
+        // the list to begin with, and TransferMergeEpisodeMarks carries seen onto
+        // it when the visible copy changes, so there is nothing left to sweep.
 
         // AM (SYNC) -->
         val isSyncEnabled = syncPreferences.isSyncEnabled()

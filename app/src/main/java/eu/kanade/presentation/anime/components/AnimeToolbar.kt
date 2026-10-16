@@ -14,8 +14,8 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FlipToBack
-import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.SelectAll
+import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
@@ -270,10 +270,11 @@ fun AnimeToolbar(
                         // count reflows the width of every other action in this
                         // bar as it does so.
                         // <-- AM (EPISODE_NAMES)
-                        // A true toggle, tinted while on. Turning it off returns
-                        // to plain selection mode with the selection kept; X or
-                        // back leave entirely. Either way edits were already
-                        // written as they were made, so there's no "done".
+                        // A true toggle, tinted while on. Turning it off
+                        // returns to plain selection mode with the selection
+                        // kept; X or back leave entirely. Either way edits were
+                        // already written as they were made, so there's no
+                        // "done".
                         if (onToggleReorder != null) {
                             add(
                                 AppBar.Action(

@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.util.fastMap
 import androidx.core.content.ContextCompat
+import aniyomi.domain.merge.model.DedupeMode
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.Navigator
 import cafe.adriel.voyager.navigator.currentOrThrow
@@ -32,8 +33,6 @@ import tachiyomi.domain.library.service.LibraryPreferences.Companion.ANIME_OUTSI
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_CHARGING
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_NETWORK_NOT_METERED
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_ONLY_ON_WIFI
-import tachiyomi.domain.library.service.LibraryPreferences.Companion.MARK_DUPLICATE_EPISODE_SEEN_EXISTING
-import tachiyomi.domain.library.service.LibraryPreferences.Companion.MARK_DUPLICATE_EPISODE_SEEN_NEW
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.MIN_TAG_LIMIT
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.UNCAPPED_TAG_LIMIT
 import tachiyomi.i18n.MR
@@ -303,16 +302,21 @@ object SettingsLibraryScreen : SearchableSettings {
                     ),
                     title = stringResource(AYMR.strings.pref_episode_swipe_end),
                 ),
-                Preference.PreferenceItem.MultiSelectListPreference(
-                    preference = libraryPreferences.markDuplicateSeenEpisodeAsSeen,
+                // AM (MERGE_SETTINGS) -->
+                Preference.PreferenceItem.ListPreference(
+                    preference = libraryPreferences.defaultDedupeMode,
                     entries = mapOf(
-                        MARK_DUPLICATE_EPISODE_SEEN_EXISTING to
-                            stringResource(AYMR.strings.pref_mark_duplicate_seen_episode_seen_existing),
-                        MARK_DUPLICATE_EPISODE_SEEN_NEW to
-                            stringResource(AYMR.strings.pref_mark_duplicate_seen_episode_seen_new),
+                        DedupeMode.OFF to stringResource(MR.strings.none),
+                        DedupeMode.PRIORITY to
+                            stringResource(AMMR.strings.am_merge_settings_dedupe_priority),
+                        DedupeMode.MOST_EPISODES to
+                            stringResource(AMMR.strings.am_merge_settings_dedupe_most),
+                        DedupeMode.HIGHEST_EPISODE to
+                            stringResource(AMMR.strings.am_merge_settings_dedupe_highest),
                     ),
-                    title = stringResource(AYMR.strings.pref_mark_duplicate_seen_episode_seen),
+                    title = stringResource(AMMR.strings.am_pref_default_dedupe_mode),
                 ),
+                // <-- AM (MERGE_SETTINGS)
                 Preference.PreferenceItem.SwitchPreference(
                     preference = libraryPreferences.hideMissingEpisodes,
                     title = stringResource(AMMR.strings.am_pref_hide_missing_episode_indicators),

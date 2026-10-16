@@ -8,7 +8,8 @@ import tachiyomi.domain.episode.model.EpisodeUpdate
 import tachiyomi.domain.episode.repository.EpisodeRepository
 
 /**
- * Carries bookmarks and fillermarks onto the episodes a merge actually shows.
+ * Carries seen state, bookmarks and fillermarks onto the episodes a merge
+ * actually shows.
  *
  * Merging never copies episodes - every episode still belongs to the source it
  * came from, marks included - but deduplication HIDES rows from the merged
@@ -24,9 +25,21 @@ import tachiyomi.domain.episode.repository.EpisodeRepository
  * unmarking on the source changes that source's own episode, and neither
  * touches the other.
  *
+ * Seen is the case that matters most on a refresh rather than a settings
+ * change: an episode watched on a lower-priority source because the preferred
+ * one had not posted it yet becomes hidden the moment the preferred source
+ * fetches its own copy, and that copy is unseen. Without this the episode
+ * returns to the merged list as unwatched and lands in Updates. Carrying seen
+ * across clears the stand-in's resume position, the same thing
+ * finishing an episode normally does, so a finished episode never keeps a
+ * resume position near its end.
+ *
  * Only ever adds a mark. Nothing here clears one, so running it again - on the
- * next source added, or the next dedupe change - cannot undo a mark the user
- * has since removed on either side.
+ * next source added, the next dedupe change, or the next fetch - cannot undo a
+ * mark the user has since removed on either side. Nothing here acts on the
+ * downloads of the episode it marks either: this recalculates what the merge
+ * shows, and deleting a file the user never watched through the merge is not
+ * part of that.
  */
 @Inject
 class TransferMergeEpisodeMarks(
@@ -44,7 +57,7 @@ class TransferMergeEpisodeMarks(
             .getEpisodesByMergeParentId(mergeParentId)
             .groupBy { it.animeId }
         val all = episodesByChild.values.flatten()
-        if (all.none { it.bookmark || it.fillermark }) return
+        if (all.none { it.seen || it.bookmark || it.fillermark }) return
 
         val visible = getMergedEpisodeList.build(
             childOrdering = childOrdering,
@@ -64,17 +77,28 @@ class TransferMergeEpisodeMarks(
 
         val updates = HashMap<Long, EpisodeUpdate>()
         all.asSequence()
-            .filter { it.id !in visibleIds && (it.bookmark || it.fillermark) && it.isRecognizedNumber }
+            .filter {
+                it.id !in visibleIds &&
+                    (it.seen || it.bookmark || it.fillermark) &&
+                    it.isRecognizedNumber
+            }
             .forEach { hidden ->
                 visibleByNumber[hidden.episodeNumber].orEmpty().forEach { target ->
                     val pending = updates[target.id]
+                    val seen = needsMark(hidden.seen, target.seen, pending?.seen)
                     val bookmark = needsMark(hidden.bookmark, target.bookmark, pending?.bookmark)
                     val fillermark = needsMark(hidden.fillermark, target.fillermark, pending?.fillermark)
-                    if (bookmark == null && fillermark == null) return@forEach
+                    if (seen == null && bookmark == null && fillermark == null) return@forEach
+                    val seenUpdate = seen ?: pending?.seen
                     updates[target.id] = EpisodeUpdate(
                         id = target.id,
+                        seen = seenUpdate,
                         bookmark = bookmark ?: pending?.bookmark,
                         fillermark = fillermark ?: pending?.fillermark,
+                        // Finishing an episode resets its resume position; a
+                        // stand-in inheriting seen has to land in the same
+                        // state rather than keeping a position it never used.
+                        lastSecondSeen = if (seenUpdate == true) 0L else pending?.lastSecondSeen,
                     )
                 }
             }

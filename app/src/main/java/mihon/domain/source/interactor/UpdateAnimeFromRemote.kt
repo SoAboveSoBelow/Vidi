@@ -1,5 +1,7 @@
 package mihon.domain.source.interactor
 
+import aniyomi.domain.merge.interactor.TransferMergeEpisodeMarks
+import aniyomi.domain.merge.repository.MergeChildRepository
 import dev.zacsweers.metro.Inject
 import eu.kanade.domain.anime.interactor.SyncSeasonsWithSource
 import eu.kanade.domain.anime.model.hasCustomBackground
@@ -40,6 +42,10 @@ class UpdateAnimeFromRemote(
     private val animeRepository: AnimeRepository,
     private val syncEpisodesWithSource: SyncEpisodesWithSource,
     private val syncSeasonsWithSource: SyncSeasonsWithSource,
+    // AM (MERGE_MARK_TRANSFER) -->
+    private val mergeChildRepository: MergeChildRepository,
+    private val transferMergeEpisodeMarks: TransferMergeEpisodeMarks,
+    // <-- AM (MERGE_MARK_TRANSFER)
     private val coverCache: CoverCache,
     private val backgroundCache: BackgroundCache,
 ) {
@@ -148,6 +154,27 @@ class UpdateAnimeFromRemote(
                 manualFetch = manualFetch,
                 fetchWindow = fetchWindow,
             )
+
+            // AM (MERGE_MARK_TRANSFER) -->
+            // Every fetch path funnels through here - the anime screen, the
+            // merge refresh fan-out, the library job updating a child as an
+            // ordinary favorite, migration - so this is the one place that
+            // sees new episodes land for an anime regardless of who asked.
+            //
+            // Dedupe decides visibility at list-build time, so the preferred
+            // source's freshly fetched copy of a number takes the row from the
+            // lower-priority copy the user actually watched, and that copy is
+            // unseen. The transfer is what carries the seen state onto it;
+            // without it the episode comes back as unwatched and shows up in
+            // Updates. Only on new episodes: nothing else changes which rows
+            // dedupe hides, and the existing settings-side call sites cover
+            // the changes that do.
+            if (newEpisodes.isNotEmpty()) {
+                mergeChildRepository.getMergeParentsByAnimeId(anime.id).forEach { parent ->
+                    transferMergeEpisodeMarks.await(parent.id)
+                }
+            }
+            // <-- AM (MERGE_MARK_TRANSFER)
 
             // AM (PARTIAL_EPISODE_SYNC) -->
             // LocalSource returns episodes with thumbnails left empty so a big folder

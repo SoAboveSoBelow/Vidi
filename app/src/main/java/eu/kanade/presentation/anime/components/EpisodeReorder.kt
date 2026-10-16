@@ -19,6 +19,7 @@ import sh.calvin.reorderable.rememberReorderableLazyGridState
 /** Everything the screen can ask of reorder mode, bundled to keep the layout signatures flat. */
 @Immutable
 data class EpisodeReorderActions(
+    /** Turns dragging on for the open selection; X or back turn it off with the selection. */
     val onEnter: () -> Unit,
     /** Toggle off: back to plain selection mode, selection kept. */
     val onLeave: () -> Unit,
@@ -26,8 +27,6 @@ data class EpisodeReorderActions(
     val onExit: () -> Unit,
     val onMove: (episodeIds: List<Long>, targetSeason: Long, placement: MoveEpisodesInOrder.Placement) -> Unit,
     val onChangeSeason: () -> Unit,
-    val onDiscard: () -> Unit,
-    val onReset: () -> Unit,
 )
 
 /**

@@ -79,14 +79,21 @@ class GetEpisodeOrder(
      * Whether [host]'s order is already decided here and must not be
      * re-sorted by a caller.
      *
-     * True for a merged entry, whose union order (season, then merge order)
-     * would be destroyed by re-sorting on episode number, and for any entry
-     * the user has given a custom order. False otherwise, which is the normal
-     * case: an ordinary untouched entry keeps whatever display sort it already
-     * had, and nothing about ordering changes for it.
+     * True only while the entry is sorted by source, and then for a merged
+     * entry - whose union order IS that by-source order - or for an entry the
+     * user has given a custom order. False otherwise, which is the normal
+     * case: an entry under any other sort keeps that sort, and nothing about
+     * ordering changes for it.
+     *
+     * AM (CUSTOM_EPISODE_ORDER): the by-source condition is what keeps a custom
+     * order, or a merge's union order, from outranking the sort the user picked
+     * - see the resolve() note on applyOrderOverrides. A stored order under
+     * another sort is dormant, not gone.
      */
     suspend fun isPreordered(host: Anime): Boolean {
-        return host.isMerged() || episodeOrderRepository.getByHostAnimeId(host.id).isNotEmpty()
+        if (host.sorting != Anime.EPISODE_SORTING_SOURCE) return false
+        if (host.isMerged()) return true
+        return episodeOrderRepository.getByHostAnimeId(host.id).isNotEmpty()
     }
 
     suspend fun await(host: Anime, applyScanlatorFilter: Boolean = false): List<Episode> {
@@ -314,8 +321,27 @@ class GetEpisodeOrder(
             .associate { (block, child) -> child.animeId to block }
         val defaultSortKeyById = default.associate { it.id to defaultSortKey(it, blockByChild) }
         val priorityById = default.associate { it.id to (orderingByChildId[it.animeId]?.priority ?: 0L) }
-        val sortKeyById = default.associate {
-            it.id to (overrideById[it.id]?.sortKey ?: defaultSortKeyById.getValue(it.id))
+        // AM (CUSTOM_EPISODE_ORDER): a custom order IS the by-source order, not
+        // a layer that sits on top of whichever sort is selected. Under any
+        // other sort the user asked for that sort, so the stored keys are left
+        // out of the read rather than beating it. They are never deleted here -
+        // switching to by-source brings the order straight back, and only
+        // "delete custom ordering" clears it for good. Season overrides are a
+        // separate question and still apply, since the season switcher groups
+        // by them whatever the sort is.
+        //
+        // This covers merged entries too. Their union order is the by-source
+        // order - season, then merge order, then number - so a merged entry
+        // under another sort hands back the union unsorted and lets the
+        // caller's sort run, exactly as an ordinary one does. The cost is the
+        // one GetMergedEpisodeList warns about: sorting by number interleaves
+        // the children. That is what picking "by number" asks for, and leaving
+        // a merge permanently preordered was what kept the sort options from
+        // doing anything on it at all.
+        val applyOrderOverrides = host.sorting == Anime.EPISODE_SORTING_SOURCE
+        val sortKeyById = default.associate { episode ->
+            val override = overrideById[episode.id]?.sortKey.takeIf { applyOrderOverrides }
+            episode.id to (override ?: defaultSortKeyById.getValue(episode.id))
         }
 
         // AM (NAMED_SEASONS) -->
@@ -327,7 +353,7 @@ class GetEpisodeOrder(
         // its seasons follow their display order, which only this knows. With
         // no season reordering that is the order GetMergedEpisodeList already
         // produced, so the sort changes nothing until the user reorders.
-        val ordered = if (overrides.isEmpty() && !host.isMerged()) {
+        val ordered = if (!applyOrderOverrides || (overrides.isEmpty() && !host.isMerged())) {
             default
         } else {
             // Ties are only reachable through duplicate episode numbers; the
@@ -395,7 +421,8 @@ class GetEpisodeOrder(
             // AM (SINGLE_EPISODE_THUMBNAIL) -->
             thumbnailUrlByEpisodeId = singleEpisodeThumbnails,
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
-            isPreordered = host.isMerged() || overrides.isNotEmpty(),
+            isPreordered = applyOrderOverrides && (host.isMerged() || overrides.isNotEmpty()),
+            hasOverrides = overrides.isNotEmpty(),
         )
     }
 

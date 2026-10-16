@@ -242,6 +242,9 @@ class AnimeScreen(
                     // <-- AY
                     onSetAsDefault = viewModel::setCurrentSettingsAsDefault,
                     onResetToDefault = viewModel::resetToDefaultSettings,
+                    // AM (CUSTOM_EPISODE_ORDER)
+                    onDeleteCustomOrdering = viewModel::deleteCustomOrdering
+                        .takeIf { successState.hasCustomOrdering },
                     scanlatorFilterActive = successState.scanlatorFilterActive,
                     onScanlatorFilterClicked = { showScanlatorsDialog = true },
                 )
@@ -624,8 +627,6 @@ class AnimeScreen(
                     onExit = viewModel::exitReorderMode,
                     onMove = viewModel::moveEpisodes,
                     onChangeSeason = viewModel::showChangeEpisodeSeasonDialog,
-                    onDiscard = viewModel::discardReorderChanges,
-                    onReset = viewModel::resetSelectedEpisodeOrder,
                 )
             },
             // <-- AM (CUSTOM_EPISODE_ORDER)

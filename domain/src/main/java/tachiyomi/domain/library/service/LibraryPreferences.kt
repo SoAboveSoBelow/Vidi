@@ -1,6 +1,7 @@
 package tachiyomi.domain.library.service
 
 import aniyomi.domain.anime.model.SeasonDisplayMode
+import aniyomi.domain.merge.model.DedupeMode
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -69,10 +70,22 @@ class LibraryPreferences(
         false,
     )
 
-    val markDuplicateSeenEpisodeAsSeen: Preference<Set<String>> = preferenceStore.getStringSet(
-        "mark_duplicate_seen_episode_seen",
-        emptySet(),
+    // AM (MERGE_SETTINGS) -->
+    /**
+     * The dedupe mode a newly created merge starts on. Per-merge settings still
+     * override it; this only decides where a merge begins, so changing it never
+     * reaches a merge that already exists.
+     *
+     * This replaced "mark duplicate seen episode as seen". That setting kept
+     * every copy of a number listed and synced the seen flag between them;
+     * dedupe lists one copy and TransferMergeEpisodeMarks carries the seen
+     * state onto it, which is the same outcome without the duplicate rows.
+     */
+    val defaultDedupeMode: Preference<DedupeMode> = preferenceStore.getEnum(
+        "default_dedupe_mode",
+        DedupeMode.OFF,
     )
+    // <-- AM (MERGE_SETTINGS)
 
     // region Filter
 
@@ -452,9 +465,6 @@ class LibraryPreferences(
         /** The step past [MAX_TAG_LIMIT], meaning no cap at all. */
         const val UNCAPPED_TAG_LIMIT = MAX_TAG_LIMIT + 1
         // <-- AM (TAG_LIMIT)
-
-        const val MARK_DUPLICATE_EPISODE_SEEN_NEW = "new"
-        const val MARK_DUPLICATE_EPISODE_SEEN_EXISTING = "existing"
 
         const val DEFAULT_CATEGORY_PREF_KEY = "default_category"
         private const val LIBRARY_UPDATE_CATEGORIES_PREF_KEY = "library_update_categories"

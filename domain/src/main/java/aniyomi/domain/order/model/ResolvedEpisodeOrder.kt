@@ -54,6 +54,13 @@ data class ResolvedEpisodeOrder(
     val thumbnailUrlByEpisodeId: Map<Long, String>,
     // <-- AM (SINGLE_EPISODE_THUMBNAIL)
     val isPreordered: Boolean,
+    /**
+     * Whether the entry has any stored order overrides at all, regardless of
+     * whether the current sort is letting them through. [isPreordered] answers
+     * "is this list already ordered"; this answers "is there a custom order to
+     * delete", which stays true while a non-source sort holds one dormant.
+     */
+    val hasOverrides: Boolean,
 ) {
     /** Display rank of each season number - what episodes are ordered by, rather than the number itself. */
     val seasonRankByNumber: Map<Long, Int> by lazy { seasons.withIndex().associate { (i, s) -> s.number to i } }
@@ -93,6 +100,7 @@ data class ResolvedEpisodeOrder(
             emptyMap(),
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
             isPreordered = false,
+            hasOverrides = false,
         )
     }
 }

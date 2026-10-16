@@ -44,7 +44,6 @@ import aniyomi.domain.merge.repository.MergeEpisodeExclusionRepository
 import aniyomi.domain.merge.repository.MergeSettingsRepository
 import aniyomi.domain.order.interactor.GetEpisodeOrder
 import aniyomi.domain.order.interactor.MoveEpisodesInOrder
-import aniyomi.domain.order.model.EpisodeOrderOverride
 import aniyomi.domain.order.model.ResolvedEpisodeOrder
 import aniyomi.domain.order.repository.EpisodeOrderRepository
 import aniyomi.domain.season.interactor.ManageEntrySeasons
@@ -439,6 +438,7 @@ class AnimeViewModel(
                             ),
                             // AM (CUSTOM_EPISODE_ORDER) -->
                             isPreordered = order.isPreordered,
+                            hasCustomOrdering = order.hasOverrides,
                             // AM (NAMED_SEASONS) -->
                             // Pickers left open across a trip to the season
                             // manager must offer seasons added there.
@@ -613,6 +613,7 @@ class AnimeViewModel(
                     hideMissingEpisodes = libraryPreferences.hideMissingEpisodes.get(),
                     // AM (CUSTOM_EPISODE_ORDER) -->
                     isPreordered = order.isPreordered,
+                    hasCustomOrdering = order.hasOverrides,
                     episodeSeasonById = order.seasonByEpisodeId,
                     seasonNumbers = order.seasonNumbers,
                     entrySeasons = order.seasons,
@@ -2341,6 +2342,24 @@ class AnimeViewModel(
         }
     }
 
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    /**
+     * Throws away this entry's stored custom order for good.
+     *
+     * Switching off by-source sort only makes the order dormant - it comes back
+     * untouched when by-source comes back - so this is the one way to be rid of
+     * it. Nothing else is affected: season assignments live in the same rows'
+     * other column and go with them, which is what "delete custom ordering"
+     * means for an entry whose episodes were moved between seasons by hand.
+     */
+    fun deleteCustomOrdering() {
+        val anime = successState?.anime ?: return
+        viewModelScope.launchNonCancellable {
+            episodeOrderRepository.deleteByHostAnimeId(anime.id)
+        }
+    }
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+
     fun toggleSelection(
         item: EpisodeList.Item,
         selected: Boolean,
@@ -2710,12 +2729,11 @@ class AnimeViewModel(
     // AM (CUSTOM_EPISODE_ORDER) -->
     /**
      * An open reorder mode. Edits are written through as they're made, so
-     * nothing here needs saving; [snapshot] is the entry's stored order from
-     * when the mode was entered, which is what "discard changes" restores.
+     * nothing here needs saving and nothing is kept to restore: undoing a
+     * custom order is "delete custom ordering" in the episode settings
+     * overflow, not an action inside the selection bar.
      */
     data class ReorderSession(
-        val snapshot: List<EpisodeOrderOverride>,
-        val hasChanges: Boolean = false,
         // AM (NAMED_SEASONS) -->
         /**
          * Seasons this session moved episodes out of OR into. Checked for
@@ -2785,19 +2803,20 @@ class AnimeViewModel(
 
     // AM (CUSTOM_EPISODE_ORDER) -->
     /**
-     * Enters reorder mode, keeping the current selection. The snapshot taken
-     * here is the only state the mode needs: every edit is written through
+     * Enters reorder mode, keeping the current selection. The session carries
+     * nothing but the seasons it touches: every edit is written through
      * immediately, so leaving - by X, back, or the screen simply going away -
      * never has anything left to save.
      */
     fun enterReorderMode() {
-        val anime = successState?.anime ?: return
         if (successState?.isReordering == true) return
-        viewModelScope.launchIO {
-            val snapshot = episodeOrderRepository.getByHostAnimeId(anime.id)
-            resetRangeAnchors()
-            updateSuccessState { it.copy(reorderSession = ReorderSession(snapshot)) }
-        }
+        // AM (CUSTOM_EPISODE_ORDER): nothing is written to anime.sorting here.
+        // processedEpisodes already shows canonicalEpisodeIds while the mode is
+        // open, so the list reads in the by-source order being edited for as
+        // long as that lasts and goes back to the user's own sort on the way
+        // out - a view, not a setting.
+        resetRangeAnchors()
+        updateSuccessState { it.copy(reorderSession = ReorderSession()) }
     }
 
     /**
@@ -2850,7 +2869,10 @@ class AnimeViewModel(
 
     fun showChangeEpisodeSeasonDialog() {
         val state = successState ?: return
-        if (!state.isReordering || state.selectedEpisodes.isEmpty()) return
+        // AM (CUSTOM_EPISODE_ORDER): a selection is all this needs. Moving
+        // episodes between seasons is a bulk action like marking them seen, not
+        // something reorder mode owns, so it no longer waits on that mode.
+        if (state.selectedEpisodes.isEmpty()) return
         updateSuccessState { it.copy(dialogStack = listOf(Dialog.ChangeEpisodeSeason(seasons = state.entrySeasons))) }
     }
 
@@ -2930,8 +2952,22 @@ class AnimeViewModel(
      * the moved episodes can be dragged into place once there.
      */
     fun moveSelectionToSeason(targetSeason: Long) {
-        val ids = successState?.selectedEpisodes?.map { it.id } ?: return
-        moveEpisodes(ids, targetSeason, MoveEpisodesInOrder.Placement.AtEnd)
+        val state = successState ?: return
+        val ids = state.selectedEpisodes.map { it.id }
+        if (ids.isEmpty()) return
+        // AM (CUSTOM_EPISODE_ORDER): inside reorder mode the move joins that
+        // session, which is what prunes a season it empties. Outside it there is
+        // no session to join, so it is written straight through - the same split
+        // moveEpisodeToSeason makes for the quick-edit dialog.
+        if (state.isReordering) {
+            moveEpisodes(ids, targetSeason, MoveEpisodesInOrder.Placement.AtEnd)
+            return
+        }
+        viewModelScope.launchIO {
+            val from = ids.mapNotNullTo(HashSet()) { state.episodeSeasonById[it] } - targetSeason
+            moveEpisodesInOrder.await(state.anime, ids, targetSeason, MoveEpisodesInOrder.Placement.AtEnd)
+            manageEntrySeasons.pruneEmpty(state.anime, from)
+        }
     }
 
     // AM (NAMED_SEASONS) -->
@@ -2948,7 +2984,7 @@ class AnimeViewModel(
      */
     fun moveSelectionToNextSeason() {
         val state = successState ?: return
-        if (!state.isReordering || state.selectedEpisodes.isEmpty()) return
+        if (state.selectedEpisodes.isEmpty()) return
         // create is read-modify-write on IO, so a second tap landing before the
         // first write does would make two seasons out of one gesture.
         if (!isCreatingSeason.compareAndSet(false, true)) return
@@ -2956,7 +2992,13 @@ class AnimeViewModel(
         viewModelScope.launchIO {
             try {
                 val number = manageEntrySeasons.create(state.anime, name = null)
-                moveEpisodes(ids, number, MoveEpisodesInOrder.Placement.AtEnd)
+                // AM (CUSTOM_EPISODE_ORDER): same split as moveSelectionToSeason -
+                // the new season is empty, so nothing needs pruning either way.
+                if (state.isReordering) {
+                    moveEpisodes(ids, number, MoveEpisodesInOrder.Placement.AtEnd)
+                } else {
+                    moveEpisodesInOrder.await(state.anime, ids, number, MoveEpisodesInOrder.Placement.AtEnd)
+                }
             } finally {
                 isCreatingSeason.set(false)
             }
@@ -2964,50 +3006,13 @@ class AnimeViewModel(
     }
     // <-- AM (NAMED_SEASONS)
 
-    /** Restores the stored order to how it was when reorder mode was entered - including undoing resets. */
-    fun discardReorderChanges() {
-        val anime = successState?.anime ?: return
-        val session = successState?.reorderSession ?: return
-        viewModelScope.launchIO {
-            episodeOrderRepository.replaceAll(anime.id, session.snapshot)
-            updateSuccessState { state ->
-                state.reorderSession?.let { state.copy(reorderSession = it.copy(hasChanges = false)) } ?: state
-            }
-            // AM (NAMED_SEASONS): the restore puts every episode back, so a
-            // season the quick-add created during this session now holds
-            // nothing. Checked here rather than only on exit so the season goes
-            // as soon as the discard empties it.
-            manageEntrySeasons.pruneEmpty(anime, session.touchedSeasons)
-        }
-    }
-
-    /**
-     * Returns the selected episodes to their default position and season by
-     * dropping their overrides - across every season the selection spans, so
-     * selecting everything resets everything. No confirmation: like every
-     * reorder edit it is undone by "discard changes" until the mode is left.
-     */
-    fun resetSelectedEpisodeOrder() {
-        val anime = successState?.anime ?: return
-        if (successState?.isReordering != true) return
-        val ids = successState?.selectedEpisodes?.map { it.id }.orEmpty()
-        if (ids.isEmpty()) return
-        viewModelScope.launchIO {
-            episodeOrderRepository.deleteAll(anime.id, ids)
-            markReorderChanged()
-        }
-    }
-
     private fun markReorderChanged(touched: Set<Long> = emptySet()) {
         resetRangeAnchors()
         updateSuccessState { state ->
             state.reorderSession?.let {
                 state.copy(
-                    reorderSession = it.copy(
-                        hasChanges = true,
-                        // AM (NAMED_SEASONS)
-                        touchedSeasons = it.touchedSeasons + touched,
-                    ),
+                    // AM (NAMED_SEASONS)
+                    reorderSession = it.copy(touchedSeasons = it.touchedSeasons + touched),
                 )
             } ?: state
         }
@@ -3844,6 +3849,8 @@ class AnimeViewModel(
              * properties. Shuffle still layers on top of it.
              */
             val isPreordered: Boolean = false,
+            /** Whether a stored custom order exists, dormant or not - gates "delete custom ordering". */
+            val hasCustomOrdering: Boolean = false,
             /** Each episode's resolved season (see GetEpisodeOrder). */
             val episodeSeasonById: Map<Long, Long> = emptyMap(),
             /** Seasons holding episodes, in display order - what the switcher offers. */
@@ -3956,6 +3963,26 @@ class AnimeViewModel(
 
             val isShuffleEnabled: Boolean
                 get() = episodeShuffleSeed != 0L
+
+            // AM (CUSTOM_EPISODE_ORDER) -->
+            /**
+             * Whether the action bar offers reorder mode at all.
+             *
+             * Not gated on the sort: a custom order only exists in the by-source
+             * order, and the mode simply shows that order rather than hiding the
+             * button under every other sort and leaving the feature invisible -
+             * the mode shows canonicalEpisodeIds while it is open and the
+             * entry's own sort returns on the way out. It IS gated on
+             * shuffle, which is the one case where entering would rearrange the
+             * list under the user: a shuffled view has no stored order to drag
+             * against, so until shuffle gets an order of its own there is
+             * nothing honest for the button to do. Seasons are fetched per
+             * season rather than as one list, so they are excluded as they
+             * always were.
+             */
+            val canReorder: Boolean
+                get() = anime.fetchType == FetchType.Episodes && !isShuffleEnabled
+            // <-- AM (CUSTOM_EPISODE_ORDER)
 
             val episodeListItems by lazy {
                 // AM (CUSTOM_EPISODE_ORDER) -->
