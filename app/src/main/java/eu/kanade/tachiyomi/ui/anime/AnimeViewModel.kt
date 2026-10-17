@@ -1563,8 +1563,10 @@ class AnimeViewModel(
             // did not agree was next.
             //
             // Same seed and same key function as both of those, so all three
-            // land on the same episode. sortDescending is deliberately not
-            // consulted: it mirrors an ordering that shuffle has replaced.
+            // land on the same episode. AM (SHUFFLE_SORT_DIRECTION):
+            // sortDescending is passed through rather than ignored - it now
+            // mirrors the scramble within each season, so Continue has to read
+            // the flipped order or it starts where the list says it ends.
             if (successState.isShuffleEnabled) {
                 // AM (SEASON_SCOPED_SHUFFLE) -->
                 // Kept in step with the list and the playlist deliberately.
@@ -1578,6 +1580,7 @@ class AnimeViewModel(
                     seed = successState.episodeShuffleSeed,
                     idOf = { it.id },
                     seasonRankOf = { successState.episodeSeasonById[it.id]?.let(seasonRankByNumber::get) },
+                    descending = anime.sortDescending(),
                 ).find { !it.seen }
                 // <-- AM (SEASON_SCOPED_SHUFFLE)
             }
@@ -3948,6 +3951,17 @@ class AnimeViewModel(
                 episodes.fastAny { it.selected }
             }
 
+            // AM (EPISODE_NAMES) -->
+            /**
+             * The name each episode is listed under - what alphabetical order
+             * has to sort on. Off the full list, not the visible one, so it
+             * covers every episode a sort can reach.
+             */
+            private val displayNamesById by lazy {
+                episodes.associate { it.id to it.displayName }
+            }
+            // <-- AM (EPISODE_NAMES)
+
             // AM (CUSTOM_EPISODE_ORDER) -->
             /**
              * Every selected episode, from the FULL list rather than the
@@ -4000,6 +4014,11 @@ class AnimeViewModel(
                         seed = episodeShuffleSeed,
                         idOf = { it.id },
                         seasonRankOf = { episodeSeasonById[it.id]?.let(seasonRankByNumber::get) },
+                        // AM (SHUFFLE_SORT_DIRECTION): the sort mode is what
+                        // shuffle replaces, but its direction still reads as a
+                        // mirror of whatever order is shown - so the toggle
+                        // flips the scramble instead of doing nothing.
+                        descending = anime.sortDescending(),
                     )
                 }
                 // <-- AM (SEASON_SCOPED_SHUFFLE)
@@ -4115,7 +4134,16 @@ class AnimeViewModel(
                         if (isPreordered) {
                             items
                         } else {
-                            items.sortedWith { (episode1), (episode2) -> getEpisodeSort(anime).invoke(episode1, episode2) }
+                            // AM (EPISODE_NAMES) -->
+                            // Alphabetical order is computed against the name
+                            // on the row, not episode.name - on a merged entry
+                            // those differ wherever a custom name or a
+                            // single-episode source's title was substituted,
+                            // and sorting by the hidden one looks like no sort
+                            // at all. Built once rather than per comparison.
+                            val sort = getEpisodeSort(anime) { displayNamesById[it.id] ?: it.name }
+                            items.sortedWith { (episode1), (episode2) -> sort.invoke(episode1, episode2) }
+                            // <-- AM (EPISODE_NAMES)
                         }
                     }
                     // <-- AM (MERGED_SOURCES)

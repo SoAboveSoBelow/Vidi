@@ -77,6 +77,13 @@ fun episodeShuffleSortKey(seed: Long, episodeId: Long): Long {
  * user-managed and need not be ordered. Anything without a season sorts last
  * rather than being dropped.
  *
+ * [descending] mirrors the scramble INSIDE each season, leaving seasons in
+ * their display order - the same thing the descending toggle does to any other
+ * sort, and the only reading that keeps boundaries monotonic. Reversing the
+ * whole list would put the last season first and undo the scoping above. It is
+ * a display layer: the player's playlist builds ascending whatever the toggle
+ * says, exactly as it does under every other sort.
+ *
  * One definition for all three surfaces - the episode list, the player's
  * playlist, and the merged entry's next-unseen lookup. They derive their order
  * independently from the same seed, so a change to what "shuffled" means has
@@ -86,10 +93,15 @@ fun <T> List<T>.shuffledWithinSeasons(
     seed: Long,
     idOf: (T) -> Long,
     seasonRankOf: (T) -> Int?,
-): List<T> = sortedWith(
-    compareBy(
-        { seasonRankOf(it) ?: Int.MAX_VALUE },
-        { episodeShuffleSortKey(seed, idOf(it)) },
-    ),
-)
+    descending: Boolean = false,
+): List<T> {
+    val bySeason = compareBy<T> { seasonRankOf(it) ?: Int.MAX_VALUE }
+    return sortedWith(
+        if (descending) {
+            bySeason.thenByDescending { episodeShuffleSortKey(seed, idOf(it)) }
+        } else {
+            bySeason.thenBy { episodeShuffleSortKey(seed, idOf(it)) }
+        },
+    )
+}
 // <-- AM (SEASON_SCOPED_SHUFFLE)

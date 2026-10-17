@@ -1844,7 +1844,18 @@ class PlayerViewModel(
         val episodes = rawEpisodes
             .let {
                 // AM (CUSTOM_EPISODE_ORDER) -->
-                if (isPreordered) it else it.sortedWith(getEpisodeSort(anime, sortDescending = false))
+                // AM (EPISODE_NAMES): alphabetical sorts on the playlist row's
+                // own label, the same names the entry screen lists, so the two
+                // cannot disagree about what alphabetical means.
+                if (isPreordered) {
+                    it
+                } else {
+                    it.sortedWith(
+                        getEpisodeSort(anime, sortDescending = false) { episode ->
+                            resolvedOrder.displayNameByEpisodeId[episode.id] ?: episode.name
+                        },
+                    )
+                }
                 // <-- AM (CUSTOM_EPISODE_ORDER)
             }
             .run {
