@@ -212,6 +212,57 @@
             android:theme="@style/Theme.Tachiyomi" />
 
 
+        <!-- AM (EXTERNAL_PLAYBACK) -->
+        <!-- The app's only exported entry point for playback. PlayerActivity
+             stays exported="false" on purpose - see ExternalPlayerActivity's own
+             doc comment, and the DISTINCT_TASK_AFFINITY_FIX /
+             DUPLICATE_INSTANCE_SELF_TERMINATE notes above, for why its task
+             invariants should not be reachable by arbitrary apps.
+
+             No taskAffinity, no launchMode: this Activity holds no state and is
+             finished before the player appears, so there is nothing for a
+             hostile or merely careless caller's intent flags to corrupt.
+
+             excludeFromRecents + noHistory keep the trampoline out of the
+             recents list and off the back stack - without them, backing out of
+             the player would land on an invisible NoDisplay Activity that
+             immediately relaunched playback. -->
+        <activity
+            android:name=".ui.player.ExternalPlayerActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+
+            <!-- "Open with" from a file manager or gallery. The three data
+                 blocks are deliberately separate rather than one merged block:
+                 Android's intent filters combine every attribute within a
+                 single <data> across the whole filter, so merging a scheme-only
+                 entry with a mimeType entry matches far more than intended. -->
+            <intent-filter android:priority="1">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:mimeType="video/*" android:scheme="content" />
+                <data android:mimeType="video/*" android:scheme="file" />
+                <data android:mimeType="application/x-mpegURL" android:scheme="content" />
+                <data android:mimeType="application/vnd.apple.mpegurl" android:scheme="content" />
+            </intent-filter>
+
+            <!-- "Share to Vidi" from a gallery or downloads app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity>
+        <!-- AM (EXTERNAL_PLAYBACK) -->
+
         <activity
             android:name=".ui.security.UnlockActivity"
             android:exported="false"

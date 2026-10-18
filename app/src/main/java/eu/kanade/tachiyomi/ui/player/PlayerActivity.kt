@@ -68,7 +68,6 @@ import dev.icerock.moko.resources.StringResource
 import dev.zacsweers.metro.Inject
 import eu.kanade.domain.connection.service.ConnectionPreferences
 import eu.kanade.presentation.theme.TachiyomiTheme
-import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SerializableHoster.Companion.serialize
 import eu.kanade.tachiyomi.data.connection.discord.DiscordRPCService
 import eu.kanade.tachiyomi.data.connection.discord.PlayerData
@@ -456,28 +455,23 @@ class PlayerActivity : BaseActivity() {
         // comment.
         // <-- AM (PIP_RECREATE_FIX_REMOVED)
 
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // Takes a [PlaybackRequest] instead of five loose parameters, and the
+        // extras are written by [writeToIntent] - one place that owns the wire
+        // format, shared with the parse in onNewIntent(). The flags below are
+        // untouched and still the whole reason this builder exists; see their
+        // own comments, which are load-bearing.
+        //
+        // The old signature took animeId/episodeId as Long? and wrote nulls
+        // straight through to putExtra, where getLong() read them back as 0 -
+        // a valid-looking id that no bail-out check caught. A request is
+        // non-null or there is no intent to build.
         fun newIntent(
             context: Context,
-            animeId: Long?,
-            episodeId: Long?,
-            hostList: List<Hoster>? = null,
-            hostIndex: Int? = null,
-            vidIndex: Int? = null,
-            // AM (CONTINUE_BUTTON_RESUME_FIX) -->
-            // See AnimeScreen.openEpisode()'s forceResume param - only the
-            // "Continue" button should pass true.
-            forceResume: Boolean = false,
-            // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
+            request: PlaybackRequest,
         ): Intent {
-            return Intent(context, PlayerActivity::class.java).apply {
-                putExtra("animeId", animeId)
-                putExtra("episodeId", episodeId)
-                hostIndex?.let { putExtra("hostIndex", it) }
-                vidIndex?.let { putExtra("vidIndex", it) }
-                hostList?.let { putExtra("hostList", it.serialize()) }
-                // AM (CONTINUE_BUTTON_RESUME_FIX) -->
-                putExtra("forceResume", forceResume)
-                // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
+            return request.writeToIntent(Intent(context, PlayerActivity::class.java)).apply {
+                // <-- AM (CONTENT_AGNOSTIC_SESSION)
                 // AM (PIP_REOPEN_DUPLICATE_TASK_FIX) -->
                 // Explicitly setting NEW_TASK here (rather than letting Android inject it
                 // implicitly at PendingIntent.send() time when this Intent is fired from a
@@ -542,18 +536,31 @@ class PlayerActivity : BaseActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
 
-        val animeId = intent.extras?.getLong("animeId") ?: -1
-        val episodeId = intent.extras?.getLong("episodeId") ?: -1
-        val hostList = intent.extras?.getString("hostList") ?: ""
-        val hostIndex = intent.extras?.getInt("hostIndex") ?: -1
-        val vidIndex = intent.extras?.getInt("vidIndex") ?: -1
-        // AM (CONTINUE_BUTTON_RESUME_FIX) -->
-        val forceResume = intent.extras?.getBoolean("forceResume") ?: false
-        // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
-        if (animeId == -1L || episodeId == -1L) {
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // One parse in place of five individually-defaulted extra reads. The
+        // old `animeId == -1L || episodeId == -1L` bail-out was really asking
+        // "did this intent carry a request at all" - it just had to express
+        // that as sentinel ids, which also meant an intent missing only the
+        // hoster extras parsed as a valid request with silent -1 defaults.
+        //
+        // External requests finish() for now, exactly as an unparseable one
+        // does. Nothing produces them yet (see PlaybackRequest.External), and
+        // the surrounding onNewIntent logic below - the duplicate-instance
+        // teardown, the cross-series relaunch - is written entirely in terms
+        // of anime/episode identity. Teaching it otherwise belongs with the
+        // external PlaybackSource, not here.
+        val request = PlaybackRequest.fromIntent(intent) as? PlaybackRequest.Library
+        if (request == null) {
             finish()
             return
         }
+        val animeId = request.animeId
+        val episodeId = request.episodeId
+        val hostList = request.hosterList?.serialize() ?: ""
+        val hostIndex = request.hosterIndex
+        val vidIndex = request.videoIndex
+        val forceResume = request.forceResume
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
         NotificationReceiver.dismissNotification(
             this,
             animeId.hashCode(),
@@ -599,16 +606,29 @@ class PlayerActivity : BaseActivity() {
                         withUIContext { setIntent(intent) }
                     }
                     else -> {
-                        pendingFreshInstanceIntent = Intent(this@PlayerActivity, PlayerActivity::class.java).apply {
-                            putExtra("animeId", animeId)
-                            putExtra("episodeId", episodeId)
-                            if (hostIndex != -1) putExtra("hostIndex", hostIndex)
-                            if (vidIndex != -1) putExtra("vidIndex", vidIndex)
-                            if (hostList.isNotBlank()) putExtra("hostList", hostList)
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                        }
+                        // AM (CONTENT_AGNOSTIC_SESSION) -->
+                        // Was a hand-rolled copy of newIntent()'s extras,
+                        // minus forceResume - the kind of near-duplicate that
+                        // silently drifts. Rebuilt from the parsed request
+                        // through the same writer, with the same three flags
+                        // this always set.
+                        //
+                        // forceResume is explicitly dropped rather than
+                        // carried: the hand-rolled version never wrote it, so
+                        // passing it through here would be a real behavior
+                        // change (a Continue-initiated cross-series switch
+                        // would start forcing a resume on the relaunched
+                        // instance) smuggled into a refactor. Whether it
+                        // SHOULD carry is a separate question, asked on its
+                        // own.
+                        pendingFreshInstanceIntent = request.copy(forceResume = false)
+                            .writeToIntent(Intent(this@PlayerActivity, PlayerActivity::class.java))
+                            .apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            }
+                        // <-- AM (CONTENT_AGNOSTIC_SESSION)
                         withUIContext { finish() }
                     }
                 }
@@ -661,7 +681,7 @@ class PlayerActivity : BaseActivity() {
             )
             // <-- AM (PIP_AVAILABILITY_FASTPATH_FIX)
 
-            if (!viewModel.needsInit(animeId, episodeId)) {
+            if (!viewModel.needsInit(SessionKey.Library(animeId, episodeId))) {
                 // Already playing this exact episode (e.g. reopened from the
                 // background-playback notification) - avoid restarting the whole
                 // file-open pipeline.
@@ -683,9 +703,13 @@ class PlayerActivity : BaseActivity() {
             // fails for any reason (nothing lost - same behavior as before this
             // fix existed).
             val holderState = mediaHolder?.state?.value
+            // AM (CONTENT_AGNOSTIC_SESSION) -->
+            // One key comparison in place of the two id comparisons - same
+            // question ("is the holder already on this exact target"), asked
+            // without unpacking what kind of target it is.
             val canSyncWithoutReload = viewModel.wasPlayerReusedFromLiveHolder &&
-                holderState?.animeId == animeId &&
-                holderState.episodeId == episodeId
+                holderState?.sessionKey == SessionKey.Library(animeId, episodeId)
+            // <-- AM (CONTENT_AGNOSTIC_SESSION)
             if (canSyncWithoutReload && viewModel.syncSessionStateFromDb(animeId, episodeId)) {
                 withUIContext { setIntent(intent) }
                 return@launchNonCancellable

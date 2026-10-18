@@ -295,7 +295,8 @@ class DownloadProvider(
         if (animeSource == null) return null
         return if (animeSource.isLocal()) {
             val (animeDirName, episodeDirName) = episodeUrl?.split('/', limit = 2) ?: return null
-            localFileSystem.getBaseDirectory()?.findFile(animeDirName)?.findFile(episodeDirName)?.size()
+            // AM (EXTRA_LOCAL_FOLDERS)
+            localFileSystem.getAnimeDirectory(animeDirName)?.findFile(episodeDirName)?.size()
         } else {
             val episodeUrl = episodeUrl ?: return null
             findEpisodeDir(episodeName, episodeScanlator, episodeUrl, animeTitle, animeSource)?.size()

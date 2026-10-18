@@ -23,16 +23,22 @@ import eu.kanade.tachiyomi.ui.main.MainActivity
 // AM (BACKGROUND_SKIP_FIX) -->
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import logcat.LogPriority
 // <-- AM (BACKGROUND_SKIP_FIX)
 import mihon.app.di.appGraph
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -64,9 +70,9 @@ class PlayerBackgroundPlaybackService : Service() {
             // notification never refreshed to match, since nothing was watching
             // for that change with no Activity around to notice it.
             holder.state
-                .map { Triple(it.animeTitle to it.episodeTitle, it.animeId to it.episodeId, it.resolvedEpisodeKey) }
+                .map { Triple(it.animeTitle to it.episodeTitle, it.sessionKey, it.resolvedSessionKey) }
                 .distinctUntilChanged()
-                .onEach { (titles, ids, resolvedKey) ->
+                .onEach { (titles, key, resolvedKey) ->
                     // AM (MEDIASESSION_SINGLE_WRITER_FIX) -->
                     // Previously deferred entirely to PlayerActivity's own
                     // REOPEN_TARGET_STALENESS_FIX observer whenever an Activity was alive,
@@ -80,12 +86,11 @@ class PlayerBackgroundPlaybackService : Service() {
                     // Activity-side observer it replaces.
                     // <-- AM (MEDIASESSION_SINGLE_WRITER_FIX)
                     val (animeTitle, episodeTitle) = titles
-                    val (animeId, episodeId) = ids
                     if (animeTitle.isEmpty() && episodeTitle.isEmpty()) return@onEach
                     // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
                     // Gated on the SAME resolution-finished signal
                     // pushLiveMediaState() uses (see PlayerMediaState's own doc comment
-                    // on resolvedEpisodeKey) - without this, the notification's visible
+                    // on resolvedSessionKey) - without this, the notification's visible
                     // title/subtitle updated instantly on every switch while its
                     // artwork (a completely separate Android API surface -
                     // MediaSession's metadata, not this Notification's own text) waited
@@ -98,8 +103,13 @@ class PlayerBackgroundPlaybackService : Service() {
                     // rather than splitting "text can wait" from "ids can't" and ending
                     // up back at a partially-incremental render either way.
                     // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
-                    if (resolvedKey != ids) return@onEach
-                    updateEpisodeInfo(animeTitle, episodeTitle, animeId, episodeId)
+                    // AM (CONTENT_AGNOSTIC_SESSION) -->
+                    // Null check for the same reason as pushLiveMediaState()'s -
+                    // see that comment. Both nullable keys being null compares
+                    // equal, where the old (animeId to episodeId) pair did not.
+                    if (key == null || resolvedKey != key) return@onEach
+                    // <-- AM (CONTENT_AGNOSTIC_SESSION)
+                    updateEpisodeInfo(animeTitle, episodeTitle, key)
                 }
                 .launchIn(serviceScope)
             // <-- AM (BACKGROUND_SKIP_FIX)
@@ -120,11 +130,37 @@ class PlayerBackgroundPlaybackService : Service() {
                 // Was `if (!paused)` - resume only. Both edges now, so this observer is
                 // the single writer of the Service's foreground state, driven by mpv's
                 // own real pause value rather than by whichever call site happened to
-                // cause the change. The pause edge is what releases the foreground
-                // obligation (see postNotification); the resume edge re-takes it.
-                .onEach { paused -> updatePlaybackState(isPlaying = !paused) }
+                // cause the change.
                 // <-- AM (IDLE_SESSION_COST_FIX)
+                .onEach { paused -> updatePlaybackState(isPlaying = !paused) }
                 .launchIn(serviceScope)
+
+            // AM (EXTERNAL_RESUME_POSITION) -->
+            // The holder's own live sampler already pushes position into state; this
+            // just keeps the latest where buildReopenIntent can reach it. Not
+            // distinctUntilChanged on the whole state - only the field is taken, so
+            // this collects a Flow of ints that changes about once a second.
+            holder.state
+                .map { it.positionMs }
+                .distinctUntilChanged()
+                .onEach { lastPositionMs = it }
+                .launchIn(serviceScope)
+            // <-- AM (EXTERNAL_RESUME_POSITION)
+
+            // AM (IDLE_RECLAIM_GRACE) -->
+            // The grace timer's two inputs, combined so either one changing
+            // re-evaluates. Separate from the observer above deliberately: that one
+            // owns the notification and the wake lock, this one owns the session's
+            // lifetime, and folding them together would mean a change to either
+            // concern editing the other's single-writer path.
+            combine(
+                holder.state.map { it.paused }.distinctUntilChanged(),
+                holder.hasExternalScreenConsumerFlow,
+            ) { paused, hasConsumer -> paused && !hasConsumer }
+                .distinctUntilChanged()
+                .onEach { idle -> if (idle) armIdleReclaim() else cancelIdleReclaim() }
+                .launchIn(serviceScope)
+            // <-- AM (IDLE_RECLAIM_GRACE)
         }
     }
     val mediaHolder: PlayerMediaHolder by mediaHolderLazy
@@ -140,8 +176,28 @@ class PlayerBackgroundPlaybackService : Service() {
     private var subtitle: String = ""
     private var isPlaying: Boolean = true
     private var mediaSessionToken: MediaSession.Token? = null
-    private var animeId: Long? = null
-    private var episodeId: Long? = null
+    // AM (CONTENT_AGNOSTIC_SESSION) -->
+    // Was animeId/episodeId. The notification only ever needed these to rebuild
+    // its reopen intent, which is a "take me back to what's playing" request -
+    // the session's identity, not a library lookup. Holding the key keeps that
+    // true for sessions that have no library row.
+    private var sessionKey: SessionKey? = null
+    // <-- AM (CONTENT_AGNOSTIC_SESSION)
+
+    // AM (EXTERNAL_RESUME_POSITION) -->
+    /**
+     * Where the session was last playing, for [buildReopenIntent] to carry.
+     *
+     * Held here because this Service lives for as long as the notification does,
+     * which is the lifetime a resume position has to survive: the player may be
+     * torn down to save battery, but while the notification is up, pressing play
+     * must start again where it stopped. A library episode gets this from its DB
+     * row; an external file has no row, so the reopen Intent carries it instead -
+     * and a PendingIntent is held by the system alongside the notification, so
+     * the position outlives even this field.
+     */
+    private var lastPositionMs: Int = 0
+    // <-- AM (EXTERNAL_RESUME_POSITION)
     private var onTogglePlayPause: (() -> Unit)? = null
     private var onStopRequested: (() -> Unit)? = null
 
@@ -284,19 +340,32 @@ class PlayerBackgroundPlaybackService : Service() {
      * This is the same shape the platform's own media stack uses - Media3's
      * MediaSessionService leaves foreground when playback stops and re-enters on play.
      *
-     * The consequence to be clear about: a paused session is no longer guaranteed to
-     * survive. The system may reclaim the process, taking the notification with it.
-     * That is why the pause edge flushes the position (see PlayerMediaHolder's
-     * PauseChanged observer) - resuming where the user left off is the persisted
-     * value's job, and holding the process alive is only an optimization that makes
-     * the common case instant.
+     * AM (IDLE_RECLAIM_GRACE) -->
+     * That detach is no longer done on the pause edge itself, which was the half of
+     * this fix that was missing rather than a deliberate trade. Dropping the
+     * obligation the instant mpv reports paused makes the process reclaimable
+     * immediately, and the session is then killed by whatever happens next rather
+     * than reclaimed at a point of our choosing. Confirmed on-device (2026-10-17):
+     * dismissing the player (which pauses - see PlayerHostScreen's onDismiss, whose
+     * own contract is "pause and hide, but keep the session alive") and then swiping
+     * the task away destroyed the whole session, while doing the same with playback
+     * left running survived it. Identical paths, differing only in pause state,
+     * because pause was the thing deciding survivability.
+     *
+     * The obligation is now held for as long as a session exists, playing or paused,
+     * and [armIdleReclaim] takes it away on a timer instead - so a paused session is
+     * protected for a grace period and then torn down properly, in one orderly place,
+     * rather than being left to be killed arbitrarily. The cost IDLE_SESSION_COST_FIX
+     * exists to avoid is still avoided: nothing is pinned indefinitely, it just ends
+     * deliberately instead of by reclamation.
+     * <-- AM (IDLE_RECLAIM_GRACE)
      *
      * NOTIFICATION_REPOST_FIX's own reasoning still holds on the playing path, so that
      * branch is still a startForeground() rather than a bare notify().
      */
     private fun postNotification() {
         val notification = buildNotification()
-        if (isPlaying) {
+        if (isPlaying || !foregroundReleased) {
             ServiceCompat.startForeground(
                 this,
                 Notifications.ID_BACKGROUND_PLAYBACK,
@@ -304,12 +373,75 @@ class PlayerBackgroundPlaybackService : Service() {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
             )
         } else {
+            // The grace period has expired: hand the obligation back, keep the
+            // notification posted. DETACH, not REMOVE - see foregroundReleased.
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
             NotificationManagerCompat.from(this)
                 .notify(Notifications.ID_BACKGROUND_PLAYBACK, notification)
         }
     }
     // <-- AM (IDLE_SESSION_COST_FIX)
+
+    // AM (IDLE_RECLAIM_GRACE) -->
+    /** Pending orderly teardown of a paused, unwatched session - see [armIdleReclaim]. */
+    private var idleReclaimJob: Job? = null
+
+    /**
+     * Starts the grace period after which a paused session is torn down.
+     *
+     * Armed only when BOTH are true: mpv is paused, and nothing is on screen
+     * showing this session. A paused video with the player still open is a user
+     * sitting on a frame, not an idle session, and must never be reclaimed under
+     * them - which is why [PlayerMediaHolder.hasExternalScreenConsumerFlow] is part
+     * of the condition rather than pause alone.
+     *
+     * Any change to either input cancels and re-evaluates, so resuming or coming
+     * back to the player disarms this with no bookkeeping of its own. A plain
+     * coroutine delay is enough and no alarm is needed, precisely because the
+     * foreground obligation is held throughout the grace period - the process is
+     * alive to run it.
+     *
+     * Expiry is an ORDERLY teardown, not a hand-off to the system: stop the
+     * foreground state and remove the notification, then stopSelf, which runs
+     * onDestroy and releases the holder through the one existing path. The pause
+     * edge has already flushed the position (see PlayerMediaHolder's PauseChanged
+     * observer), so the session is resumable from the DB afterwards exactly as it
+     * would be after any other clean end.
+     */
+    private fun armIdleReclaim() {
+        idleReclaimJob?.cancel()
+        idleReclaimJob = serviceScope.launch {
+            delay(IDLE_RECLAIM_GRACE_MS)
+            logcat(LogPriority.INFO) {
+                "IDLE_RECLAIM paused and unwatched for ${IDLE_RECLAIM_GRACE_MS}ms - releasing foreground"
+            }
+            withContext(Dispatchers.Main) {
+                foregroundReleased = true
+                postNotification()
+            }
+        }
+    }
+
+    private fun cancelIdleReclaim() {
+        idleReclaimJob?.cancel()
+        idleReclaimJob = null
+        foregroundReleased = false
+    }
+
+    /**
+     * True once the grace period has expired and the foreground obligation has
+     * been given back.
+     *
+     * The session is NOT over at that point - the notification stays posted, the
+     * MediaSession stays active, and every control on it must still work. All
+     * that changed is that the process stopped being privileged. An earlier
+     * version of this expiry called stopSelf() instead, which tore the session
+     * down on a timer: that is the app deciding the user is finished, which is
+     * not ours to decide. Swiping the notification away is that decision, and it
+     * already has a path (see NOTIFICATION_DISMISS_STOPS_BACKGROUND_FIX).
+     */
+    private var foregroundReleased = false
+    // <-- AM (IDLE_RECLAIM_GRACE)
 
     /** Reflects the current pause state in the notification. */
     fun updatePlaybackState(isPlaying: Boolean) {
@@ -347,11 +479,10 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     /** Keeps notification text and reopen-intent ids in sync when the episode changes mid-session. */
-    fun updateEpisodeInfo(title: String, subtitle: String, animeId: Long?, episodeId: Long?) {
+    fun updateEpisodeInfo(title: String, subtitle: String, sessionKey: SessionKey?) {
         this.title = title
         this.subtitle = subtitle
-        this.animeId = animeId
-        this.episodeId = episodeId
+        this.sessionKey = sessionKey
         // AM (NOTIFICATION_REPOST_FIX) -->
         // See updatePlaybackState()'s own doc comment above - same fix, same reason.
         // <-- AM (NOTIFICATION_REPOST_FIX)
@@ -373,7 +504,42 @@ class PlayerBackgroundPlaybackService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_TOGGLE_PLAY_PAUSE -> onTogglePlayPause?.invoke()
+            // AM (NOTIFICATION_ACTIONS_OUTLIVE_SESSION) -->
+            // Was `onTogglePlayPause?.invoke()` alone. That lambda is captured from
+            // PlayerHostScreen's service connection and closes over ONE
+            // PlayerViewModel instance; it is nulled in onDestroy and
+            // stopBackgroundPlayback, and even while set it flips the pause state of
+            // whatever player that VM holds. So once the session behind it is gone -
+            // the holder released, the player torn down - this was `null?.invoke()`:
+            // a silent no-op. The notification was still posted and still looked
+            // live, and its play button did nothing at all.
+            //
+            // The notification's own existence is what says a session is resumable,
+            // so its controls have to be as durable as it is. If a live player is
+            // there, toggle it, exactly as before. If not, rebuild from the
+            // [sessionKey] this Service already holds for the reopen intent - the
+            // same payload, through the same path, so there is one definition of
+            // "take me back to what was playing" rather than one for tapping the
+            // notification body and a broken one for its button.
+            //
+            // Rebuilding has to go through MainActivity because that is where the
+            // player overlay is hosted - there is no headless path that can
+            // construct a session (see PlayerMediaHolder's note on
+            // hasExternalScreenConsumer). Bringing the app up to resume is a
+            // trade-off, but it is strictly better than a button that lies.
+            ACTION_TOGGLE_PLAY_PAUSE -> {
+                val hasLivePlayer = PlayerMediaHolder.current?.hasAdoptedPlayer == true
+                val toggle = onTogglePlayPause
+                if (hasLivePlayer && toggle != null) {
+                    toggle.invoke()
+                } else {
+                    logcat(LogPriority.INFO) {
+                        "NOTIFICATION_ACTIONS no live player for toggle - rebuilding session"
+                    }
+                    startActivity(buildReopenIntent())
+                }
+            }
+            // <-- AM (NOTIFICATION_ACTIONS_OUTLIVE_SESSION)
             ACTION_STOP -> {
                 onStopRequested?.invoke()
                 stopBackgroundPlayback()
@@ -455,17 +621,59 @@ class PlayerBackgroundPlaybackService : Service() {
         return PendingIntent.getActivity(
             this,
             REQUEST_CODE_OPEN,
-            Intent(this, MainActivity::class.java).apply {
-                action = "${BuildConfig.APPLICATION_ID}.REOPEN_PLAYER_HOST_SCREEN"
-                putExtra("animeId", animeId)
-                putExtra("episodeId", episodeId)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            },
+            buildReopenIntent(),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
+
+    // AM (NOTIFICATION_ACTIONS_OUTLIVE_SESSION) -->
+    /**
+     * "Take me back to what was playing", as an Intent.
+     *
+     * Extracted from [buildReopenPendingIntent] so the notification's own play
+     * action can rebuild a torn-down session through the identical payload and
+     * path rather than a second, parallel one - see onStartCommand.
+     */
+    private fun buildReopenIntent(): Intent {
+        return Intent(this, MainActivity::class.java).apply {
+            action = "${BuildConfig.APPLICATION_ID}.REOPEN_PLAYER_HOST_SCREEN"
+            // AM (EXTERNAL_PLAYBACK_REOPEN_FIX) -->
+            // Was library-only: an external session wrote NO extras at all,
+            // so MainActivity's handler read -1/-1 and did nothing - tapping
+            // the notification simply would not bring an externally-opened
+            // video back. Writing the request the same way every other
+            // caller does means the reopen path does not need to know which
+            // kind of session it is reopening.
+            //
+            // The library extras keep their original names (see
+            // PlaybackRequest.writeToIntent) so a PendingIntent the system
+            // still holds from a previous build keeps resolving.
+            // Both reads are qualified deliberately: inside apply{} on an
+            // Intent, bare `sessionKey`/`title` resolve outward to this
+            // Service only because Intent happens to declare neither, which
+            // is not a property worth depending on.
+            val svc = this@PlayerBackgroundPlaybackService
+            svc.sessionKey?.let { key ->
+                when (key) {
+                    is SessionKey.Library -> PlaybackRequest.Library(
+                        animeId = key.animeId,
+                        episodeId = key.episodeId,
+                    )
+                    is SessionKey.External -> PlaybackRequest.External(
+                        uri = key.uri,
+                        title = svc.title.takeIf { it.isNotBlank() },
+                        // AM (EXTERNAL_RESUME_POSITION)
+                        positionMs = svc.lastPositionMs.toLong(),
+                    )
+                }.writeToIntent(this)
+            }
+            // <-- AM (EXTERNAL_PLAYBACK_REOPEN_FIX)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+    }
+    // <-- AM (NOTIFICATION_ACTIONS_OUTLIVE_SESSION)
     // <-- AM (PLAYER_HOST_SCREEN_REOPEN_FIX)
     // <-- AM (PIP_TASK_ROOT_FIX_REMOVED)
 
@@ -542,6 +750,25 @@ class PlayerBackgroundPlaybackService : Service() {
     }
 
     companion object {
+        // AM (IDLE_RECLAIM_GRACE) -->
+        /**
+         * How long a paused, unwatched session is kept before it is torn down.
+         *
+         * Twenty minutes: long enough to cover the ordinary reasons a video gets
+         * paused and set down - a call, a meal, a conversation, putting the phone
+         * in a pocket mid-episode - and still short enough that forgetting about
+         * it does not hold the process at foreground priority for the rest of the
+         * day. Giving the obligation up is also all that happens at expiry; the
+         * notification and the session stay, so the cost of erring long is
+         * foreground priority for a while, not anything the user loses.
+         *
+         * A constant rather than a preference because nothing yet suggests the
+         * right value differs per person; promoting it to PlayerPreferences is a
+         * few lines if it does.
+         */
+        private const val IDLE_RECLAIM_GRACE_MS = 20L * 60L * 1000L
+        // <-- AM (IDLE_RECLAIM_GRACE)
+
         private const val REQUEST_CODE_TOGGLE = 0
         private const val REQUEST_CODE_STOP = 1
         private const val REQUEST_CODE_OPEN = 2

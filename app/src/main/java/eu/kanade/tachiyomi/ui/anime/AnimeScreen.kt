@@ -72,6 +72,7 @@ import eu.kanade.tachiyomi.ui.category.CategoryScreen
 import eu.kanade.tachiyomi.ui.home.HomeScreen
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
+import eu.kanade.tachiyomi.ui.player.SessionKey
 import eu.kanade.tachiyomi.ui.setting.SettingsScreen
 import eu.kanade.tachiyomi.ui.webview.WebViewScreen
 import eu.kanade.tachiyomi.util.system.copyToClipboard
@@ -749,7 +750,7 @@ class AnimeScreen(
                 // episode.animeId -> targetAnimeId: the session's anime is what
                 // we launch with, not necessarily the episode's owning child.
                 // <-- AM (MERGED_SOURCES)
-                liveState?.animeId == targetAnimeId && liveState.episodeId == episode.id
+                liveState?.sessionKey == SessionKey.Library(targetAnimeId, episode.id)
             ) {
                 holder.setPaused(false)
             }

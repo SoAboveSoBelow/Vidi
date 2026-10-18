@@ -393,4 +393,20 @@
     <string name="release_history">Release history</string>
     <string name="release_history_installed">Installed</string>
     <string name="release_history_hint">Long-press to copy debug info</string>
+
+    <!-- AM (EXTERNAL_FOLDER_GRANT) -->
+    <string name="external_folder_title">Grant Folder Access?</string>
+    <string name="external_folder_request">Allows the sources folder to function as a playlist.</string>
+    <string name="external_folder_granted">Playing through this folder. Use next and previous to move between its videos.</string>
+    <string name="external_folder_action">Grant</string>
+
+    <!-- AM (EXTRA_LOCAL_FOLDERS) -->
+    <string name="am_pref_granted_folders">Granted folders</string>
+    <string name="am_pref_granted_folders_summary">Folders outside your storage location that the local source covers</string>
+    <string name="am_granted_folders_empty">No granted folders</string>
+    <string name="am_granted_folders_in_library">In library</string>
+    <string name="am_granted_folders_not_in_library">Not in library</string>
+    <string name="am_granted_folders_unavailable">Unavailable</string>
+    <string name="am_granted_folders_internal_storage">Internal storage</string>
+    <string name="am_granted_folders_select_unused">Select not in library</string>
 </resources>

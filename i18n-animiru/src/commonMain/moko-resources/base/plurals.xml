@@ -18,4 +18,10 @@
         <item quantity="one">Missing %1$s season</item>
         <item quantity="other">Missing %1$s seasons</item>
     </plurals>
+
+    <!-- AM (EXTRA_LOCAL_FOLDERS) -->
+    <plurals name="am_granted_folders_remove_text">
+        <item quantity="one">Stop covering this folder? Its videos stay where they are, and the entry stays in your library if you added it.</item>
+        <item quantity="other">Stop covering these %d folders? Their videos stay where they are, and entries you added stay in your library.</item>
+    </plurals>
 </resources>

@@ -288,18 +288,32 @@ class MainActivity : BaseActivity() {
         // rather than duplicating it, so tapping the notification behaves
         // exactly like tapping the same episode again from inside the app.
         if (intent.action == "${BuildConfig.APPLICATION_ID}.REOPEN_PLAYER_HOST_SCREEN") {
-            val animeId = intent.getLongExtra("animeId", -1L)
-            val episodeId = intent.getLongExtra("episodeId", -1L)
-            if (animeId != -1L && episodeId != -1L) {
-                lifecycleScope.launch {
+            // AM (EXTERNAL_PLAYBACK_REOPEN_FIX) -->
+            // Was two getLongExtra reads with -1 sentinels. Parsed as a request
+            // now, matching how the Service writes it - which is what lets an
+            // externally-opened video be reopened from its notification at all.
+            when (val request = PlaybackRequest.fromIntent(intent)) {
+                is PlaybackRequest.Library -> lifecycleScope.launch {
                     startPlayerActivity(
                         context = this@MainActivity,
-                        animeId = animeId,
-                        episodeId = episodeId,
+                        animeId = request.animeId,
+                        episodeId = request.episodeId,
                         extPlayer = false,
                     )
                 }
+                is PlaybackRequest.External -> {
+                    // Straight to the overlay host: there is no library entry
+                    // to route through startPlayerActivity for, and its
+                    // already-playing check reads currentAnime, which an
+                    // external session does not have. Submitting the request is
+                    // what the external path does everywhere else (see
+                    // ExternalPlayerActivity), and the host's reconciliation
+                    // effect no-ops when this is already what is playing.
+                    PlayerMediaHolder.requestPlayback(request)
+                }
+                null -> Unit
             }
+            // <-- AM (EXTERNAL_PLAYBACK_REOPEN_FIX)
         }
         // <-- AM (PLAYER_HOST_SCREEN_REOPEN_FIX)
     }
@@ -1713,7 +1727,7 @@ class MainActivity : BaseActivity() {
                     holder.isDummyPipActive = false
                 } else {
                     PlayerMediaHolder.requestPlayback(
-                        PlaybackRequest(
+                        PlaybackRequest.Library(
                             animeId = animeId,
                             episodeId = episodeId,
                             hosterList = hosterList,

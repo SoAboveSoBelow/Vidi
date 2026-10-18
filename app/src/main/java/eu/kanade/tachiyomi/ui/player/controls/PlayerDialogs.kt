@@ -13,6 +13,7 @@ import eu.kanade.tachiyomi.ui.player.controls.components.dialogs.IntegerPickerDi
 import mihon.feature.library.EpisodeSearchFields
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.stringResource
 
@@ -57,9 +58,25 @@ fun PlayerDialogs(
     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
 
     onDismissRequest: () -> Unit,
+
+    // AM (EXTERNAL_FOLDER_GRANT) -->
+    /** Whether asking for folder access would do anything - see PlayerViewModel. */
+    canGrantExternalFolder: Boolean = false,
+    /** Launches the folder picker; null where no launcher is wired up. */
+    onRequestExternalFolder: (() -> Unit)? = null,
+    // <-- AM (EXTERNAL_FOLDER_GRANT)
 ) {
     when (dialogShown) {
         Dialogs.None -> {}
+        // AM (EXTERNAL_FOLDER_GRANT) -->
+        Dialogs.ExternalFolder -> {
+            ExternalFolderDialog(
+                canGrantAccess = canGrantExternalFolder,
+                onGrantAccess = onRequestExternalFolder,
+                onDismissRequest = onDismissRequest,
+            )
+        }
+        // <-- AM (EXTERNAL_FOLDER_GRANT)
         Dialogs.EpisodeList -> {
             EpisodeListDialog(
                 displayMode = episodeDisplayMode,
@@ -148,3 +165,58 @@ fun PlayerDialogs(
         }
     }
 }
+
+// AM (EXTERNAL_FOLDER_GRANT) -->
+/**
+ * What the episode-list button opens for an externally-opened file.
+ *
+ * A file handed to Vidi from another app comes with access to that one file and
+ * nothing around it, so there is no folder to list and no next/previous to
+ * offer until the user says which folder this is. This is where they say it -
+ * an explicit action rather than a prompt on open, which would be asking for
+ * access before knowing whether anything needs it.
+ *
+ * Once a folder has been granted the action is gone and this reports the queue
+ * is in place, because asking again would do nothing.
+ */
+@Composable
+private fun ExternalFolderDialog(
+    canGrantAccess: Boolean,
+    onGrantAccess: (() -> Unit)?,
+    onDismissRequest: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        title = { Text(stringResource(AMMR.strings.external_folder_title)) },
+        text = {
+            Text(
+                stringResource(
+                    if (canGrantAccess) {
+                        AMMR.strings.external_folder_request
+                    } else {
+                        AMMR.strings.external_folder_granted
+                    },
+                ),
+            )
+        },
+        confirmButton = {
+            if (canGrantAccess && onGrantAccess != null) {
+                TextButton(onClick = onGrantAccess) {
+                    Text(stringResource(AMMR.strings.external_folder_action))
+                }
+            } else {
+                TextButton(onClick = onDismissRequest) {
+                    Text(stringResource(MR.strings.action_ok))
+                }
+            }
+        },
+        dismissButton = {
+            if (canGrantAccess) {
+                TextButton(onClick = onDismissRequest) {
+                    Text(stringResource(MR.strings.action_cancel))
+                }
+            }
+        },
+    )
+}
+// <-- AM (EXTERNAL_FOLDER_GRANT)

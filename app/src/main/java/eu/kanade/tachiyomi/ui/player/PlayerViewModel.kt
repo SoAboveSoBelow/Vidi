@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.compose.runtime.Stable
@@ -16,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.net.toUri
+import com.hippo.unifile.UniFile
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.createSavedStateHandle
@@ -68,6 +70,7 @@ import eu.kanade.domain.track.interactor.TrackEpisode
 import eu.kanade.domain.track.service.TrackPreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.animesource.model.ChapterType
+import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.HttpServer
 import eu.kanade.tachiyomi.animesource.model.SerializableHoster.Companion.toHosterList
@@ -88,6 +91,7 @@ import eu.kanade.tachiyomi.data.database.models.isRecognizedNumber
 import eu.kanade.tachiyomi.data.database.models.toDomainEpisode
 import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
+import eu.kanade.tachiyomi.data.download.DownloadProvider
 import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.data.player.service.HttpServerService
 import eu.kanade.tachiyomi.data.saver.Image
@@ -162,6 +166,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import logcat.LogPriority
+import mihon.domain.anime.model.toDomainAnime
+import mihon.domain.source.interactor.UpdateAnimeFromRemote
 import mihon.domain.library.model.search.QueryNode
 import mihon.feature.library.matches
 import animiru.domain.episode.interactor.GetEpisodeTags
@@ -182,6 +188,9 @@ import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.interactor.GetAnime
+import tachiyomi.domain.anime.interactor.GetAnimeByUrlAndSourceId
+import tachiyomi.domain.anime.interactor.GetFavorites
+import tachiyomi.domain.anime.interactor.NetworkToLocalAnime
 import tachiyomi.domain.anime.interactor.GetDuplicateLibraryAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.category.interactor.GetCategories
@@ -196,20 +205,21 @@ import tachiyomi.domain.episode.model.EpisodeUpdate
 import tachiyomi.domain.episode.service.getEpisodeSort
 import tachiyomi.domain.history.interactor.GetNextEpisodes
 import tachiyomi.domain.history.interactor.UpsertHistory
-import tachiyomi.domain.history.model.HistoryUpdate
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.storage.service.StorageManager
+import tachiyomi.domain.storage.service.StoragePreferences
 import tachiyomi.domain.track.interactor.GetTracks
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
+import tachiyomi.source.local.LocalSource
+import tachiyomi.source.local.io.LocalSourceFileSystem
 import tachiyomi.source.local.image.LocalBackgroundManager
 import tachiyomi.source.local.image.LocalCoverManager
 import tachiyomi.source.local.image.LocalEpisodeThumbnailManager
 import tachiyomi.source.local.isLocal
 import java.io.File
 import java.io.InputStream
-import java.util.Date
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.abs
@@ -228,6 +238,11 @@ class PlayerViewModel(
     private val getAnime: GetAnime,
     private val getNextEpisodes: GetNextEpisodes,
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
+    // AM (EXTERNAL_PREFERS_LIBRARY) -->
+    private val getAnimeByUrlAndSourceId: GetAnimeByUrlAndSourceId,
+    private val getFavorites: GetFavorites,
+    private val downloadProvider: DownloadProvider,
+    // <-- AM (EXTERNAL_PREFERS_LIBRARY)
     // AM (MERGED_SOURCES) -->
     private val mergeChildRepository: MergeChildRepository,
     // <-- AM (MERGED_SOURCES)
@@ -302,6 +317,15 @@ class PlayerViewModel(
     // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
     private val recentEpisodePositionManager: RecentEpisodePositionManager,
     // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
+    // AM (EXTERNAL_FOLDER_GRANT) -->
+    // Registering a granted folder as a local source entry is the whole point of
+    // the grant, so these are the local source's own two persistence steps - the
+    // same ones a library refresh uses - rather than anything player-specific.
+    private val storagePreferences: StoragePreferences,
+    private val localSourceFileSystem: LocalSourceFileSystem,
+    private val networkToLocalAnime: NetworkToLocalAnime,
+    private val updateAnimeFromRemote: UpdateAnimeFromRemote,
+    // <-- AM (EXTERNAL_FOLDER_GRANT)
 ) : ViewModel() {
 
     @AssistedFactory
@@ -537,16 +561,19 @@ class PlayerViewModel(
         val anime = stateData.value.currentAnime ?: return
         val playing = stateData.value.currentEpisode ?: return
         setupEpisodeList(anime)
-        val playlist = stateData.value.currentPlaylist
-        val index = playlist.indexOfFirst { it.id == playing.id }
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        val queue = playbackQueue ?: return
+        val playingId = playing.id ?: return
+        val index = queue.indexOf(SessionKey.Library(animeId = anime.id, episodeId = playingId))
         if (index == -1) return
         updateStateData {
             it.copy(
                 currentPlaylistIndex = index,
-                hasPreviousEpisode = index != 0,
-                hasNextEpisode = index != playlist.size - 1,
+                hasPreviousEpisode = queue.hasPrevious(index),
+                hasNextEpisode = queue.hasNext(index),
             )
         }
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
     }
     // <-- AM (SHUFFLE_FOLLOWS_SEED)
 
@@ -813,8 +840,7 @@ class PlayerViewModel(
         // <-- AM (MERGED_NOTIFICATION_ARTWORK_FIX)
         val episodeAnime = stateData.value.currentEpisodeAnime ?: anime
         mediaHolder?.syncSessionState(
-            animeId = anime.id,
-            episodeId = episodeId,
+            sessionKey = SessionKey.Library(animeId = anime.id, episodeId = episodeId),
             animeTitle = anime.title,
             episodeTitle = displayNameOf(episode),
             animeThumbnailUrl = episodeAnime.thumbnailUrl,
@@ -1208,7 +1234,13 @@ class PlayerViewModel(
                 displayBrightnessSlider(event.show)
             }
             PlayerEvent.ShowEpisodeDialog -> {
-                updateUiData { it.copy(dialogShown = Dialogs.EpisodeList) }
+                // AM (EXTERNAL_FOLDER_GRANT) -->
+                // An externally-opened file has no episode list, so the list
+                // dialog would open empty. It gets its own dialog instead, which
+                // is where the folder-access action lives.
+                val dialog = if (externalSource != null) Dialogs.ExternalFolder else Dialogs.EpisodeList
+                updateUiData { it.copy(dialogShown = dialog) }
+                // <-- AM (EXTERNAL_FOLDER_GRANT)
             }
             is PlayerEvent.ShowPlayerUpdate -> {
                 updateUiData { it.copy(playerUpdate = event.update) }
@@ -1421,9 +1453,19 @@ class PlayerViewModel(
      */
     var forceResumeFromLastPosition = false
 
-    fun needsInit(animeId: Long, episodeId: Long): Boolean {
+    // AM (CONTENT_AGNOSTIC_SESSION) -->
+    // Takes a [SessionKey] rather than two longs. The holder comparison below is
+    // pure identity - it asks whether the Service is already holding the session
+    // being requested - so it compares keys and never unpacks them. The local
+    // comparison still reads currentAnime/currentEpisode because this
+    // ViewModel's own bookkeeping is still library-shaped; that is what the
+    // PlaybackSource/Queue extraction takes care of next.
+    fun needsInit(key: SessionKey): Boolean {
         val local = stateData.value
-        if (local.currentAnime?.id == animeId && local.currentEpisode?.id == episodeId) {
+        if (key is SessionKey.Library &&
+            local.currentAnime?.id == key.animeId &&
+            local.currentEpisode?.id == key.episodeId
+        ) {
             return false
         }
         // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
@@ -1457,10 +1499,7 @@ class PlayerViewModel(
         // falls through to a real init(), regardless of what the holder separately
         // remembers from a prior instance's session.
         val holderState = mediaHolder?.state?.value
-        if (holderState?.animeId == animeId &&
-            holderState.episodeId == episodeId &&
-            local.currentPlaylist.isNotEmpty()
-        ) {
+        if (holderState?.sessionKey == key && local.currentPlaylist.isNotEmpty()) {
             return false
         }
         // <-- AM (NEEDSINIT_STALE_HOLDER_FIX)
@@ -1679,7 +1718,9 @@ class PlayerViewModel(
         vidIndex: Int,
     ): Pair<InitResult, Result<Boolean>> {
         val defaultResult = InitResult(currentHosterList, qualityIndex, null)
-        if (!needsInit(animeId, initialEpisodeId)) return Pair(defaultResult, Result.success(true))
+        if (!needsInit(SessionKey.Library(animeId, initialEpisodeId))) {
+            return Pair(defaultResult, Result.success(true))
+        }
 
         // AM (REUSED_PLAYER_TARGET_MISMATCH_FIX) -->
         // wasPlayerReusedFromLiveHolder only means "a live holder with an adopted
@@ -1701,7 +1742,7 @@ class PlayerViewModel(
         // once per holder).
         if (wasPlayerReusedFromLiveHolder) {
             val liveState = PlayerMediaHolder.current?.state?.value
-            if (liveState?.animeId != animeId || liveState.episodeId != initialEpisodeId) {
+            if (liveState?.sessionKey != SessionKey.Library(animeId, initialEpisodeId)) {
                 _player = mpvFactory.create(videoOutput)
                 wasPlayerReusedFromLiveHolder = false
             }
@@ -1761,9 +1802,20 @@ class PlayerViewModel(
                     }
                     qualityIndex = Pair(hostIndex, vidIndex)
                 } else {
-                    // AM (MERGED_SOURCES) -->
-                    episodeLoader.getHosters(episode.toDomainEpisode()!!, episodeAnime, episodeSource)
-                    // <-- AM (MERGED_SOURCES)
+                    // AM (CONTENT_AGNOSTIC_SESSION) -->
+                    // Was a direct episodeLoader.getHosters() call. Same work,
+                    // asked of the session's own source instead - MERGED_SOURCES'
+                    // episodeAnime/episodeSource (the child, not the merge parent)
+                    // are resolved above and handed over at construction, so the
+                    // merged case is decided in one place rather than at each
+                    // getHosters call site.
+                    librarySourceFor(
+                        episode = episode,
+                        anime = episodeAnime,
+                        source = episodeSource,
+                        displayAnime = anime,
+                    ).resolveStreams()
+                    // <-- AM (CONTENT_AGNOSTIC_SESSION)
                         .takeIf { it.isNotEmpty() }
                         ?.also { currentHosterList = it }
                         ?: run {
@@ -2055,6 +2107,11 @@ class PlayerViewModel(
         // <-- AM (CUSTOM_EPISODE_ORDER)
     }
 
+    // AM (CONTENT_AGNOSTIC_SESSION) -->
+    // The "is this streaming or a local file" test moved onto PlaybackSource,
+    // where it belongs: it is a fact about where the stream comes from, which
+    // is the source's whole subject. Still returns null when the session has no
+    // resolved episode anime/source yet, exactly as before.
     private fun isEpisodeOnline(episode: Episode): Boolean? {
         val currentState = stateData.value
 
@@ -2062,12 +2119,863 @@ class PlayerViewModel(
         val anime = currentState.currentEpisodeAnime ?: return null
         val source = currentState.currentEpisodeSource ?: return null
         // <-- AM (MERGED_SOURCES)
-        return source is AnimeHttpSource &&
-            !episodeLoader.isDownload(
-                episode.toDomainEpisode()!!,
-                anime,
-            )
+        val displayAnime = currentState.currentAnime ?: return null
+        return librarySourceFor(
+            episode = episode,
+            anime = anime,
+            source = source,
+            displayAnime = displayAnime,
+        ).isOnline()
     }
+
+    // AM (CONTENT_AGNOSTIC_SESSION) -->
+    /**
+     * The current session's queue.
+     *
+     * Derived from state on each read rather than held, so it can never
+     * disagree with the playlist the UI is showing - which is rebuilt whenever
+     * the shuffle seed changes and re-scoped by playlist search. Returns null
+     * before an entry is loaded, where there is no order to speak of.
+     */
+    private val playbackQueue: PlaybackQueue?
+        get() {
+            externalQueue?.let { return it }
+            val state = stateData.value
+            val animeId = state.currentAnime?.id ?: return null
+            return LibraryPlaybackQueue(animeId, state.currentPlaylist.map { it.id })
+        }
+    // <-- AM (CONTENT_AGNOSTIC_SESSION)
+
+    // AM (EXTERNAL_PLAYBACK) -->
+    /**
+     * The externally-opened video this session is playing, or null for an
+     * ordinary library session.
+     *
+     * Deliberately NOT in [PlayerStateData]: every library feature in this
+     * ViewModel already guards on `currentAnime`/`currentEpisode` being
+     * non-null (there is not one force-unwrap among the 46 reads of
+     * currentAnime), so an external session leaving both null makes trackers,
+     * history, the episode list, prefetch, season advance and add-to-library
+     * no-op on their own, without a single `if (isExternal)` added to any of
+     * them. That is the payoff for steps 1-3: external playback is the absence
+     * of library state, not a second mode running alongside it.
+     */
+    private var externalSource: ExternalPlaybackSource? = null
+
+    /** The external session's order - see [playbackQueue]. */
+    private var externalQueue: PlaybackQueue? = null
+
+    // AM (EXTERNAL_FOLDER_GRANT) -->
+    /** The opened file's own name, for finding it inside a granted folder. */
+    private var externalFileName: String? = null
+
+    /**
+     * Publishes whether offering folder access would do anything.
+     *
+     * This was a plain getter read straight from the dialog, which Compose cannot
+     * observe: it was evaluated once during composition - before loadExternal had
+     * set externalSource - captured false and never recomposed, so the Grant
+     * action never appeared and the dialog only ever offered OK. Anything the UI
+     * decides on has to live in state that it collects.
+     */
+    private fun publishCanGrantExternalFolder() {
+        val offer = externalSource != null && externalQueue !is ExternalFolderQueue
+        updateStateData { it.copy(canGrantExternalFolder = offer) }
+    }
+
+    /**
+     * Where the folder picker should open, or null when it cannot be worked out.
+     *
+     * ACTION_OPEN_DOCUMENT_TREE takes EXTRA_INITIAL_URI, which
+     * ActivityResultContracts.OpenDocumentTree passes as its input - so the
+     * picker can open already showing the folder the video is in, leaving the
+     * user to confirm rather than navigate to a location the app already knows.
+     *
+     * Captured at load time, like [externalFileName], because deriving it needs
+     * the file's real path and the launching app's grant may be gone by the time
+     * the dialog is opened.
+     */
+    private var externalFolderPickerStart: Uri? = null
+
+    /** Read by the UI to open the picker at the right place - see above. */
+    val externalFolderPickerStartUri: Uri? get() = externalFolderPickerStart
+
+    /**
+     * A storage-provider document URI for [realPath]'s parent directory.
+     *
+     * The storage provider names a document `<volume>:<path within volume>`, so
+     * this is a translation of a path already in hand rather than a lookup -
+     * `/storage/emulated/0/Movies/x.mkv` becomes `primary:Movies`, and
+     * `/storage/75D7-DC5F/Anime/x.mkv` becomes `75D7-DC5F:Anime`.
+     *
+     * Only a starting point for the picker: a wrong guess costs the user some
+     * navigating, which is exactly what they faced before, so anything
+     * unrecognised returns null rather than being forced into a shape.
+     */
+    private fun folderPickerStartFor(realPath: String): Uri? {
+        val docId = parentDocumentIdFor(realPath) ?: return null
+        return runCatching {
+            DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_PROVIDER, docId)
+        }.getOrNull()
+    }
+
+    /** The storage provider's document id for [realPath]'s parent, or null. */
+    private fun parentDocumentIdFor(realPath: String): String? {
+        val parent = realPath.substringBeforeLast('/', "").takeIf { it.isNotBlank() } ?: return null
+        val (volume, relative) = when {
+            parent.startsWith(PRIMARY_VOLUME_PATH) ->
+                "primary" to parent.removePrefix(PRIMARY_VOLUME_PATH).trim('/')
+            parent.startsWith("/storage/") -> {
+                val rest = parent.removePrefix("/storage/")
+                rest.substringBefore('/') to rest.substringAfter('/', "")
+            }
+            else -> return null
+        }
+        if (volume.isBlank()) return null
+        return if (relative.isBlank()) "$volume:" else "$volume:$relative"
+    }
+
+    /**
+     * The already-granted folder containing [realPath], or null when none is.
+     *
+     * A grant taken through [applyExternalFolderGrant] is persisted, so a later
+     * video in the same folder - or anywhere under the same granted tree - needs
+     * no second ask. Without this, "persisted" was only true in principle: every
+     * load started from a single-item queue and the user had to grant the same
+     * folder again.
+     *
+     * Any persisted READ tree whose document id is the folder's or an ancestor of
+     * it counts, which is what makes a grant on a parent directory cover the
+     * folders inside it. The app's own storage tree is one of these, so files
+     * under it are covered too.
+     */
+    private fun persistedFolderUriFor(realPath: String): Uri? {
+        val parentDocId = parentDocumentIdFor(realPath) ?: return null
+        return context.contentResolver.persistedUriPermissions
+            .asSequence()
+            .filter { it.isReadPermission }
+            .mapNotNull { permission ->
+                val treeDocId = runCatching {
+                    DocumentsContract.getTreeDocumentId(permission.uri)
+                }.getOrNull() ?: return@mapNotNull null
+                if (parentDocId != treeDocId && !parentDocId.startsWith("$treeDocId/")) {
+                    return@mapNotNull null
+                }
+                runCatching {
+                    DocumentsContract.buildDocumentUriUsingTree(permission.uri, parentDocId)
+                }.getOrNull()
+            }
+            .firstOrNull()
+    }
+
+
+    /**
+     * Registers a folder the user has just granted as a local source entry.
+     *
+     * This is what the grant is for. The local source already turns a directory
+     * of videos into an entry with episodes, already has a queue dialog for those
+     * episodes, and already plays them - so a granted folder becomes one of its
+     * entries and every one of those behaviours arrives with it. The session then
+     * switches onto the episode the opened file now is, which is why the queue the
+     * user sees afterwards is the real episode list and not a second one built for
+     * external files.
+     *
+     * Three steps, in order, each the app's own: persist the tree (the same
+     * persisted-tree mechanism the configured storage directory uses, not a new
+     * permission), register it in [StoragePreferences.extraLocalFolders] so the
+     * local source covers it from now on, and refresh it through
+     * [UpdateAnimeFromRemote], which is the one path every other entry in the app
+     * is filled by - cover and background extracted from the video, episode list
+     * synced, episode thumbnails generated in the background.
+     *
+     * Falls back to the folder-queue behaviour if any of that does not come off -
+     * an unlistable tree, a file that is not in the granted folder - so the grant
+     * is never a dead end. next/previous work either way; what the fallback loses
+     * is the episode list and everything else a library entry has.
+     */
+    fun applyExternalFolderGrant(treeUri: Uri) {
+        val source = externalSource ?: return
+        viewModelScope.launchNonCancellable {
+            withIOContext {
+                runCatching {
+                    // Write as well as read, because a local source entry is
+                    // written INTO its own folder: cover.jpg by LocalCoverManager,
+                    // the background and the episode thumbnails the same way. The
+                    // picker returns both flags, so nothing extra is asked of the
+                    // user - a read-only grant just made every one of those writes
+                    // fail and the entry came up with no artwork.
+                    context.contentResolver.takePersistableUriPermission(
+                        treeUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                    )
+                }.onFailure {
+                    logcat(LogPriority.INFO, it) { "EXTERNAL_FOLDER could not persist grant for $treeUri" }
+                }
+            }
+
+            updateUiData { it.copy(dialogShown = Dialogs.None) }
+
+            // The switch is done here rather than inside the registration so that
+            // a failure in it cannot land in the fallback below with the session
+            // already half moved onto a library entry.
+            val registered = registerGrantedFolderAsLocalEntry(
+                treeUri = treeUri,
+                resumeSeconds = playbackData.value.position.toLong(),
+            )
+            if (registered != null) {
+                val (animeId, episodeId) = registered
+                externalSource = null
+                externalQueue = null
+                publishCanGrantExternalFolder()
+                switchToAnime(
+                    animeId = animeId,
+                    episodeId = episodeId,
+                    hostList = "",
+                    hostIndex = -1,
+                    vidIndex = -1,
+                )
+                return@launchNonCancellable
+            }
+
+            val queue = withIOContext {
+                ExternalFolderQueue.create(
+                    context = context,
+                    treeUri = treeUri,
+                    openedUri = source.sessionKey.uri,
+                    openedFileName = externalFileName,
+                )
+            }
+            if (queue == null) {
+                showMessage(AYMR.strings.no_available_videos)
+                return@launchNonCancellable
+            }
+
+            externalQueue = queue
+            publishCanGrantExternalFolder()
+            val index = queue.indexOf(source.sessionKey)
+            updateStateData {
+                it.copy(
+                    currentPlaylistIndex = index,
+                    hasPreviousEpisode = queue.hasPrevious(index),
+                    hasNextEpisode = queue.hasNext(index),
+                )
+            }
+        }
+    }
+
+    /**
+     * Scans [treeUri] in as a local source entry, returning its anime and episode.
+     *
+     * Returns null - leaving nothing registered behind it - whenever the folder
+     * does not come out as an entry holding the file being played, which includes
+     * the user having picked some other folder entirely.
+     *
+     * The playing position is written onto the episode row before returning - see
+     * the note at that write.
+     */
+    private suspend fun registerGrantedFolderAsLocalEntry(
+        treeUri: Uri,
+        resumeSeconds: Long,
+    ): Pair<Long, Long>? {
+        val fileName = externalFileName
+        if (fileName.isNullOrBlank()) {
+            logcat(LogPriority.INFO) { "EXTERNAL_FOLDER no file name to look for in $treeUri" }
+            return null
+        }
+        val local = sourceManager.get(LocalSource.ID) as? LocalSource ?: return null
+
+        val treeUriString = treeUri.toString()
+        val animeUrl = localSourceFileSystem.entryUrlForGrantedFolder(treeUriString)
+
+        // Registered before the scan, not after: resolving animeUrl back to a
+        // directory is a membership test against this very preference, so the
+        // folder has to be in it for the scan to be able to list anything. Undone
+        // again below if the folder turns out not to be what was wanted, so a
+        // picked-by-mistake folder does not linger in the local source.
+        storagePreferences.extraLocalFolders.set(
+            storagePreferences.extraLocalFolders.get() + treeUriString,
+        )
+
+        val resolved = try {
+            scanGrantedFolderEntry(local, animeUrl, fileName)
+        } catch (e: Exception) {
+            logcat(LogPriority.INFO, e) { "EXTERNAL_FOLDER could not register $treeUri" }
+            null
+        }
+
+        if (resolved == null) {
+            storagePreferences.extraLocalFolders.set(
+                storagePreferences.extraLocalFolders.get() - treeUriString,
+            )
+            return null
+        }
+
+        // Written onto the episode row rather than threaded through the switch:
+        // setVideo resumes an episode from what the database says, so this is how
+        // the reload lands where the video already is, through the one resume path
+        // every other episode uses. Passed in rather than read from playbackData
+        // because the two callers mean different things by it - one is interrupting
+        // a playing file, the other has not started one yet, where playbackData
+        // still describes whatever played last.
+        if (resumeSeconds > 0L) {
+            runCatching {
+                updateEpisode.await(
+                    EpisodeUpdate(
+                        id = resolved.second,
+                        lastSecondSeen = resumeSeconds,
+                        totalSeconds = playbackData.value.duration.toLong()
+                            .takeIf { it > resumeSeconds } ?: 0L,
+                    ),
+                )
+            }
+        }
+
+        logcat(LogPriority.INFO) {
+            "EXTERNAL_FOLDER $treeUri registered as local entry ${resolved.first}, " +
+                "episode ${resolved.second}"
+        }
+        return resolved
+    }
+
+    /**
+     * The anime and episode ids [animeUrl] now addresses, or null when the folder
+     * holds no episode named [fileName].
+     *
+     * Separate from its caller only so that each bail-out can be a plain return
+     * while the caller still gets one place to catch from and one place to undo
+     * the registration.
+     */
+    private suspend fun scanGrantedFolderEntry(
+        local: LocalSource,
+        animeUrl: String,
+        fileName: String,
+    ): Pair<Long, Long>? {
+        val title = withIOContext { localSourceFileSystem.getEntryTitle(animeUrl) }
+        if (title.isBlank()) {
+            logcat(LogPriority.INFO) { "EXTERNAL_FOLDER $animeUrl resolved to no directory" }
+            return null
+        }
+
+        // Checked against the directory rather than by scanning it for episodes:
+        // the scan belongs to the refresh below, and all this has to decide is
+        // whether the folder is the one holding the file being played.
+        val holdsFile = withIOContext {
+            localSourceFileSystem.getFilesInAnimeDirectory(animeUrl).any { it.name == fileName }
+        }
+        if (!holdsFile) {
+            logcat(LogPriority.INFO) { "EXTERNAL_FOLDER $fileName is not in $animeUrl" }
+            return null
+        }
+
+        val anime = networkToLocalAnime(
+            SAnime.create().apply {
+                url = animeUrl
+                this.title = title
+            }.toDomainAnime(LocalSource.ID),
+        )
+
+        // The app's own refresh, not a hand-rolled sync. It runs
+        // getAnimeEpisodeUpdate (which extracts the cover and background from the
+        // video), writes those onto the entry, syncs the episode list, and kicks
+        // off LocalSource.generateMissingThumbnails in the background - every one
+        // of which an episode list built here by hand would have skipped, which is
+        // exactly why the first version came up with no artwork.
+        updateAnimeFromRemote.awaitEpisodesUpdate(
+            source = local,
+            anime = anime,
+            fetchDetails = true,
+            fetchEpisodes = true,
+            manualFetch = true,
+        ).onFailure {
+            logcat(LogPriority.INFO, it) { "EXTERNAL_FOLDER refresh failed for $animeUrl" }
+        }
+
+        val episodeId = getEpisodesByAnimeId.await(anime.id)
+            .firstOrNull { it.url == "$animeUrl/$fileName" }
+            ?.id
+            ?: return null
+
+        return anime.id to episodeId
+    }
+
+    /**
+     * Steps to the adjacent file in the granted folder.
+     *
+     * Runs on episodeChangeJob like every other load, so a rapid next-next
+     * cancels the first cleanly instead of racing two loads against one mpv, and
+     * calls [loadExternal] rather than [changeToExternal] - which would cancel
+     * the very job this runs on.
+     *
+     * Position starts from zero rather than carrying over: a different file has
+     * nothing to do with where this one had got to, which is also why
+     * changeEpisode() does not carry one.
+     */
+    private fun nextExternal(next: Boolean) {
+        episodeChangeJob?.cancel()
+        episodeChangeJob = viewModelScope.launch {
+            val current = externalSource?.sessionKey ?: return@launch
+            val queue = externalQueue ?: return@launch
+            val index = queue.indexOf(current)
+            if (index == -1) return@launch
+            val target = queue.keyAt(index + if (next) 1 else -1) as? SessionKey.External
+                ?: return@launch
+            loadExternal(uri = target.uri, title = null, positionMs = 0L)
+        }
+    }
+    // <-- AM (EXTERNAL_FOLDER_GRANT)
+
+    // AM (EXTERNAL_RESUME_POSITION) -->
+    /**
+     * Where an external session should start, in milliseconds, pending its load.
+     *
+     * Deliberately the same shape as RecentEpisodePositionManager.consume(): a
+     * one-shot value the resume decision takes if it is there. Clearing on read
+     * is what makes it one-shot - without that, a later hoster/quality switch on
+     * the same file (which also runs through setVideo) would jump back to the
+     * position this session originally resumed from.
+     */
+    private var pendingExternalResumeMs: Long? = null
+
+    private fun consumePendingExternalResume(): Long? {
+        val pending = pendingExternalResumeMs ?: return null
+        pendingExternalResumeMs = null
+        return pending / 1000L
+    }
+    // <-- AM (EXTERNAL_RESUME_POSITION)
+
+    /**
+     * What this session has actually settled on, whatever kind it is.
+     *
+     * PlayerHostScreen's reconciliation effect needs to record where a load
+     * ENDED UP rather than what was asked for (see its recordSettledTarget -
+     * a failed load rolls the session back, and writing the request would
+     * leave the host reconciling against an entry the ViewModel abandoned).
+     * It used to read currentAnime/currentEpisode for that, which an external
+     * session has neither of; a key answers for both kinds.
+     */
+    val settledSessionKey: SessionKey?
+        get() {
+            externalSource?.let { return it.sessionKey }
+            val state = stateData.value
+            val animeId = state.currentAnime?.id ?: return null
+            val episodeId = state.currentEpisode?.id ?: return null
+            return SessionKey.Library(animeId = animeId, episodeId = episodeId)
+        }
+
+    // AM (EXTERNAL_PREFERS_LIBRARY) -->
+    /**
+     * The library episode [uri] already is, or null when it is not one.
+     *
+     * The local source stores an entry's directory name as `anime.url` and
+     * `"<anime.url>/<fileName>"` as `episode.url` (see LocalSource.getEpisodeList
+     * and EpisodeLoader.getHostersOnLocal), so a real path under the local source
+     * directory identifies both rows with no scan and no new state.
+     *
+     * Located by the local source directory's NAME inside the resolved path
+     * rather than by comparing against that directory's own path, which - being a
+     * SAF tree - generally has none. Season subfolders fall out for free:
+     * `anime.url` is every segment between the local source directory and the
+     * file, which is exactly how LocalSource builds a season entry's url.
+     */
+    private suspend fun resolveLibraryEpisode(uri: String): Pair<Long, Long>? {
+        val realPath = uri.toUri().realFilePath(
+            context,
+            heldFd = PlayerMediaHolder.heldExternalFd(uri),
+        ) ?: return null
+        return try {
+            resolveLocalSourceEpisode(realPath)
+                ?: resolveGrantedFolderEpisode(realPath)
+                ?: resolveDownloadedEpisode(realPath)
+        } catch (e: Exception) {
+            logcat(LogPriority.INFO, e) { "EXTERNAL_PREFERS_LIBRARY lookup failed for $realPath" }
+            null
+        }
+    }
+
+    /** Segments of [realPath] below the directory named [dirName], or null. */
+    private fun segmentsUnder(realPath: String, dirName: String?): List<String>? {
+        if (dirName.isNullOrBlank()) return null
+        val marker = "/$dirName/"
+        val markerAt = realPath.indexOf(marker)
+        if (markerAt == -1) return null
+        return realPath.substring(markerAt + marker.length).split('/')
+    }
+
+    private suspend fun resolveLocalSourceEpisode(realPath: String): Pair<Long, Long>? {
+        val segments = segmentsUnder(realPath, storageManager.getLocalSourceDirectory()?.name)
+            ?: return null
+        if (segments.size < 2) return null
+
+        val animeUrl = segments.dropLast(1).joinToString("/")
+        val episodeUrl = segments.joinToString("/")
+
+        val anime = getAnimeByUrlAndSourceId.await(animeUrl, LocalSource.ID) ?: return null
+        val episodeId = getEpisodesByAnimeId.await(anime.id)
+            .firstOrNull { it.url == episodeUrl }
+            ?.id
+            ?: return null
+        return anime.id to episodeId
+    }
+
+    /**
+     * The granted-folder episode [realPath] is, or null when it is not one.
+     *
+     * A folder granted through [applyExternalFolderGrant] is a local source entry
+     * from then on, so the SECOND video opened from it is a library episode and
+     * must resolve as one - without this, every video in a granted folder came up
+     * external again and the grant was worth exactly one video.
+     *
+     * Matched on the storage provider's document id rather than on the path: the
+     * entry's url is a percent-encoded tree uri, which no path can be turned into,
+     * but the registered tree's document id and the file's parent's document id
+     * are the same string for the same directory.
+     */
+    private suspend fun resolveGrantedFolderEpisode(realPath: String): Pair<Long, Long>? {
+        val parentDocId = parentDocumentIdFor(realPath) ?: return null
+        val fileName = realPath.substringAfterLast('/').takeIf { it.isNotBlank() } ?: return null
+
+        val animeUrl = storagePreferences.extraLocalFolders.get()
+            .firstOrNull { registered -> folderDocumentIdOf(registered) == parentDocId }
+            ?.let { localSourceFileSystem.entryUrlForGrantedFolder(it) }
+            ?: return null
+
+        val anime = getAnimeByUrlAndSourceId.await(animeUrl, LocalSource.ID) ?: return null
+        val episodeId = getEpisodesByAnimeId.await(anime.id)
+            .firstOrNull { it.url == "$animeUrl/$fileName" }
+            ?.id
+            ?: return null
+        return anime.id to episodeId
+    }
+
+    /**
+     * Which directory a registered folder uri names, as a document id.
+     *
+     * A registered uri is whichever uri the folder was reached by, and those come
+     * in two shapes: a tree uri the user picked directly, where the tree document
+     * IS the folder, and a document-under-tree uri built from an ancestor grant,
+     * where the tree document is the ancestor and the document is the folder. The
+     * document id answers for the folder in both, which the tree id does not.
+     */
+    private fun folderDocumentIdOf(uri: String): String? {
+        val parsed = runCatching { Uri.parse(uri) }.getOrNull() ?: return null
+        return runCatching { DocumentsContract.getDocumentId(parsed) }.getOrNull()
+            ?: runCatching { DocumentsContract.getTreeDocumentId(parsed) }.getOrNull()
+    }
+
+    /**
+     * The downloaded episode [realPath] is, or null when it is not one.
+     *
+     * A download lives at `<downloads>/<sourceDir>/<animeDir>/<episodeDir>`, and
+     * all three names are sanitised through DiskUtil.buildValidFilename (see
+     * DownloadProvider), so the path cannot be reversed into titles. The names
+     * are computed FORWARD for candidates instead and compared - which is also
+     * how DownloadCache matches them, so the two agree by construction rather
+     * than by a second guess at the sanitising rules.
+     *
+     * Candidates come from the favourites, because a download only exists for a
+     * library entry. The episode segment is either `<episodeDir>` (a folder with
+     * the video inside) or `<episodeDir>.mkv` (a single file), so both shapes are
+     * accepted - see Downloader, which writes either depending on the download.
+     */
+    private suspend fun resolveDownloadedEpisode(realPath: String): Pair<Long, Long>? {
+        val segments = segmentsUnder(realPath, storageManager.getDownloadsDirectory()?.name)
+            ?: return null
+        if (segments.size < 3) return null
+
+        val sourceDirName = segments[0]
+        val animeDirName = segments[1]
+        val episodeSegment = segments[2]
+
+        val candidates = getFavorites.await()
+            .filter { downloadProvider.getAnimeDirName(it.ogTitle) == animeDirName }
+        for (anime in candidates) {
+            val source = sourceManager.get(anime.source) ?: continue
+            if (downloadProvider.getSourceDirName(source) != sourceDirName) continue
+
+            val episode = getEpisodesByAnimeId.await(anime.id).firstOrNull { ep ->
+                val dirName = downloadProvider.getEpisodeDirName(ep.name, ep.scanlator, ep.url)
+                dirName.isNotBlank() &&
+                    (episodeSegment == dirName || episodeSegment.substringBeforeLast('.') == dirName)
+            } ?: continue
+
+            return anime.id to episode.id
+        }
+        return null
+    }
+    // <-- AM (EXTERNAL_PREFERS_LIBRARY)
+
+    /**
+     * Plays a video handed to us from outside the app.
+     *
+     * Does NOT go through [loadHosters]/[loadVideo], and that is a correction
+     * to what PlaybackSource's own doc comment claims. Those two require a
+     * non-null `currentEpisodeSource` - loadHosters throws without one, and
+     * loadVideo needs it for `getResolvedVideo` - because their job is to turn
+     * a source's hoster into a playable URL. An external URI IS already that
+     * URL: there is nothing to resolve, no quality to pick between, no hoster
+     * to fail over to. So this seeds the hoster state the UI reads as already
+     * READY and goes straight to [setVideo], which (unlike those two) reads
+     * the source as `as? AnimeHttpSource` and tolerates its absence.
+     *
+     * What step 3b's reasoning got right is the STATE shape - one Hoster
+     * holding one Video, so the quality sheet and hoster UI render an external
+     * file without knowing it is one. What it got wrong was assuming the
+     * resolution pipeline came along with that shape. It does not, and forcing
+     * it to would have meant inventing a stub AnimeSource for files that have
+     * no source - exactly the sentinel-shaped workaround this whole refactor
+     * exists to avoid.
+     */
+    fun changeToExternal(uri: String, title: String?, positionMs: Long = 0L) {
+        episodeChangeJob?.cancel()
+        episodeChangeJob = viewModelScope.launch {
+            loadExternal(uri, title, positionMs)
+        }
+    }
+
+    // AM (EXTERNAL_FOLDER_GRANT) -->
+    /**
+     * The load itself, separated from [changeToExternal] so folder navigation
+     * can reuse it.
+     *
+     * [changeToExternal] cancels episodeChangeJob before launching, which is
+     * right for a request arriving from outside the app but fatal if called
+     * from inside that job - it would cancel the coroutine making the call.
+     * Everything that loads an external file goes through this, and exactly one
+     * place owns the job.
+     */
+    private suspend fun loadExternal(uri: String, title: String?, positionMs: Long = 0L) {
+        // AM (EXTERNAL_PREFERS_LIBRARY) -->
+        // A file handed to us from outside is very often one this app already
+        // knows: anything under the local source directory has been scanned
+        // into real Anime and Episode rows, so there is nothing external
+        // about it except how it arrived. Opening it as the library episode
+        // it already is gives the real playlist for next/previous, the stored
+        // resume position, history, trackers and artwork - none of which an
+        // external session has, and all of which would otherwise be rebuilt
+        // beside machinery that already does it.
+        //
+        // Checked before any external state is set, so the two can never both
+        // be half-true, and routed through switchToAnime rather than
+        // changeAnime because changeAnime cancels episodeChangeJob - the job
+        // this is running on.
+        val libraryTarget = resolveLibraryEpisode(uri)
+        if (libraryTarget != null) {
+            val (animeId, episodeId) = libraryTarget
+            logcat(LogPriority.INFO) {
+                "EXTERNAL_PREFERS_LIBRARY $uri is local episode $episodeId of anime $animeId"
+            }
+            externalSource = null
+            externalQueue = null
+            publishCanGrantExternalFolder()
+            switchToAnime(
+                animeId = animeId,
+                episodeId = episodeId,
+                hostList = "",
+                hostIndex = -1,
+                vidIndex = -1,
+            )
+            return
+        }
+        // <-- AM (EXTERNAL_PREFERS_LIBRARY)
+        val parsedUri = uri.toUri()
+        val source = withIOContext {
+            // Touches storage for the display name - see create()'s own note.
+            ExternalPlaybackSource.create(context, parsedUri, title)
+        }
+        externalSource = source
+    // AM (EXTERNAL_FOLDER_GRANT) -->
+    // Captured now, while the launching app's grant is alive. Matching the
+    // file inside a granted folder is by name, and by the time the user
+    // grants one the provider may no longer answer for this URI.
+        val realPath = withIOContext {
+            parsedUri.realFilePath(context, heldFd = PlayerMediaHolder.heldExternalFd(uri))
+        }
+        externalFileName = withIOContext {
+            runCatching { UniFile.fromUri(context, parsedUri)?.name }.getOrNull()
+        }
+        externalFolderPickerStart = realPath?.let { folderPickerStartFor(it) }
+
+        // A folder this app can already read needs no asking, and asking is the
+        // only reason this was ever an external folder queue rather than a local
+        // source entry. So when a persisted tree covers the file - a folder
+        // granted in an earlier session, or the app's own storage tree - the
+        // folder is registered as a local source entry right here and the session
+        // becomes the library episode it now is: real episode list, real
+        // add-to-library, no dialog at all.
+        //
+        // Not done when a folder queue is already in hand and still contains this
+        // file, because that is this session stepping through a folder it is
+        // already playing, and re-registering mid-step would reload the player
+        // underneath itself.
+        val carriedQueue = (externalQueue as? ExternalFolderQueue)
+            ?.takeIf { it.indexOf(source.sessionKey) != -1 }
+        if (carriedQueue == null && realPath != null) {
+            val coveringTree = withIOContext { persistedFolderUriFor(realPath) }
+            val registered = coveringTree?.let {
+                registerGrantedFolderAsLocalEntry(treeUri = it, resumeSeconds = positionMs / 1000L)
+            }
+            if (registered != null) {
+                val (animeId, episodeId) = registered
+                logcat(LogPriority.INFO) {
+                    "EXTERNAL_FOLDER covered by an existing grant, playing as episode $episodeId"
+                }
+                externalSource = null
+                externalQueue = null
+                publishCanGrantExternalFolder()
+                switchToAnime(
+                    animeId = animeId,
+                    episodeId = episodeId,
+                    hostList = "",
+                    hostIndex = -1,
+                    vidIndex = -1,
+                )
+                return
+            }
+        }
+
+        // Falls back to the folder queue when that did not come off, so a folder
+        // the local source cannot make an entry of still gets next/previous.
+        externalQueue = carriedQueue
+            ?: realPath?.let { path ->
+                withIOContext {
+                    persistedFolderUriFor(path)?.let { folderUri ->
+                        ExternalFolderQueue.create(
+                            context = context,
+                            treeUri = folderUri,
+                            openedUri = source.sessionKey.uri,
+                            openedFileName = externalFileName,
+                        )
+                    }
+                }
+            }
+            ?: SingleItemQueue(source.sessionKey)
+        // Both halves of what the offer depends on are settled by here, so this
+        // is the one place that has to publish it on load.
+        publishCanGrantExternalFolder()
+        // <-- AM (EXTERNAL_FOLDER_GRANT)
+        // AM (EXTERNAL_RESUME_POSITION) -->
+        // Stashed rather than applied here: setVideo owns every decision about
+        // where a file starts, and routing this through the same expression as
+        // the episode case keeps that true. Consumed exactly once - see
+        // consumePendingExternalResume.
+        pendingExternalResumeMs = positionMs.takeIf { it > 0L }
+        // <-- AM (EXTERNAL_RESUME_POSITION)
+
+        // AM (EXTERNAL_FD_OWNERSHIP) -->
+        // Claimed here, on the session's first load, because this is the
+        // last moment the grant from the launching app is reliably alive -
+        // it dies with the task, and a reload after a swipe-away runs with
+        // nothing. Idempotent per uri, so the reload itself reuses whatever
+        // this already holds instead of asking the provider again. See
+        // PlayerMediaHolder.externalFd.
+        withIOContext { PlayerMediaHolder.claimExternalFd(context, source.sessionKey.uri) }
+        // <-- AM (EXTERNAL_FD_OWNERSHIP)
+
+        updateUiData { it.copy(animeTitle = source.title, isLoadingEpisode = true) }
+        // AM (EXTERNAL_FOLDER_GRANT)
+        val resolvedQueue = externalQueue ?: SingleItemQueue(source.sessionKey)
+        val queueIndex = resolvedQueue.indexOf(source.sessionKey)
+        updateStateData {
+            // AM (EXTERNAL_FOLDER_GRANT) -->
+            // Derived from whatever queue this session ended up with above, so a
+            // folder queue enables next/previous and a single file does not.
+            it.copy(
+                isEpisodeOnline = source.isOnline(),
+                currentPlaylistIndex = queueIndex,
+                hasPreviousEpisode = resolvedQueue.hasPrevious(queueIndex),
+                hasNextEpisode = resolvedQueue.hasNext(queueIndex),
+            )
+            // <-- AM (EXTERNAL_FOLDER_GRANT)
+        }
+
+        // The notification and lock-screen controls read the holder, not
+        // this ViewModel, and go through the same one writer a library
+        // session does - see PlayerMediaHolder.syncSessionState.
+        mediaHolder?.syncSessionState(
+            sessionKey = source.sessionKey,
+            animeTitle = source.title,
+            episodeTitle = "",
+            animeThumbnailUrl = null,
+            episodePreviewUrl = null,
+        )
+
+        val hosters = withIOContext { source.resolveStreams() }
+        val video = hosters.firstOrNull()?.videoList?.firstOrNull()
+        if (video == null) {
+            // resolveStreams() is a pure wrap of the URI, so this means the
+            // URI itself was unusable. Clearing the spinner matters: nothing
+            // downstream runs to clear it, and the player would buffer
+            // forever on a file it never attempted.
+            updateUiData { it.copy(isLoadingEpisode = false, isLoadingHosters = false) }
+            showMessage(AYMR.strings.no_available_videos)
+            return
+        }
+
+        updateStateData {
+            it.copy(
+                hosterList = hosters,
+                hosterState = listOf(
+                    HosterState.Ready(
+                        name = hosters.first().hosterName,
+                        videoList = listOf(video),
+                        videoState = listOf(Video.State.READY),
+                    ),
+                ),
+                currentVideo = video,
+            )
+        }
+        updateUiData {
+            it.copy(
+                hosterExpandedList = listOf(true),
+                selectedHosterVideoIndex = 0 to 0,
+                previousPauseState = false,
+            )
+        }
+        qualityIndex = 0 to 0
+
+        // AM (EXTERNAL_TRACK_SELECTION_FIX) -->
+        // loadVideo() does this before every library load and this path did not,
+        // which is why an external video sometimes played with no audio at all.
+        // setVideo() loads every file with aid=no/sid=no and relies on the
+        // track-list event to select tracks afterwards - but onTrackListChanged()
+        // only runs that selection when hasLoadedTracks is false, or retries it
+        // when hasLoadedAudio/hasLoadedSubs are false. Carrying those flags in
+        // still true from the previous file sent it down the already-loaded
+        // branch, so nothing ever chose a track and aid stayed off. "Sometimes"
+        // because it depended entirely on what the previous session left behind.
+        clearTracks()
+        // <-- AM (EXTERNAL_TRACK_SELECTION_FIX)
+
+        setVideo(video)
+    }
+    // <-- AM (EXTERNAL_FOLDER_GRANT)
+    // <-- AM (EXTERNAL_PLAYBACK)
+
+    /**
+     * A [PlaybackSource] for one episode of the current session.
+     *
+     * [anime]/[source] are the episode's OWN anime and source (the child, for a
+     * merged entry); [displayAnime] is the library entry the session is on,
+     * which is what the title names - see MERGED_NOTIFICATION_ARTWORK_FIX for
+     * why those two differ and which belongs where.
+     */
+    private fun librarySourceFor(
+        episode: Episode,
+        anime: Anime,
+        source: AnimeSource,
+        displayAnime: Anime,
+        prefetched: List<Hoster>? = null,
+    ): LibraryPlaybackSource = LibraryPlaybackSource(
+        sessionKey = SessionKey.Library(animeId = displayAnime.id, episodeId = episode.id!!),
+        title = "${displayAnime.title} - ${displayNameOf(episode)}",
+        episode = episode.toDomainEpisode()!!,
+        anime = anime,
+        source = source,
+        episodeLoader = episodeLoader,
+        prefetched = prefetched,
+    )
+    // <-- AM (CONTENT_AGNOSTIC_SESSION)
 
     // AM (EPISODE_NAMES) -->
     /** The episode's name as the list shows it - see PlayerStateData.displayNameOf. */
@@ -2121,19 +3029,35 @@ class PlayerViewModel(
         // <-- AM (CUSTOM_EPISODE_ORDER)
         val currentState = stateData.value
 
-        val currentEpisodeIndex = currentState.currentPlaylist.indexOfFirst {
-            episode.id == it.id
-        }
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // Position and the two next/previous facts come from the queue now
+        // rather than being recomputed against currentPlaylist here. Same
+        // comparisons - see hasNext/hasPrevious, which keep them verbatim,
+        // index -1 behaviour included.
+        // EmptyPlaybackQueue rather than a null check: with no entry loaded the
+        // old inline comparisons ran against an empty currentPlaylist and
+        // reported index -1, a previous and no next. An empty queue answers
+        // identically, where `?: false` would have quietly changed what the
+        // previous button does in that state.
+        val queue = playbackQueue ?: EmptyPlaybackQueue
+        val currentEpisodeIndex = episode.id
+            ?.let { episodeId ->
+                currentState.currentAnime?.id?.let { animeId ->
+                    queue.indexOf(SessionKey.Library(animeId = animeId, episodeId = episodeId))
+                }
+            }
+            ?: -1
 
         updateStateData {
             it.copy(
                 currentEpisode = episode,
                 currentPlaylistIndex = currentEpisodeIndex,
                 isEpisodeOnline = isEpisodeOnline(episode) == true,
-                hasPreviousEpisode = currentEpisodeIndex != 0,
-                hasNextEpisode = currentEpisodeIndex != currentState.currentPlaylist.size - 1,
+                hasPreviousEpisode = queue.hasPrevious(currentEpisodeIndex),
+                hasNextEpisode = queue.hasNext(currentEpisodeIndex),
             )
         }
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
 
         setPropertyDouble("user-data/current-anime/episode-number", episode.episode_number.toDouble())
 
@@ -3051,7 +3975,16 @@ class PlayerViewModel(
         // re-fetch the new file from the first byte.
         // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
         val resumePosition = if (isLoadingEpisode && !keepPosition) {
-            stateData.value.currentEpisode?.let { episode ->
+            // AM (EXTERNAL_RESUME_POSITION) -->
+            // An external session has no episode row, so the branch below yields
+            // null for it and nothing would set `start` at all - the file would
+            // reload from zero every time the session was rebuilt. This is the
+            // same decision for a session whose "last here" came off the reopen
+            // Intent instead of the DB, which is why it sits here rather than
+            // seeking after the load: setVideo stays the one place that decides
+            // where a file starts.
+            consumePendingExternalResume()
+                ?: stateData.value.currentEpisode?.let { episode ->
                 val preservePos = playerPreferences.preserveWatchingPosition.get()
                 val liveHolderState = mediaHolder?.state?.value
                 // AM (RESUME_PRIORITY_SYSTEM) -->
@@ -3081,6 +4014,11 @@ class PlayerViewModel(
                 // Keyed on the episode alone - see RecentEpisodePositionManager.consume.
                 val tempFromManager = episode.id?.let { recentEpisodePositionManager.consume(it) }
                 // <-- AM (MERGED_SOURCES)
+                // AM (CONTENT_AGNOSTIC_SESSION) -->
+                val targetSessionKey = stateData.value.currentAnime?.id?.let { animeId ->
+                    episode.id?.let { SessionKey.Library(animeId, it) }
+                }
+                // <-- AM (CONTENT_AGNOSTIC_SESSION)
                 val tempPositionMs = when {
                     tempFromManager != null -> tempFromManager
                     // <-- AM (TEMP_MEMORY_PRIORITY_FIX)
@@ -3105,10 +4043,17 @@ class PlayerViewModel(
                     // checks below guard a narrower cross-series bleed within that same
                     // reinit case: the holder's state stays live for whatever was
                     // PREVIOUSLY playing right up until a new session adopts it.
+                    // AM (CONTENT_AGNOSTIC_SESSION) -->
+                    // Was two separate animeId/episodeId comparisons; one key
+                    // comparison now. Built via a non-null local rather than
+                    // inline, so a missing anime/episode id can never collapse
+                    // into a null that matches a holder with no session at all.
                     resumeFromLast && liveHolderState != null &&
-                        liveHolderState.animeId == stateData.value.currentAnime?.id &&
-                        liveHolderState.episodeId == episode.id && liveHolderState.positionMs > 0 ->
+                        targetSessionKey != null &&
+                        liveHolderState.sessionKey == targetSessionKey &&
+                        liveHolderState.positionMs > 0 ->
                         liveHolderState.positionMs.toLong()
+                    // <-- AM (CONTENT_AGNOSTIC_SESSION)
                     // <-- AM (LIVE_POSITION_REINIT_ONLY_FIX)
                     // Process died mid-playback and this is the reinit picking the
                     // session back up - there's no live in-memory temp source left, but
@@ -4282,15 +5227,27 @@ class PlayerViewModel(
             // Failure is now null, and currentHosterList is cleared with it - a
             // stale list is worse than none, since init()'s defaultResult reads
             // this field too.
+            // AM (CONTENT_AGNOSTIC_SESSION) -->
+            // Built once, outside the try, so the title below comes from the
+            // same source that resolved the streams rather than being rebuilt
+            // from displayAnime a second time - two spellings of one string
+            // that nothing kept in step.
+            //
+            // AM (NEXT_EPISODE_PREFETCH) -->
+            // The prefetched list is handed to the source rather than checked
+            // around it, so "where does a stream come from" has one answer per
+            // session instead of one per call site.
+            // <-- AM (NEXT_EPISODE_PREFETCH)
+            val playbackSource = librarySourceFor(
+                episode = chosenEpisode,
+                anime = anime,
+                source = source,
+                displayAnime = displayAnime,
+                prefetched = prefetchedFor(chosenEpisode.id)?.hosterList,
+            )
+            // <-- AM (CONTENT_AGNOSTIC_SESSION)
             val resolved = try {
-                // AM (NEXT_EPISODE_PREFETCH) -->
-                val hosters = prefetchedFor(chosenEpisode.id)?.hosterList
-                    ?: episodeLoader.getHosters(
-                        episode = chosenEpisode.toDomainEpisode()!!,
-                        anime,
-                        source,
-                    )
-                // <-- AM (NEXT_EPISODE_PREFETCH)
+                val hosters = playbackSource.resolveStreams()
                 this@PlayerViewModel.episodeId = chosenEpisode.id!!
                 hosters
             } catch (e: Exception) {
@@ -4303,7 +5260,7 @@ class PlayerViewModel(
 
             EpisodeLoadResult(
                 hosterList = resolved,
-                episodeTitle = "${displayAnime.title} - ${displayNameOf(chosenEpisode)}",
+                episodeTitle = playbackSource.title,
             )
         }
     }
@@ -4333,13 +5290,28 @@ class PlayerViewModel(
     // <-- AM (MERGED_SOURCES)
 
     fun nextEpisode(next: Boolean, autoplay: Boolean = false) {
+        // AM (EXTERNAL_FOLDER_GRANT) -->
+        // An external session navigates its folder, not a playlist of episodes -
+        // changeEpisode() below takes an episode id it has none of. Branching
+        // here keeps that function about episodes, which every other caller of it
+        // is.
+        if (externalSource != null) {
+            nextExternal(next)
+            return
+        }
+        // <-- AM (EXTERNAL_FOLDER_GRANT)
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // Stepping one position and asking the queue what is there, instead of
+        // indexing currentPlaylist directly. keyAt() returns null for an index
+        // outside the queue, which folds the old bounds check and the
+        // null-episode-id check into one answer.
+        val queue = playbackQueue ?: return
         val currentIndex = stateData.value.currentPlaylistIndex
         val newIndex = if (next) currentIndex + 1 else currentIndex - 1
+        val target = queue.keyAt(newIndex) as? SessionKey.Library ?: return
 
-        if (newIndex !in stateData.value.currentPlaylist.indices) return
-        val episodeId = stateData.value.currentPlaylist.getOrNull(newIndex)?.id ?: return
-
-        changeEpisode(episodeId, autoplay)
+        changeEpisode(target.episodeId, autoplay)
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
     }
 
     // AM (EPISODE_CHANGE_RACE_FIX) -->
@@ -5754,12 +6726,38 @@ class PlayerViewModel(
     /** Position, in seconds, at the last database write - see onSecondReached. */
     private var lastPersistedPositionSeconds = 0
 
-    /** The episode whose history row has been written this session. */
-    private var historyWrittenForEpisodeId: Long? = null
+    // AM (CONTENT_AGNOSTIC_SESSION) -->
+    // historyWrittenForEpisodeId and syncRequestedForEpisodeId moved into
+    // LibraryProgressStore as plain flags. They were ids held here only so a
+    // once-per-episode guard had something to compare the current episode
+    // against; a store that exists for exactly one episode needs no comparison.
+    //
+    // Recreated on demand rather than in setupEpisode() so a save that lands
+    // before (or after) an episode switch still writes through a store for the
+    // episode it is actually saving, instead of depending on which of the two
+    // ran first.
+    private var progressStore: PlaybackProgressStore? = null
 
-    // AM (SYNC_ON_OPEN_RUNS_ONCE)
-    /** The episode a "sync on episode open" run has already been requested for. */
-    private var syncRequestedForEpisodeId: Long? = null
+    /** The store for [episode], creating one if the last was for something else. */
+    private fun progressStoreFor(episode: Episode): PlaybackProgressStore? {
+        val episodeId = episode.id ?: return null
+        val animeId = stateData.value.currentAnime?.id ?: return null
+        val key = SessionKey.Library(animeId = animeId, episodeId = episodeId)
+        progressStore?.takeIf { it.sessionKey == key }?.let { return it }
+        return LibraryProgressStore(
+            episode = episode,
+            sessionKey = key,
+            context = context,
+            getEpisode = getEpisode,
+            updateEpisode = updateEpisode,
+            upsertHistory = upsertHistory,
+            playerPreferences = playerPreferences,
+            syncPreferences = syncPreferences,
+            isIncognito = { stateData.value.incognitoMode },
+            hasTrackers = { stateData.value.hasTrackers },
+        ).also { progressStore = it }
+    }
+    // <-- AM (CONTENT_AGNOSTIC_SESSION)
 
     /**
      * Writes the current position now, for the moments where durability actually
@@ -5837,9 +6835,15 @@ class PlayerViewModel(
     /** Persists progress when the activity is saved without a config change. */
     fun onSaveInstanceStateNonConfigurationChange() {
         val currentEpisode = stateData.value.currentEpisode ?: return
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // Position only, no history write - same as the saveEpisodeProgress()
+        // call this replaces, which deliberately did not go through
+        // saveWatchingProgress() and so never touched history.
+        val store = progressStoreFor(currentEpisode) ?: return
         viewModelScope.launchNonCancellable {
-            saveEpisodeProgress(currentEpisode)
+            store.savePosition(writeSeenState = false)
         }
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
     }
 
     // AM (SERVICE_OWNED_VIEWMODEL) -->
@@ -6031,124 +7035,22 @@ class PlayerViewModel(
     // stomp it back to false, no matter how the timing lines up. Only a call that is
     // itself intentionally changing seen (episode naturally finishing) passes true.
     // <-- AM (TICK_NEVER_OWNS_SEEN)
+    // AM (CONTENT_AGNOSTIC_SESSION) -->
+    // saveEpisodeProgress() and saveEpisodeHistory() moved verbatim into
+    // LibraryProgressStore (see PlaybackProgressStore.kt) - the DB writes, the
+    // version-staleness check, WIPE_POSITION_ON_SEEN, SAVE_ONLY_WHAT_CHANGED and
+    // both once-per-episode guards all behave as they did. What is left here is
+    // the dispatch: WHERE progress goes is the store's business now, not the
+    // ViewModel's, which is what gives a session with no library row somewhere
+    // to write at all.
     private fun saveWatchingProgress(episode: Episode, writeSeenState: Boolean = false) {
+        val store = progressStoreFor(episode) ?: return
         viewModelScope.launchNonCancellable {
-            saveEpisodeProgress(episode, writeSeenState)
-            saveEpisodeHistory(episode)
+            store.savePosition(writeSeenState)
+            store.recordWatched()
         }
     }
-
-    /** Saves [episode] progress if not in incognito mode, or has at least one tracker. */
-    private suspend fun saveEpisodeProgress(episode: Episode, writeSeenState: Boolean = false) {
-        val stateData = stateData.value
-        if (!stateData.incognitoMode || stateData.hasTrackers) {
-            // AM (RECENT_EPISODE_POSITIONS) -->
-            // currentPlaylist is loaded once per player session and never refreshed, so our
-            // in-memory seen can go stale in EITHER direction if it's toggled elsewhere
-            // while this player stays alive (e.g. from the anime screen during PIP). The
-            // `version` column bumps on every real seen/bookmark/last_second_seen change
-            // (see the episodes.sq trigger), so use it to detect a change we don't know
-            // about and defer to the DB's seen instead of blindly overwriting it. This is
-            // now purely for keeping local/UI state accurate during a live session - the
-            // DB write itself no longer depends on it, see writeSeenState above.
-            val fresh = getEpisode.await(episode.id!!)
-            if (fresh != null && fresh.version != episode.version) {
-                episode.seen = fresh.seen
-                episode.bookmark = fresh.bookmark
-                episode.version = fresh.version
-                // AM (WIPE_POSITION_ON_SEEN) -->
-                // If this refresh just picked up an external "marked as seen" that
-                // happened while this episode was still actively playing, don't let
-                // the position this tick already computed (from the pre-refresh,
-                // stale `seen = false`) get written back below and reclobber the
-                // wipe the external mark-as-seen action just did.
-                if (episode.seen && !playerPreferences.preserveWatchingPosition.get()) {
-                    episode.last_second_seen = 0L
-                }
-                // <-- AM (WIPE_POSITION_ON_SEEN)
-            }
-            val willChangeTrackedFields = fresh != null && (
-                (writeSeenState && episode.seen != fresh.seen) ||
-                    (writeSeenState && episode.bookmark != fresh.bookmark) ||
-                    episode.last_second_seen != fresh.lastSecondSeen
-                )
-            // <-- AM (RECENT_EPISODE_POSITIONS)
-            // AM (SAVE_ONLY_WHAT_CHANGED) -->
-            // Every field is sent as null unless it actually differs from the row,
-            // and the write is skipped outright when nothing does. This path runs
-            // on a cadence AND on pause, seek, episode change and teardown, so
-            // saves that re-state the same position were routine - each one an
-            // UPDATE that rewrote unchanged columns and, through the episodes.sq
-            // version trigger, bumped `version` and woke every flow watching the
-            // episode list for a change that was not one.
-            val changedFillermark = episode.fillermark.takeIf { fresh == null || it != fresh.fillermark }
-            val changedTotalSeconds = episode.total_seconds.takeIf { fresh == null || it != fresh.totalSeconds }
-            val changedPosition = episode.last_second_seen.takeIf { fresh == null || it != fresh.lastSecondSeen }
-            val changedSeen = episode.seen.takeIf { writeSeenState && (fresh == null || it != fresh.seen) }
-            val changedBookmark = episode.bookmark.takeIf { writeSeenState && (fresh == null || it != fresh.bookmark) }
-            val hasChanges = changedFillermark != null ||
-                changedTotalSeconds != null ||
-                changedPosition != null ||
-                changedSeen != null ||
-                changedBookmark != null
-            if (hasChanges) {
-                updateEpisode.await(
-                    EpisodeUpdate(
-                        id = episode.id!!,
-                        seen = changedSeen,
-                        bookmark = changedBookmark,
-                        fillermark = changedFillermark,
-                        lastSecondSeen = changedPosition,
-                        totalSeconds = changedTotalSeconds,
-                    ),
-                )
-            }
-            // <-- AM (SAVE_ONLY_WHAT_CHANGED)
-            // AM (RECENT_EPISODE_POSITIONS) -->
-            // Mirror the DB trigger's version bump locally so our next save's staleness
-            // check compares against what the DB will actually have, not last tick's.
-            if (willChangeTrackedFields) {
-                episode.version = fresh!!.version + 1
-            }
-            // <-- AM (RECENT_EPISODE_POSITIONS)
-            // AM (SYNC) -->
-            // AM (SYNC_ON_OPEN_RUNS_ONCE) -->
-            // "Sync on episode open" means once, on open. This ran on every
-            // progress save instead - a WorkManager enqueue every few seconds for
-            // the whole episode, plus two preference reads per save - because the
-            // only condition was a position past the first second, which stays
-            // true for the rest of the episode. Guarded per episode, like the
-            // history write below.
-            if (episode.last_second_seen >= 1L && syncRequestedForEpisodeId != episode.id) {
-                if (syncPreferences.isSyncEnabled() && syncPreferences.getSyncTriggerOptions().syncOnEpisodeOpen) {
-                    syncRequestedForEpisodeId = episode.id
-                    SyncDataJob.startNow(context.workManager)
-                }
-            }
-            // <-- AM (SYNC_ON_OPEN_RUNS_ONCE)
-            // <-- AM (SYNC)
-        }
-    }
-
-    /** Saves [episode] last-seen history if not in incognito mode. */
-    private suspend fun saveEpisodeHistory(episode: Episode) {
-        if (!stateData.value.incognitoMode) {
-            val episodeId = episode.id!!
-            // AM (PERSIST_ON_CADENCE) -->
-            // History records WHEN an episode was last watched, which changes once
-            // per viewing, not continuously - but this ran on every progress save,
-            // so it was upserting the same row with a slightly newer timestamp
-            // over and over. Once per episode per session says the same thing; the
-            // teardown save refreshes it on the way out.
-            if (historyWrittenForEpisodeId == episodeId) return
-            historyWrittenForEpisodeId = episodeId
-            // <-- AM (PERSIST_ON_CADENCE)
-            val seenAt = Date()
-            upsertHistory.await(
-                HistoryUpdate(episodeId, seenAt),
-            )
-        }
-    }
+    // <-- AM (CONTENT_AGNOSTIC_SESSION)
 
     // AM (PLAYER_ADD_TO_LIBRARY) -->
     /**
@@ -6230,8 +7132,9 @@ class PlayerViewModel(
                 // AnimeViewModel.applyFavoriteCategories: they are what the
                 // dialog offers back if the entry is added again.
                 updateStateData { it.copy(currentAnime = anime.copy(favorite = false)) }
-                // Only worth asking when there is something to delete.
-                if (downloadManager.getDownloadCount(anime) > 0) {
+                // Only worth asking when there is something to delete - which a
+                // local entry never has. AM (LOCAL_ENTRIES_HAVE_NO_DOWNLOADS)
+                if (downloadManager.hasDeletableDownloads(anime)) {
                     setDialog(Dialogs.DeleteDownloadsAfterRemoval(anime))
                 }
                 return@launchIO
@@ -6657,6 +7560,10 @@ class PlayerViewModel(
         // <-- AM (EPISODE_TAG_SEARCH)
         val hasPreviousEpisode: Boolean = false,
         val hasNextEpisode: Boolean = false,
+        // AM (EXTRA_LOCAL_FOLDERS) -->
+        /** Whether to offer folder access - see publishCanGrantExternalFolder. */
+        val canGrantExternalFolder: Boolean = false,
+        // <-- AM (EXTRA_LOCAL_FOLDERS)
         val isEpisodeOnline: Boolean = false,
         val currentEpisode: Episode? = null,
         val currentAnime: Anime? = null,
@@ -6854,6 +7761,11 @@ class PlayerViewModel(
 
     // AM (NEXT_EPISODE_PREFETCH) -->
     companion object {
+        // AM (EXTERNAL_FOLDER_GRANT) -->
+        private const val EXTERNAL_STORAGE_PROVIDER = "com.android.externalstorage.documents"
+        private const val PRIMARY_VOLUME_PATH = "/storage/emulated/0"
+        // <-- AM (EXTERNAL_FOLDER_GRANT)
+
         // AM (PERSIST_ON_CADENCE) -->
         /** Backstop write interval between the event-driven saves. */
         private const val PERSIST_INTERVAL_SECONDS = 5

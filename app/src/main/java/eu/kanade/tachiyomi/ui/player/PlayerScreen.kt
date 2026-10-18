@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.ui.player
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -1092,6 +1094,15 @@ fun PlayerScreen(
                 // <-- AM (PLAYER_ADD_TO_LIBRARY)
 
                 // Dialogs
+                // AM (EXTERNAL_FOLDER_GRANT) -->
+                // The folder picker lives here, beside the dialog that offers it,
+                // because an Activity result needs a launcher registered in the
+                // composition - the ViewModel cannot start one itself. It only
+                // applies the result.
+                val folderPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocumentTree(),
+                ) { uri -> uri?.let { viewModel.applyExternalFolderGrant(it) } }
+                // <-- AM (EXTERNAL_FOLDER_GRANT)
                 PlayerDialogs(
                     dialogShown = uiData.dialogShown,
                     episodeDisplayMode = stateData.currentAnime?.displayMode,
@@ -1188,6 +1199,19 @@ fun PlayerScreen(
                     onDeleteDownloads = viewModel::deleteDownloadsOf,
                     // <-- AM (PLAYER_ADD_TO_LIBRARY)
                     onDismissRequest = { viewModel.setDialog(Dialogs.None) },
+                    // AM (EXTERNAL_FOLDER_GRANT) -->
+                    // Read from collected state, not a ViewModel getter: a getter
+                    // is evaluated once during composition - before the external
+                    // load has set anything - and never recomposed, so the Grant
+                    // action never appeared and the dialog only ever offered OK.
+                    canGrantExternalFolder = stateData.canGrantExternalFolder,
+                    // The picker's input IS EXTRA_INITIAL_URI, so this opens it
+                    // already showing the video's own folder rather than making
+                    // the user navigate to a place the app already knows.
+                    onRequestExternalFolder = {
+                        folderPicker.launch(viewModel.externalFolderPickerStartUri)
+                    },
+                    // <-- AM (EXTERNAL_FOLDER_GRANT)
                 )
 
                 // AM (CUSTOM_EPISODE_ORDER) -->

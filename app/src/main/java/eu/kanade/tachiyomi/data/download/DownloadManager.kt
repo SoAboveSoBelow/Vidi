@@ -30,7 +30,6 @@ import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.source.service.SourceManager
-import tachiyomi.domain.storage.service.StorageManager
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.source.local.io.Format
 import tachiyomi.source.local.io.LocalSourceFileSystem
@@ -45,9 +44,13 @@ import tachiyomi.source.local.isLocal
 @SingleIn(AppScope::class)
 class DownloadManager(
     private val context: Context,
-    // AM (STORAGE_SCREEN) -->
-    private val storageManager: StorageManager,
-    // <-- AM (STORAGE_SCREEN)
+    // AM (EXTRA_LOCAL_FOLDERS) -->
+    // Injected rather than constructed where it is used: LocalSourceFileSystem
+    // now resolves urls across the configured directory and any granted folders,
+    // so it needs its own dependencies and building one by hand would quietly
+    // produce a copy that only knew about the configured one.
+    private val localSourceFileSystem: LocalSourceFileSystem,
+    // <-- AM (EXTRA_LOCAL_FOLDERS)
     private val provider: DownloadProvider,
     private val cache: DownloadCache,
     private val getCategories: GetCategories,
@@ -252,10 +255,28 @@ class DownloadManager(
      *
      * @param anime the anime to check.
      */
+    // AM (LOCAL_ENTRIES_HAVE_NO_DOWNLOADS) -->
+    /**
+     * Whether removing [anime] from the library leaves downloads worth offering
+     * to delete.
+     *
+     * Deliberately not `getDownloadCount(anime) > 0`, which is what both removal
+     * offers used to ask: for a local entry that count is the number of video
+     * files in the entry's OWN folder (see getDownloadCount below, and the
+     * storage screen, which is what that branch is for). Those files are the
+     * source, not downloads of it, so the offer appeared for every local entry
+     * and accepting it would have deleted the entry's content. A local entry
+     * never has downloads.
+     */
+    fun hasDeletableDownloads(anime: Anime): Boolean {
+        return !anime.isLocal() && getDownloadCount(anime) > 0
+    }
+    // <-- AM (LOCAL_ENTRIES_HAVE_NO_DOWNLOADS)
+
     fun getDownloadCount(anime: Anime): Int {
         return if (anime.isLocal()) {
             // AM (STORAGE_SCREEN) -->
-            LocalSourceFileSystem(storageManager).getFilesInAnimeDirectory(anime.url)
+            localSourceFileSystem.getFilesInAnimeDirectory(anime.url)
                 .count { Format.isSupported(it) }
             // <-- AM (STORAGE_SCREEN)
         } else {

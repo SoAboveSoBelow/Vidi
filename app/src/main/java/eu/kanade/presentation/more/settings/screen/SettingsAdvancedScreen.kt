@@ -27,6 +27,7 @@ import aniyomi.source.js.JsSpikes
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.screen.advanced.JsProjectsScreen
 import eu.kanade.presentation.more.settings.screen.advanced.ClearDatabaseScreen
+import eu.kanade.presentation.more.settings.screen.advanced.GrantedFoldersScreen
 import eu.kanade.presentation.more.settings.screen.debug.DebugInfoScreen
 import eu.kanade.tachiyomi.data.library.MetadataUpdateJob
 import eu.kanade.tachiyomi.network.NetworkPreferences
@@ -212,6 +213,12 @@ object SettingsAdvancedScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_clear_database),
                     subtitle = stringResource(MR.strings.pref_clear_database_summary),
                     onClick = { navigator.push(ClearDatabaseScreen()) },
+                ),
+                // AM (EXTRA_LOCAL_FOLDERS)
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(AMMR.strings.am_pref_granted_folders),
+                    subtitle = stringResource(AMMR.strings.am_pref_granted_folders_summary),
+                    onClick = { navigator.push(GrantedFoldersScreen()) },
                 ),
             ),
         )

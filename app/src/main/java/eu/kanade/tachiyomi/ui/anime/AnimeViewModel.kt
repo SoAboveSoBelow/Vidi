@@ -1159,7 +1159,8 @@ class AnimeViewModel(
      */
     private fun hasDownloads(): Boolean {
         val anime = successState?.anime ?: return false
-        return downloadManager.getDownloadCount(anime) > 0
+        // AM (LOCAL_ENTRIES_HAVE_NO_DOWNLOADS)
+        return downloadManager.hasDeletableDownloads(anime)
     }
 
     /**

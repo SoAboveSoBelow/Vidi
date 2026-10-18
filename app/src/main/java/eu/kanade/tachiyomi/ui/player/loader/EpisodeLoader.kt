@@ -134,11 +134,16 @@ class EpisodeLoader(
         episode: Episode,
     ): List<Hoster> {
         return try {
+            // AM (EXTRA_LOCAL_FOLDERS) -->
+            // Was getBaseDirectory()?.findFile(animeDirName), which only ever
+            // looked in the configured local source directory. getAnimeDirectory()
+            // resolves the entry's url in whichever folder it belongs to, so an
+            // entry in a granted folder plays rather than failing to resolve.
             val (animeDirName, episodeName) = episode.url.split('/', limit = 2)
-            val videoFile = fileSystem.getBaseDirectory()
-                ?.findFile(animeDirName)
+            val videoFile = fileSystem.getAnimeDirectory(animeDirName)
                 ?.findFile(episodeName)
             val videoUri = videoFile!!.uri
+            // <-- AM (EXTRA_LOCAL_FOLDERS)
 
             val video = Video(
                 videoUri.toString(),

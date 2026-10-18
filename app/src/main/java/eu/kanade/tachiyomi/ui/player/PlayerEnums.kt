@@ -33,6 +33,14 @@ enum class Panels {
 sealed class Dialogs {
     data object None : Dialogs()
     data object EpisodeList : Dialogs()
+
+    // AM (EXTERNAL_FOLDER_GRANT) -->
+    /**
+     * Shown in place of [EpisodeList] for an externally-opened file, which has
+     * no episode list to show - see PlayerViewModel's ShowEpisodeDialog handler.
+     */
+    data object ExternalFolder : Dialogs()
+    // <-- AM (EXTERNAL_FOLDER_GRANT)
     data class IntegerPicker(
         val defaultValue: Int,
         val minValue: Int,

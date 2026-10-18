@@ -3,7 +3,6 @@ package tachiyomi.source.local
 import android.content.Context
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFprobeKit
-import com.hippo.unifile.UniFile
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -96,17 +95,27 @@ class LocalSource(
             0L
         }
 
-        var animeDirs = fileSystem.getFilesInBaseDirectory()
+        // AM (EXTRA_LOCAL_FOLDERS) -->
+        // Was getFilesInBaseDirectory(), which only ever saw the configured
+        // directory. getEntryDirectories() also covers folders the user has
+        // granted, each child carrying the url that addresses it - so a granted
+        // folder's videos become ordinary local entries and everything that
+        // already works for a local entry works for them.
+        //
+        // distinctBy is on the url rather than the name now: two roots can hold a
+        // folder of the same name, and those are different entries, not a
+        // duplicate to collapse.
+        var animeDirs = fileSystem.getEntryDirectories()
             // Filter out files that are hidden and is not a folder
-            .filter { it.isDirectory && !it.name.orEmpty().startsWith('.') }
-            .distinctBy { it.name }
+            .filter { it.file.isDirectory && !it.file.name.orEmpty().startsWith('.') }
+            .distinctBy { it.url }
             .filter {
                 if (lastModifiedLimit == 0L && query.isBlank()) {
                     true
                 } else if (lastModifiedLimit == 0L) {
-                    it.name.orEmpty().contains(query, ignoreCase = true)
+                    it.file.name.orEmpty().contains(query, ignoreCase = true)
                 } else {
-                    it.lastModified() >= lastModifiedLimit
+                    it.file.lastModified() >= lastModifiedLimit
                 }
             }
 
@@ -114,16 +123,18 @@ class LocalSource(
             when (filter) {
                 is OrderBy.Popular -> {
                     animeDirs = if (filter.state!!.ascending) {
-                        animeDirs.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name.orEmpty() })
+                        animeDirs.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.file.name.orEmpty() })
                     } else {
-                        animeDirs.sortedWith(compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.name.orEmpty() })
+                        animeDirs.sortedWith(
+                            compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.file.name.orEmpty() },
+                        )
                     }
                 }
                 is OrderBy.Latest -> {
                     animeDirs = if (filter.state!!.ascending) {
-                        animeDirs.sortedBy(UniFile::lastModified)
+                        animeDirs.sortedBy { it.file.lastModified() }
                     } else {
-                        animeDirs.sortedByDescending(UniFile::lastModified)
+                        animeDirs.sortedByDescending { it.file.lastModified() }
                     }
                 }
                 else -> {
@@ -136,7 +147,9 @@ class LocalSource(
             .map { animeDir ->
                 async {
                     // AY -->
-                    getSAnime(animeDir.name)
+                    // AM (EXTRA_LOCAL_FOLDERS): the url, which for a granted
+                    // folder's entry is not the same as its name.
+                    getSAnime(animeDir.url)
                     // <-- AY
                 }
             }
@@ -148,7 +161,13 @@ class LocalSource(
     // AY -->
     private fun getSAnime(animeDir: String?): SAnime {
         return SAnime.create().apply {
-            title = animeDir.orEmpty().substringAfterLast(File.separator)
+            // AM (EXTRA_LOCAL_FOLDERS) -->
+            // Was substringAfterLast(separator) on the url, which is the
+            // directory name for a configured-directory entry but would show the
+            // percent-encoded root for a granted folder's entry. getEntryTitle()
+            // is the one place that knows how to read a title out of either.
+            title = fileSystem.getEntryTitle(animeDir.orEmpty())
+            // <-- AM (EXTRA_LOCAL_FOLDERS)
             url = animeDir.orEmpty()
             fetch_type = fetchTypeManager.find(animeDir.orEmpty())
 
