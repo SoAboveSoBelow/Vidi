@@ -2227,7 +2227,7 @@ private fun LazyGridScope.sharedEpisodeItems(
                     // <-- AM (FILE_SIZE)
                     // AM (MINIMAL_EPISODE_LIST) -->
                     // AM (EPISODE_VIEW_MODE) -->
-                    minimalView = anime.hideEpisodeMetadata(),
+                    minimalView = anime.showPreviews(),
                     // <-- AM (EPISODE_VIEW_MODE)
                     // <-- AM (MINIMAL_EPISODE_LIST)
                     // AM (NOW_PLAYING_INDICATOR) -->

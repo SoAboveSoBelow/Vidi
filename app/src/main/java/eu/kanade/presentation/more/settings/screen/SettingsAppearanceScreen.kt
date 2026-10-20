@@ -19,7 +19,6 @@ import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.screen.appearance.AppLanguageScreen
 import eu.kanade.presentation.more.settings.widget.AppThemeModePreferenceWidget
 import eu.kanade.presentation.more.settings.widget.AppThemePreferenceWidget
-import eu.kanade.tachiyomi.ui.anime.DefaultEpisodeViewModePreference
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.collections.immutable.persistentMapOf
 import kotlinx.datetime.TimeZone
@@ -117,7 +116,7 @@ object SettingsAppearanceScreen : SearchableSettings {
 
         // AM (EPISODE_VIEW_MODE) -->
         val defaultEpisodeViewModePreference = remember {
-            DefaultEpisodeViewModePreference(context.appGraph.libraryPreferences)
+            context.appGraph.libraryPreferences.showEpisodeThumbnailPreviews
         }
         // <-- AM (EPISODE_VIEW_MODE)
 
@@ -184,8 +183,6 @@ object SettingsAppearanceScreen : SearchableSettings {
                     entries = persistentMapOf(
                         Anime.EPISODE_SHOW_NOT_PREVIEWS to stringResource(AMMR.strings.am_pref_default_view_simplified),
                         Anime.EPISODE_SHOW_PREVIEWS to stringResource(AMMR.strings.am_pref_default_view_preview),
-                        (Anime.EPISODE_SHOW_PREVIEWS or Anime.EPISODE_HIDE_METADATA) to
-                            stringResource(AMMR.strings.am_pref_default_view_minimal),
                     ),
                     title = stringResource(AMMR.strings.am_pref_default_view),
                 ),

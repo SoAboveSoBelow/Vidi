@@ -6,6 +6,7 @@ import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.animesource.AnimeSource
+import eu.kanade.tachiyomi.data.download.model.LocalSourceTarget
 import eu.kanade.tachiyomi.util.lang.Hash.md5
 import eu.kanade.tachiyomi.util.storage.DiskUtil
 import eu.kanade.tachiyomi.util.storage.size
@@ -79,6 +80,75 @@ class DownloadProvider(
 
         return Result.success(animeDir)
     }
+
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /**
+     * Returns the local source entry directory a local source download lands in,
+     * creating it when this is the first video saved from that origin.
+     *
+     * The configured local source directory rather than a granted folder: a
+     * granted folder IS one entry (see LocalSourceFileSystem.EntryDirectory), so
+     * there is no "put a new entry in it", while the configured directory is
+     * exactly a place entries live.
+     *
+     * The two levels are the entry and a season inside it - see
+     * [LocalSourceTarget], which says why a saved video has both.
+     */
+    internal fun getLocalSourceDir(target: LocalSourceTarget): Result<UniFile> {
+        val baseDir = localFileSystem.getBaseDirectory()
+        if (baseDir == null) {
+            logcat(LogPriority.ERROR) { "Failed to resolve local source directory" }
+            return Result.failure(
+                IOException(
+                    context.stringResource(
+                        MR.strings.storage_failed_to_create_directory,
+                        context.stringResource(MR.strings.local_source),
+                    ),
+                ),
+            )
+        }
+
+        return baseDir
+            .createChildDirectory(DiskUtil.buildValidFilename(target.entryName))
+            .mapCatching { entryDir ->
+                entryDir.createChildDirectory(DiskUtil.buildValidFilename(target.seasonName)).getOrThrow()
+            }
+    }
+
+    /**
+     * Creates (or opens) the directory [name] inside this one, as a [Result]
+     * carrying the same failure every other directory step here reports.
+     */
+    private fun UniFile.createChildDirectory(name: String): Result<UniFile> {
+        val child = createDirectory(name)
+        if (child == null) {
+            val displayablePath = displayablePath + "/$name"
+            logcat(LogPriority.ERROR) { "Failed to create local source directory: $displayablePath" }
+            return Result.failure(
+                IOException(context.stringResource(MR.strings.storage_failed_to_create_directory, displayablePath)),
+            )
+        }
+        return Result.success(child)
+    }
+
+    /**
+     * Returns the video already saved into [target] under [fileName], if any.
+     *
+     * Matched on the name without its extension, because what lands there is
+     * whatever container the download produced and the caller asking "do I
+     * already have this episode" does not know which that will be.
+     */
+    fun findLocalSourceFile(target: LocalSourceTarget, fileName: String): UniFile? {
+        val seasonDir = localFileSystem.getBaseDirectory()
+            ?.findFile(DiskUtil.buildValidFilename(target.entryName))
+            ?.findFile(DiskUtil.buildValidFilename(target.seasonName))
+            ?: return null
+        val wanted = DiskUtil.buildValidFilename(fileName)
+        return seasonDir.listFiles()?.firstOrNull { file ->
+            file.isFile && file.name?.substringBeforeLast('.') == wanted
+        }
+    }
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 
     /**
      * Returns the download directory for a source if it exists.
@@ -294,9 +364,13 @@ class DownloadProvider(
     ): Long? {
         if (animeSource == null) return null
         return if (animeSource.isLocal()) {
-            val (animeDirName, episodeDirName) = episodeUrl?.split('/', limit = 2) ?: return null
+            // AM (LOCAL_NESTED_ENTRY_URLS): split at the last separator, so an
+            // entry inside an app folder resolves - see EpisodeLoader.
+            val url = episodeUrl ?: return null
             // AM (EXTRA_LOCAL_FOLDERS)
-            localFileSystem.getAnimeDirectory(animeDirName)?.findFile(episodeDirName)?.size()
+            localFileSystem.getAnimeDirectory(url.substringBeforeLast('/'))
+                ?.findFile(url.substringAfterLast('/'))
+                ?.size()
         } else {
             val episodeUrl = episodeUrl ?: return null
             findEpisodeDir(episodeName, episodeScanlator, episodeUrl, animeTitle, animeSource)?.size()

@@ -56,6 +56,10 @@ fun PlayerDialogs(
     onDeleteDownloads: (Anime) -> Unit,
     // <-- AM (PLAYER_ADD_TO_LIBRARY)
     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /** Null hides the download action - see EpisodeListDialog. */
+    onDownloadEpisodes: ((List<Episode>) -> Unit)?,
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 
     onDismissRequest: () -> Unit,
 
@@ -105,6 +109,9 @@ fun PlayerDialogs(
                 isFavorited = isFavorited,
                 onAddToLibrary = onAddToLibrary,
                 // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+                // AM (LOCAL_SOURCE_DOWNLOAD) -->
+                onDownloadEpisodes = onDownloadEpisodes,
+                // <-- AM (LOCAL_SOURCE_DOWNLOAD)
                 onDismissRequest = onDismissRequest,
             )
         }

@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.data.download.model.Download
+import eu.kanade.tachiyomi.data.download.model.LocalSourceTarget
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.drop
@@ -172,12 +173,48 @@ class DownloadManager(
         alt: Boolean = false,
         video: Video? = null,
         // <-- AY
+        // AM (LOCAL_SOURCE_DOWNLOAD) -->
+        /** Set to save into the local source - see [LocalSourceTarget]. */
+        localSourceTarget: LocalSourceTarget? = null,
+        // <-- AM (LOCAL_SOURCE_DOWNLOAD)
     ) {
         // AY -->
         val filteredEpisodes = getEpisodesToDownload(episodes)
-        downloader.queueEpisodes(anime, filteredEpisodes, autoStart, alt, video)
+        downloader.queueEpisodes(anime, filteredEpisodes, autoStart, alt, video, localSourceTarget)
         // <-- AY
     }
+
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /**
+     * Enqueues [episodes] to be saved into the local source rather than owned by
+     * the library entry they came from.
+     *
+     * The files land under `<extension>/<site>/`, so everything saved through
+     * one extension collects in one local entry with a season per site - see
+     * [LocalSourceTarget]. Nothing happens for a source with no
+     * http identity (the local source itself, most obviously), which has
+     * nothing to save from and nowhere to name.
+     */
+    fun downloadEpisodesToLocalSource(anime: Anime, episodes: List<Episode>, entryName: String? = null) {
+        val source = sourceManager.get(anime.source) as? AnimeHttpSource ?: return
+        downloadEpisodes(
+            anime = anime,
+            episodes = episodes,
+            localSourceTarget = LocalSourceTarget(
+                // AM (EXTERNAL_APP_LABEL): the app it was opened from, where
+                // that is known, and the extension's own name otherwise.
+                entryName = entryName?.let { LocalSourceTarget.entryNameFor(it) }
+                    ?: LocalSourceTarget.entryNameFor(source),
+                // AM (EXTERNAL_APP_LABEL): a source with no baseUrl of its own -
+                // an externally opened stream - is named by the url of the entry
+                // itself, which IS the address the video came from.
+                seasonName = LocalSourceTarget.seasonNameFor(
+                    source.baseUrl.ifBlank { anime.url },
+                ),
+            ),
+        )
+    }
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 
     /**
      * Tells the downloader to enqueue the given list of downloads at the start of the queue.
@@ -544,6 +581,10 @@ class DownloadManager(
         }
     }
     // <-- AY
+
+    // AM (LOCAL_SOURCE_DOWNLOAD)
+    /** Emits each completed save into the local source - see [Downloader.localSourceSaved]. */
+    fun localSourceSaves(): Flow<LocalSourceTarget> = downloader.localSourceSaved
 
     fun statusFlow(): Flow<Download> = queueState
         .flatMapLatest { downloads ->

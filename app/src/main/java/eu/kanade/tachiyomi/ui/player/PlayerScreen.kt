@@ -1119,7 +1119,14 @@ fun PlayerScreen(
                     onFillermarkClicked = viewModel::fillermarkEpisode,
                     onEpisodeClicked = {
                         viewModel.setDialog(Dialogs.None)
-                        viewModel.changeEpisode(it)
+                        // AM (PLAYER_EPISODE_LIST_SELECTION)
+                        // Picking the episode already playing means "close
+                        // this", not "start it again" - changeEpisode tears the
+                        // session down and reloads, which for the current
+                        // episode is a reload of what is already on screen.
+                        if (it != stateData.currentEpisode?.id) {
+                            viewModel.changeEpisode(it)
+                        }
                     },
                     // AM (EPISODE_NAMES) -->
                     displayNameOf = stateData::displayNameOf,
@@ -1198,6 +1205,15 @@ fun PlayerScreen(
                     },
                     onDeleteDownloads = viewModel::deleteDownloadsOf,
                     // <-- AM (PLAYER_ADD_TO_LIBRARY)
+                    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+                    // Both null for a playlist with nothing to fetch from - a
+                    // local entry, or no entry at all - so the selection header
+                    // offers neither rather than offering an action that would
+                    // silently do nothing. canDownloadEpisodes answers that one
+                    // question for both.
+                    onDownloadEpisodes = viewModel::downloadEpisodes
+                        .takeIf { stateData.canDownloadEpisodes },
+                    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
                     onDismissRequest = { viewModel.setDialog(Dialogs.None) },
                     // AM (EXTERNAL_FOLDER_GRANT) -->
                     // Read from collected state, not a ViewModel getter: a getter

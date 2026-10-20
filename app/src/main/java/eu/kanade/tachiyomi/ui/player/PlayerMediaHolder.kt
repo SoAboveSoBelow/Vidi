@@ -945,6 +945,16 @@ class PlayerMediaHolder(
                     val artworkForCurrentEpisode = lastArtwork
                         .takeIf { lastArtworkKey == current.sessionKey }
                         .takeUnless { hideContent }
+                    // AM (MEDIA_TITLE_DEDUPE) -->
+                    // Same two strings as the Service's notification text, in the
+                    // opposite order: the media controls lead with the episode in
+                    // their TITLE slot and carry the entry as ARTIST. A single-entry
+                    // video has the same text in both, so the card, the lock screen
+                    // and any head unit print it on both lines. See
+                    // dedupeMediaTitleLines().
+                    val (metadataTitle, metadataArtist) =
+                        dedupeMediaTitleLines(current.episodeTitle, current.animeTitle)
+                    // <-- AM (MEDIA_TITLE_DEDUPE)
                     mediaSession?.setMetadata(
                         MediaMetadata.Builder()
                             .putString(
@@ -952,12 +962,12 @@ class PlayerMediaHolder(
                                 if (hideContent) {
                                     context.stringResource(AMMR.strings.player_background_playback_channel)
                                 } else {
-                                    current.episodeTitle
+                                    metadataTitle
                                 },
                             )
                             .putString(
                                 MediaMetadata.METADATA_KEY_ARTIST,
-                                if (hideContent) "" else current.animeTitle,
+                                if (hideContent) "" else metadataArtist.orEmpty(),
                             )
                             .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs.toLong())
                             .apply {

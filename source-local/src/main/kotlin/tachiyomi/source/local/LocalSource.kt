@@ -35,6 +35,7 @@ import tachiyomi.core.metadata.tachiyomi.EpisodeDetails
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.episode.service.EpisodeRecognition
 import tachiyomi.i18n.MR
+import tachiyomi.source.local.filter.AppGroup
 import tachiyomi.source.local.filter.OrderBy
 import tachiyomi.source.local.image.LocalBackgroundManager
 import tachiyomi.source.local.image.LocalCoverManager
@@ -105,7 +106,33 @@ class LocalSource(
         // distinctBy is on the url rather than the name now: two roots can hold a
         // folder of the same name, and those are different entries, not a
         // duplicate to collapse.
-        var animeDirs = fileSystem.getEntryDirectories()
+        // AM (LOCAL_SOURCE_APP_FILTER) -->
+        // An app group is a container, never an entry: `Chrome` holds no video
+        // of its own, and listing it would put a row in browse that opens on
+        // nothing. What belongs in the list is the SITES inside it, so a group
+        // is always replaced by its children - the list is sites and ordinary
+        // entries, never groups.
+        //
+        // The filter then only narrows which of those are shown: one app's
+        // sites for a named group, and the entries belonging to no app for
+        // "Local".
+        val appFilter = filters.filterIsInstance<AppGroup>().firstOrNull()
+        val selectedGroup = appFilter?.selectedGroup
+        val topLevelDirs = fileSystem.getEntryDirectories()
+        val candidateDirs = when {
+            selectedGroup != null -> fileSystem.getEntryDirectoriesInGroup(selectedGroup)
+            appFilter?.isLocalOnly == true -> topLevelDirs.filterNot { fileSystem.isAppGroup(it.file) }
+            else -> topLevelDirs.flatMap { dir ->
+                if (fileSystem.isAppGroup(dir.file)) {
+                    fileSystem.getEntryDirectoriesInGroup(dir.url)
+                } else {
+                    listOf(dir)
+                }
+            }
+        }
+        // <-- AM (LOCAL_SOURCE_APP_FILTER)
+
+        var animeDirs = candidateDirs
             // Filter out files that are hidden and is not a folder
             .filter { it.file.isDirectory && !it.file.name.orEmpty().startsWith('.') }
             .distinctBy { it.url }
@@ -200,9 +227,21 @@ class LocalSource(
         fetchDetails: Boolean,
         fetchEpisodes: Boolean,
     ): SAnimeEpisodeUpdate = supervisorScope {
+        // AM (LOCAL_COVER_ON_FIRST_SCAN) -->
+        // Episodes before details when both are wanted, rather than in
+        // parallel. Scanning the episodes is what WRITES the cover for an entry
+        // that has none (see getOldEpisodeList), and reading the details is
+        // what records where it was written. Run together, the details read
+        // almost always looks before the file exists, so a newly added entry
+        // came back with a null thumbnail_url and stayed uncovered until some
+        // later refresh happened to scan it again.
+        //
+        // Only the both-wanted case is ordered; either one alone is unchanged,
+        // and nothing else about the scan is serialised.
+        val newEpisodes = if (fetchEpisodes) getOldEpisodeList(anime) else null
         val asyncAnime = if (fetchDetails) async { getOldAnimeDetails(anime) } else null
-        val asyncEpisodes = if (fetchEpisodes) async { getOldEpisodeList(anime) } else null
-        SAnimeEpisodeUpdate(asyncAnime?.await() ?: anime, asyncEpisodes?.await() ?: episodes)
+        SAnimeEpisodeUpdate(asyncAnime?.await() ?: anime, newEpisodes ?: episodes)
+        // <-- AM (LOCAL_COVER_ON_FIRST_SCAN)
     }
 
     // AM (CUSTOM_INFORMATION) -->
@@ -439,7 +478,24 @@ class LocalSource(
     // <-- AY
 
     // Filters
-    override fun getFilterList() = AnimeFilterList(OrderBy.Popular(context))
+    // AM (LOCAL_SOURCE_APP_FILTER) -->
+    // The app groups are read from disk each time rather than cached: a group
+    // exists exactly as long as its directory does, and the first video saved
+    // from a new app creates one.
+    override fun getFilterList() = AnimeFilterList(
+        OrderBy.Popular(context),
+        AppGroup(context, appGroupNames()),
+    )
+
+    /** The top-level directories that are app groups - see isAppGroup. */
+    private fun appGroupNames(): List<AppGroup.Group> =
+        fileSystem.getEntryDirectories()
+            .filter { it.file.isDirectory && !it.file.name.orEmpty().startsWith('.') }
+            .filter { fileSystem.isAppGroup(it.file) }
+            .distinctBy { it.url }
+            .map { AppGroup.Group(url = it.url, title = fileSystem.getEntryTitle(it.url)) }
+            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
+    // <-- AM (LOCAL_SOURCE_APP_FILTER)
 
     // Unused stuff
     override suspend fun getVideoList(episode: SEpisode): List<Video> = throw UnsupportedOperationException("Unused")
@@ -457,7 +513,15 @@ class LocalSource(
         )
         val outFile = tempFile.path
 
-        val episodeName = episode.url.split('/', limit = 2).last()
+        // AM (LOCAL_NESTED_ENTRY_URLS)
+        // The file name is the LAST segment, not everything after the first.
+        // An entry inside an app folder has a two-segment url
+        // (`Chrome/archive`), so its episode url has three - and the old
+        // split(limit = 2) handed findFile "archive/video.mkv", which resolves
+        // to nothing. The !! below then threw and the caller logged a failed
+        // extraction, which is why such an entry never got a cover, a
+        // background or episode thumbnails.
+        val episodeName = episode.url.substringAfterLast('/')
         val animeDir = fileSystem.getAnimeDirectory(anime.url)!!
         val episodeFile = animeDir.findFile(episodeName)!!
         val episodeFilename = { episodeFile.toFFmpegString(context) }

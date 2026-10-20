@@ -139,7 +139,13 @@ class EpisodeLoader(
             // looked in the configured local source directory. getAnimeDirectory()
             // resolves the entry's url in whichever folder it belongs to, so an
             // entry in a granted folder plays rather than failing to resolve.
-            val (animeDirName, episodeName) = episode.url.split('/', limit = 2)
+            // AM (LOCAL_NESTED_ENTRY_URLS)
+            // Split at the LAST separator: an entry inside an app folder has a
+            // two-segment url, so everything up to the last '/' is the entry
+            // and only the final segment is the file. Splitting at the first
+            // asked findFile for a path, which resolves to nothing.
+            val animeDirName = episode.url.substringBeforeLast('/')
+            val episodeName = episode.url.substringAfterLast('/')
             val videoFile = fileSystem.getAnimeDirectory(animeDirName)
                 ?.findFile(episodeName)
             val videoUri = videoFile!!.uri

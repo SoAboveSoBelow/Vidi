@@ -93,6 +93,7 @@ import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.DownloadProvider
 import eu.kanade.tachiyomi.data.download.model.Download
+import eu.kanade.tachiyomi.data.download.model.LocalSourceTarget
 import eu.kanade.tachiyomi.data.player.service.HttpServerService
 import eu.kanade.tachiyomi.data.saver.Image
 import eu.kanade.tachiyomi.data.saver.ImageSaver
@@ -102,6 +103,7 @@ import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.data.track.anilist.Anilist
 import eu.kanade.tachiyomi.data.track.myanimelist.MyAnimeList
 // AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.source.ExternalStreamSource
 import eu.kanade.tachiyomi.source.MergedSource
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.ui.anime.EpisodeShufflePreferences
@@ -155,11 +157,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -201,6 +205,7 @@ import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
 import tachiyomi.domain.episode.interactor.UpdateEpisode
+import tachiyomi.domain.episode.model.Episode as DomainEpisode
 import tachiyomi.domain.episode.model.EpisodeUpdate
 import tachiyomi.domain.episode.service.getEpisodeSort
 import tachiyomi.domain.history.interactor.GetNextEpisodes
@@ -1235,10 +1240,12 @@ class PlayerViewModel(
             }
             PlayerEvent.ShowEpisodeDialog -> {
                 // AM (EXTERNAL_FOLDER_GRANT) -->
-                // An externally-opened file has no episode list, so the list
-                // dialog would open empty. It gets its own dialog instead, which
-                // is where the folder-access action lives.
-                val dialog = if (externalSource != null) Dialogs.ExternalFolder else Dialogs.EpisodeList
+                // The folder dialog exists to ask for the grant, so it opens only
+                // where the grant is on offer. Routing on externalSource instead
+                // sent every external session there, including streams, which
+                // have nothing to grant - leaving a dialog with nothing in it and
+                // no way through to the list.
+                val dialog = if (canGrantExternalFolder()) Dialogs.ExternalFolder else Dialogs.EpisodeList
                 updateUiData { it.copy(dialogShown = dialog) }
                 // <-- AM (EXTERNAL_FOLDER_GRANT)
             }
@@ -2179,9 +2186,32 @@ class PlayerViewModel(
      * decides on has to live in state that it collects.
      */
     private fun publishCanGrantExternalFolder() {
-        val offer = externalSource != null && externalQueue !is ExternalFolderQueue
-        updateStateData { it.copy(canGrantExternalFolder = offer) }
+        // AM (EXTERNAL_FOLDER_GRANT_LOCAL_ONLY) -->
+        // Only a file has a folder. The grant exists so the directory holding
+        // the opened video can be listed for next/previous and registered as a
+        // local source entry - a stream has no directory to pick, the picker
+        // would open at nothing (externalFolderPickerStart is null for a
+        // remote url, since realFilePath cannot resolve one), and whatever the
+        // user chose could not contain the video anyway.
+        //
+        // isOnline() is the source's own answer to "is mpv reading a network
+        // url", already used to drive the streaming-only affordances - so this
+        // asks the existing question rather than re-deriving it from the
+        // scheme here.
+        updateStateData { it.copy(canGrantExternalFolder = canGrantExternalFolder()) }
     }
+
+    /**
+     * Whether a folder grant is worth offering for the session in hand.
+     *
+     * Only a file has a folder to grant. A stream has no directory to pick, and
+     * a folder already granted has nothing left to ask for. Both the dialog's
+     * Grant action and the choice of which dialog to open ask this, so the two
+     * cannot disagree about what an external session is.
+     */
+    private fun canGrantExternalFolder(): Boolean =
+        externalSource?.isOnline() == false && externalQueue !is ExternalFolderQueue
+    // <-- AM (EXTERNAL_FOLDER_GRANT_LOCAL_ONLY)
 
     /**
      * Where the folder picker should open, or null when it cannot be worked out.
@@ -2374,6 +2404,59 @@ class PlayerViewModel(
      * The playing position is written onto the episode row before returning - see
      * the note at that write.
      */
+    // AM (EXTERNAL_STREAM_SOURCE) -->
+    /**
+     * The anime and episode ids now standing for [source], or null if the entry
+     * could not be made.
+     *
+     * The url written on the entry is the stream url, and
+     * [ExternalStreamSource.getEpisodeList] gives the entry one episode holding
+     * that same url, so the ordinary episode-sync path produces the row and
+     * nothing has to be remembered about this session for the episode to resolve
+     * later.
+     */
+    private suspend fun registerStreamAsEntry(
+        source: ExternalPlaybackSource,
+        resumeSeconds: Long,
+    ): Pair<Long, Long>? {
+        val streamSource = sourceManager.get(ExternalStreamSource.ID) as? AnimeHttpSource ?: return null
+        val entry = networkToLocalAnime(
+            SAnime.create().apply {
+                url = source.sessionKey.uri.toString()
+                title = source.title
+            }.toDomainAnime(ExternalStreamSource.ID),
+        )
+        updateAnimeFromRemote.awaitEpisodesUpdate(
+            source = streamSource,
+            anime = entry,
+            fetchDetails = false,
+            fetchEpisodes = true,
+            manualFetch = true,
+        ).onFailure {
+            logcat(LogPriority.INFO, it) { "EXTERNAL_STREAM episode sync failed for ${entry.id}" }
+        }
+
+        val episodeId = getEpisodesByAnimeId.await(entry.id).firstOrNull()?.id ?: return null
+
+        // Written onto the row rather than threaded through the switch, for the
+        // same reason the folder case does it: setVideo resumes from what the
+        // database says, so this is the one resume path every episode uses.
+        if (resumeSeconds > 0L) {
+            runCatching {
+                updateEpisode.await(
+                    EpisodeUpdate(
+                        id = episodeId,
+                        lastSecondSeen = resumeSeconds,
+                        totalSeconds = playbackData.value.duration.toLong()
+                            .takeIf { it > resumeSeconds } ?: 0L,
+                    ),
+                )
+            }
+        }
+        return entry.id to episodeId
+    }
+    // <-- AM (EXTERNAL_STREAM_SOURCE)
+
     private suspend fun registerGrantedFolderAsLocalEntry(
         treeUri: Uri,
         resumeSeconds: Long,
@@ -2726,12 +2809,27 @@ class PlayerViewModel(
      * no source - exactly the sentinel-shaped workaround this whole refactor
      * exists to avoid.
      */
-    fun changeToExternal(uri: String, title: String?, positionMs: Long = 0L) {
+    fun changeToExternal(
+        uri: String,
+        title: String?,
+        positionMs: Long = 0L,
+        // AM (EXTERNAL_APP_LABEL)
+        appLabel: String? = null,
+    ) {
         episodeChangeJob?.cancel()
+        // AM (EXTERNAL_APP_LABEL)
+        // Held for the session rather than passed along: the save that uses it
+        // happens long after the load, and after switchToAnime has cleared
+        // everything else about where this came from.
+        externalAppLabel = appLabel
         episodeChangeJob = viewModelScope.launch {
             loadExternal(uri, title, positionMs)
         }
     }
+
+    // AM (EXTERNAL_APP_LABEL)
+    /** The app this session was opened from - see LocalSourceTarget. */
+    private var externalAppLabel: String? = null
 
     // AM (EXTERNAL_FOLDER_GRANT) -->
     /**
@@ -2833,6 +2931,34 @@ class PlayerViewModel(
                 return
             }
         }
+
+        // AM (EXTERNAL_STREAM_SOURCE) -->
+        // A stream has no folder, so the branch above can never cover it. It
+        // becomes an ordinary entry of its own instead and the session carries
+        // on as an episode - which is what the episode list, downloading and
+        // next/previous already know how to work with, so none of them need to
+        // learn about external playback. See ExternalStreamSource.
+        if (carriedQueue == null && source.isOnline()) {
+            val registered = registerStreamAsEntry(source, resumeSeconds = positionMs / 1000L)
+            if (registered != null) {
+                val (animeId, episodeId) = registered
+                logcat(LogPriority.INFO) {
+                    "EXTERNAL_STREAM playing as episode $episodeId of entry $animeId"
+                }
+                externalSource = null
+                externalQueue = null
+                publishCanGrantExternalFolder()
+                switchToAnime(
+                    animeId = animeId,
+                    episodeId = episodeId,
+                    hostList = "",
+                    hostIndex = -1,
+                    vidIndex = -1,
+                )
+                return
+            }
+        }
+        // <-- AM (EXTERNAL_STREAM_SOURCE)
 
         // Falls back to the folder queue when that did not come off, so a folder
         // the local source cannot make an entry of still gets next/previous.
@@ -7213,6 +7339,131 @@ class PlayerViewModel(
     private var downloadAheadEpisodeId: Long? = null
     // <-- AM (DOWNLOAD_AHEAD_ONCE)
 
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /** Downloads [episodes] the ordinary way, owned by the entry they belong to. */
+    fun downloadEpisodes(episodes: List<Episode>) {
+        enqueueByOwner(episodes) { anime, owned ->
+            // AM (LOCAL_SOURCE_DOWNLOAD) -->
+            // One download action, with the destination following the entry
+            // rather than the button. An entry that only exists because
+            // something was opened from outside the app has no library of its
+            // own to own the file, so it is saved into the local source, where
+            // it becomes an entry the user can find again; everything else is
+            // owned by the entry it came from, as before.
+            if (anime.source == ExternalStreamSource.ID) {
+                saveToLocalSource(anime, owned, entryName = externalAppLabel)
+            } else {
+                downloadManager.downloadEpisodes(anime, owned)
+            }
+            // <-- AM (LOCAL_SOURCE_DOWNLOAD)
+        }
+    }
+
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /**
+     * Saves [owned] into the local source, as plain videos under the site they
+     * came from - see LocalSourceTarget.
+     */
+    private fun saveToLocalSource(anime: Anime, owned: List<DomainEpisode>, entryName: String? = null) {
+        downloadManager.downloadEpisodesToLocalSource(anime, owned, entryName)
+        // The refresh that turns the saved files into a real local entry runs
+        // HERE rather than inside Downloader.
+        //
+        // It needs UpdateAnimeFromRemote, which needs SyncEpisodesWithSource,
+        // which needs DownloadManager - so injecting it anywhere in the download
+        // layer closes a dependency cycle the graph refuses to build. This
+        // ViewModel already holds both interactors for the granted-folder
+        // registration, so asking from here adds no dependency anywhere and the
+        // download layer stays unaware of the library entirely.
+        registerLocalSourceEntryWhenSaved(anime, owned.size, entryName)
+    }
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
+
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /**
+     * Waits for the queued saves to leave the download queue, then syncs the
+     * local source entry they landed in.
+     *
+     * The same refresh the granted-folder path makes, for the same reason: it
+     * extracts the cover and background from the video, writes them onto the
+     * entry, syncs the episode list and starts thumbnail generation, none of
+     * which a hand-written episode row would get.
+     *
+     * Tied to [viewModelScope], so closing the player before the download
+     * finishes simply leaves the files to be picked up by the local source's
+     * next refresh - the videos are on disk either way, and nothing is lost
+     * beyond the entry appearing a little later.
+     */
+    private fun registerLocalSourceEntryWhenSaved(anime: Anime, queued: Int, entryName: String? = null) {
+        if (queued <= 0) return
+        val source = sourceManager.get(anime.source) as? AnimeHttpSource ?: return
+        // Built the same way the save itself builds it - see
+        // DownloadManager.downloadEpisodesToLocalSource - because this waits on
+        // the queue emptying of exactly that target.
+        val target = LocalSourceTarget(
+            entryName = entryName?.let { LocalSourceTarget.entryNameFor(it) }
+                ?: LocalSourceTarget.entryNameFor(source),
+            seasonName = LocalSourceTarget.seasonNameFor(
+                source.baseUrl.ifBlank { anime.url },
+            ),
+        )
+        viewModelScope.launchNonCancellable {
+            // Waits for the downloader to say the files are in place. Queue
+            // state cannot answer this: it looks empty of the target both
+            // before the enqueue lands and after the download is removed on
+            // completion, so a refresh driven from it ran against a folder the
+            // files had not reached - which is why nothing was ever extracted
+            // from them. See Downloader.localSourceSaved.
+            downloadManager.localSourceSaves()
+                .filter { it == target }
+                .take(queued)
+                .collect { }
+            val local = sourceManager.get(LocalSource.ID) as? LocalSource ?: return@launchNonCancellable
+            val entryUrl = "${target.entryName}/${target.seasonName}"
+            val entry = networkToLocalAnime(
+                SAnime.create().apply {
+                    url = entryUrl
+                    title = target.seasonName
+                }.toDomainAnime(LocalSource.ID),
+            )
+            updateAnimeFromRemote.awaitEpisodesUpdate(
+                source = local,
+                anime = entry,
+                fetchDetails = true,
+                fetchEpisodes = true,
+                manualFetch = true,
+            ).onFailure {
+                logcat(LogPriority.INFO, it) { "LOCAL_SOURCE_DOWNLOAD refresh failed for $entryUrl" }
+            }
+        }
+    }
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
+
+    /**
+     * Runs [enqueue] once per owning entry.
+     *
+     * Grouped rather than passed wholesale with currentAnime, because on a
+     * merged entry the playlist's episodes belong to the CHILDREN while
+     * currentAnime is the parent - and the download path resolves the source
+     * from the anime it is handed, so handing it the parent would resolve the
+     * wrong source (or none) for every child's episodes.
+     * playlistOwnerByAnimeId is the same map the episode list uses to label
+     * those rows; an ordinary entry leaves it empty and everything falls back
+     * to currentAnime, which is then the right answer.
+     */
+    private fun enqueueByOwner(episodes: List<Episode>, enqueue: (Anime, List<DomainEpisode>) -> Unit) {
+        if (episodes.isEmpty()) return
+        val state = stateData.value
+        val fallback = state.currentAnime ?: return
+        episodes
+            .groupBy { episode -> state.playlistOwnerByAnimeId[episode.anime_id] ?: fallback }
+            .forEach { (anime, owned) ->
+                val domainEpisodes = owned.mapNotNull { it.toDomainEpisode() }
+                if (domainEpisodes.isNotEmpty()) enqueue(anime, domainEpisodes)
+            }
+    }
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
+
     /** Enqueues the nth-back episode for deletion if the delete-after-seen option is enabled. */
     private fun deleteEpisodeIfNeeded(chosenEpisode: Episode) {
         val currentEpisodePosition = stateData.value.currentPlaylist.indexOf(chosenEpisode)
@@ -7606,6 +7857,24 @@ class PlayerViewModel(
         val hosterState: List<HosterState> = emptyList(),
         val isPipAvailable: Boolean = false,
     ) {
+        // AM (LOCAL_SOURCE_DOWNLOAD) -->
+        /**
+         * Whether this playlist has anything downloadable behind it.
+         *
+         * Derived rather than stored, for the same reason as [displayNameOf]
+         * below: it is a question about the entry already in this state, and a
+         * stored field would be one more thing every load path has to remember
+         * to set. False for an external session, which has no entry, and for a
+         * local one, whose episodes are already files on disk.
+         *
+         * A merged entry answers true off its parent; the per-episode owners
+         * are resolved when the download is actually enqueued, where the
+         * episodes being acted on are known.
+         */
+        val canDownloadEpisodes: Boolean
+            get() = currentAnime != null && currentAnime.source != LocalSource.ID
+        // <-- AM (LOCAL_SOURCE_DOWNLOAD)
+
         // AM (EPISODE_NAMES) -->
         /**
          * The episode's name as the episode list shows it: a custom name, then

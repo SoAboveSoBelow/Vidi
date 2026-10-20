@@ -335,6 +335,8 @@ fun PlayerHostScreen(
                     title = request.title,
                     // AM (EXTERNAL_RESUME_POSITION)
                     positionMs = request.positionMs,
+                    // AM (EXTERNAL_APP_LABEL)
+                    appLabel = request.appLabel,
                 )
                 recordSettledTarget()
             }

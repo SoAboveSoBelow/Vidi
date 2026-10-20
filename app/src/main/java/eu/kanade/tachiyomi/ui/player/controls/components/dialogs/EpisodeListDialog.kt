@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.NewLabel
 import androidx.compose.material.icons.outlined.Visibility
@@ -102,6 +103,15 @@ fun EpisodeListDialog(
     onAddToLibrary: () -> Unit,
     // <-- AM (PLAYER_ADD_TO_LIBRARY)
     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /**
+     * Downloads the selection. Where the files land follows the entry, not this
+     * action - see PlayerViewModel.downloadEpisodes. Null when this playlist has
+     * nothing downloadable behind it, a local entry most obviously, in which
+     * case the action is not offered.
+     */
+    onDownloadEpisodes: ((List<Episode>) -> Unit)?,
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
     onDismissRequest: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -198,6 +208,17 @@ fun EpisodeListDialog(
             if (selectionMode) {
                 EpisodeListSelectionHeader(
                     selectedCount = selectedIds.size,
+                    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+                    // Clears the selection, like the entry list's own download
+                    // action: the selection described what to act on, and it has
+                    // been acted on.
+                    onDownload = onDownloadEpisodes?.let { download ->
+                        {
+                            download(selectedEpisodes)
+                            selectedIds = emptySet()
+                        }
+                    },
+                    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
                     // Offered only when it would change something: with every
                     // selected episode already bookmarked there is nothing for
                     // the add action to do, and the same in reverse.
@@ -466,6 +487,10 @@ private fun EpisodeListDialogHeader(
 @Composable
 private fun EpisodeListSelectionHeader(
     selectedCount: Int,
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /** Null when the playlist has no entry to download from - see the dialog. */
+    onDownload: (() -> Unit)?,
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
     onBookmark: (() -> Unit)?,
     onRemoveBookmark: (() -> Unit)?,
     onFillermark: (() -> Unit)?,
@@ -490,6 +515,18 @@ private fun EpisodeListSelectionHeader(
             modifier = Modifier.weight(1f),
         )
 
+        // AM (LOCAL_SOURCE_DOWNLOAD) -->
+        // Ahead of the mark actions: downloading is the one that fetches
+        // something, and the marks are bookkeeping beside it.
+        if (onDownload != null) {
+            IconButton(onClick = onDownload) {
+                Icon(
+                    imageVector = Icons.Outlined.Download,
+                    contentDescription = stringResource(MR.strings.action_download),
+                )
+            }
+        }
+        // <-- AM (LOCAL_SOURCE_DOWNLOAD)
         if (onBookmark != null) {
             IconButton(onClick = onBookmark) {
                 Icon(

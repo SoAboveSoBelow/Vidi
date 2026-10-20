@@ -68,6 +68,9 @@ sealed interface PlaybackRequest {
          * playback must be resumable from where it stopped.
          */
         val positionMs: Long = 0L,
+        // AM (EXTERNAL_APP_LABEL)
+        /** The app this was opened from, for naming where a save of it lands. */
+        val appLabel: String? = null,
         override val forceResume: Boolean = false,
     ) : PlaybackRequest {
         override val sessionKey: SessionKey
@@ -114,6 +117,8 @@ sealed interface PlaybackRequest {
                         uri = uri,
                         title = extras.getString(EXTRA_TITLE)?.takeIf { it.isNotBlank() },
                         positionMs = extras.getLong(EXTRA_POSITION_MS, 0L),
+                        // AM (EXTERNAL_APP_LABEL)
+                        appLabel = extras.getString(EXTRA_APP_LABEL)?.takeIf { it.isNotBlank() },
                         forceResume = forceResume,
                     )
                 }
@@ -148,6 +153,8 @@ fun PlaybackRequest.writeToIntent(intent: Intent): Intent = intent.apply {
             putExtra(EXTRA_URI, uri)
             title?.let { putExtra(EXTRA_TITLE, it) }
             if (positionMs > 0L) putExtra(EXTRA_POSITION_MS, positionMs)
+            // AM (EXTERNAL_APP_LABEL)
+            appLabel?.let { putExtra(EXTRA_APP_LABEL, it) }
         }
     }
 }
@@ -155,6 +162,9 @@ fun PlaybackRequest.writeToIntent(intent: Intent): Intent = intent.apply {
 // Extra names kept at file scope so [PlaybackRequest.fromIntent] and
 // [writeToIntent] cannot drift apart - the two halves of one wire format.
 private const val EXTRA_KIND = "playbackRequestKind"
+
+// AM (EXTERNAL_APP_LABEL)
+private const val EXTRA_APP_LABEL = "externalAppLabel"
 private const val KIND_LIBRARY = "library"
 private const val KIND_EXTERNAL = "external"
 

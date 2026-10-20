@@ -21,6 +21,8 @@
     <string name="am.action_mark_as_seen">Mark as seen</string>
     <string name="am.action_mark_as_unseen">Mark as unseen</string>
     <string name="am.action_merge">Merge</string>
+    <string name="am.action_save_to_local_source">Save to local source</string>
+    <string name="am.download_local_file_missing">Download finished but the file could not be found</string>
     <string name="am.merge_entry_merged">Entry merged!</string>
     <string name="am.merge_remove_originals">Remove original entries from library?</string>
     <string name="am.merge_requires_valid_selection">Select at least 2 entries to merge.</string>
@@ -115,6 +117,9 @@
     <string name="am.pref_auto_update_anime_on_mark_seen">Update progress when marked as seen</string>
     <string name="am.tracking_info">One-way sync to update the episode progress in external tracker services. Set up tracking for individual entries from their tracking button.</string>
     <string name="am.pref_storage_location_info">Used for automatic backups, episode downloads, and local source.</string>
+    <string name="am.local_filter_app">App</string>
+    <string name="am.local_filter_app_all">All</string>
+    <string name="am.local_filter_app_local">Local</string>
     <string name="am.pref_invalidate_download_cache_summary">Force app to recheck downloaded episodes</string>
     <string name="am.clear_database_history_warning">Seen episodes and progress of non-library entries will be lost</string>
     <string name="am.clear_db_exclude_seen">Keep entries with seen episodes</string>
@@ -131,7 +136,6 @@
     <string name="am.pref_default_view">Default view</string>
     <string name="am.pref_default_view_simplified">Simplified</string>
     <string name="am.pref_default_view_preview">Preview</string>
-    <string name="am.pref_default_view_minimal">Minimal</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesTitle">Hide entries without newer episodes</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesSubtitle">Only show entry if the match has additional episodes</string>
     <string name="am.migrationConfigScreen.prioritizeByChaptersTitle">Match based on episode number</string>

@@ -1893,7 +1893,13 @@ class PlayerActivity : BaseActivity() {
             val episode = viewModel.stateData.value.currentEpisode
 
             if (anime != null && episode != null) {
-                builder.setTitle(anime.title).setSubtitle(episode.name)
+                // AM (MEDIA_TITLE_DEDUPE) -->
+                // The PiP window's own two-slot label, fed from the same pair as
+                // the notification and the media controls. See
+                // dedupeMediaTitleLines().
+                val (pipTitle, pipSubtitle) = dedupeMediaTitleLines(anime.title, episode.name)
+                builder.setTitle(pipTitle).setSubtitle(pipSubtitle)
+                // <-- AM (MEDIA_TITLE_DEDUPE)
             }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

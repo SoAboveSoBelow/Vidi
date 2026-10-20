@@ -711,12 +711,19 @@ class PlayerBackgroundPlaybackService : Service() {
         val hideContent = appGraph.securityPreferences.hideNotificationContent.get()
         // <-- AM (HIDE_NOTIFICATION_CONTENT)
 
+        // AM (MEDIA_TITLE_DEDUPE) -->
+        // A single-entry video puts the same string in both slots, which read as
+        // the same line printed twice. See dedupeMediaTitleLines() - the entry
+        // title leads here, and the second line is dropped when it adds nothing.
+        val (contentTitle, contentText) = dedupeMediaTitleLines(title, subtitle)
+        // <-- AM (MEDIA_TITLE_DEDUPE)
+
         return NotificationCompat.Builder(this, Notifications.CHANNEL_BACKGROUND_PLAYBACK)
             .setSmallIcon(R.drawable.ic_ani)
             .setContentTitle(
-                if (hideContent) stringResource(AMMR.strings.player_background_playback_channel) else title,
+                if (hideContent) stringResource(AMMR.strings.player_background_playback_channel) else contentTitle,
             )
-            .setContentText(subtitle.takeUnless { hideContent })
+            .setContentText(contentText.takeUnless { hideContent })
             // AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX) -->
             // Was setOngoing(true), blocked swipe-dismiss
             // <-- AM (NOTIFICATION_ONGOING_BLOCKS_CANCEL_FIX)

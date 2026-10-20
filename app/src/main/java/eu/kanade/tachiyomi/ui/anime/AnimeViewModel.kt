@@ -2059,7 +2059,7 @@ class AnimeViewModel(
     // AM (EPISODE_VIEW_MODE) -->
 
     /**
-     * Applies one of the 3 named episode view modes (Simplified/Preview/Minimal)
+     * Applies one of the 2 named episode view modes (Simplified/Preview)
      * for the current anime. Switching into a mode that shows thumbnails from
      * Simplified also triggers a refresh, since episodes synced while Simplified
      * never had their thumbnails looked up/generated.

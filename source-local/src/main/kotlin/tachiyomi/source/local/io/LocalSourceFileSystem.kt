@@ -86,6 +86,41 @@ class LocalSourceFileSystem(
         return configured + extra
     }
 
+    // AM (LOCAL_SOURCE_APP_FILTER) -->
+    /**
+     * Whether [dir] is an app group - a container of entries rather than an
+     * entry itself.
+     *
+     * Structural, not recorded anywhere: a directory holding subdirectories and
+     * no playable file is a container, and one holding playable files is an
+     * entry. That answers correctly for a folder the user arranged by hand,
+     * which a list of folders the app created would not, and it cannot drift
+     * out of step with what is actually on disk.
+     *
+     * An empty directory is not a group. It is not an entry either, but calling
+     * it a group would put an empty row in the filter for every stray folder.
+     */
+    fun isAppGroup(dir: UniFile): Boolean {
+        val children = dir.listFiles().orEmpty().filterNot { it.name.orEmpty().startsWith('.') }
+        if (children.isEmpty()) return false
+        return children.none { it.isFile && Format.isSupported(it) } &&
+            children.any { it.isDirectory }
+    }
+
+    /**
+     * The entry directories inside the app group [url], each addressed by a url
+     * that appends its name to the group's - the same `parent/child` form
+     * LocalSource already builds season urls with, so these resolve through
+     * [resolveUrl] unchanged.
+     */
+    fun getEntryDirectoriesInGroup(url: String): List<EntryDirectory> {
+        val group = resolveUrl(url)?.takeIf { it.isDirectory } ?: return emptyList()
+        return group.listFiles().orEmpty()
+            .filter { it.isDirectory && !it.name.orEmpty().startsWith('.') }
+            .map { EntryDirectory(url = "$url/${it.name.orEmpty()}", file = it) }
+    }
+    // <-- AM (LOCAL_SOURCE_APP_FILTER)
+
     /**
      * The display title for [url] - the directory's own name, either kind.
      *

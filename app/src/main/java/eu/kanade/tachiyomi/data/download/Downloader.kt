@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.provider.DocumentsContract
 import androidx.core.net.toUri
 import animiru.domain.download.repository.PlannedDownloadRepository
 import aniyomi.core.common.torrent.TorrentPreferences
@@ -27,6 +28,7 @@ import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.data.download.model.Download
+import eu.kanade.tachiyomi.data.download.model.LocalSourceTarget
 import eu.kanade.tachiyomi.data.library.LibraryUpdateNotifier
 import eu.kanade.tachiyomi.data.media.MediaCache
 import eu.kanade.tachiyomi.data.media.MediaProxyServer
@@ -49,7 +51,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
@@ -125,6 +129,24 @@ class Downloader(
      */
     private val _queueState = MutableStateFlow<List<Download>>(emptyList())
     val queueState = _queueState.asStateFlow()
+
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    private val _localSourceSaved = MutableSharedFlow<LocalSourceTarget>(replay = REPLAYED_SAVES)
+
+    /**
+     * Emits each time a save into the local source finishes, with the target it
+     * landed in.
+     *
+     * Emitted here rather than inferred from the queue: a download leaves the
+     * queue at the same moment it reports DOWNLOADED, so a watcher built on
+     * queue state can miss the completion entirely. This fires once the file is
+     * actually in place, which is the only moment that means anything to a
+     * reader of the local source. Replayed, so a watcher that subscribes just
+     * after a very fast save still sees it - re-reading a folder that already
+     * holds the files is harmless.
+     */
+    val localSourceSaved = _localSourceSaved.asSharedFlow()
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var downloaderJob: Job? = null
@@ -324,6 +346,8 @@ class Downloader(
         changeDownloader: Boolean = false,
         video: Video? = null,
         // <-- AY
+        // AM (LOCAL_SOURCE_DOWNLOAD)
+        localSourceTarget: LocalSourceTarget? = null,
     ) {
         if (episodes.isEmpty()) return
 
@@ -332,14 +356,23 @@ class Downloader(
         val episodesToQueue = episodes.asSequence()
             // Filter out those already downloaded.
             // AM (CUSTOM_INFORMATION) -->
-            .filter { provider.findEpisodeDir(it.name, it.scanlator, it.url, anime.ogTitle, source) == null }
+            // AM (LOCAL_SOURCE_DOWNLOAD): asked of the destination this download
+            // is headed for. A library download already present says nothing
+            // about whether the local source holds the same video, and the two
+            // are allowed to coexist - they answer different questions.
+            .filter { !alreadyDownloaded(it, anime, source, localSourceTarget) }
             // <-- AM (CUSTOM_INFORMATION)
             // Add episodes to queue from the start.
             .sortedByDescending { it.sourceOrder }
             // Filter out those already enqueued.
-            .filter { episode -> queueState.value.none { it.episode.id == episode.id } }
+            // AM (LOCAL_SOURCE_DOWNLOAD): to the same destination, for the same
+            // reason - a queued library download must not swallow a request to
+            // also save the episode into the local source.
+            .filter { episode ->
+                queueState.value.none { it.episode.id == episode.id && it.localSourceTarget == localSourceTarget }
+            }
             // Create a download for each one.
-            .map { Download(source, anime, it, changeDownloader, video) }
+            .map { Download(source, anime, it, changeDownloader, video, localSourceTarget) }
             .toList()
 
         if (episodesToQueue.isNotEmpty()) {
@@ -378,11 +411,21 @@ class Downloader(
      */
     private suspend fun downloadEpisode(download: Download) {
         // AM (CUSTOM_INFORMATION) -->
-        val animeDir = provider.getAnimeDir(download.anime.ogTitle, download.source).getOrElse { e ->
-            download.status = Download.State.ERROR
-            notifier.onError(e.message, download.episode.name, download.anime.title, download.anime.id)
-            return
-        }
+        // AM (LOCAL_SOURCE_DOWNLOAD): the directory the finished file lands in,
+        // which is the only thing the destination changes before the fetch. The
+        // scratch directory, the resolution, the fetch itself and every error
+        // path below are shared.
+        // AM (LOCAL_SOURCE_DOWNLOAD): the one thing the destination changes
+        // before the fetch - which directory the download lands in.
+        val animeDir = (
+            download.localSourceTarget
+                ?.let { provider.getLocalSourceDir(it) }
+                ?: provider.getAnimeDir(download.anime.ogTitle, download.source)
+            ).getOrElse { e ->
+                download.status = Download.State.ERROR
+                notifier.onError(e.message, download.episode.name, download.anime.title, download.anime.id)
+                return
+            }
         // <-- AM (CUSTOM_INFORMATION)
 
         val availSpace = DiskUtil.getAvailableStorageSpace(animeDir)
@@ -434,10 +477,24 @@ class Downloader(
             // <-- AM (CUSTOM_INFORMATION)
             // AY -->
             tmpDir.findFile("${filename}_tmp.mkv")?.delete()
-            tmpDir.renameTo(episodeDirname)
             // <-- AY
 
-            cache.addEpisode(episodeDirname, animeDir, download.anime)
+            tmpDir.renameTo(episodeDirname)
+
+            // AM (LOCAL_SOURCE_DOWNLOAD) -->
+            // The library path below is exactly what it was. A local source
+            // download differs in two ways and no others: the video has to sit
+            // directly in the entry directory, because a subdirectory there
+            // registers as a SEASON rather than an episode, and it is not part
+            // of the downloads tree the cache indexes.
+            val localTarget = download.localSourceTarget
+            if (localTarget == null) {
+                cache.addEpisode(episodeDirname, animeDir, download.anime)
+            } else {
+                flattenIntoLocalSource(animeDir, episodeDirname)
+                _localSourceSaved.tryEmit(localTarget)
+            }
+            // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 
             // AM (PLANNED_DOWNLOADS) -->
             // The episode is downloaded, so the intent to download it is spent.
@@ -450,7 +507,12 @@ class Downloader(
             plannedDownloadRepository.remove(download.episode.id)
             // <-- AM (PLANNED_DOWNLOADS)
 
-            DiskUtil.createNoMediaFile(tmpDir, context)
+            // AM (LOCAL_SOURCE_DOWNLOAD): skipped for a local source download -
+            // .nomedia would hide the entry from the device's media scanner,
+            // and the directory it would be written to no longer exists.
+            if (localTarget == null) {
+                DiskUtil.createNoMediaFile(tmpDir, context)
+            }
 
             download.status = Download.State.DOWNLOADED
         } catch (error: Throwable) {
@@ -461,6 +523,89 @@ class Downloader(
             notifier.onError(error.message, download.episode.name, download.anime.title, download.anime.id)
         }
     }
+
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+
+    /**
+     * Whether [episode] is already present where this download would put it.
+     *
+     * The library answer is upstream's, unchanged. A local source download
+     * asks the same question of the entry directory instead, since the two can
+     * legitimately both exist - they answer different needs.
+     */
+    private fun alreadyDownloaded(
+        episode: Episode,
+        anime: Anime,
+        source: AnimeHttpSource,
+        target: LocalSourceTarget?,
+    ): Boolean = if (target == null) {
+        // AM (CUSTOM_INFORMATION)
+        provider.findEpisodeDir(episode.name, episode.scanlator, episode.url, anime.ogTitle, source) != null
+    } else {
+        provider.findLocalSourceFile(target, DiskUtil.buildValidFilename(episode.name)) != null
+    }
+
+    /**
+     * Moves the finished video out of [episodeDir] up into [entryDir], then
+     * removes the now-empty directory.
+     *
+     * This is the whole of what a local source download does differently. The
+     * fetch, the retries, the progress notification and the queue are the
+     * library path's, untouched - only the resting place differs, because the
+     * local source reads a directory of videos and treats a subdirectory as a
+     * season.
+     *
+     * Renamed on the way if something of that name is already there, rather
+     * than overwriting: two sites can serve an episode of the same name, and
+     * silently replacing the first is the worse outcome.
+     */
+    private fun flattenIntoLocalSource(entryDir: UniFile, episodeDirname: String) {
+        val episodeDir = entryDir.findFile(episodeDirname) ?: return
+        val taken = entryDir.listFiles().orEmpty().mapNotNull { it.name }.toSet()
+        episodeDir.listFiles().orEmpty().filter { it.isFile }.forEach { file ->
+            val name = file.name ?: return@forEach
+            val base = name.substringBeforeLast('.')
+            val ext = name.substringAfterLast('.', "")
+            var candidate = name
+            var n = 2
+            while (candidate in taken) {
+                candidate = if (ext.isBlank()) "$base ($n)" else "$base ($n).$ext"
+                n++
+            }
+            if (candidate != name) file.renameTo(candidate)
+            moveUp(file, episodeDir, entryDir)
+        }
+        episodeDir.delete()
+    }
+
+    /**
+     * Moves [file] from [from] into [to].
+     *
+     * The provider's own move first, which is metadata-only and so costs
+     * nothing for a file that may be gigabytes; copy-then-delete for the
+     * providers that do not support it, which is slow but is the difference
+     * between a download that lands and one that does not.
+     */
+    private fun moveUp(file: UniFile, from: UniFile, to: UniFile): Boolean {
+        val moved = runCatching {
+            if (!DocumentsContract.isDocumentUri(context, file.uri)) return@runCatching null
+            DocumentsContract.moveDocument(context.contentResolver, file.uri, from.uri, to.uri)
+        }.getOrNull()
+        if (moved != null) return true
+
+        val name = file.name ?: return false
+        val target = to.createFile(name) ?: return false
+        return runCatching {
+            file.openInputStream().use { input -> target.openOutputStream().use(input::copyTo) }
+            file.delete()
+            true
+        }.getOrElse { e ->
+            logcat(LogPriority.ERROR, e) { "LOCAL_SOURCE_DOWNLOAD copy into local source failed" }
+            target.delete()
+            false
+        }
+    }
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 
     // AY -->
 
@@ -1214,6 +1359,9 @@ class Downloader(
     }
 
     companion object {
+        // AM (LOCAL_SOURCE_DOWNLOAD)
+        private const val REPLAYED_SAVES = 8
+
         // AM (VERIFY_DOWNLOAD_COMPLETE) -->
         /** How much of the expected duration a finished download must cover. */
         private const val MIN_COMPLETE_DURATION_RATIO = 0.98

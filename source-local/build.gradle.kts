@@ -18,6 +18,8 @@ kotlin {
 dependencies {
     implementation(projects.sourceApi)
     implementation(projects.i18n)
+    // AM (LOCAL_SOURCE_APP_FILTER)
+    implementation(projects.i18nAnimiru)
 
     implementation(projects.core.archive)
     implementation(projects.core.common)

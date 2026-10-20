@@ -252,6 +252,220 @@
                 <data android:mimeType="application/vnd.apple.mpegurl" android:scheme="content" />
             </intent-filter>
 
+            <!-- AM (EXTERNAL_STREAM_INTENT):
+                 "Stream using" / "Play with" from a browser, download manager or
+                 any app holding a remote media URL. Same ACTION_VIEW trampoline
+                 as above, so a stream arrives as the PlaybackRequest.External it
+                 already was - ExternalPlaybackSource.isOnline() has reported
+                 http/https/rtmp/rtsp as streaming since it was written, and the
+                 session gets the streaming affordances an extension's video
+                 gets, with nothing specific to this entry point behind it.
+
+                 A separate filter rather than more <data> in the one above
+                 purely to keep the "opened from storage" and "handed a remote
+                 URL" cases readable; the same merge rule noted there applies.
+
+                 NO SCHEME on these entries, deliberately. A "stream using" /
+                 "play with" list is built by querying ACTION_VIEW with a type
+                 and NO data, and only then launching the chosen app with
+                 setDataAndType - so a filter that declares a scheme cannot
+                 match the query that builds the list, and the app never
+                 appears in it however well it would have handled the launch.
+                 Confirmed on device: querying VIEW with video/* and no data
+                 returned nothing for Vidi while the same query with a url
+                 matched. A type-only filter is also what the established
+                 players carry, for this reason.
+
+                 This stays narrow despite dropping the scheme: it matches only
+                 intents that carry a video type, so it claims video the device
+                 asks a player to handle and nothing else. It is a scheme-only
+                 http/https filter that would have put Vidi in the chooser for
+                 every web link, and that is still not done here.
+
+                 It also CANNOT stand alone, which is why the filter below it
+                 exists. IntentFilter.matchData rejects a filter that declares a
+                 type but no scheme whenever the intent's uri scheme is anything
+                 other than content:, file: or absent - so this one answers the
+                 data-less query that builds the list, and nothing else answers
+                 the typed http url the list then launches. -->
+            <intent-filter android:priority="1">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/x-mpegURL" />
+                <data android:mimeType="application/vnd.apple.mpegurl" />
+                <data android:mimeType="application/dash+xml" />
+            </intent-filter>
+
+            <!-- AM (EXTERNAL_STREAM_INTENT):
+                 The launch the list above leads to: a remote url WITH a video
+                 type. Needs its own filter carrying both the scheme and the
+                 type, for the matchData rule noted above - the type-only filter
+                 refuses an http uri, and the path-pattern filter below refuses
+                 an intent that has a type at all (a filter with schemes but no
+                 types is NO_MATCH_TYPE against a typed intent). Those two and
+                 this one are disjoint, not redundant. -->
+            <intent-filter android:priority="1">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:mimeType="video/*" android:scheme="http" />
+                <data android:mimeType="video/*" android:scheme="https" />
+                <data android:mimeType="video/*" android:scheme="rtmp" />
+                <data android:mimeType="video/*" android:scheme="rtsp" />
+                <data android:mimeType="audio/*" android:scheme="http" />
+                <data android:mimeType="audio/*" android:scheme="https" />
+                <data android:mimeType="audio/*" android:scheme="rtmp" />
+                <data android:mimeType="audio/*" android:scheme="rtsp" />
+                <data android:mimeType="application/x-mpegURL" android:scheme="http" />
+                <data android:mimeType="application/x-mpegURL" android:scheme="https" />
+                <data android:mimeType="application/vnd.apple.mpegurl" android:scheme="http" />
+                <data android:mimeType="application/vnd.apple.mpegurl" android:scheme="https" />
+                <data android:mimeType="application/dash+xml" android:scheme="http" />
+                <data android:mimeType="application/dash+xml" android:scheme="https" />
+            </intent-filter>
+
+            <!-- AM (EXTERNAL_STREAM_INTENT):
+                 The untyped case the filter above cannot reach: a sender that
+                 passes a bare media URL and no type at all. Bounded by path
+                 rather than by scheme, so what is claimed is urls that end in a
+                 media extension - not every http link.
+
+                 host="*" is required for pathPattern to be consulted at all.
+                 pathPattern matches the path only, so a trailing query string
+                 does not defeat it, and it is case-sensitive with no way to say
+                 otherwise - lowercase extensions are what these urls carry in
+                 practice. -->
+            <intent-filter android:priority="1">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.mp4" />
+                <data android:pathPattern=".*\\.mkv" />
+                <data android:pathPattern=".*\\.webm" />
+                <data android:pathPattern=".*\\.avi" />
+                <data android:pathPattern=".*\\.mov" />
+                <data android:pathPattern=".*\\.m4v" />
+                <data android:pathPattern=".*\\.flv" />
+                <data android:pathPattern=".*\\.ts" />
+                <data android:pathPattern=".*\\.m3u8" />
+                <data android:pathPattern=".*\\.mpd" />
+                <data android:pathPattern=".*\\.mp3" />
+                <data android:pathPattern=".*\\.aac" />
+                <data android:pathPattern=".*\\.flac" />
+                <data android:pathPattern=".*\\.opus" />
+                <data android:pathPattern=".*\\.ogg" />
+                <data android:pathPattern=".*\\..*\\.mp4" />
+                <data android:pathPattern=".*\\..*\\.mkv" />
+                <data android:pathPattern=".*\\..*\\.webm" />
+                <data android:pathPattern=".*\\..*\\.avi" />
+                <data android:pathPattern=".*\\..*\\.mov" />
+                <data android:pathPattern=".*\\..*\\.m4v" />
+                <data android:pathPattern=".*\\..*\\.flv" />
+                <data android:pathPattern=".*\\..*\\.ts" />
+                <data android:pathPattern=".*\\..*\\.m3u8" />
+                <data android:pathPattern=".*\\..*\\.mpd" />
+                <data android:pathPattern=".*\\..*\\.mp3" />
+                <data android:pathPattern=".*\\..*\\.aac" />
+                <data android:pathPattern=".*\\..*\\.flac" />
+                <data android:pathPattern=".*\\..*\\.opus" />
+                <data android:pathPattern=".*\\..*\\.ogg" />
+                <data android:pathPattern=".*\\..*\\..*\\.mp4" />
+                <data android:pathPattern=".*\\..*\\..*\\.mkv" />
+                <data android:pathPattern=".*\\..*\\..*\\.webm" />
+                <data android:pathPattern=".*\\..*\\..*\\.avi" />
+                <data android:pathPattern=".*\\..*\\..*\\.mov" />
+                <data android:pathPattern=".*\\..*\\..*\\.m4v" />
+                <data android:pathPattern=".*\\..*\\..*\\.flv" />
+                <data android:pathPattern=".*\\..*\\..*\\.ts" />
+                <data android:pathPattern=".*\\..*\\..*\\.m3u8" />
+                <data android:pathPattern=".*\\..*\\..*\\.mpd" />
+                <data android:pathPattern=".*\\..*\\..*\\.mp3" />
+                <data android:pathPattern=".*\\..*\\..*\\.aac" />
+                <data android:pathPattern=".*\\..*\\..*\\.flac" />
+                <data android:pathPattern=".*\\..*\\..*\\.opus" />
+                <data android:pathPattern=".*\\..*\\..*\\.ogg" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.mp4" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.mkv" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.webm" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.avi" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.mov" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.m4v" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.flv" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.ts" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.m3u8" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.mpd" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.mp3" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.aac" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.flac" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.opus" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.ogg" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.mp4" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.mkv" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.webm" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.avi" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.mov" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.m4v" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.flv" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.ts" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.m3u8" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.mpd" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.mp3" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.aac" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.flac" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.opus" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.ogg" />
+            </intent-filter>
+
+            <!-- AM (EXTERNAL_STREAM_INTENT):
+                 No <data> at all, which is not an oversight.
+
+                 IntentFilter.matchData gives a filter with neither schemes nor
+                 types exactly one job: it matches an intent that has neither
+                 data nor type, and nothing else. That is the query an app runs
+                 to ENUMERATE players - a bare ACTION_VIEW - and it is the only
+                 filter shape that answers it. A filter declaring types is
+                 NO_MATCH_TYPE against a null type, and one declaring schemes is
+                 NO_MATCH_DATA against null data, so every other filter on this
+                 activity is invisible to such a query.
+
+                 This claims nothing: an intent carrying no data and no type
+                 asks to view nothing, so no real launch lands here through it.
+                 The app that picked us from such a list then launches the
+                 component directly, with real data, which the filters above
+                 describe. If one ever does arrive empty, resolveUri returns
+                 null and the activity toasts and finishes, as it already does
+                 for a share with nothing playable in it. -->
+            <intent-filter android:priority="1">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <!-- AM (EXTERNAL_STREAM_INTENT):
+                 rtmp/rtsp, whose scheme alone says it is a stream - there is no
+                 web-link ambiguity to guard against for these. -->
+            <intent-filter android:priority="1">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="rtmp" />
+                <data android:scheme="rtsp" />
+            </intent-filter>
+
             <!-- "Share to Vidi" from a gallery or downloads app. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -259,6 +473,33 @@
                 <category android:name="android.intent.category.DEFAULT" />
 
                 <data android:mimeType="video/*" />
+                <!-- AM (EXTERNAL_STREAM_INTENT): audio too - mpv plays it, and
+                     a sender handing over a stream often types it audio/*. -->
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+
+            <!-- AM (EXTERNAL_STREAM_INTENT):
+                 A shared URL, which is how a "stream using" / "share to" list
+                 hands over a link: ACTION_SEND carrying the address as text
+                 rather than a typed stream.
+
+                 Vidi already matched text/plain, but through DeepLinkActivity,
+                 which runs a SEARCH for the text - so a shared stream url
+                 appeared in the sheet as "Search" and then searched for the
+                 url instead of playing it. This routes it to the player.
+
+                 Not a free-for-all: the trampoline parses the text and only
+                 plays what is actually a playable address, finishing with the
+                 usual toast otherwise (see resolveUri). text/plain is what
+                 every sharer uses; application/txt is what a few send instead,
+                 and costs nothing to accept. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="application/txt" />
             </intent-filter>
         </activity>
         <!-- AM (EXTERNAL_PLAYBACK) -->

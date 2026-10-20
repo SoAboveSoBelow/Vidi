@@ -15,6 +15,10 @@ data class Download(
     val changeDownloader: Boolean = false,
     var video: Video? = null,
     // <-- AY
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /** Set when this is saved into the local source - see [LocalSourceTarget]. */
+    val localSourceTarget: LocalSourceTarget? = null,
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 ) {
 
     @Transient

@@ -7,6 +7,7 @@ import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.data.download.model.Download
+import eu.kanade.tachiyomi.data.download.model.LocalSourceTarget
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -101,13 +102,25 @@ class DownloadStore(
         val downloads = mutableListOf<Download>()
         if (objs.isNotEmpty()) {
             val cachedAnime = mutableMapOf<Long, Anime?>()
-            for ((animeId, episodeId) in objs) {
-                val anime = cachedAnime.getOrPut(animeId) {
-                    runBlocking { getAnime.await(animeId) }
+            for (obj in objs) {
+                val anime = cachedAnime.getOrPut(obj.animeId) {
+                    runBlocking { getAnime.await(obj.animeId) }
                 } ?: continue
                 val source = sourceManager.get(anime.source) as? AnimeHttpSource ?: continue
-                val episode = runBlocking { getEpisode.await(episodeId) } ?: continue
-                downloads.add(Download(source, anime, episode))
+                val episode = runBlocking { getEpisode.await(obj.episodeId) } ?: continue
+                // AM (LOCAL_SOURCE_DOWNLOAD) -->
+                // A local source download that was still queued when the process
+                // died comes back as one, rather than silently reverting to a
+                // library download and landing somewhere the user did not ask for.
+                val target = obj.localSourceEntry?.let { entry ->
+                    LocalSourceTarget(
+                        entryName = entry,
+                        seasonName = obj.localSourceSeason?.takeIf(String::isNotBlank)
+                            ?: LocalSourceTarget.seasonNameFor(null),
+                    )
+                }
+                downloads.add(Download(source, anime, episode, localSourceTarget = target))
+                // <-- AM (LOCAL_SOURCE_DOWNLOAD)
             }
         }
 
@@ -122,7 +135,14 @@ class DownloadStore(
      * @param download the download to serialize.
      */
     private fun serialize(download: Download): String {
-        val obj = DownloadObject(download.anime.id, download.episode.id, counter++)
+        val obj = DownloadObject(
+            animeId = download.anime.id,
+            episodeId = download.episode.id,
+            order = counter++,
+            // AM (LOCAL_SOURCE_DOWNLOAD)
+            localSourceEntry = download.localSourceTarget?.entryName,
+            localSourceSeason = download.localSourceTarget?.seasonName,
+        )
         return json.encodeToString(obj)
     }
 
@@ -146,6 +166,18 @@ class DownloadStore(
  * @param animeId the id of the anime.
  * @param episodeId the id of the episode.
  * @param order the order of the download in the queue.
+ * @param localSourceEntry the local source entry this lands in, or null for an
+ * ordinary library download.
+ * @param localSourceSeason the season inside that entry. Both defaulted so
+ * entries written before they existed still decode.
  */
 @Serializable
-private data class DownloadObject(val animeId: Long, val episodeId: Long, val order: Int)
+private data class DownloadObject(
+    val animeId: Long,
+    val episodeId: Long,
+    val order: Int,
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    val localSourceEntry: String? = null,
+    val localSourceSeason: String? = null,
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
+)
