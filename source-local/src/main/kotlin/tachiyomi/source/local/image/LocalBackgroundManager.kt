@@ -25,7 +25,10 @@ class LocalBackgroundManager(
     fun find(animeUrl: String): UniFile? {
         return fileSystem.getFilesInAnimeDirectory(animeUrl)
             // Get all file whose names start with 'background'
-            .filter { it.isFile && it.nameWithoutExtension.equals("background", ignoreCase = true) }
+            // AM (LOCAL_SOURCE_NO_ISFILE_STAT): isFile is a provider stat per
+            // child; !isDirectory is free from the listing cursor. Same as
+            // LocalCoverManager.find.
+            .filter { !it.isDirectory && it.nameWithoutExtension.equals("background", ignoreCase = true) }
             // Get the first actual image
             .firstOrNull { ImageUtil.isImage(it.name) { it.openInputStream() } }
     }

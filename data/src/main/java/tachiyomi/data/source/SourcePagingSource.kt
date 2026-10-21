@@ -2,8 +2,14 @@ package tachiyomi.data.source
 
 import androidx.paging.PagingState
 import eu.kanade.tachiyomi.animesource.AnimeSource
+import eu.kanade.tachiyomi.animesource.SnapshotInvalidatingSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import logcat.LogPriority
 import mihon.domain.anime.model.toDomainAnime
 import tachiyomi.core.common.util.lang.withIOContext
@@ -46,6 +52,21 @@ abstract class BaseSourcePagingSource(
     protected val source: AnimeSource,
     private val networkToLocalAnime: NetworkToLocalAnime,
 ) : SourcePagingSource() {
+
+    // AM (LOCAL_SOURCE_SNAPSHOT) -->
+    // Snapshot-served sources (the local source) refresh in the background;
+    // when the snapshot changes they emit here and the page invalidates
+    // itself, so the UI shows the fresh listing without a manual refresh.
+    private val invalidateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    init {
+        (source as? SnapshotInvalidatingSource)?.let { snapshotSource ->
+            snapshotSource.snapshotRefreshes
+                .onEach { invalidate() }
+                .launchIn(invalidateScope)
+        }
+    }
+    // <-- AM (LOCAL_SOURCE_SNAPSHOT)
 
     private val seenAnime = hashSetOf<String>()
 

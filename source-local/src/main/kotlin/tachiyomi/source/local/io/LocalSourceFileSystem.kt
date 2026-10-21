@@ -118,7 +118,11 @@ class LocalSourceFileSystem(
     /** [isAppGroup] over an already-listed [children], from [visibleChildren]. */
     fun isAppGroup(children: List<UniFile>): Boolean {
         if (children.isEmpty()) return false
-        return children.none { it.isFile && Format.isSupported(it) } &&
+        // AM (LOCAL_SOURCE_NO_ISFILE_STAT): isFile is a provider stat query per
+        // child; !isDirectory is the same answer from the listing cursor, free.
+        // The old form scanned every child of a group with a stat each, and a
+        // group can hold hundreds.
+        return children.none { !it.isDirectory && Format.isSupported(it) } &&
             children.any { it.isDirectory }
     }
 

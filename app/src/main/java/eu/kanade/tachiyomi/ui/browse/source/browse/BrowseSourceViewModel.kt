@@ -90,21 +90,49 @@ class BrowseSourceViewModel(
     val source = sourceManager.getOrStub(sourceId)
 
     init {
-        state.update {
-            var query: String? = null
-            var listing = it.listing
+        // AM (LOCAL_SOURCE_FILTER_OFF_MAIN) -->
+        // getFilterList() is synchronous, and for the local source it scans
+        // storage to build the app group filter - which made opening the
+        // local source in browse freeze the UI for the whole scan on the main
+        // thread, twice (this init called getFilterList() once for the listing
+        // and again for the state). Fetch it once, on IO, and let the listing
+        // flow start in the meantime: GetRemoteAnime routes by query, so
+        // Popular/Latest never read filters at all and start immediately;
+        // only an initial Search listing (deep link, global search handoff)
+        // runs its first page against the placeholder filters and reloads
+        // once the real ones land.
+        viewModelScope.launchIO {
+            val filters = source.getFilterList()
+            state.update {
+                var query: String? = null
+                var listing = it.listing
 
-            if (listing is Listing.Search) {
-                query = listing.query
-                listing = Listing.Search(query, source.getFilterList())
+                if (listing is Listing.Search) {
+                    query = listing.query
+                    // AM (LOCAL_SOURCE_NO_DOUBLE_SCAN) -->
+                    // A null query is the default browse state (Listing.valueOf
+                    // hands out Search(null, emptyFilters) when no query was
+                    // passed), not a real search. Replacing the listing with a
+                    // new Search object would make the listing flow emit twice,
+                    // and for the local source each emission is a full storage
+                    // scan - so opening the source would scan everything twice.
+                    // Only a genuine query needs the filters spliced in up
+                    // front, and search() reads state.filters when the listing
+                    // still carries its placeholder ones.
+                    if (query != null) {
+                        listing = Listing.Search(query, filters)
+                    }
+                    // <-- AM (LOCAL_SOURCE_NO_DOUBLE_SCAN)
+                }
+
+                it.copy(
+                    listing = listing,
+                    filters = filters,
+                    toolbarQuery = query,
+                )
             }
-
-            it.copy(
-                listing = listing,
-                filters = source.getFilterList(),
-                toolbarQuery = query,
-            )
         }
+        // <-- AM (LOCAL_SOURCE_FILTER_OFF_MAIN)
 
         if (!getIncognitoState.await(source.id)) {
             sourcePreferences.lastUsedSource.set(source.id)
@@ -166,8 +194,12 @@ class BrowseSourceViewModel(
     }
     // <-- AY
 
+    // AM (LOCAL_SOURCE_FILTER_OFF_MAIN): same off-main-thread fetch as init -
+    // resetting the filter sheet re-scans storage for the local source.
     fun resetFilters() {
-        state.update { it.copy(filters = source.getFilterList()) }
+        viewModelScope.launchIO {
+            state.update { it.copy(filters = source.getFilterList()) }
+        }
     }
 
     fun setListing(listing: Listing) {
@@ -182,61 +214,73 @@ class BrowseSourceViewModel(
         }
     }
 
+    // AM (LOCAL_SOURCE_FILTER_OFF_MAIN): see init - getFilterList() can scan
+    // storage, so it is never called on the main thread.
     fun search(query: String? = null, filters: AnimeFilterList? = null) {
-        val input = state.value.listing as? Listing.Search
-            ?: Listing.Search(query = null, filters = source.getFilterList())
+        viewModelScope.launchIO {
+            // AM (LOCAL_SOURCE_NO_DOUBLE_SCAN): the default browse listing
+            // keeps its placeholder filters (see init), so prefer the loaded
+            // state.filters when the listing has none.
+            val input = (state.value.listing as? Listing.Search)?.let {
+                it.copy(filters = state.value.filters.ifEmpty { it.filters })
+            } ?: Listing.Search(query = null, filters = source.getFilterList())
 
-        state.update {
-            it.copy(
-                listing = input.copy(
-                    query = query ?: input.query,
-                    filters = filters ?: input.filters,
-                ),
-                toolbarQuery = query ?: input.query,
-            )
+            state.update {
+                it.copy(
+                    listing = input.copy(
+                        query = query ?: input.query,
+                        filters = filters ?: input.filters,
+                    ),
+                    toolbarQuery = query ?: input.query,
+                )
+            }
         }
     }
 
+    // AM (LOCAL_SOURCE_FILTER_OFF_MAIN): see init - getFilterList() can scan
+    // storage, so it is never called on the main thread.
     fun searchGenre(genreName: String) {
-        val defaultFilters = source.getFilterList()
-        var genreExists = false
+        viewModelScope.launchIO {
+            val defaultFilters = source.getFilterList()
+            var genreExists = false
 
-        filter@ for (sourceFilter in defaultFilters) {
-            if (sourceFilter is SourceModelFilter.Group<*>) {
-                for (filter in sourceFilter.state) {
-                    if (filter is SourceModelFilter<*> && filter.name.equals(genreName, true)) {
-                        when (filter) {
-                            is SourceModelFilter.TriState -> filter.state = 1
-                            is SourceModelFilter.CheckBox -> filter.state = true
-                            else -> {}
+            filter@ for (sourceFilter in defaultFilters) {
+                if (sourceFilter is SourceModelFilter.Group<*>) {
+                    for (filter in sourceFilter.state) {
+                        if (filter is SourceModelFilter<*> && filter.name.equals(genreName, true)) {
+                            when (filter) {
+                                is SourceModelFilter.TriState -> filter.state = 1
+                                is SourceModelFilter.CheckBox -> filter.state = true
+                                else -> {}
+                            }
+                            genreExists = true
+                            break@filter
                         }
+                    }
+                } else if (sourceFilter is SourceModelFilter.Select<*>) {
+                    val index = sourceFilter.values.filterIsInstance<String>()
+                        .indexOfFirst { it.equals(genreName, true) }
+
+                    if (index != -1) {
+                        sourceFilter.state = index
                         genreExists = true
-                        break@filter
+                        break
                     }
                 }
-            } else if (sourceFilter is SourceModelFilter.Select<*>) {
-                val index = sourceFilter.values.filterIsInstance<String>()
-                    .indexOfFirst { it.equals(genreName, true) }
+            }
 
-                if (index != -1) {
-                    sourceFilter.state = index
-                    genreExists = true
-                    break
+            state.update {
+                val listing = if (genreExists) {
+                    Listing.Search(query = null, filters = defaultFilters)
+                } else {
+                    Listing.Search(query = genreName, filters = defaultFilters)
                 }
+                it.copy(
+                    filters = defaultFilters,
+                    listing = listing,
+                    toolbarQuery = listing.query,
+                )
             }
-        }
-
-        state.update {
-            val listing = if (genreExists) {
-                Listing.Search(query = null, filters = defaultFilters)
-            } else {
-                Listing.Search(query = genreName, filters = defaultFilters)
-            }
-            it.copy(
-                filters = defaultFilters,
-                listing = listing,
-                toolbarQuery = listing.query,
-            )
         }
     }
 
