@@ -50,6 +50,7 @@ import coil3.imageLoader
 import coil3.request.ImageRequest
 import coil3.size.Size
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
+import eu.kanade.tachiyomi.source.ExternalStreamSource
 import eu.kanade.tachiyomi.ui.player.components.HosterState
 import eu.kanade.tachiyomi.ui.player.loader.EpisodeLoader
 import eu.kanade.tachiyomi.ui.player.loader.HosterLoader
@@ -257,6 +258,10 @@ class PlayerMediaHolder(
         /** How often the live media state is pushed while playback is actually running. */
         private const val LIVE_PUSH_INTERVAL_MS = 15_000L
         // <-- AM (IDLE_SESSION_COST_FIX)
+
+        // AM (EXTERNAL_STREAM_COVER)
+        /** How long artwork resolution waits for a stream entry's captured cover. */
+        private const val EXTERNAL_COVER_WAIT_MS = 30_000L
 
         // AM (NOW_PLAYING_INDICATOR) -->
         // Backing StateFlow so UI (e.g. the episode list) can react to a holder
@@ -1442,6 +1447,38 @@ class PlayerMediaHolder(
                                         .filter { !it.isNullOrBlank() }
                                         .first()
                                 }
+                            } else if (anime.source == ExternalStreamSource.ID) {
+                                // AM (EXTERNAL_STREAM_COVER) -->
+                                // The same reactive wait the local branch makes,
+                                // for the same reason: this entry's artwork is
+                                // produced on this device after playback starts
+                                // (PlayerViewModel.captureExternalStreamArtwork),
+                                // so at the moment this flow runs the row has no
+                                // thumbnail_url yet and never will have one by
+                                // the time a single read returns.
+                                //
+                                // That is why a stream entry's notification stayed
+                                // art-less while a local entry's filled in: this
+                                // branch read `isLocal()`, which is the wrong
+                                // question. What matters is whether the cover is
+                                // coming from a source fetch - in which case there
+                                // is nothing to wait for and null is right - or
+                                // from this app, in which case waiting is the whole
+                                // point. Both kinds of on-device artwork now wait.
+                                //
+                                // A shorter ceiling than the local branch's two
+                                // minutes because the write is scheduled rather
+                                // than open-ended: the capture is one screenshot
+                                // taken a fixed lead-in after the file loads, not
+                                // an ffmpeg extraction whose length follows the
+                                // size of the video.
+                                withTimeoutOrNull(EXTERNAL_COVER_WAIT_MS) {
+                                    getAnime.subscribe(animeId)
+                                        .map { it.thumbnailUrl }
+                                        .filter { !it.isNullOrBlank() }
+                                        .first()
+                                }
+                                // <-- AM (EXTERNAL_STREAM_COVER)
                             } else {
                                 null
                             }

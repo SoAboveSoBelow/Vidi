@@ -100,12 +100,38 @@ class LocalSourceFileSystem(
      * An empty directory is not a group. It is not an entry either, but calling
      * it a group would put an empty row in the filter for every stray folder.
      */
-    fun isAppGroup(dir: UniFile): Boolean {
-        val children = dir.listFiles().orEmpty().filterNot { it.name.orEmpty().startsWith('.') }
+    fun isAppGroup(dir: UniFile): Boolean = isAppGroup(visibleChildren(dir))
+
+    // AM (LOCAL_SOURCE_SINGLE_LISTING) -->
+    /**
+     * The children of [dir] that the local source considers at all, listed once.
+     *
+     * Every classification below - group or entry, which fetch type, where the
+     * cover is - is a question about this same list, and listing a directory is
+     * the expensive step over SAF. Callers that ask more than one of those
+     * questions about a directory list it here and pass the result along, rather
+     * than each lookup listing the directory again for itself.
+     */
+    fun visibleChildren(dir: UniFile): List<UniFile> =
+        dir.listFiles().orEmpty().filterNot { it.name.orEmpty().startsWith('.') }
+
+    /** [isAppGroup] over an already-listed [children], from [visibleChildren]. */
+    fun isAppGroup(children: List<UniFile>): Boolean {
         if (children.isEmpty()) return false
         return children.none { it.isFile && Format.isSupported(it) } &&
             children.any { it.isDirectory }
     }
+
+    /**
+     * [getEntryDirectoriesInGroup] over an already-listed [children] of the group
+     * addressed by [url], from [visibleChildren] - the group itself needs no
+     * resolving, because the caller already holds it.
+     */
+    fun entryDirectoriesInGroup(url: String, children: List<UniFile>): List<EntryDirectory> =
+        children
+            .filter { it.isDirectory }
+            .map { EntryDirectory(url = "$url/${it.name.orEmpty()}", file = it) }
+    // <-- AM (LOCAL_SOURCE_SINGLE_LISTING)
 
     /**
      * The entry directories inside the app group [url], each addressed by a url
@@ -115,9 +141,7 @@ class LocalSourceFileSystem(
      */
     fun getEntryDirectoriesInGroup(url: String): List<EntryDirectory> {
         val group = resolveUrl(url)?.takeIf { it.isDirectory } ?: return emptyList()
-        return group.listFiles().orEmpty()
-            .filter { it.isDirectory && !it.name.orEmpty().startsWith('.') }
-            .map { EntryDirectory(url = "$url/${it.name.orEmpty()}", file = it) }
+        return entryDirectoriesInGroup(url, visibleChildren(group))
     }
     // <-- AM (LOCAL_SOURCE_APP_FILTER)
 
@@ -130,9 +154,17 @@ class LocalSourceFileSystem(
      * by their url's last segment, as they always were - no decoding there, which
      * would have mangled any directory whose name contains `%` or `+`.
      */
-    fun getEntryTitle(url: String): String {
+    fun getEntryTitle(url: String): String = getEntryTitle(url, file = null)
+
+    // AM (LOCAL_SOURCE_SINGLE_LISTING)
+    /**
+     * [getEntryTitle] against the directory [file] when the caller already holds
+     * it, which is the only reason the url-only form has to resolve anything.
+     */
+    fun getEntryTitle(url: String, file: UniFile?): String {
         if (firstSegmentGrant(url) != null) {
-            return resolveUrl(url)?.name.orEmpty().ifBlank { url.substringAfterLast('/') }
+            val name = file?.name ?: resolveUrl(url)?.name
+            return name.orEmpty().ifBlank { url.substringAfterLast('/') }
         }
         return url.substringAfterLast('/')
     }

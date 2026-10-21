@@ -3,6 +3,7 @@ package tachiyomi.source.local
 import android.content.Context
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFprobeKit
+import com.hippo.unifile.UniFile
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -118,31 +119,58 @@ class LocalSource(
         // "Local".
         val appFilter = filters.filterIsInstance<AppGroup>().firstOrNull()
         val selectedGroup = appFilter?.selectedGroup
-        val topLevelDirs = fileSystem.getEntryDirectories()
-        val candidateDirs = when {
-            selectedGroup != null -> fileSystem.getEntryDirectoriesInGroup(selectedGroup)
-            appFilter?.isLocalOnly == true -> topLevelDirs.filterNot { fileSystem.isAppGroup(it.file) }
-            else -> topLevelDirs.flatMap { dir ->
-                if (fileSystem.isAppGroup(dir.file)) {
-                    fileSystem.getEntryDirectoriesInGroup(dir.url)
+        // AM (LOCAL_SOURCE_SINGLE_LISTING) -->
+        // Every directory this pass touches is listed exactly once, here, and
+        // the children travel with it from then on.
+        //
+        // They used to be listed over and over: isAppGroup listed a directory
+        // to classify it, getEntryDirectoriesInGroup threw away the UniFile it
+        // had just been handed and resolved the group's url again to list it a
+        // second time, and then getSAnime resolved each entry's url twice more
+        // - once for the fetch type and once for the cover - listing it both
+        // times. Resolving is itself a listing per url segment, because
+        // UniFile.findFile enumerates the directory it searches, so an entry
+        // inside an app group re-enumerated that group on every one of those
+        // lookups. For N top-level directories holding M entries that is on the
+        // order of 4N + 4M listings where N + M will do.
+        //
+        // Nothing is cached: the listing lives for this one call, so a folder
+        // that changes between calls is still read fresh, exactly as before.
+        val topLevel = fileSystem.getEntryDirectories()
+            .filter { it.file.isDirectory && !it.file.name.orEmpty().startsWith('.') }
+            .distinctBy { it.url }
+            .map { ScannedEntry(it, fileSystem.visibleChildren(it.file)) }
+
+        val candidateDirs: List<ScannedEntry> = when {
+            selectedGroup != null -> {
+                val group = topLevel.firstOrNull { it.dir.url == selectedGroup }
+                val children = group
+                    ?.let { fileSystem.entryDirectoriesInGroup(it.dir.url, it.children) }
+                    ?: fileSystem.getEntryDirectoriesInGroup(selectedGroup)
+                children.scan()
+            }
+            appFilter?.isLocalOnly == true -> topLevel.filterNot { fileSystem.isAppGroup(it.children) }
+            else -> topLevel.flatMap { entry ->
+                if (fileSystem.isAppGroup(entry.children)) {
+                    fileSystem.entryDirectoriesInGroup(entry.dir.url, entry.children).scan()
                 } else {
-                    listOf(dir)
+                    listOf(entry)
                 }
             }
         }
+        // <-- AM (LOCAL_SOURCE_SINGLE_LISTING)
         // <-- AM (LOCAL_SOURCE_APP_FILTER)
 
         var animeDirs = candidateDirs
-            // Filter out files that are hidden and is not a folder
-            .filter { it.file.isDirectory && !it.file.name.orEmpty().startsWith('.') }
-            .distinctBy { it.url }
+            // AM (LOCAL_SOURCE_SINGLE_LISTING): hidden/non-directory filtering
+            // and the url distinct happen above, before anything is listed.
             .filter {
                 if (lastModifiedLimit == 0L && query.isBlank()) {
                     true
                 } else if (lastModifiedLimit == 0L) {
-                    it.file.name.orEmpty().contains(query, ignoreCase = true)
+                    it.name.contains(query, ignoreCase = true)
                 } else {
-                    it.file.lastModified() >= lastModifiedLimit
+                    it.lastModified >= lastModifiedLimit
                 }
             }
 
@@ -150,18 +178,18 @@ class LocalSource(
             when (filter) {
                 is OrderBy.Popular -> {
                     animeDirs = if (filter.state!!.ascending) {
-                        animeDirs.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.file.name.orEmpty() })
+                        animeDirs.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
                     } else {
                         animeDirs.sortedWith(
-                            compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.file.name.orEmpty() },
+                            compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.name },
                         )
                     }
                 }
                 is OrderBy.Latest -> {
                     animeDirs = if (filter.state!!.ascending) {
-                        animeDirs.sortedBy { it.file.lastModified() }
+                        animeDirs.sortedBy { it.lastModified }
                     } else {
-                        animeDirs.sortedByDescending { it.file.lastModified() }
+                        animeDirs.sortedByDescending { it.lastModified }
                     }
                 }
                 else -> {
@@ -176,7 +204,7 @@ class LocalSource(
                     // AY -->
                     // AM (EXTRA_LOCAL_FOLDERS): the url, which for a granted
                     // folder's entry is not the same as its name.
-                    getSAnime(animeDir.url)
+                    getSAnime(animeDir)
                     // <-- AY
                 }
             }
@@ -184,6 +212,29 @@ class LocalSource(
 
         AnimesPage(animes, false)
     }
+
+    // AM (LOCAL_SOURCE_SINGLE_LISTING) -->
+    /**
+     * An entry directory together with its children, listed once - see the note
+     * in [getSearchAnime].
+     *
+     * [name] and [lastModified] are held rather than read off the UniFile each
+     * time they are wanted: both are provider queries over SAF, and the sorts
+     * below ask for them once per comparison.
+     */
+    private class ScannedEntry(
+        val dir: LocalSourceFileSystem.EntryDirectory,
+        val children: List<UniFile>,
+    ) {
+        val name: String = dir.file.name.orEmpty()
+        val lastModified: Long by lazy(LazyThreadSafetyMode.NONE) { dir.file.lastModified() }
+    }
+
+    private fun List<LocalSourceFileSystem.EntryDirectory>.scan(): List<ScannedEntry> =
+        filter { it.file.isDirectory && !it.file.name.orEmpty().startsWith('.') }
+            .distinctBy { it.url }
+            .map { ScannedEntry(it, fileSystem.visibleChildren(it.file)) }
+    // <-- AM (LOCAL_SOURCE_SINGLE_LISTING)
 
     // AY -->
     private fun getSAnime(animeDir: String?): SAnime {
@@ -200,6 +251,20 @@ class LocalSource(
 
             // Try to find the cover
             coverManager.find(animeDir.orEmpty())?.let {
+                thumbnail_url = it.uri.toString()
+            }
+        }
+    }
+
+    // AM (LOCAL_SOURCE_SINGLE_LISTING)
+    /** [getSAnime] for an entry whose directory has already been listed. */
+    private fun getSAnime(entry: ScannedEntry): SAnime {
+        return SAnime.create().apply {
+            title = fileSystem.getEntryTitle(entry.dir.url, entry.dir.file)
+            url = entry.dir.url
+            fetch_type = fetchTypeManager.find(entry.children)
+
+            coverManager.find(entry.children)?.let {
                 thumbnail_url = it.uri.toString()
             }
         }
@@ -376,7 +441,12 @@ class LocalSource(
      * so it's kept separate from thumbnail generation, which doesn't.
      */
     suspend fun scanEpisodeFiles(anime: SAnime): List<SEpisode> = withIOContext {
-        val episodesData = fileSystem.getFilesInAnimeDirectory(anime.url)
+        // AM (LOCAL_SOURCE_SINGLE_LISTING): the directory was listed twice here,
+        // once for episodes.json and once for the videos - the same listing
+        // answers both.
+        val animeDirFiles = fileSystem.getFilesInAnimeDirectory(anime.url)
+
+        val episodesData = animeDirFiles
             .firstOrNull {
                 it.extension == "json" && it.nameWithoutExtension == "episodes"
             }?.let { file ->
@@ -391,7 +461,7 @@ class LocalSource(
         val existingThumbnails = thumbnailManager.findExistingBatch(anime.url)
         // <-- AM (LOCAL_THUMBNAIL_LOOKUP)
 
-        fileSystem.getFilesInAnimeDirectory(anime.url)
+        animeDirFiles
             // Only keep supported formats
             .filterNot { it.name.orEmpty().startsWith('.') }
             .filter { Format.isSupported(it) }

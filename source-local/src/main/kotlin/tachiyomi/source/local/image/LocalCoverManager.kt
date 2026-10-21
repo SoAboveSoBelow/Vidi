@@ -22,7 +22,13 @@ class LocalCoverManager(
 ) {
 
     fun find(animeUrl: String): UniFile? {
-        return fileSystem.getFilesInAnimeDirectory(animeUrl)
+        return find(fileSystem.getFilesInAnimeDirectory(animeUrl))
+    }
+
+    // AM (LOCAL_SOURCE_SINGLE_LISTING)
+    /** [find] over an already-listed [files] - see LocalSourceFileSystem.visibleChildren. */
+    fun find(files: List<UniFile>): UniFile? {
+        return files
             // Get all file whose names start with "cover"
             .filter { it.isFile && it.nameWithoutExtension.equals("cover", ignoreCase = true) }
             // Get the first actual image

@@ -197,6 +197,7 @@ import tachiyomi.domain.anime.interactor.GetFavorites
 import tachiyomi.domain.anime.interactor.NetworkToLocalAnime
 import tachiyomi.domain.anime.interactor.GetDuplicateLibraryAnime
 import tachiyomi.domain.anime.model.Anime
+import tachiyomi.domain.anime.model.AnimeUpdate
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.category.interactor.SetAnimeCategories
 import tachiyomi.domain.custombutton.interactor.GetCustomButtons
@@ -4745,6 +4746,8 @@ class PlayerViewModel(
         setupPlayerOrientation()
         checkFileLoaded()
         generateEpisodeThumbnailIfMissing()
+        // AM (EXTERNAL_STREAM_COVER)
+        captureExternalStreamArtwork()
 
         // AniSkip stuff
         val chapterCount = mpv.getPropertyInt("chapter-list/count") ?: 0
@@ -4807,6 +4810,123 @@ class PlayerViewModel(
             }
         }
     }
+
+    // AM (EXTERNAL_STREAM_COVER) -->
+    /** The capture running for the current external entry, cancelled when it changes. */
+    private var externalStreamCoverJob: Job? = null
+
+    /**
+     * Gives an external stream entry artwork taken from the video itself.
+     *
+     * An entry on ExternalStreamSource has nothing to take a cover from the way
+     * a local entry does: there is no folder to extract a frame into and the
+     * stream url carries no artwork, so the entry screen the eye icon opens
+     * showed a blank cover and its one episode row a blank thumbnail. The frame
+     * mpv is already decoding is the one thing on hand that depicts the video,
+     * and the player already turns that frame into artwork - this is the same
+     * capture generateEpisodeThumbnailIfMissing makes.
+     *
+     * Written to the cache first and pointed at by `thumbnail_url`, BEFORE the
+     * entry is anything the library knows about. The custom cover store cannot
+     * hold it yet - editCover writes there only for a local or favorited entry
+     * - but the cover is wanted precisely when the entry is neither, which is
+     * what the eye icon opens onto. A `file://` url needs none of that: the
+     * image fetcher loads one for any entry, favorited or not (see
+     * AnimeImageFetcher.getResourceType), and the same file answers for the
+     * episode's preview.
+     *
+     * Being in the cache is what makes it temporary, and the promotion below is
+     * what makes it permanent once there is somewhere permanent to put it. A
+     * capture evicted before then is simply taken again on the next play, which
+     * is why this checks for the FILE rather than remembering that it ran.
+     */
+    private fun captureExternalStreamArtwork() {
+        externalStreamCoverJob?.cancel()
+        externalStreamCoverJob = null
+
+        val anime = stateData.value.currentAnime ?: return
+        if (anime.source != ExternalStreamSource.ID) return
+        // Already promoted - the permanent copy outranks anything taken here.
+        if (coverCache.getCustomCoverFile(anime.id).exists()) return
+        val episode = stateData.value.currentEpisode
+        val episodeId = episode?.id
+
+        externalStreamCoverJob = viewModelScope.launchIO {
+            val file = externalStreamArtworkFile(anime.id)
+            if (!file.exists() || file.length() == 0L) {
+                // The same lead-in the thumbnail capture takes: a frame asked
+                // for too early is the black one mpv starts on, not the video.
+                delay(COVER_CAPTURE_LEAD_IN_MS)
+                if (player.isReleased) return@launchIO
+                if (stateData.value.currentAnime?.id != anime.id) return@launchIO
+                runCatching {
+                    file.parentFile?.mkdirs()
+                    mpvCommand("screenshot-to-file", file.absolutePath, "video")
+                    if (!file.exists() || file.length() == 0L) return@launchIO
+                    val fileUrl = "file://${file.absolutePath}"
+                    updateAnime.await(AnimeUpdate(id = anime.id, thumbnailUrl = fileUrl))
+                    // Bumped so the image loader re-reads rather than serving
+                    // the blank it already cached for this entry.
+                    updateAnime.awaitUpdateCoverLastModified(anime.id)
+                    // The row is not the only copy. currentAnime and
+                    // currentEpisodeAnime are snapshots taken at init() and
+                    // never re-read, and syncSessionState feeds the media
+                    // session's animeThumbnailUrl straight off them - so
+                    // leaving them stale would keep pushing a null cover to
+                    // the notification for the rest of the session no matter
+                    // what the database says.
+                    updateStateData { data ->
+                        data.copy(
+                            currentAnime = data.currentAnime
+                                ?.takeIf { it.id == anime.id }
+                                ?.copy(thumbnailUrl = fileUrl)
+                                ?: data.currentAnime,
+                            currentEpisodeAnime = data.currentEpisodeAnime
+                                ?.takeIf { it.id == anime.id }
+                                ?.copy(thumbnailUrl = fileUrl)
+                                ?: data.currentEpisodeAnime,
+                        )
+                    }
+                    if (episodeId != null && episode.preview_url.isNullOrBlank()) {
+                        updateEpisode.await(EpisodeUpdate(id = episodeId, previewUrl = fileUrl))
+                        _thumbnailGenerated.update { episodeId }
+                    }
+                }.onFailure {
+                    logcat(LogPriority.INFO, it) { "EXTERNAL_STREAM artwork capture failed for ${anime.id}" }
+                    return@launchIO
+                }
+            }
+            promoteExternalStreamCoverWhenFavorited(anime.id, file)
+        }
+    }
+
+    /**
+     * Copies the cached capture into the custom cover store once the entry is
+     * favorited, which is the first moment anything can be kept there.
+     *
+     * A subscription rather than a hook on the player's own add-to-library
+     * action, so the heart on the entry screen counts too - the eye icon is how
+     * most of these get favorited, and that path never comes back through this
+     * ViewModel. Tied to viewModelScope: close the player before adding the
+     * entry and the cover stays the cached one until the next play promotes it.
+     */
+    private suspend fun promoteExternalStreamCoverWhenFavorited(animeId: Long, file: File) {
+        val favorited = getAnime.subscribe(animeId).first { it.favorite }
+        if (coverCache.getCustomCoverFile(animeId).exists()) return
+        if (!file.exists() || file.length() == 0L) return
+        runCatching {
+            file.inputStream().use { stream ->
+                favorited.editCover(coverManager, stream, updateAnime, coverCache)
+            }
+        }.onFailure {
+            logcat(LogPriority.INFO, it) { "EXTERNAL_STREAM cover promotion failed for $animeId" }
+        }
+    }
+
+    /** Where an external entry's capture is kept until it can be promoted. */
+    private fun externalStreamArtworkFile(animeId: Long): File =
+        File(File(context.cacheDir, EXTERNAL_ARTWORK_DIR), "$animeId.png")
+    // <-- AM (EXTERNAL_STREAM_COVER)
 
     private fun setMpvOptions() {
         val video = stateData.value.currentVideo ?: return
@@ -8065,6 +8185,14 @@ class PlayerViewModel(
 
         /** Floor between zoom indicator emissions, in ms. */
         private const val ZOOM_INDICATOR_MIN_INTERVAL_MS = 100L
+
+        // AM (EXTERNAL_STREAM_COVER) -->
+        // The lead-in a captured frame needs to be the video rather than the
+        // black frame mpv opens on, and the cache directory a capture waits in
+        // until the entry is favorited and it can be promoted.
+        private const val COVER_CAPTURE_LEAD_IN_MS = 3000L
+        private const val EXTERNAL_ARTWORK_DIR = "external_artwork"
+        // <-- AM (EXTERNAL_STREAM_COVER)
         // <-- AM (PINCH_ZOOM)
     }
     // <-- AM (NEXT_EPISODE_PREFETCH)
