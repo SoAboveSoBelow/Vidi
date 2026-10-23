@@ -1931,10 +1931,33 @@ private fun rememberNowPlaying(animeId: Long): NowPlayingEpisode? {
                         // would make a mm:ss label jump in 15s steps. Collected
                         // only while this screen is composed.
                         holder.livePositionMs,
-                    ) { mediaState, hasScreenConsumer, positionMs ->
+                    ) { mediaState, hasScreenConsumer, _ ->
                         if (!hasScreenConsumer && mediaState.paused) {
                             null
                         } else {
+                            // AM (PLAYLIST_PROGRESS_LOAD_GUARD) -->
+                            // state.episodeId moves to the new episode the
+                            // moment a switch is requested, but the player is
+                            // still on - often still displaying - the OLD file
+                            // until the load finishes. Two stale reads made
+                            // the new row flash the old timestamp: the
+                            // position (livePositionMs's cached value is up to
+                            // a second old, and this lambda re-runs on state
+                            // emissions mid-load, replaying it) and the
+                            // loading flag itself. Both are now read FRESH at
+                            // attribution time: 0 while a load is in flight
+                            // (the consumer's >0 filter then falls back to the
+                            // episode's own stored progress), otherwise a
+                            // just-taken mpv sample. livePositionMs is still
+                            // collected above purely as the 1s recomposition
+                            // trigger for this label.
+                            val loading = holder.viewModel?.uiData?.value?.isLoadingEpisode == true
+                            val positionMs = if (loading) {
+                                0L
+                            } else {
+                                holder.samplePositionMs() ?: 0L
+                            }
+                            // <-- AM (PLAYLIST_PROGRESS_LOAD_GUARD)
                             NowPlayingEpisode(
                                 animeId = mediaState.animeId,
                                 episodeId = mediaState.episodeId,
@@ -2142,7 +2165,19 @@ private fun LazyGridScope.sharedEpisodeItems(
                     // The source's cover first: for a single-episode source it IS
                     // this episode's thumbnail, and it is set for nothing else.
                     // <-- AM (SINGLE_EPISODE_THUMBNAIL)
-                    previewUrl = (item.thumbnailUrl ?: item.episode.previewUrl)
+                    // A single-episode source follows the single-episode rule
+                    // for every source type alike: its thumbnail is the rule's
+                    // own (the source's cover on a merged entry) or nothing.
+                    // Falling through to the episode's previewUrl there is what
+                    // let local/torrent one-file entries show a row thumbnail
+                    // where extension entries correctly show none.
+                    previewUrl = (
+                        if (item.singleEpisodeSource) {
+                            item.thumbnailUrl
+                        } else {
+                            item.thumbnailUrl ?: item.episode.previewUrl
+                        }
+                        )
                         .takeIf { !it.isNullOrBlank() && showPreviews },
                     // <-- AY
                     seen = item.episode.seen,

@@ -2,6 +2,7 @@ package tachiyomi.data.source
 
 import androidx.paging.PagingState
 import eu.kanade.tachiyomi.animesource.AnimeSource
+import eu.kanade.tachiyomi.animesource.FaultRecoverableSource
 import eu.kanade.tachiyomi.animesource.SnapshotInvalidatingSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
@@ -110,6 +111,27 @@ abstract class BaseSourcePagingSource(
         } catch (e: NoResultsException) {
             LoadResult.Error(e)
         } catch (e: Exception) {
+            // AM (JS_FAULT_MANUAL_RECOVERY) -->
+            // A latched source fault (JS projects) is not a parser crash, and
+            // treating it as one was doubly wrong: the page-skip below would
+            // silently walk past the whole listing, and every retry the UI
+            // offered just re-hit the latch - which is why a faulted source
+            // looked like it could never be refreshed. Surface it like a
+            // network failure, and reset the source's runtime so the retry
+            // the user then triggers IS the manual refresh: a fresh attempt,
+            // not an instant re-fault. On a genuinely wedged script each
+            // retry costs one more hard-timeout wait and one orphaned thread
+            // (see JsProjectSource.clearFault) - the documented price of a
+            // recovery the user explicitly asked for.
+            val faultedSource = (source as? FaultRecoverableSource)?.takeIf { it.isFaulted }
+            if (faultedSource != null) {
+                logcat(LogPriority.ERROR, e) {
+                    "SourcePagingSource.load() source fault, page=$page - runtime reset for retry"
+                }
+                runCatching { faultedSource.clearFault() }
+                LoadResult.Error(e)
+            } else {
+            // <-- AM (JS_FAULT_MANUAL_RECOVERY)
             // Parser crash; skip page
             logcat(LogPriority.ERROR, e) {
                 "SourcePagingSource: source parser crashed on page=$page, skipping page"
@@ -124,6 +146,7 @@ abstract class BaseSourcePagingSource(
                     prevKey = null,
                     nextKey = page + 1,
                 )
+            }
             }
         }
         // <-- AY

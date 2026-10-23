@@ -1946,7 +1946,12 @@ class PlayerActivity : BaseActivity() {
             val shouldAutoEnter = !forceDisableAutoEnter &&
                 (ignoreBackgroundPlaybackActiveGuard || !SecureActivityDelegate.isBackgroundPlaybackActive) &&
                 // <-- AM (PIP_AUTOENTER_SELF_POISON_FIX)
-                !viewModel.playbackData.value.paused &&
+                // AM (PIP_AUTOENTER_DURING_LOAD_FIX) -->
+                // pauseStateForPipRegistration(), not raw paused: mid-load the
+                // raw value is the load freeze, and registering auto-enter off
+                // it made PiP unenterable for the whole load/buffer window.
+                !viewModel.pauseStateForPipRegistration() &&
+                // <-- AM (PIP_AUTOENTER_DURING_LOAD_FIX)
                 autoEnter
             builder.setAutoEnterEnabled(shouldAutoEnter)
             builder.setSeamlessResizeEnabled(shouldAutoEnter)

@@ -90,7 +90,14 @@ import tachiyomi.presentation.core.screens.LoadingScreen
  * currently holds, or nothing at all if there's no live request.
  */
 @Composable
-fun PlayerOverlayHost() {
+fun PlayerOverlayHost(
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // The Navigator's current top screen key, forwarded to PlayerScreen's
+    // BackHandler - see that fix tag for why the player's system-back
+    // handler must re-register after every background navigation.
+    backPressPriorityKey: Any? = null,
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
+) {
     val request by PlayerMediaHolder.playbackRequestFlow.collectAsStateWithLifecycle()
     val currentRequest = request
     if (currentRequest == null) {
@@ -135,7 +142,7 @@ fun PlayerOverlayHost() {
         // availability, the dummy-pip window, the PlayerScreen render - none of
         // which cares what is playing. The request type is only consulted where
         // it genuinely matters: the one effect that decides what to load.
-        PlayerHostScreen(request = currentRequest)
+        PlayerHostScreen(request = currentRequest, backPressPriorityKey = backPressPriorityKey)
         // <-- AM (EXTERNAL_PLAYBACK)
         // <-- AM (CONTENT_AGNOSTIC_SESSION)
     }
@@ -156,6 +163,10 @@ fun PlayerHostScreen(
     // and six longs could not express.
     request: PlaybackRequest,
     // <-- AM (EXTERNAL_PLAYBACK)
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // Forwarded to PlayerScreen unchanged - see PlayerOverlayHost.
+    backPressPriorityKey: Any? = null,
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
 ) {
     val context = LocalContext.current
     val graph = remember { context.appGraph }
@@ -536,6 +547,7 @@ fun PlayerHostScreen(
         PlayerScreen(
             viewModel = currentViewModel,
             onBack = { PlayerMediaHolder.clearPlaybackRequest() },
+            backPressPriorityKey = backPressPriorityKey,
             onEnterDummyPip = {
                 if (holder?.isDummyPipActive == true) {
                     // Effectively unreachable: PlayerScreen's BackHandler

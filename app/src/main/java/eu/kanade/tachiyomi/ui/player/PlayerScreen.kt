@@ -107,6 +107,12 @@ fun PlayerScreen(
     // see its own call site for what entering the dummy pip actually does.
     onEnterDummyPip: (() -> Unit)? = null,
     // <-- AM (DUMMY_PIP)
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // See the BackHandler below. Null (the default) means "no re-keying" -
+    // PlayerActivity and the spikes don't share their dispatcher with a
+    // Navigator, so registration order never shifts under them.
+    backPressPriorityKey: Any? = null,
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -262,9 +268,24 @@ fun PlayerScreen(
 
     // Disabled while the dummy pip is up - see
     // DUMMY_PIP_BACK_PASSTHROUGH_FIX above.
-    BackHandler(enabled = !dummyPipActive) {
-        handleBackPress()
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // Keyed on the Navigator's current top screen (MainActivity passes
+    // navigator.lastItem.key). OnBackPressedDispatcher runs the MOST
+    // RECENTLY ADDED enabled callback, and every background navigation
+    // re-registers the Navigator's own back handling after this one - so
+    // while any screen below the player could still pop, system back went
+    // to the BACKGROUND page instead of the fullscreen player (only at the
+    // library root, where the Navigator disables its handler, did this one
+    // ever fire - the in-player back button calls handleBackPress()
+    // directly, which is why it always worked). Re-running BackHandler's
+    // DisposableEffect on every stack change re-adds this callback last,
+    // so a visible fullscreen player owns system back again.
+    key(backPressPriorityKey) {
+        BackHandler(enabled = !dummyPipActive) {
+            handleBackPress()
+        }
     }
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
 
     // AM (DUMMY_PIP_BACKGROUND_CORNERS_FIX) -->
     // Inside the dummy pip this root black background is the box-sized

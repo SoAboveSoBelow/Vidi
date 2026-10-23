@@ -637,7 +637,12 @@ class MainActivity : BaseActivity() {
             // the same reasoning DUMMY_PIP_FULLSCREEN_RESTORE already relied
             // on, just no longer gated on a flag only the explicit path sets.
             val shouldAutoEnter = autoEnter &&
-                !viewModel.playbackData.value.paused &&
+                // AM (PIP_AUTOENTER_DURING_LOAD_FIX) -->
+                // Same as PlayerActivity.createPipParams(): mid-load the raw
+                // paused flag is the load freeze; register the post-load
+                // intent instead so PiP stays enterable while buffering.
+                !viewModel.pauseStateForPipRegistration() &&
+                // <-- AM (PIP_AUTOENTER_DURING_LOAD_FIX)
                 graph.playerPreferences.pipOnExit.get()
             // <-- AM (DUMMY_PIP_AUTO_ENTER_RESTORED)
             // <-- AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX)
@@ -1262,7 +1267,15 @@ class MainActivity : BaseActivity() {
                         // request, so this is safe to always compose
                         // regardless of what screen the Navigator itself is
                         // currently showing.
-                        PlayerOverlayHost()
+                        PlayerOverlayHost(
+                            // AM (PLAYER_BACK_PRIORITY_FIX) -->
+                            // The visible top screen: changes on every
+                            // background navigation, which is exactly when
+                            // the player's BackHandler must re-register to
+                            // stay ahead of the Navigator's own.
+                            backPressPriorityKey = navigator.lastItem.key,
+                            // <-- AM (PLAYER_BACK_PRIORITY_FIX)
+                        )
                         // <-- AM (PLAYER_OVERLAY_MIGRATION)
 
                         // AM (PLAYER_DIALOG_LAYER) -->

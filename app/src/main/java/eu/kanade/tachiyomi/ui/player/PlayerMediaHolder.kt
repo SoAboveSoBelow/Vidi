@@ -674,11 +674,23 @@ class PlayerMediaHolder(
      */
     val livePositionMs: Flow<Long> = flow {
         while (true) {
-            val seconds = runCatching { _player?.mpv?.getPropertyInt("time-pos") }.getOrNull()
-            if (seconds != null) emit(seconds.toLong() * 1000L)
+            samplePositionMs()?.let { emit(it) }
             delay(POSITION_SAMPLE_INTERVAL_MS)
         }
     }
+
+    // AM (PLAYLIST_PROGRESS_LOAD_GUARD) -->
+    /**
+     * A single on-demand [livePositionMs] sample. Consumers that attribute a
+     * position to a holder-state emission (the entry screen's now-playing
+     * label) must sample AT that moment: the flow's last emitted value is up
+     * to a second old, and during an episode switch that second is exactly
+     * where the old file's position lives - replayed against the new
+     * episode's id, it flashes the old timestamp on the new row.
+     */
+    fun samplePositionMs(): Long? =
+        runCatching { _player?.mpv?.getPropertyInt("time-pos")?.toLong()?.times(1000L) }.getOrNull()
+    // <-- AM (PLAYLIST_PROGRESS_LOAD_GUARD)
     // <-- AM (PLAYLIST_PROGRESS)
 
     // AM (LIVE_POSITION_TRACKING) -->

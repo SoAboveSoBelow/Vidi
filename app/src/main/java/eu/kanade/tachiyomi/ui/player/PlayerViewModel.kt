@@ -3984,6 +3984,22 @@ class PlayerViewModel(
         if (!keepPosition) pauseInternal()
         // <-- AM (SWITCH_PAUSES_LATE)
 
+        // AM (LOAD_CLEARS_STALE_PROGRESS) -->
+        // The freeze above stops the old file, but playbackData still holds its
+        // position/duration - and mpv won't report the new file's until well
+        // after loadfile. For that whole window the seek bar shows the OLD
+        // video's progress under the new one's loading spinner. Zeroing it
+        // here is the honest state (nothing is playing, nowhere is "where we
+        // are"), and the new file's own duration/time-pos observers repaint
+        // real values as they arrive. keepPosition loads skip this on purpose:
+        // the old file keeps playing until the new one's loadfile, so its
+        // progress is still live data, and the position carries across by
+        // design.
+        if (!keepPosition) {
+            updatePlaybackData { it.copy(position = 0, duration = 0) }
+        }
+        // <-- AM (LOAD_CLEARS_STALE_PROGRESS)
+
         // AM (SHARED_LINK_RESOLUTION) -->
         // A link the downloader already resolved for this episode and quality is
         // the same link this would go and fetch, so take it rather than hitting the
@@ -4667,6 +4683,33 @@ class PlayerViewModel(
         if (videoState == Video.State.ERROR) {
             return
         }
+
+        // AM (VIDEO_SELECT_PLAYS) -->
+        // Tapping a video is an explicit request to watch THAT video, so it
+        // should play once loaded - not inherit the paused state of whatever
+        // it replaces. Without this, loadVideo()'s
+        // `previousPauseState ?: playbackData.value.paused` capture picks up
+        // the current pause and checkFileLoaded() re-applies it to the new
+        // file: pause a video, pick another one, and the new one arrives
+        // paused. Setting the slot (rather than passing a flag) keeps
+        // recordPauseIntentDuringLoad() authoritative afterwards: a pause
+        // arriving DURING this load still wins over this default.
+        updateUiData { it.copy(previousPauseState = false) }
+        // <-- AM (VIDEO_SELECT_PLAYS)
+
+        // AM (LOAD_CLEARS_STALE_PROGRESS) -->
+        // Same rule as loadVideo()'s own reset, for the keepPosition path
+        // that function deliberately skips. An explicit video tap means the
+        // user asked for a DIFFERENT video: from that moment, where the old
+        // file happens to be is no longer what the bar should show while the
+        // new one loads. Cleared here rather than in loadVideo() so
+        // keepPosition's other callers (loadBestVideo()'s failover, a reload)
+        // keep their continuous bar. If the old file is actually still
+        // playing through the resolution, mpv's own time-pos/duration
+        // observers repaint it immediately - this only visibly matters when
+        // playback was frozen/paused, which is exactly the stale-bar case.
+        updatePlaybackData { it.copy(position = 0, duration = 0) }
+        // <-- AM (LOAD_CLEARS_STALE_PROGRESS)
 
         viewModelScope.launchIO {
             // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
@@ -5935,6 +5978,30 @@ class PlayerViewModel(
     fun updateHasPip(value: Boolean) {
         updateStateData { it.copy(isPipAvailable = value) }
     }
+
+    // AM (PIP_AUTOENTER_DURING_LOAD_FIX) -->
+    /**
+     * The pause state a PiP auto-enter registration should read.
+     *
+     * During a load, playbackData.paused is true for no reason other than
+     * loadVideo()'s freeze - it says nothing about what playback will do once
+     * the file arrives. The reactive setPictureInPictureParams() push on every
+     * pause change therefore registers setAutoEnterEnabled(false) for the
+     * whole load/buffer window, and the OS's auto-enter (the only path a
+     * Recents press has) reads exactly that stale registration: PiP cannot be
+     * entered until the load finishes. previousPauseState is the answer
+     * checkFileLoaded() will apply, so it - not the transient freeze - is the
+     * intent to register.
+     */
+    fun pauseStateForPipRegistration(): Boolean {
+        val ui = uiData.value
+        return if (ui.isLoadingEpisode) {
+            ui.previousPauseState ?: playbackData.value.paused
+        } else {
+            playbackData.value.paused
+        }
+    }
+    // <-- AM (PIP_AUTOENTER_DURING_LOAD_FIX)
 
     // AM (UNIFIED_CAST_PLAY_PAUSE) -->
     // Was two separate paths: this ViewModel's pause()/unpause()/pauseUnpause()

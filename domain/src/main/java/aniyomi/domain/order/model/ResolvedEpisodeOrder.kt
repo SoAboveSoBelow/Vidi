@@ -52,6 +52,14 @@ data class ResolvedEpisodeOrder(
      * its rows would say nothing.
      */
     val thumbnailUrlByEpisodeId: Map<Long, String>,
+    /**
+     * Every episode whose source offers only that one episode, merged entry or
+     * not - the membership half of the single-episode rule, without the
+     * merged-only cover requirement [thumbnailUrlByEpisodeId] carries. Display
+     * code uses it to give every single-episode source the same treatment:
+     * the rule's own thumbnail (or none), never the episode's raw preview.
+     */
+    val singleEpisodeIds: Set<Long> = emptySet(),
     // <-- AM (SINGLE_EPISODE_THUMBNAIL)
     val isPreordered: Boolean,
     /**

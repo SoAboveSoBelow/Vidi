@@ -434,6 +434,7 @@ class AnimeViewModel(
                                 order.displayNameByEpisodeId,
                                 // AM (SINGLE_EPISODE_THUMBNAIL) -->
                                 order.thumbnailUrlByEpisodeId,
+                                order.singleEpisodeIds,
                                 // <-- AM (SINGLE_EPISODE_THUMBNAIL)
                             ),
                             // AM (CUSTOM_EPISODE_ORDER) -->
@@ -571,6 +572,7 @@ class AnimeViewModel(
                 order.displayNameByEpisodeId,
                 // AM (SINGLE_EPISODE_THUMBNAIL) -->
                 order.thumbnailUrlByEpisodeId,
+                order.singleEpisodeIds,
                 // <-- AM (SINGLE_EPISODE_THUMBNAIL)
             )
             // <-- AM (CUSTOM_EPISODE_ORDER)
@@ -1322,6 +1324,7 @@ class AnimeViewModel(
         // <-- AM (EPISODE_NAMES)
         // AM (SINGLE_EPISODE_THUMBNAIL) -->
         thumbnailUrls: Map<Long, String> = emptyMap(),
+        singleEpisodeIds: Set<Long> = emptySet(),
         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
     ): List<EpisodeList.Item> {
         // AM (EPISODE_TAG_SEARCH) -->
@@ -1380,6 +1383,7 @@ class AnimeViewModel(
                     // would mean changing what the row accepts.
                     coverCache.getCustomCoverFile(episode.animeId).takeIf { it.exists() }?.path ?: url
                 },
+                singleEpisodeSource = episode.id in singleEpisodeIds,
                 // <-- AM (SINGLE_EPISODE_THUMBNAIL)
                 // AM (EPISODE_TAG_SEARCH) -->
                 owner = owner,
@@ -4213,6 +4217,14 @@ sealed class EpisodeList {
         // AM (SINGLE_EPISODE_THUMBNAIL) -->
         /** Cover to draw for a single-episode source - see ResolvedEpisodeOrder.thumbnailUrlByEpisodeId. */
         val thumbnailUrl: String? = null,
+        /**
+         * This episode is its source's only one - see
+         * ResolvedEpisodeOrder.singleEpisodeIds. Display uses it to apply the
+         * single-episode rule to every source type alike: the rule's thumbnail
+         * (the source's cover, merged entries only) or none, never the
+         * episode's own previewUrl.
+         */
+        val singleEpisodeSource: Boolean = false,
         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
         // AM (EPISODE_TAG_SEARCH) -->
         /**

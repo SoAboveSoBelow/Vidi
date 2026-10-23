@@ -398,6 +398,16 @@ class GetEpisodeOrder(
         // Still merged-only, unlike the title half: a cover says which source an
         // episode came from, which is a question only a merge raises. On an
         // ordinary entry it would repeat the cover at the top of the screen.
+        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+        // Membership, off the same grouping as the name and cover below, so a
+        // source's episode-count rule is computed in exactly one place. Local
+        // and torrent sources land here too - a one-file local entry is a
+        // single-episode source like any other.
+        val singleEpisodeIds = episodesByChild.filterValues { it.size == 1 }
+            .flatMap { (_, episodes) -> episodes }
+            .mapTo(HashSet()) { it.id }
+        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+
         val singleEpisodeThumbnails = if (host.isMerged()) {
             episodesByChild.filterValues { it.size == 1 }
                 .mapNotNull { (childId, episodes) ->
@@ -420,6 +430,7 @@ class GetEpisodeOrder(
             displayNameByEpisodeId = displayNames,
             // AM (SINGLE_EPISODE_THUMBNAIL) -->
             thumbnailUrlByEpisodeId = singleEpisodeThumbnails,
+            singleEpisodeIds = singleEpisodeIds,
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
             isPreordered = applyOrderOverrides && (host.isMerged() || overrides.isNotEmpty()),
             hasOverrides = overrides.isNotEmpty(),

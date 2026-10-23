@@ -1,6 +1,7 @@
 package aniyomi.source.js
 
 import aniyomi.core.common.jsengine.JsSourceRuntime
+import eu.kanade.tachiyomi.animesource.FaultRecoverableSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
@@ -18,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -71,7 +73,7 @@ class JsProjectSource(
     private val networkHelper: NetworkHelper,
     private val softTimeoutMillis: Long = DEFAULT_SOFT_TIMEOUT,
     private val hardTimeoutMillis: Long = DEFAULT_HARD_TIMEOUT,
-) : AnimeHttpSource(), Closeable {
+) : AnimeHttpSource(), Closeable, FaultRecoverableSource {
 
     /**
      * Mutable because the instance outlives any one version of the project.
@@ -254,6 +256,28 @@ class JsProjectSource(
             )
             _fault.value = fault
             logcat(LogPriority.WARN, e) { "Project '$name' faulted: ${fault.reason}" }
+            // AM (JS_FAULT_AUTO_RECOVERY) -->
+            // A permanent latch is only right for the case this watchdog
+            // exists for at all: a script spinning in pure compute, which no
+            // OkHttp timeout can reach (extensions never need this path -
+            // their slow calls die in the HTTP layer and the source just
+            // tries again). A slow network ANSWER trips the same wall clock
+            // here, but its thread does finish once the response arrives,
+            // leaving an idle, trustworthy runtime. Latching that case is
+            // what made one 30s stall kill the source until a restart. So
+            // watch the orphaned work: when it settles - abort honored or
+            // late answer in - the fault clears itself and the next call
+            // runs normally. Only a genuinely wedged thread, the one case
+            // the latch was ever for, keeps the source faulted.
+            //
+            // compareAndSet, not plain set: a clearFault()/update() in the
+            // meantime has already swapped in a fresh runtime, and the old
+            // thread finishing must not undo that.
+            callScope.launch {
+                runCatching { work.await() }
+                _fault.compareAndSet(fault, null)
+            }
+            // <-- AM (JS_FAULT_AUTO_RECOVERY)
             throw JsProjectFaultedException(name, fault)
         } catch (e: CancellationException) {
             // The caller went away, so let the script stop at its next crossing
@@ -340,7 +364,9 @@ class JsProjectSource(
      * until it finishes - this makes the project usable again, it does not
      * reclaim the core.
      */
-    suspend fun clearFault() {
+    override val isFaulted: Boolean get() = _fault.value != null
+
+    override suspend fun clearFault() {
         loadMutex.withLock {
             runtime.close()
             runtime = JsSourceRuntime(script, baseUrl, networkHelper)
