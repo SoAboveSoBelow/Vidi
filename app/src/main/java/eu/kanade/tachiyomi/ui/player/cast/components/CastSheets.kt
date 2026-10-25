@@ -41,7 +41,8 @@ fun CastSheets(
     onResetDefaultSpeed: () -> Unit,
 
     // Playlist sheet
-    episodeDisplayMode: Long?,
+    // AM (PLAYBACK_QUEUE)
+    episodeDisplayModeOf: (Episode) -> Long?,
     currentEpisodeIndex: Int,
     episodeList: List<Episode>,
     dateRelativeTime: Boolean,
@@ -111,7 +112,7 @@ fun CastSheets(
         }
         CastSheet.Playlist -> {
             CastPlaylistSheet(
-                displayMode = episodeDisplayMode,
+                displayModeOf = episodeDisplayModeOf,
                 currentEpisodeIndex = currentEpisodeIndex,
                 episodeList = episodeList,
                 dateRelativeFormat = dateRelativeTime,

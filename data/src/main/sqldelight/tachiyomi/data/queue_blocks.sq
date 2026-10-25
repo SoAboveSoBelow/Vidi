@@ -1,0 +1,100 @@
+-- AM (PLAYBACK_QUEUE) -->
+-- A run of queued items that were added together, and the queue's coarse
+-- order.
+--
+-- The queue is banded rather than one flat list of positions, the same way
+-- merge_children bands children by season before ordering them by priority
+-- (see merge_children.sq): play order is (queue_blocks.position,
+-- queue_items.position). Three things need the band to exist:
+--
+--   * A block holds its place in the order while its items are still being
+--     fetched. Queueing an entry whose episodes are not in the database yet
+--     has no item rows to insert, and appending them later would land them at
+--     the end rather than where the user put the entry. The block is inserted
+--     at once with fill_state PENDING and the items arrive into it.
+--   * Shuffle and search scope rewrite one entry's order mid-session (see
+--     PlayerViewModel.observeShuffleSeed). With a band that is a rewrite of
+--     one block's item positions; flat, it would be a search for which rows
+--     happened to come from that entry.
+--   * "These twelve came from X" is a fact the queue holds rather than one the
+--     UI has to infer, which is what a queue screen needs to group by.
+--
+-- anime_id is the entry the block came from, or NULL for a block of items
+-- that have no library entry behind them (a file handed to the app from
+-- outside - see queue_items.uri). It is the block's PROVENANCE, not its
+-- contents: the items carry their own ids, and nothing resolves playback
+-- through this column.
+--
+-- position is a sparse ordering key, not an index: it is never renumbered on
+-- insert, so appending a block does not rewrite every row after it.
+CREATE TABLE queue_blocks(
+    _id INTEGER NOT NULL PRIMARY KEY,
+    position INTEGER NOT NULL,
+    anime_id INTEGER,
+    fill_state INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX queue_blocks_position_index ON queue_blocks(position);
+CREATE INDEX queue_blocks_anime_id_index ON queue_blocks(anime_id);
+
+getAllBlocks:
+SELECT _id, position, anime_id, fill_state
+FROM queue_blocks
+ORDER BY position ASC;
+
+getBlockById:
+SELECT _id, position, anime_id, fill_state
+FROM queue_blocks
+WHERE _id = :blockId;
+
+-- Blocks still waiting on a fetch, oldest first - what a fill worker picks up,
+-- including after process death.
+getBlocksByFillState:
+SELECT _id, position, anime_id, fill_state
+FROM queue_blocks
+WHERE fill_state = :fillState
+ORDER BY position ASC;
+
+insertReturningId:
+INSERT INTO queue_blocks(position, anime_id, fill_state)
+VALUES (:position, :animeId, :fillState)
+RETURNING _id;
+
+setFillState:
+UPDATE queue_blocks
+SET fill_state = :fillState
+WHERE _id = :blockId;
+
+setPosition:
+UPDATE queue_blocks
+SET position = :position
+WHERE _id = :blockId;
+
+-- Items cascade with the block (see queue_items.sq).
+delete:
+DELETE FROM queue_blocks
+WHERE _id = :blockId;
+
+deleteAll:
+DELETE FROM queue_blocks;
+
+-- Blocks left with nothing in them after their items were removed elsewhere.
+--
+-- Pending blocks are spared: holding no items yet is exactly what pending
+-- MEANS (see the fill worker), so pruning on emptiness alone would delete the
+-- blocks waiting to be filled.
+deleteEmptyComplete:
+DELETE FROM queue_blocks
+WHERE fill_state = 0
+AND _id NOT IN (SELECT DISTINCT block_id FROM queue_items);
+
+-- The append anchor. NULL on an empty queue, which the caller reads as "start
+-- at the first position" rather than as an error.
+maxPosition:
+SELECT position
+FROM queue_blocks
+ORDER BY position DESC
+LIMIT 1;
+-- <-- AM (PLAYBACK_QUEUE)

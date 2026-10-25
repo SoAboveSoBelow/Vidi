@@ -512,6 +512,8 @@ fun LibraryBottomActionMenu(
     onChangeCategoryClicked: () -> Unit,
     onMarkAsSeenClicked: () -> Unit,
     onMarkAsUnseenClicked: () -> Unit,
+    // AM (PLAYBACK_QUEUE)
+    onAddToQueueClicked: () -> Unit,
     onDownloadClicked: ((DownloadAction) -> Unit)?,
     onDeleteClicked: () -> Unit,
     onMigrateClicked: () -> Unit,
@@ -551,6 +553,18 @@ fun LibraryBottomActionMenu(
                 title = stringResource(AMMR.strings.am_action_mark_as_unseen),
                 icon = Icons.Outlined.RemoveDone,
                 onClick = onMarkAsUnseenClicked,
+            ),
+        )
+        // AM (PLAYBACK_QUEUE): into the overflow - this bar is already full,
+        // and queueing is not one of the actions a library selection is
+        // usually made for.
+        add(
+            BottomActionItem(
+                key = "add_to_queue",
+                title = stringResource(AMMR.strings.am_action_add_to_queue),
+                icon = ImageVector.vectorResource(R.drawable.ic_playlist_add_24dp),
+                onClick = onAddToQueueClicked,
+                placement = BottomActionPlacement.Overflow,
             ),
         )
         if (onDownloadClicked != null) {

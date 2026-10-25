@@ -1,6 +1,7 @@
 package animiru.domain.player.service
 
 import animiru.domain.player.model.PlayerOrientation
+import animiru.domain.player.model.QueueCleaning
 import animiru.domain.player.model.VideoAspect
 import animiru.domain.player.model.VideoAspectOverride
 import dev.zacsweers.metro.AppScope
@@ -80,6 +81,24 @@ class PlayerPreferences(
         true,
     )
     val progressPreference: Preference<Float> = preferenceStore.getFloat("pref_progress_preference", 0.85F)
+
+    // AM (PLAYBACK_QUEUE) -->
+    val queueCleaning: Preference<QueueCleaning> = preferenceStore.getEnum(
+        "pref_queue_cleaning",
+        QueueCleaning.CLEAR_ON_CLOSE,
+    )
+
+    /**
+     * How many already-watched entries to keep behind the playing one before
+     * the queue trims them. 0 turns trimming off.
+     *
+     * Not a cap on the queue's length: nothing queued AHEAD is ever dropped,
+     * however much of it there is - see TrimQueue for why a cap was the wrong
+     * shape. The window exists so stepping back a couple of entries still
+     * finds them.
+     */
+    val queueAutoTrim: Preference<Int> = preferenceStore.getInt("pref_queue_auto_trim", 3)
+    // <-- AM (PLAYBACK_QUEUE)
     val defaultPlayerOrientationType: Preference<PlayerOrientation> = preferenceStore.getEnum(
         "pref_default_player_orientation_type_key",
         // AM (FREE_ORIENTATION_DEFAULT_FIX) -->

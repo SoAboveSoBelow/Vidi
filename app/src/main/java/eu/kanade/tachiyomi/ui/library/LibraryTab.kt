@@ -191,6 +191,8 @@ data object LibraryTab : Tab {
                     onChangeCategoryClicked = viewModel::openChangeCategoryDialog,
                     onMarkAsSeenClicked = { viewModel.markSeenSelection(true) },
                     onMarkAsUnseenClicked = { viewModel.markSeenSelection(false) },
+                    // AM (PLAYBACK_QUEUE)
+                    onAddToQueueClicked = viewModel::addSelectionToQueue,
                     onDownloadClicked = viewModel::performDownloadAction
                         .takeIf { state.selectedAnime.fastAll { !it.isLocal() } },
                     onDeleteClicked = viewModel::openDeleteAnimeDialog,

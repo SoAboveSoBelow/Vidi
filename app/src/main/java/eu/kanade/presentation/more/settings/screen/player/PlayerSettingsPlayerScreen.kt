@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import animiru.domain.player.model.PlayerOrientation
+import animiru.domain.player.model.QueueCleaning
 import animiru.domain.player.service.PlayerPreferences
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.presentation.more.settings.Preference
@@ -131,6 +132,8 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 },
                 title = stringResource(AYMR.strings.pref_category_player_orientation),
             ),
+            // AM (PLAYBACK_QUEUE)
+            getQueueGroup(playerPreferences = playerPreferences),
             getControlsGroup(playerPreferences = playerPreferences),
             getHosterGroup(playerPreferences = playerPreferences),
             getDisplayGroup(playerPreferences = playerPreferences),
@@ -145,6 +148,48 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
             ),
         )
     }
+
+    // AM (PLAYBACK_QUEUE) -->
+    @Composable
+    private fun getQueueGroup(playerPreferences: PlayerPreferences): Preference.PreferenceGroup {
+        val autoTrim by playerPreferences.queueAutoTrim.collectAsState()
+        return Preference.PreferenceGroup(
+            title = stringResource(AMMR.strings.am_pref_category_queue),
+            preferenceItems = listOf(
+                Preference.PreferenceItem.ListPreference(
+                    preference = playerPreferences.queueCleaning,
+                    // Ordered by how much they throw away, most first, so the
+                    // list reads as a scale rather than an arbitrary set.
+                    entries = mapOf(
+                        QueueCleaning.CLEAR_ON_EPISODE_SELECTION to
+                            stringResource(AMMR.strings.am_pref_queue_cleaning_on_selection),
+                        QueueCleaning.CLEAR_ON_CLOSE to
+                            stringResource(AMMR.strings.am_pref_queue_cleaning_on_close),
+                        QueueCleaning.KEEP to
+                            stringResource(AMMR.strings.am_pref_queue_cleaning_keep),
+                    ),
+                    title = stringResource(AMMR.strings.am_pref_queue_cleaning),
+                ),
+                // A number, not a list: this is "how far back to remember",
+                // which is a quantity a user can reason about directly, unlike
+                // the old cap on queue length - and it caps nothing, so there
+                // is no trade to steer them away from.
+                Preference.PreferenceItem.SliderPreference(
+                    value = autoTrim,
+                    valueRange = 0..10,
+                    title = stringResource(AMMR.strings.am_pref_queue_auto_trim),
+                    subtitle = stringResource(AMMR.strings.am_pref_queue_auto_trim_summary),
+                    valueString = if (autoTrim == 0) {
+                        stringResource(AMMR.strings.am_pref_queue_auto_trim_off)
+                    } else {
+                        autoTrim.toString()
+                    },
+                    onValueChanged = { playerPreferences.queueAutoTrim.set(it) },
+                ),
+            ),
+        )
+    }
+    // <-- AM (PLAYBACK_QUEUE)
 
     @Composable
     private fun getControlsGroup(playerPreferences: PlayerPreferences): Preference.PreferenceGroup {

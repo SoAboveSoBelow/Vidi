@@ -17,10 +17,12 @@ import eu.kanade.core.util.fastFilterNot
 // AM (MERGED_SOURCES) -->
 import aniyomi.domain.order.interactor.GetEpisodeOrder
 import aniyomi.domain.merge.repository.MergeChildRepository
+import aniyomi.domain.queue.interactor.AddToQueue
 import eu.kanade.domain.anime.interactor.MergeAnimeEntries
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.base.BasePreferences
+import eu.kanade.domain.category.interactor.GetCategorySelection
 import eu.kanade.domain.episode.interactor.SetSeenStatus
 import eu.kanade.presentation.anime.DownloadAction
 import eu.kanade.presentation.library.components.LibraryToolbarTitle
@@ -107,6 +109,10 @@ class LibraryViewModel(
     // AY -->
     private val getVisibleCategories: GetVisibleCategories,
     // <-- AY
+    // AM (BROWSE_SELECTION)
+    private val getCategorySelection: GetCategorySelection,
+    // AM (PLAYBACK_QUEUE)
+    private val addToQueue: AddToQueue,
     private val getTracksPerAnime: GetTracksPerAnime,
     private val getNextEpisodes: GetNextEpisodes,
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
@@ -609,36 +615,8 @@ class LibraryViewModel(
         }
     }
 
-    /**
-     * Returns the common categories for the given list of anime.
-     *
-     * @param animes the list of anime.
-     */
-    private suspend fun getCommonCategories(animes: List<Anime>): Collection<Category> {
-        if (animes.isEmpty()) return emptyList()
-        return animes
-            // AY -->
-            .map { getVisibleCategories.await(it.id).toSet() }
-            // <-- AY
-            .reduce { set1, set2 -> set1.intersect(set2) }
-    }
-
     suspend fun getNextUnseenEpisode(anime: Anime): Episode? {
         return getEpisodesByAnimeId.await(anime.id, applyScanlatorFilter = true).getNextUnseen(anime, downloadManager)
-    }
-
-    /**
-     * Returns the mix (non-common) categories for the given list of anime.
-     *
-     * @param animes the list of anime.
-     */
-    private suspend fun getMixCategories(animes: List<Anime>): Collection<Category> {
-        if (animes.isEmpty()) return emptyList()
-        // AY -->
-        val animeCategories = animes.map { getVisibleCategories.await(it.id).toSet() }
-        // <-- AY
-        val common = animeCategories.reduce { set1, set2 -> set1.intersect(set2) }
-        return animeCategories.flatten().distinct().subtract(common)
     }
 
     /**
@@ -807,6 +785,23 @@ class LibraryViewModel(
     /**
      * Marks animes' episodes seen status.
      */
+    // AM (PLAYBACK_QUEUE) -->
+    /**
+     * Queues the selection, one block per entry, in the order it is selected.
+     *
+     * Shaped like [markSeenSelection]: the selection is read on the caller's
+     * thread, the work runs non-cancellable so it survives the screen, and the
+     * selection clears at once rather than when the work finishes.
+     */
+    fun addSelectionToQueue() {
+        val selection = selectedAnime
+        viewModelScope.launchNonCancellable {
+            addToQueue.await(selection)
+        }
+        clearSelection()
+    }
+    // <-- AM (PLAYBACK_QUEUE)
+
     fun markSeenSelection(seen: Boolean) {
         val selection = selectedAnime
         viewModelScope.launchNonCancellable {
@@ -1002,18 +997,9 @@ class LibraryViewModel(
             // Hide the default category because it has a different behavior than the ones from db.
             val categories = state.value.displayedCategories.filter { it.id != 0L }
 
-            // Get indexes of the common categories to preselect.
-            val common = getCommonCategories(animeList)
-            // Get indexes of the mix categories to preselect.
-            val mix = getMixCategories(animeList)
-            val preselected = categories
-                .map {
-                    when (it) {
-                        in common -> CheckboxState.State.Checked(it)
-                        in mix -> CheckboxState.TriState.Exclude(it)
-                        else -> CheckboxState.State.None(it)
-                    }
-                }
+            // AM (BROWSE_SELECTION): the common/mixed/none decision is shared
+            // with browse's own selection now - see GetCategorySelection.
+            val preselected = getCategorySelection.await(animeList.map { it.id }, categories)
 
             dialog.update { Dialog.ChangeCategory(animeList, preselected) }
         }

@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.episode.repository.EpisodeRepository
@@ -73,6 +74,8 @@ class GetEpisodeOrder(
     // AM (MERGE_EPISODE_EXCLUSION) -->
     private val mergeEpisodeExclusionRepository: MergeEpisodeExclusionRepository,
     // <-- AM (MERGE_EPISODE_EXCLUSION)
+    // AM (PLAYBACK_QUEUE)
+    private val getAnime: GetAnime,
 ) {
 
     /**
@@ -100,7 +103,27 @@ class GetEpisodeOrder(
         return awaitResolved(host, applyScanlatorFilter).episodes
     }
 
-    suspend fun awaitResolved(host: Anime, applyScanlatorFilter: Boolean = false): ResolvedEpisodeOrder {
+    /**
+     * [extraOwnerIds] are entries that contribute episodes to this order
+     * without being part of the host: what the playback queue holds when it
+     * carries episodes of other entries.
+     *
+     * They are deliberately NOT added to the order itself - the caller decides
+     * where they go, and folding them into [default] would let the host's own
+     * sort interleave them. What they do get is every per-episode fact the
+     * host's own contributors get: the single-episode naming rule against
+     * their own title, their cover, their custom names. That rule is about
+     * what a SOURCE offers, so each extra owner contributes its full episode
+     * list here even when only one of its episodes is queued.
+     */
+    suspend fun awaitResolved(
+        host: Anime,
+        applyScanlatorFilter: Boolean = false,
+        // AM (PLAYBACK_QUEUE)
+        extraOwnerIds: List<Long> = emptyList(),
+    ): ResolvedEpisodeOrder {
+        // AM (PLAYBACK_QUEUE)
+        val extra = extraContributors(host, extraOwnerIds, applyScanlatorFilter)
         if (!host.isMerged()) {
             val episodes = episodeRepository.getEpisodeByAnimeId(host.id, applyScanlatorFilter)
             return resolve(
@@ -110,12 +133,16 @@ class GetEpisodeOrder(
                 childOrdering = emptyList(),
                 seasonRows = entrySeasonRepository.getByHostAnimeId(host.id),
                 // AM (EPISODE_NAMES) -->
-                episodesByChild = mapOf(host.id to episodes),
+                episodesByChild = mapOf(host.id to episodes) + extra.episodesByOwner,
                 // AM (EPISODE_NAMES): its own title, for the single-episode rule
                 // below - an ordinary entry is its own only source.
-                childTitles = mapOf(host.id to host.title),
-                customNames = episodeNameRepository.getByAnimeIds(listOf(host.id)),
+                childTitles = mapOf(host.id to host.title) + extra.titles,
+                customNames = episodeNameRepository.getByAnimeIds(listOf(host.id) + extraOwnerIds),
                 // <-- AM (EPISODE_NAMES)
+                // AM (PLAYBACK_QUEUE) -->
+                childThumbnails = extra.thumbnails,
+                contributors = mapOf(host.id to host) + extra.anime,
+                // <-- AM (PLAYBACK_QUEUE)
             )
         }
 
@@ -149,15 +176,19 @@ class GetEpisodeOrder(
             childOrdering = childOrdering,
             seasonRows = entrySeasonRepository.getByHostAnimeId(host.id),
             // AM (EPISODE_NAMES) -->
-            episodesByChild = episodesByChild,
-            childTitles = children.associate { it.id to it.title },
-            customNames = episodeNameRepository.getByAnimeIds(childOrdering.map { it.animeId }),
+            episodesByChild = episodesByChild + extra.episodesByOwner,
+            childTitles = children.associate { it.id to it.title } + extra.titles,
+            customNames = episodeNameRepository.getByAnimeIds(
+                childOrdering.map { it.animeId } + extraOwnerIds,
+            ),
             // <-- AM (EPISODE_NAMES)
             // AM (SINGLE_EPISODE_THUMBNAIL) -->
             childThumbnails = children.mapNotNull { child ->
                 child.thumbnailUrl?.let { child.id to it }
-            }.toMap(),
+            }.toMap() + extra.thumbnails,
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+            // AM (PLAYBACK_QUEUE)
+            contributors = children.associateBy { it.id } + extra.anime,
         )
     }
 
@@ -196,6 +227,8 @@ class GetEpisodeOrder(
                     // AM (EPISODE_NAMES): as above - its own title.
                     childTitles = mapOf(host.id to host.title),
                     customNames = customNames,
+                    // AM (PLAYBACK_QUEUE)
+                    contributors = mapOf(host.id to host),
                 )
                 // <-- AM (EPISODE_NAMES)
             }
@@ -273,10 +306,44 @@ class GetEpisodeOrder(
                         // AM (SINGLE_EPISODE_THUMBNAIL) -->
                         childThumbnails = childThumbnails,
                         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+                        // AM (PLAYBACK_QUEUE)
+                        contributors = children.associateBy { it.id },
                     )
                 }
             }
     }
+
+    // AM (PLAYBACK_QUEUE) -->
+    /** What an extra contributing entry adds to a resolve - see [awaitResolved]. */
+    private data class ExtraContributors(
+        val anime: Map<Long, Anime> = emptyMap(),
+        val episodesByOwner: Map<Long, List<Episode>> = emptyMap(),
+        val titles: Map<Long, String> = emptyMap(),
+        val thumbnails: Map<Long, String> = emptyMap(),
+    )
+
+    private suspend fun extraContributors(
+        host: Anime,
+        ownerIds: List<Long>,
+        applyScanlatorFilter: Boolean,
+    ): ExtraContributors {
+        if (ownerIds.isEmpty()) return ExtraContributors()
+        val owners = ownerIds.distinct()
+            .filterNot { it == host.id }
+            .mapNotNull { getAnime.await(it) }
+        if (owners.isEmpty()) return ExtraContributors()
+        return ExtraContributors(
+            anime = owners.associateBy { it.id },
+            episodesByOwner = owners.associate {
+                it.id to episodeRepository.getEpisodeByAnimeId(it.id, applyScanlatorFilter)
+            },
+            titles = owners.associate { it.id to it.title },
+            thumbnails = owners.mapNotNull { owner ->
+                owner.thumbnailUrl?.let { owner.id to it }
+            }.toMap(),
+        )
+    }
+    // <-- AM (PLAYBACK_QUEUE)
 
     private suspend fun defaultOrder(host: Anime, applyScanlatorFilter: Boolean): List<Episode> {
         return if (host.isMerged()) {
@@ -302,6 +369,8 @@ class GetEpisodeOrder(
         // AM (SINGLE_EPISODE_THUMBNAIL) -->
         childThumbnails: Map<Long, String> = emptyMap(),
         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+        // AM (PLAYBACK_QUEUE)
+        contributors: Map<Long, Anime> = emptyMap(),
     ): ResolvedEpisodeOrder {
         val overrideById = overrides.associateBy { it.episodeId }
         val orderingByChildId = childOrdering.associateBy { it.animeId }
@@ -385,9 +454,19 @@ class GetEpisodeOrder(
         val singleEpisodeChildTitles = episodesByChild.filterValues { it.size == 1 }
             .mapNotNull { (childId, episodes) -> childTitles[childId]?.let { episodes.single().id to it } }
             .toMap()
-        val displayNames = ordered.associate {
-            it.id to (customNames[it.id] ?: singleEpisodeChildTitles[it.id] ?: it.name)
-        }
+        // AM (PLAYBACK_QUEUE): keyed over every episode this resolve KNOWS
+        // about, not just the ones in the order. An extra contributor's
+        // episodes are deliberately absent from `ordered` (see awaitResolved's
+        // extraOwnerIds - folding them in would let the host's sort interleave
+        // them), so keying on `ordered` alone left them with no resolved name
+        // at all and callers fell through to the raw episode name. For a
+        // merged host episodesByChild already covers `ordered`, so nothing
+        // changes there; distinctBy keeps the ordered copy of a shared id.
+        val displayNames = (ordered + episodesByChild.values.flatten())
+            .distinctBy { it.id }
+            .associate {
+                it.id to (customNames[it.id] ?: singleEpisodeChildTitles[it.id] ?: it.name)
+            }
         // <-- AM (EPISODE_NAMES)
 
         // AM (SINGLE_EPISODE_THUMBNAIL) -->
@@ -432,6 +511,8 @@ class GetEpisodeOrder(
             thumbnailUrlByEpisodeId = singleEpisodeThumbnails,
             singleEpisodeIds = singleEpisodeIds,
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+            // AM (PLAYBACK_QUEUE)
+            contributors = contributors,
             isPreordered = applyOrderOverrides && (host.isMerged() || overrides.isNotEmpty()),
             hasOverrides = overrides.isNotEmpty(),
         )

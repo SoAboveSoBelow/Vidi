@@ -33,6 +33,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 // AM (MERGED_SOURCES) -->
 import aniyomi.domain.merge.repository.MergeChildRepository
+import aniyomi.domain.queue.repository.QueueRepository
 // <-- AM (MERGED_SOURCES)
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
@@ -243,6 +244,8 @@ class ClearDatabaseViewModel(
     // AM (MERGED_SOURCES) -->
     private val mergeChildRepository: MergeChildRepository,
     // <-- AM (MERGED_SOURCES)
+    // AM (PLAYBACK_QUEUE)
+    private val queueRepository: QueueRepository,
     private val database: Database,
     private val sourceManager: SourceManager,
 ) : ViewModel() {
@@ -260,6 +263,16 @@ class ClearDatabaseViewModel(
                     // rows the view never emitted, so it needs the same guard.
                     val mergeChildIds = mergeChildRepository.getAllChildAnimeIds()
                     // <-- AM (MERGED_SOURCES)
+                    // AM (PLAYBACK_QUEUE) -->
+                    // The queue is the second thing that can depend on a row
+                    // the library itself does not hold: queueing from Browse
+                    // references an entry that is not favorited, which is
+                    // exactly what this screen deletes, and queue_items
+                    // cascades with it. Unlike merge children these are NOT
+                    // excluded by animedeletableView, so they need guarding at
+                    // the top level too, not only in the recursion.
+                    val protectedIds = mergeChildIds + queueRepository.getAllQueuedAnimeIds()
+                    // <-- AM (PLAYBACK_QUEUE)
                     // AY -->
                     val items = list.groupBy { it.sourceId }
                         .map { (sourceId, deletableAnime) ->
@@ -272,10 +285,17 @@ class ClearDatabaseViewModel(
                             val orphaned = mutableListOf<Long>()
 
                             deletableAnime.forEach {
+                                // AM (PLAYBACK_QUEUE): left out entirely rather
+                                // than orphaned - a queued entry is not a season
+                                // child being detached from a parent, it is a row
+                                // that simply must not go. Keeping it out of `ids`
+                                // also keeps it out of the count this screen
+                                // offers to delete.
+                                if (it.animeId in protectedIds) return@forEach
                                 ids.add(it.animeId)
                                 if (it.fetchType == FetchType.Seasons) {
                                     val (childrenIds, orphanedIds) =
-                                        getDeletableChildren(it.animeId, mergeChildIds)
+                                        getDeletableChildren(it.animeId, protectedIds)
                                     ids.addAll(childrenIds)
                                     orphaned.addAll(orphanedIds)
                                 }
@@ -304,7 +324,7 @@ class ClearDatabaseViewModel(
      * able to be removed later.
      */
     // AM (MERGED_SOURCES) -->
-    // mergeChildIds: rows belonging to a merge are undeletable for the same
+    // protectedIds: rows belonging to a merge are undeletable for the same
     // reason animedeletableView excludes them - deleting one cascades its
     // merge_children row away and guts a merged entry that may still be in
     // the library. They're reported as orphaned instead, which detaches them
@@ -314,7 +334,11 @@ class ClearDatabaseViewModel(
     private suspend fun getDeletableChildren(
         animeId: Long,
         // AM (MERGED_SOURCES) -->
-        mergeChildIds: Set<Long>,
+        // AM (PLAYBACK_QUEUE): merge children AND queued entries - both are
+        // rows something still depends on. Reported as orphaned rather than
+        // deleted, which detaches them from the season parent being deleted
+        // and leaves the row intact, exactly as for a favorited child.
+        protectedIds: Set<Long>,
         // <-- AM (MERGED_SOURCES)
     ): Pair<List<Long>, List<Long>> {
         val ids = mutableListOf<Long>()
@@ -322,15 +346,15 @@ class ClearDatabaseViewModel(
         val children = getSourcesWithNonLibraryAnime.getDeletableChildren(animeId)
         children.forEach { c ->
             // AM (MERGED_SOURCES) -->
-            // c.favorite -> c.favorite || c.id in mergeChildIds.
-            if (c.favorite || c.id in mergeChildIds) {
+            // c.favorite -> c.favorite || c.id in protectedIds.
+            if (c.favorite || c.id in protectedIds) {
                 // <-- AM (MERGED_SOURCES)
                 orphaned.add(c.id)
             } else {
                 ids.add(c.id)
                 if (c.fetchType == FetchType.Seasons) {
                     // AM (MERGED_SOURCES) -->
-                    val (childrenIds, orphanedIds) = getDeletableChildren(c.id, mergeChildIds)
+                    val (childrenIds, orphanedIds) = getDeletableChildren(c.id, protectedIds)
                     // <-- AM (MERGED_SOURCES)
                     ids.addAll(childrenIds)
                     orphaned.addAll(orphanedIds)

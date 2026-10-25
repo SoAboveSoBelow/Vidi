@@ -1,0 +1,116 @@
+-- AM (PLAYBACK_QUEUE) -->
+-- What plays, in the order it plays. One row is one playable item, already
+-- resolved: the ordering decisions - a merged entry's union, seasons, custom
+-- episode order, shuffle - are all made by GetEpisodeOrder when the items are
+-- added, and this table stores the answer rather than the inputs to it. That
+-- is what keeps the queue able to hold a mix of entries, and PlaybackQueue
+-- able to stay the three-method interface it is (see PlaybackQueue.kt).
+--
+-- Each row is one of the shapes SessionKey has, which is why both id columns
+-- are nullable and why there is a uri column beside them:
+--
+--   * (anime_id, episode_id) non-null, uri NULL - an episode of a library
+--     entry: SessionKey.Library.
+--   * uri non-null, both ids NULL - a video opened from outside the app:
+--     SessionKey.External.
+--
+-- The CHECK is what makes that a real either/or rather than a convention. A
+-- row that satisfied neither branch would be an item the resolver cannot turn
+-- into a key, and would be discovered as a silently missing entry in the play
+-- order rather than as a failed write.
+--
+-- anime_id is stored alongside episode_id rather than derived from it so the
+-- queue can be read, grouped and displayed without joining episodes, and so
+-- an item knows which entry it was queued as - which for a merged entry is
+-- the merge parent, not the child that owns the episode.
+--
+-- Both foreign keys cascade: an entry removed from the database takes its
+-- queued episodes with it, which is the same thing happening to the queue that
+-- has already happened to the library.
+--
+-- position orders items WITHIN a block; the block's own position orders the
+-- blocks (see queue_blocks.sq). Sparse, like the block's, so inserting does
+-- not renumber what follows. Note that position is not unique and no id pair
+-- is either: the same episode may legitimately be queued twice, which is why
+-- identity here is the row's own _id and not any combination of its contents.
+CREATE TABLE queue_items(
+    _id INTEGER NOT NULL PRIMARY KEY,
+    block_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    anime_id INTEGER,
+    episode_id INTEGER,
+    uri TEXT,
+    FOREIGN KEY(block_id) REFERENCES queue_blocks(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(episode_id) REFERENCES episodes(_id)
+    ON DELETE CASCADE,
+    CHECK (
+        (anime_id IS NOT NULL AND episode_id IS NOT NULL AND uri IS NULL)
+        OR (anime_id IS NULL AND episode_id IS NULL AND uri IS NOT NULL)
+    )
+);
+
+CREATE INDEX queue_items_block_id_index ON queue_items(block_id);
+CREATE INDEX queue_items_anime_id_index ON queue_items(anime_id);
+CREATE INDEX queue_items_episode_id_index ON queue_items(episode_id);
+
+-- The whole queue in play order. The join is on the block only to sort by its
+-- position; nothing about the block's contents is read here.
+getAllItems:
+SELECT QI._id, QI.block_id, QI.position, QI.anime_id, QI.episode_id, QI.uri
+FROM queue_items QI
+JOIN queue_blocks QB ON QB._id = QI.block_id
+ORDER BY QB.position ASC, QI.position ASC;
+
+getItemsByBlockId:
+SELECT _id, block_id, position, anime_id, episode_id, uri
+FROM queue_items
+WHERE block_id = :blockId
+ORDER BY position ASC;
+
+insert:
+INSERT INTO queue_items(block_id, position, anime_id, episode_id, uri)
+VALUES (:blockId, :position, :animeId, :episodeId, :uri);
+
+setPosition:
+UPDATE queue_items
+SET position = :position
+WHERE _id = :itemId;
+
+delete:
+DELETE FROM queue_items
+WHERE _id = :itemId;
+
+deleteByBlockId:
+DELETE FROM queue_items
+WHERE block_id = :blockId;
+
+deleteAll:
+DELETE FROM queue_items;
+
+-- Used when the same episode is queued again: the old position is removed so
+-- the new one is its only one, which is what makes a re-queue move it to the
+-- end rather than leave a duplicate earlier in the order.
+deleteByEpisodeIds:
+DELETE FROM queue_items
+WHERE episode_id IN :episodeIds;
+
+countItems:
+SELECT count(*)
+FROM queue_items;
+
+-- Every anime the queue currently points at, favorited or not.
+--
+-- The queue is the second thing after merges that can depend on a row the
+-- library itself does not hold: queueing from Browse references an entry that
+-- is not favorited, and Clear Database deletes exactly those. Its
+-- animedeletableView excludes merge children by the same reasoning and needs
+-- this set alongside them - see ClearDatabaseScreen and
+-- merge_children.getAllChildAnimeIds. Unused until that guard is wired.
+getAllQueuedAnimeIds:
+SELECT DISTINCT anime_id
+FROM queue_items
+WHERE anime_id IS NOT NULL;
+-- <-- AM (PLAYBACK_QUEUE)

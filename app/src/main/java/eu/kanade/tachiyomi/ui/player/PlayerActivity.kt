@@ -761,7 +761,15 @@ class PlayerActivity : BaseActivity() {
             // saved above instead of the normal "already watched -> start at 0" rule.
             viewModel.forceResumeFromLastPosition = true
 
-            val initResult = viewModel.init(animeId, episodeId, hostList, hostIndex, vidIndex)
+            // AM (PLAYBACK_QUEUE)
+            val initResult = viewModel.init(
+                animeId,
+                episodeId,
+                hostList,
+                hostIndex,
+                vidIndex,
+                request.continuesQueue,
+            )
             if (!initResult.second.getOrDefault(false)) {
                 val exception = initResult.second.exceptionOrNull() ?: IllegalStateException(
                     "Unknown error",

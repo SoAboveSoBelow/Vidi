@@ -9,6 +9,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
+import aniyomi.domain.queue.interactor.AddToQueue
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
@@ -23,6 +24,7 @@ import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import eu.kanade.core.preference.asState
 import eu.kanade.domain.anime.interactor.UpdateAnime
+import eu.kanade.domain.category.interactor.GetCategorySelection
 import eu.kanade.domain.source.interactor.GetIncognitoState
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.interactor.AddTracks
@@ -46,6 +48,7 @@ import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeWithEpisodeCount
 import tachiyomi.domain.anime.model.toAnimeUpdate
 import tachiyomi.domain.category.interactor.GetCategories
+import tachiyomi.domain.category.interactor.GetVisibleCategories
 import tachiyomi.domain.category.interactor.SetAnimeCategories
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.episode.interactor.SetAnimeDefaultEpisodeFlags
@@ -65,6 +68,12 @@ class BrowseSourceViewModel(
     private val getRemoteAnime: GetRemoteAnime,
     private val getDuplicateLibraryAnime: GetDuplicateLibraryAnime,
     private val getCategories: GetCategories,
+    // AM (BROWSE_SELECTION) -->
+    private val getVisibleCategories: GetVisibleCategories,
+    private val getCategorySelection: GetCategorySelection,
+    // <-- AM (BROWSE_SELECTION)
+    // AM (PLAYBACK_QUEUE)
+    private val addToQueue: AddToQueue,
     private val setAnimeCategories: SetAnimeCategories,
     private val setAnimeDefaultEpisodeFlags: SetAnimeDefaultEpisodeFlags,
     private val getAnime: GetAnime,
@@ -340,7 +349,7 @@ class BrowseSourceViewModel(
                     val preselectedIds = getCategories.await(anime.id).map { it.id }
                     setDialog(
                         Dialog.ChangeAnimeCategory(
-                            anime,
+                            listOf(anime),
                             categories.mapAsCheckboxState { it.id in preselectedIds },
                         ),
                     )
@@ -348,6 +357,125 @@ class BrowseSourceViewModel(
             }
         }
     }
+
+    // AM (BROWSE_SELECTION) -->
+    fun toggleSelection(anime: Anime) {
+        state.update { current ->
+            current.copy(
+                selection = if (anime.id in current.selection) {
+                    current.selection - anime.id
+                } else {
+                    current.selection + anime.id
+                },
+            )
+        }
+    }
+
+    fun clearSelection() {
+        state.update { it.copy(selection = emptySet()) }
+    }
+
+    /**
+     * Queues the selection, one block per entry.
+     *
+     * A browse result has no episodes in the database yet, so [AddToQueue]
+     * records each block as pending and [QueueFillJob] fetches them - which is
+     * why this asks for a fill run rather than doing the fetching itself. An
+     * entry that HAS been opened before already has its episodes, and
+     * AddToQueue fills its block outright; the run then finds nothing pending
+     * and stops, so there is no need to work out which case applies here.
+     */
+    fun addSelectionToQueue(onRequestFill: () -> Unit) {
+        viewModelScope.launchIO {
+            val animeList = selectedAnime()
+            clearSelection()
+            if (animeList.isEmpty()) return@launchIO
+            addToQueue.await(animeList)
+            onRequestFill()
+        }
+    }
+
+    /**
+     * Resolved from the DB by id rather than from the pager: a selected result
+     * can scroll out of the loaded pages, and the row is already local by the
+     * time it renders (see networkToLocalAnime in the paging source).
+     */
+    private suspend fun selectedAnime(): List<Anime> {
+        return state.value.selection.mapNotNull { getAnime.await(it) }
+    }
+
+    /**
+     * The selection's one library action: the library screen's own
+     * multi-select category dialog, over browse's selection.
+     *
+     * A selection of one that is not in the library yet still goes through the
+     * duplicate check first, so the migrate option the old long-press offered
+     * stays reachable.
+     */
+    fun openChangeCategoryDialog() {
+        viewModelScope.launchIO {
+            val animeList = selectedAnime()
+            if (animeList.isEmpty()) {
+                clearSelection()
+                return@launchIO
+            }
+
+            val single = animeList.singleOrNull()
+            if (single != null && !single.favorite) {
+                val duplicates = getDuplicateLibraryAnime(single)
+                if (duplicates.isNotEmpty()) {
+                    clearSelection()
+                    setDialog(Dialog.AddDuplicateAnime(single, duplicates))
+                    return@launchIO
+                }
+            }
+
+            // No categories to show means no dialog to show them in, so this
+            // falls back to the per-entry add the long-press always used.
+            val categories = getCategories()
+            if (categories.isEmpty()) {
+                clearSelection()
+                animeList.filterNot { it.favorite }.forEach { addFavorite(it) }
+                return@launchIO
+            }
+
+            val preselected = getCategorySelection.await(animeList.map { it.id }, categories)
+            clearSelection()
+            setDialog(Dialog.ChangeAnimeCategory(animeList, preselected))
+        }
+    }
+
+    /**
+     * The dialog's result, per entry, through the same two calls the anime and
+     * history screens use for it (moveAnimeToCategoriesAndAddToLibrary):
+     * categories first, then favorite if it is not already.
+     *
+     * [include] and [exclude] are the dialog's own lists. A category left on
+     * the dash is in neither and keeps whatever each entry had, which is what
+     * [exclude] rather than "everything not included" is for.
+     *
+     * The one thing with no existing counterpart is the last line: nothing
+     * anywhere else in the app takes an entry back OUT of the library from a
+     * category dialog. It is here because the bar has no separate remove
+     * action, so clearing an entry's last category has to be what removes it.
+     */
+    fun confirmCategorySelection(animeList: List<Anime>, include: List<Long>, exclude: List<Long>) {
+        viewModelScope.launchIO {
+            animeList.forEach { anime ->
+                val categoryIds = getVisibleCategories.await(anime.id)
+                    .map { it.id }
+                    .subtract(exclude.toSet())
+                    .plus(include)
+                    .toList()
+
+                setAnimeCategories.await(anime.id, categoryIds)
+
+                if (anime.favorite == categoryIds.isNotEmpty()) return@forEach
+                updateAnime.awaitUpdateFavorite(anime.id, categoryIds.isNotEmpty())
+            }
+        }
+    }
+    // <-- AM (BROWSE_SELECTION)
 
     /**
      * Get user categories.
@@ -411,11 +539,14 @@ class BrowseSourceViewModel(
 
     sealed interface Dialog {
         data object Filter : Dialog
-        data class RemoveAnime(val anime: Anime) : Dialog
+
         data class AddDuplicateAnime(val anime: Anime, val duplicates: List<AnimeWithEpisodeCount>) : Dialog
         data class ChangeAnimeCategory(
-            val anime: Anime,
-            val initialSelection: List<CheckboxState.State<Category>>,
+            val animeList: List<Anime>,
+            // AM (BROWSE_SELECTION): CheckboxState rather than its State
+            // subtype, because a selection can leave a category in the mixed
+            // TriState the dialog already knows how to render.
+            val initialSelection: List<CheckboxState<Category>>,
         ) : Dialog
         data class Migrate(val target: Anime, val current: Anime) : Dialog
     }
@@ -428,7 +559,12 @@ class BrowseSourceViewModel(
         val dialog: Dialog? = null,
         // AM (MERGED_SOURCES)
         val mergeChildIds: Set<Long> = emptySet(),
+        // AM (BROWSE_SELECTION)
+        val selection: Set<Long> = emptySet(),
     ) {
         val isUserQuery get() = listing is Listing.Search && !listing.query.isNullOrEmpty()
+
+        // AM (BROWSE_SELECTION)
+        val selectionMode get() = selection.isNotEmpty()
     }
 }

@@ -302,3 +302,25 @@ enum class BottomPlayerButton(val stringRes: StringResource) {
     // <-- AM (CAST)
 }
 // <-- AM (BOTTOM_PLAYER_BUTTONS)
+
+// AM (PLAYBACK_QUEUE) -->
+/** When the playback queue empties itself - see PlayerPreferences.queueCleaning. */
+enum class QueueCleaning {
+    /**
+     * Emptied when the app is next started fresh: the process is gone, the
+     * playback notification with it, so nothing is mid-session and the queue
+     * the user left behind is stale.
+     */
+    CLEAR_ON_CLOSE,
+
+    /**
+     * Emptied when an episode is picked from an entry, which starts a new
+     * queue from that entry. Navigating within the player's own playlist is
+     * not a pick - that is moving through the queue, not replacing it.
+     */
+    CLEAR_ON_EPISODE_SELECTION,
+
+    /** Never emptied on its own. */
+    KEEP,
+}
+// <-- AM (PLAYBACK_QUEUE)

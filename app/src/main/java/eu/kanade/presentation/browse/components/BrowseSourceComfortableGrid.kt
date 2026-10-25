@@ -27,6 +27,8 @@ fun BrowseSourceComfortableGrid(
     contentPadding: PaddingValues,
     onAnimeClick: (Anime) -> Unit,
     onAnimeLongClick: (Anime) -> Unit,
+    // AM (BROWSE_SELECTION)
+    selection: Set<Long> = emptySet(),
 ) {
     LazyVerticalGrid(
         columns = columns,
@@ -48,6 +50,8 @@ fun BrowseSourceComfortableGrid(
                 inMerge = anime.id in mergeChildIds,
                 onClick = { onAnimeClick(anime) },
                 onLongClick = { onAnimeLongClick(anime) },
+                // AM (BROWSE_SELECTION)
+                isSelected = anime.id in selection,
             )
         }
 
@@ -66,6 +70,8 @@ private fun BrowseSourceComfortableGridItem(
     inMerge: Boolean,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = onClick,
+    // AM (BROWSE_SELECTION)
+    isSelected: Boolean = false,
 ) {
     AnimeComfortableGridItem(
         title = anime.title,
@@ -91,5 +97,7 @@ private fun BrowseSourceComfortableGridItem(
         },
         onLongClick = onLongClick,
         onClick = onClick,
+        // AM (BROWSE_SELECTION)
+        isSelected = isSelected,
     )
 }

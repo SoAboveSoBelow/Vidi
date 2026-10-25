@@ -56,6 +56,9 @@ fun BrowseSourceContent(
     // entry in the library. Defaulted so the screens that pick a migration
     // target, where merge membership says nothing useful, need not supply it.
     mergeChildIds: Set<Long> = emptySet(),
+    // AM (BROWSE_SELECTION): defaulted for the same reason - a migration
+    // target picker has nothing to select across.
+    selection: Set<Long> = emptySet(),
 ) {
     val context = LocalContext.current
 
@@ -134,6 +137,8 @@ fun BrowseSourceContent(
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (BROWSE_SELECTION)
+                selection = selection,
             )
         }
         LibraryDisplayMode.List -> {
@@ -148,6 +153,8 @@ fun BrowseSourceContent(
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (BROWSE_SELECTION)
+                selection = selection,
             )
         }
         LibraryDisplayMode.CompactGrid, LibraryDisplayMode.CoverOnlyGrid -> {
@@ -159,6 +166,8 @@ fun BrowseSourceContent(
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (BROWSE_SELECTION)
+                selection = selection,
             )
         }
     }

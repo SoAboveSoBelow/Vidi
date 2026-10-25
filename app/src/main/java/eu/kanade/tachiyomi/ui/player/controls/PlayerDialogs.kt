@@ -22,7 +22,8 @@ fun PlayerDialogs(
     dialogShown: Dialogs,
 
     // Episode list
-    episodeDisplayMode: Long?,
+    // AM (PLAYBACK_QUEUE)
+    episodeDisplayModeOf: (Episode) -> Long?,
     // AM (PLAYLIST_SEARCH_SCOPE) -->
     currentEpisodeId: Long?,
     episodeList: List<Episode>,
@@ -83,7 +84,7 @@ fun PlayerDialogs(
         // <-- AM (EXTERNAL_FOLDER_GRANT)
         Dialogs.EpisodeList -> {
             EpisodeListDialog(
-                displayMode = episodeDisplayMode,
+                displayModeOf = episodeDisplayModeOf,
                 // AM (PLAYLIST_SEARCH_SCOPE) -->
                 currentEpisodeId = currentEpisodeId,
                 episodeList = episodeList,

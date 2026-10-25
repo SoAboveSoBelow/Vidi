@@ -14,7 +14,9 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import animiru.domain.player.model.QueueCleaning
 import animiru.domain.player.service.PlayerPreferences
+import aniyomi.domain.queue.repository.QueueRepository
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
@@ -64,6 +66,7 @@ import mihon.core.migration.Migrator
 import org.conscrypt.Conscrypt
 import tachiyomi.cast.CastManager
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.util.system.logcat
@@ -88,6 +91,10 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
     @Inject private lateinit var networkPreferences: NetworkPreferences
 
     @Inject private lateinit var uiPreferences: UiPreferences
+
+    // AM (PLAYBACK_QUEUE): playerPreferences is already injected below, for
+    // the cast setup.
+    @Inject private lateinit var queueRepository: QueueRepository
 
     @Inject private lateinit var coverCache: CoverCache
 
@@ -175,6 +182,17 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
                 }
             }
             .launchIn(scope)
+
+        // AM (PLAYBACK_QUEUE) -->
+        // "Clear on close" means clear on the next fresh start. There is no
+        // close to hook: the process can be killed at any time, so the only
+        // reliable signal that the user has finished with a queue is the app
+        // starting again with no session behind it - which is exactly here,
+        // in a process that has just been created.
+        if (playerPreferences.queueCleaning.get() == QueueCleaning.CLEAR_ON_CLOSE) {
+            scope.launchIO { queueRepository.clear() }
+        }
+        // <-- AM (PLAYBACK_QUEUE)
 
         setAppCompatDelegateThemeMode(uiPreferences.themeMode.get())
 

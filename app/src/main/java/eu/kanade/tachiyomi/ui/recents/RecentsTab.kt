@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import animiru.domain.player.service.PlayerPreferences
+import aniyomi.domain.queue.interactor.GetQueueResumePoint
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.Navigator
 import cafe.adriel.voyager.navigator.currentOrThrow
@@ -52,6 +53,8 @@ import eu.kanade.tachiyomi.ui.history.HistoryHalfTab
 import eu.kanade.tachiyomi.ui.history.HistoryViewModel
 import eu.kanade.tachiyomi.ui.history.resumeLastEpisodeSeenEvent
 import eu.kanade.tachiyomi.ui.main.MainActivity
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
+import eu.kanade.tachiyomi.ui.player.SessionKey
 import eu.kanade.tachiyomi.ui.updates.AnimeUpdatesHalfTab
 import eu.kanade.tachiyomi.ui.updates.UpdatesSettingsViewModel
 import eu.kanade.tachiyomi.ui.updates.UpdatesViewModel
@@ -65,7 +68,6 @@ import mihon.app.di.appGraph
 import mihon.feature.upcoming.UpcomingScreen
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
-import tachiyomi.domain.episode.model.Episode
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -177,8 +179,10 @@ data object RecentsTab : Tab {
             (context as? MainActivity)?.ready = true
             // AM (TAB_HOLD) -->
             resumeLastEpisodeSeenEvent.receiveAsFlow().collectLatest {
-                openEpisode(context, historyViewModel.getNextEpisode(), snackbarHostState)
+                // AM (PLAYBACK_QUEUE)
+                openResumePoint(context, historyViewModel.getResumePoint(), snackbarHostState)
             }
+            // <-- AM (TAB_HOLD)
         }
     }
 }
@@ -189,16 +193,57 @@ private const val RECENTS_PAGE_HISTORY = 1
 private const val RECENTS_PAGE_COUNT = 2
 // <-- AM (RECENTS_SWIPE_PAGER)
 
-internal suspend fun openEpisode(context: Context, episode: Episode?, snackbarHostState: SnackbarHostState) {
+// AM (PLAYBACK_QUEUE) -->
+/**
+ * Picks up where the user left off, from the reselect gesture.
+ *
+ * Took an Episode and launched on episode.animeId. A queue item records the
+ * entry it was queued as, which for an episode of a merged entry is not the
+ * entry that owns the episode, so the pair travels from the resume point
+ * rather than being read back off the episode row - see
+ * GetQueueResumePoint.ResumePoint and AnimeScreen.openEpisode()'s
+ * targetAnimeId.
+ */
+internal suspend fun openResumePoint(
+    context: Context,
+    resumePoint: GetQueueResumePoint.ResumePoint?,
+    snackbarHostState: SnackbarHostState,
+) {
     val playerPreferences: PlayerPreferences = context.appGraph.playerPreferences
     val extPlayer = playerPreferences.alwaysUseExternalPlayer.get()
-    if (episode != null) {
-        MainActivity.startPlayerActivity(context, episode.animeId, episode.id, extPlayer)
-    } else {
-        snackbarHostState.showSnackbar(context.stringResource(AYMR.strings.no_next_episode))
+    // A session that is still loaded needs nothing worked out: what it is on
+    // IS where the user left off, down to the live position, and it outranks
+    // anything derived from stored progress - which lags it by a cadence tick
+    // and, for an episode already past the seen threshold, can read as
+    // finished while it is still on screen.
+    val holder = PlayerMediaHolder.current
+    val liveKey = holder?.takeIf { it.hasAdoptedPlayer }?.state?.value?.sessionKey as? SessionKey.Library
+    val liveTarget = liveKey?.let {
+        GetQueueResumePoint.ResumePoint(animeId = it.animeId, episodeId = it.episodeId)
     }
+    val target = liveTarget ?: resumePoint
+    if (target == null) {
+        snackbarHostState.showSnackbar(context.stringResource(AYMR.strings.no_next_episode))
+        return
+    }
+    // The same unpause the Continue button does, for the same reason and
+    // through the same process-wide holder rather than an Intent extra - see
+    // AnimeScreen.openEpisode()'s forceResume param. This gesture means
+    // "resume", so a live session already sitting paused on exactly this
+    // episode should play rather than just be brought back on screen.
+    if (holder != null && liveKey == SessionKey.Library(target.animeId, target.episodeId)) {
+        holder.setPaused(false)
+    }
+    MainActivity.startPlayerActivity(
+        context,
+        target.animeId,
+        target.episodeId,
+        extPlayer,
+        forceResume = true,
+        continuesQueue = true,
+    )
 }
-// <-- AM (TAB_HOLD)
+// <-- AM (PLAYBACK_QUEUE)
 
 // AM (RECENTS_FILTER_CHIP) -->
 @Composable

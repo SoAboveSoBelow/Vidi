@@ -30,6 +30,8 @@ fun BrowseSourceList(
     contentPadding: PaddingValues,
     onAnimeClick: (Anime) -> Unit,
     onAnimeLongClick: (Anime) -> Unit,
+    // AM (BROWSE_SELECTION)
+    selection: Set<Long> = emptySet(),
 ) {
     // AY -->
     val sourceListState = rememberLazyListState()
@@ -56,6 +58,8 @@ fun BrowseSourceList(
                     inMerge = anime.id in mergeChildIds,
                     onClick = { onAnimeClick(anime) },
                     onLongClick = { onAnimeLongClick(anime) },
+                    // AM (BROWSE_SELECTION)
+                    isSelected = anime.id in selection,
                     // AY -->
                     entries = entries,
                     containerHeight = containerHeightPx - topBarHeight,
@@ -81,6 +85,8 @@ private fun BrowseSourceListItem(
     inMerge: Boolean,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = onClick,
+    // AM (BROWSE_SELECTION)
+    isSelected: Boolean = false,
     // AY -->
     entries: Int,
     containerHeight: Int,
@@ -110,6 +116,8 @@ private fun BrowseSourceListItem(
         },
         onLongClick = onLongClick,
         onClick = onClick,
+        // AM (BROWSE_SELECTION)
+        isSelected = isSelected,
         // AY -->
         entries = entries,
         containerHeight = containerHeight,

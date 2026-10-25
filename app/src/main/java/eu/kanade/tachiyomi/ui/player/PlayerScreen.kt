@@ -402,7 +402,7 @@ fun PlayerScreen(
                         playerPreferences.playerSpeed.deleteAndGet().toFixed(2).toDouble(),
                     )
                 },
-                episodeDisplayMode = stateData.currentAnime?.displayMode,
+                episodeDisplayModeOf = stateData::displayModeOf,
                 currentEpisodeIndex = stateData.currentPlaylistIndex,
                 episodeList = stateData.currentPlaylist,
                 dateRelativeTime = relativeTime,
@@ -1126,7 +1126,7 @@ fun PlayerScreen(
                 // <-- AM (EXTERNAL_FOLDER_GRANT)
                 PlayerDialogs(
                     dialogShown = uiData.dialogShown,
-                    episodeDisplayMode = stateData.currentAnime?.displayMode,
+                    episodeDisplayModeOf = stateData::displayModeOf,
                     // AM (PLAYLIST_SEARCH_SCOPE) -->
                     // The unscoped list, so the search can widen as well as
                     // narrow, with the playing episode identified by id since a

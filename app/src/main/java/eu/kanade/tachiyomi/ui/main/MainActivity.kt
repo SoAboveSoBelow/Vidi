@@ -1679,6 +1679,8 @@ class MainActivity : BaseActivity() {
             // See AnimeScreen.openEpisode()'s forceResume param.
             forceResume: Boolean = false,
             // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
+            // AM (PLAYBACK_QUEUE)
+            continuesQueue: Boolean = false,
         ) {
             if (extPlayer) {
                 val sourceId = sourceId ?: (context.appGraph.getAnime.await(animeId)?.source ?: -1L)
@@ -1747,6 +1749,8 @@ class MainActivity : BaseActivity() {
                             hosterIndex = hosterIndex,
                             videoIndex = videoIndex,
                             forceResume = forceResume,
+                            // AM (PLAYBACK_QUEUE)
+                            continuesQueue = continuesQueue,
                         ),
                     )
                 }

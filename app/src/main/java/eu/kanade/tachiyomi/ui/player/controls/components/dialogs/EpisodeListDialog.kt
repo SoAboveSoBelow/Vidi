@@ -68,7 +68,9 @@ import kotlin.time.Instant
 
 @Composable
 fun EpisodeListDialog(
-    displayMode: Long?,
+    // AM (PLAYBACK_QUEUE): per episode, not per session - see
+    // PlayerStateData.displayModeOf.
+    displayModeOf: (Episode) -> Long?,
     // AM (PLAYLIST_SEARCH_SCOPE) -->
     /** The playing episode, identified rather than indexed - see itemScrollIndex. */
     currentEpisodeId: Long?,
@@ -146,11 +148,24 @@ fun EpisodeListDialog(
     }
     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
 
-    val reversedEpisodeList = remember(episodeList) { episodeList.reversed() }
-    val filteredEpisodeList = remember(reversedEpisodeList, searchQuery) {
+    // AM (PLAYBACK_QUEUE) -->
+    // This list used to be reversed for display, so the newest episode sat at
+    // the top and `next` walked upwards. The queue made that unworkable:
+    // queued episodes are appended to the end of the play order, and under a
+    // reversal they appear at the TOP of the list the user is told is what
+    // plays next.
+    //
+    // So the reversal is gone and the list reads top to bottom in play order,
+    // queue or not - the entry's episodes in the order setupEpisodeList put
+    // them (its sort mode, always ascending), then whatever is queued after
+    // them, newest addition last. `next` always moves down. One rule, no
+    // special case for a queue being present, and the order on screen is the
+    // order things actually play in.
+    val orderedEpisodeList = episodeList
+    val filteredEpisodeList = remember(orderedEpisodeList, searchQuery) {
         val query = searchQuery
         if (query.isBlank()) {
-            reversedEpisodeList
+            orderedEpisodeList
         } else {
             // AM (EPISODE_TAG_SEARCH) -->
             // The same grammar the library search bar uses, matched against
@@ -158,7 +173,7 @@ fun EpisodeListDialog(
             // match only when the episode has no resolvable entry, which is
             // the window before the playlist's owners have loaded.
             val queryNode = QueryNode.from(query)
-            reversedEpisodeList.filter { episode ->
+            orderedEpisodeList.filter { episode ->
                 val fields = searchFieldsOf(episode)
                 if (fields != null) {
                     queryNode.matches(fields)
@@ -175,7 +190,7 @@ fun EpisodeListDialog(
     // Positioned by the playing episode's id rather than by an index into the
     // playlist: episodeList is now the unscoped list, so a playlist index no
     // longer addresses the same element.
-    val itemScrollIndex = reversedEpisodeList
+    val itemScrollIndex = orderedEpisodeList
         .indexOfFirst { it.id != null && it.id == currentEpisodeId }
         .coerceAtLeast(0)
     // <-- AM (NOW_PLAYING_INDICATOR)
@@ -282,7 +297,7 @@ fun EpisodeListDialog(
                     val isCurrentEpisode = currentEpisodeId != null && episode.id == currentEpisodeId
                     // <-- AM (NOW_PLAYING_INDICATOR)
 
-                    val title = if (displayMode == Anime.EPISODE_DISPLAY_NUMBER) {
+                    val title = if (displayModeOf(episode) == Anime.EPISODE_DISPLAY_NUMBER) {
                         stringResource(
                             AYMR.strings.display_mode_episode,
                             formatEpisodeNumber(episode.episode_number.toDouble()),

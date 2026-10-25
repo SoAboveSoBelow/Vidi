@@ -24,7 +24,9 @@ import kotlin.time.Instant
 
 @Composable
 fun CastPlaylistSheet(
-    displayMode: Long?,
+    // AM (PLAYBACK_QUEUE): per episode, not per session - see
+    // PlayerStateData.displayModeOf.
+    displayModeOf: (Episode) -> Long?,
     currentEpisodeIndex: Int,
     episodeList: List<Episode>,
     dateRelativeFormat: Boolean,
@@ -53,7 +55,7 @@ fun CastPlaylistSheet(
         header = { TrackSheetTitle(stringResource(AYMR.strings.episodes)) },
         track = { episode ->
             val isCurrentEpisode = episode.id == episodeList[currentEpisodeIndex].id
-            val title = if (displayMode == Anime.EPISODE_DISPLAY_NUMBER) {
+            val title = if (displayModeOf(episode) == Anime.EPISODE_DISPLAY_NUMBER) {
                 stringResource(
                     AYMR.strings.display_mode_episode,
                     formatEpisodeNumber(episode.episode_number.toDouble()),

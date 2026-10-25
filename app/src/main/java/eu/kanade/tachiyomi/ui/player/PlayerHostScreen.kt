@@ -365,6 +365,8 @@ fun PlayerHostScreen(
                                 hostList = hostList,
                                 hostIndex = request.hosterIndex,
                                 vidIndex = request.videoIndex,
+                                // AM (PLAYBACK_QUEUE)
+                                continuesQueue = request.continuesQueue,
                             )
                             recordSettledTarget()
                         }
@@ -387,6 +389,8 @@ fun PlayerHostScreen(
                             hostList = hostList,
                             hostIndex = request.hosterIndex,
                             vidIndex = request.videoIndex,
+                            // AM (PLAYBACK_QUEUE)
+                            continuesQueue = request.continuesQueue,
                         )
                         recordSettledTarget()
                     }

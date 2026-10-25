@@ -28,6 +28,7 @@ import animiru.domain.player.model.ArtType
 import animiru.domain.player.model.BottomPlayerButton
 import animiru.domain.player.model.CustomKeyCodes
 import animiru.domain.player.model.PlayerOrientation
+import animiru.domain.player.model.QueueCleaning
 import animiru.domain.player.model.SetAsArt
 import animiru.domain.player.model.SingleActionGesture
 import animiru.domain.player.model.VideoAspect
@@ -43,10 +44,12 @@ import aniyomi.core.common.torrent.TorrentServerApi
 import aniyomi.core.common.torrent.TorrentServerUtils
 // AM (MERGED_SOURCES) -->
 import aniyomi.domain.episode.repository.EpisodeNameRepository
-import aniyomi.domain.merge.repository.MergeChildRepository
 // <-- AM (MERGED_SOURCES)
 // AM (CUSTOM_EPISODE_ORDER) -->
 import aniyomi.domain.order.interactor.GetEpisodeOrder
+import aniyomi.domain.queue.interactor.AddToQueue
+import aniyomi.domain.queue.interactor.TrimQueue
+import aniyomi.domain.queue.repository.QueueRepository
 import aniyomi.domain.season.model.EntrySeason
 // <-- AM (CUSTOM_EPISODE_ORDER)
 import com.yubyf.truetypeparser.TTFFile
@@ -249,9 +252,8 @@ class PlayerViewModel(
     private val getFavorites: GetFavorites,
     private val downloadProvider: DownloadProvider,
     // <-- AM (EXTERNAL_PREFERS_LIBRARY)
-    // AM (MERGED_SOURCES) -->
-    private val mergeChildRepository: MergeChildRepository,
-    // <-- AM (MERGED_SOURCES)
+    // AM (PLAYBACK_QUEUE): mergeChildRepository was here only to re-derive the
+    // playlist's owning entries, which GetEpisodeOrder now reports itself.
     // AM (CUSTOM_EPISODE_ORDER) -->
     private val getEpisodeOrder: GetEpisodeOrder,
     // AM (EPISODE_TAGS)
@@ -273,6 +275,11 @@ class PlayerViewModel(
     private val updateEpisode: UpdateEpisode,
     // AM (RECENT_EPISODE_POSITIONS) -->
     private val getEpisode: GetEpisode,
+    // AM (PLAYBACK_QUEUE) -->
+    private val queueRepository: QueueRepository,
+    private val addToQueue: AddToQueue,
+    private val trimQueue: TrimQueue,
+    // <-- AM (PLAYBACK_QUEUE)
     // <-- AM (RECENT_EPISODE_POSITIONS)
     private val trackEpisode: TrackEpisode,
     private val setAnimeViewerFlags: SetAnimeViewerFlags,
@@ -514,6 +521,9 @@ class PlayerViewModel(
         // AM (SHUFFLE_FOLLOWS_SEED) -->
         observeShuffleSeed()
         // <-- AM (SHUFFLE_FOLLOWS_SEED)
+
+        // AM (PLAYBACK_QUEUE)
+        observeQueue()
     }
 
     // AM (PLAYLIST_SEARCH_SCOPE) -->
@@ -1724,6 +1734,10 @@ class PlayerViewModel(
         hostList: String,
         hostIndex: Int,
         vidIndex: Int,
+        // AM (PLAYBACK_QUEUE)
+        // See PlaybackRequest.continuesQueue - a resume leaves the queue's
+        // order alone, where an open repositions what it opened.
+        continuesQueue: Boolean = false,
     ): Pair<InitResult, Result<Boolean>> {
         val defaultResult = InitResult(currentHosterList, qualityIndex, null)
         if (!needsInit(SessionKey.Library(animeId, initialEpisodeId))) {
@@ -1780,7 +1794,12 @@ class PlayerViewModel(
                 episodeId = initialEpisodeId
 
                 setupTrackers(anime.id)
-                setupEpisodeList(anime)
+                // AM (PLAYBACK_QUEUE): opening something is "add it to the
+                // queue and skip to it", so its block goes in after whatever
+                // is playing - unless this is the queue being resumed, which
+                // is the one case where the order is already what the user
+                // asked for.
+                setupEpisodeList(anime, repositionQueueBlock = !continuesQueue)
 
                 val episode = stateData.value.currentPlaylist.firstOrNull { it.id == episodeId }
                     ?: throw ExceptionWithStringResource("No episode loaded", AYMR.strings.no_episode_loaded)
@@ -1861,12 +1880,119 @@ class PlayerViewModel(
         }
     }
 
+    // AM (PLAYBACK_QUEUE) -->
+    /**
+     * Writes [episodes] as [anime]'s block in the queue.
+     *
+     * [reposition] is an open: the block is placed directly after whatever is
+     * playing - or first, when nothing is - through AddToQueue, which also
+     * drops its previous position so re-opening moves rather than duplicates. Picking something to watch
+     * interrupts the queue, so it goes next and the rest stays ahead of it,
+     * rather than being appended behind everything already lined up.
+     *
+     * Without it the block is rewritten where it already sits, so a rebuild -
+     * a shuffle-seed change, the queue changing elsewhere - cannot reorder the
+     * queue under the user.
+     */
+    private suspend fun syncQueueBlock(anime: Anime, episodes: List<Episode>, reposition: Boolean) {
+        val episodeIds = episodes.mapNotNull { it.id }
+        if (episodeIds.isEmpty()) return
+
+        val existing = queueRepository.getBlocks().filter { it.animeId == anime.id }
+        if (reposition || existing.isEmpty()) {
+            // currentEpisode is still the PREVIOUS episode here: the open path
+            // sets the playlist up before setupEpisode switches to the new
+            // one, which is exactly the anchor wanted. Null on a fresh
+            // session, where appending is the only option anyway.
+            addToQueue.awaitEpisodeIdsNext(
+                anime = anime,
+                episodeIds = episodeIds,
+                afterEpisodeId = stateData.value.currentEpisode?.id,
+            )
+            return
+        }
+        // Several blocks for one entry is possible - it was queued, then
+        // opened. The first keeps its place; the rest are duplicates an append
+        // left behind, and they go.
+        addToQueue.refreshBlock(existing.first().id, anime, episodeIds)
+        existing.drop(1).forEach { queueRepository.removeBlock(it.id) }
+    }
+
+    /** The queue, in play order, as playlist entries. */
+    private suspend fun queueEpisodes(): List<Episode> {
+        return queueRepository.getItems()
+            .mapNotNull { it.episodeId }
+            .distinct()
+            .mapNotNull { getEpisode.await(it)?.toDbEpisode() }
+    }
+
+    /**
+     * The entries the queue draws on.
+     *
+     * Read off the queue rows directly: an item records the entry it was
+     * queued as, so this needs no episode lookups.
+     */
+    private suspend fun queuedOwnerIds(): List<Long> {
+        return queueRepository.getItems().mapNotNull { it.animeId }.distinct()
+    }
+
+    /** The queue's episode ids, in play order - see [PlayerStateData.playlistQueueIds]. */
+    private suspend fun queueIds(): List<Long> {
+        return queueRepository.getItems().mapNotNull { it.episodeId }.distinct()
+    }
+
+    /**
+     * Keeps the playlist following the queue.
+     *
+     * The same shape as [observeShuffleSeed], and for the same reason: the
+     * playlist is derived from the queue at setup time, sessions are
+     * service-owned and outlive the player UI, so queueing something while
+     * playback is running left the playlist built before the addition. Compared
+     * against the ids the playlist was actually built with rather than by
+     * counting emissions - the flow replays its current value on subscribe,
+     * and a count-based skip would break the moment this resubscribes or the
+     * session changes anime.
+     *
+     * [rebuildPlaylistPreservingCurrent] re-anchors the index on the episode
+     * that is playing, so nothing about playback is touched: only what comes
+     * next changes.
+     */
+    private fun observeQueue() {
+        viewModelScope.launchIO {
+            queueRepository.getItemsAsFlow()
+                .map { items -> items.mapNotNull { it.episodeId }.distinct() }
+                .distinctUntilChanged()
+                .collectLatest { ids ->
+                    if (stateData.value.currentAnime == null) return@collectLatest
+                    if (ids != stateData.value.playlistQueueIds) {
+                        rebuildPlaylistPreservingCurrent()
+                    }
+                }
+        }
+    }
+    // <-- AM (PLAYBACK_QUEUE)
+
     private suspend fun setupTrackers(animeId: Long) {
         val tracks = getTracks.await(animeId)
         updateStateData { it.copy(hasTrackers = tracks.isNotEmpty()) }
     }
 
-    private suspend fun setupEpisodeList(anime: Anime) {
+    /**
+     * Builds the session's play order.
+     *
+     * AM (PLAYBACK_QUEUE): the queue IS that order. This entry's own episodes
+     * are written into the queue as its block - in the order worked out below,
+     * which is the entry's sort, shuffle and filters exactly as before - and
+     * the playlist is then read back from the queue so everything already
+     * queued plays in one list with it.
+     *
+     * [repositionQueueBlock] separates opening something from rebuilding the
+     * playlist under it. Opening is "add to the queue and skip to it", so the
+     * block is placed after whatever is playing; a rebuild (a shuffle-seed
+     * change, the queue changing elsewhere) must leave the block where it is
+     * and only refresh its contents.
+     */
+    private suspend fun setupEpisodeList(anime: Anime, repositionQueueBlock: Boolean = false) {
         // AM (CUSTOM_EPISODE_ORDER) -->
         // One source of truth for playlist order - the merged union, an
         // ordinary entry's own episodes, and any custom order the user has
@@ -1881,16 +2007,24 @@ class PlayerViewModel(
         // playlist still matches the stored seed.
         val shuffleSeed = episodeShufflePreferences.seed(anime.id).get()
         // <-- AM (SHUFFLE_FOLLOWS_SEED)
-        val resolvedOrder = getEpisodeOrder.awaitResolved(anime)
+        // AM (PLAYBACK_QUEUE) -->
+        // The queue's other entries are declared as contributors to this
+        // resolve, so every per-episode fact it returns - display names and
+        // the single-episode rule, covers, custom names, the owning entry
+        // itself - already covers them. Nothing about queued episodes is
+        // special-cased below or merged in afterwards.
+        // Read before the write below, for the guard on the playing episode.
+        val liveQueueIds = queueIds()
+        val resolvedOrder = getEpisodeOrder.awaitResolved(anime, extraOwnerIds = queuedOwnerIds())
+        // <-- AM (PLAYBACK_QUEUE)
         val rawEpisodes = resolvedOrder.episodes
         val isPreordered = resolvedOrder.isPreordered
         // Each episode of a merged entry belongs to a child, so download
         // checks must resolve the episode's real entry, not the merge parent.
-        val ownerById = if (isMerged) {
-            mergeChildRepository.getChildrenByMergeParentId(anime.id).associateBy { it.id }
-        } else {
-            emptyMap()
-        }
+        // AM (PLAYBACK_QUEUE): from the resolve rather than a second query of
+        // the merge children, which is where this came from - and which could
+        // never have known about a queued episode's entry.
+        val ownerById = resolvedOrder.contributors
         // <-- AM (CUSTOM_EPISODE_ORDER)
         // AM (EPISODE_TAG_SEARCH) -->
         // One stub lookup per source, not per episode. Needed both by the
@@ -1972,8 +2106,17 @@ class PlayerViewModel(
         val scopeQuery = PlaylistSearchScope.queryFor(anime.id)
         // <-- AM (PLAYLIST_SEARCH_SCOPE)
 
+        // AM (PLAYBACK_QUEUE) -->
+        // The episode this session is being set up for may
+        // be a QUEUED one belonging to another entry, and `episodes` holds only
+        // this entry's own. Reached by playing into the queue and then anything
+        // rebuilding the playlist under it - a queue change, or a shuffle
+        // toggle - and before this guard it threw.
         val selectedEpisode = episodes.find { it.id == episodeId }
-            ?: error("Requested episode of id $episodeId not found in episode list")
+        if (selectedEpisode == null && episodeId !in liveQueueIds) {
+            error("Requested episode of id $episodeId not found in episode list")
+        }
+        // <-- AM (PLAYBACK_QUEUE)
 
         val filtered = episodes.filterNot {
             // AM (MERGED_SOURCES) -->
@@ -2023,7 +2166,10 @@ class PlayerViewModel(
                     )
         }.toMutableList()
 
-        if (filtered.all { it.id != episodeId }) {
+        // AM (PLAYBACK_QUEUE): only for an episode of this entry. A queued one
+        // is appended by the tail below, and forcing it in here would list it
+        // twice and inside the entry's own episodes rather than after them.
+        if (selectedEpisode != null && filtered.all { it.id != episodeId }) {
             filtered += listOf(selectedEpisode)
         }
 
@@ -2042,12 +2188,39 @@ class PlayerViewModel(
         // the episodes you were trying to reach were not in the list being
         // searched.
         val unscoped = filtered.toList()
+        // AM (PLAYBACK_QUEUE) -->
+        // This entry's block, then the whole queue as the playlist. The block
+        // carries `unscoped` - filters applied, search scope not - so the
+        // scope stays a live narrowing of the playlist below rather than
+        // something baked into stored rows.
+        //
+        // Episodes of OTHER entries need no special handling to play: merged
+        // entries already put foreign episodes in this list, and
+        // resolveEpisodeAnimeAndSource resolves each one's real anime and
+        // source from its own anime_id rather than from the session's. The
+        // session keeps reporting the entry it was opened on, exactly as it
+        // does while playing a merge child.
+        // Clear-on-episode-selection empties the queue at exactly this point:
+        // the user has picked an episode from an entry (which is what
+        // repositionQueueBlock marks), so the queue starts again from it.
+        // Navigating the player's own playlist does not come through here.
+        if (repositionQueueBlock &&
+            playerPreferences.queueCleaning.get() == QueueCleaning.CLEAR_ON_EPISODE_SELECTION
+        ) {
+            queueRepository.clear()
+        }
+        syncQueueBlock(anime, unscoped, reposition = repositionQueueBlock)
+        val queuePlaylist = queueEpisodes()
+        val playlistIds = queuePlaylist.mapNotNull { it.id }
+        // <-- AM (PLAYBACK_QUEUE)
+        // AM (PLAYBACK_QUEUE): over the queue playlist, not this entry's own
+        // list - the scope narrows what plays, and what plays is the queue.
         val scoped = if (scopeQuery.isBlank()) {
-            unscoped
+            queuePlaylist
         } else {
             val queryNode = QueryNode.from(scopeQuery)
             val hostSourceName = sourceManager.getOrStub(anime.source).name
-            unscoped.filter { episode ->
+            queuePlaylist.filter { episode ->
                 val owner = episode.anime_id?.let { ownerById[it] } ?: anime
                 queryNode.matches(
                     EpisodeSearchFields(
@@ -2065,7 +2238,18 @@ class PlayerViewModel(
                             ?: owner.genre.orEmpty(),
                     ),
                 )
-            }.let { if (it.any { episode -> episode.id == episodeId }) it else it + selectedEpisode }
+            }.let { scopedEpisodes ->
+                // AM (PLAYBACK_QUEUE): selectedEpisode is nullable now, for a
+                // session playing a QUEUED episode of another entry - see the
+                // lookup above. Null means the playing episode is not one of
+                // this entry's, so there is nothing for this fallback to
+                // rescue from the scope filter: the queue tail carries it.
+                when {
+                    selectedEpisode == null -> scopedEpisodes
+                    scopedEpisodes.any { episode -> episode.id == episodeId } -> scopedEpisodes
+                    else -> scopedEpisodes + selectedEpisode
+                }
+            }
         }
         // <-- AM (PLAYLIST_SEARCH_SCOPE)
 
@@ -2085,9 +2269,14 @@ class PlayerViewModel(
         }
         updateStateData {
             it.copy(
+                // AM (PLAYBACK_QUEUE) -->
                 currentPlaylist = scoped,
+                playlistQueueIds = playlistIds,
+                // <-- AM (PLAYBACK_QUEUE)
                 // AM (PLAYLIST_SEARCH_SCOPE) -->
-                playlistUnscoped = unscoped,
+                // AM (PLAYBACK_QUEUE): the queue before the scope narrows it -
+                // the dialog searches this, so it searches everything queued.
+                playlistUnscoped = queuePlaylist,
                 // <-- AM (PLAYLIST_SEARCH_SCOPE)
                 // AM (EPISODE_TAG_SEARCH) -->
                 playlistOwnerByAnimeId = ownerById,
@@ -3197,6 +3386,20 @@ class PlayerViewModel(
         // untouched instead of switching to it.
         syncHolderSessionState()
         // <-- AM (DUPLICATE_ACTIVITY_REINIT_FIX)
+
+        // AM (PLAYBACK_QUEUE) -->
+        // Trimming hangs off the same choke point, for the same reason: this
+        // is where every episode switch lands, so progression - the only thing
+        // that ever drops a queued entry - is observed here without a second
+        // mechanism watching for it.
+        // Launched rather than awaited: a switch must not wait on a cleanup,
+        // and a trim cut short by the next switch is simply redone from there.
+        episode.id?.let { episodeId ->
+            viewModelScope.launchIO {
+                trimQueue.await(episodeId, playerPreferences.queueAutoTrim.get())
+            }
+        }
+        // <-- AM (PLAYBACK_QUEUE)
     }
 
     fun setupPlayerOrientation() {
@@ -5782,6 +5985,8 @@ class PlayerViewModel(
         hostList: String,
         hostIndex: Int,
         vidIndex: Int,
+        // AM (PLAYBACK_QUEUE)
+        continuesQueue: Boolean = false,
     ) {
         if (stateData.value.currentAnime?.id == animeId) {
             // Same anime is changeEpisode()'s case - never let a caller
@@ -5801,14 +6006,16 @@ class PlayerViewModel(
             episodeChangeJob?.cancel()
             episodeChangeJob = viewModelScope.launch {
                 if (!rehostPlaylist(animeId)) {
-                    switchToAnime(animeId, episodeId, hostList, hostIndex, vidIndex)
+                    // AM (PLAYBACK_QUEUE)
+                    switchToAnime(animeId, episodeId, hostList, hostIndex, vidIndex, continuesQueue)
                 }
             }
             return
         }
         episodeChangeJob?.cancel()
         episodeChangeJob = viewModelScope.launch {
-            switchToAnime(animeId, episodeId, hostList, hostIndex, vidIndex)
+            // AM (PLAYBACK_QUEUE)
+            switchToAnime(animeId, episodeId, hostList, hostIndex, vidIndex, continuesQueue)
         }
     }
 
@@ -5825,6 +6032,8 @@ class PlayerViewModel(
         hostList: String,
         hostIndex: Int,
         vidIndex: Int,
+        // AM (PLAYBACK_QUEUE)
+        continuesQueue: Boolean = false,
     ) {
         // <-- AM (MERGED_SOURCES)
         // AM (LOAD_FAILURE_NOT_FATAL) -->
@@ -5876,6 +6085,8 @@ class PlayerViewModel(
             hostList = hostList,
             hostIndex = hostIndex,
             vidIndex = vidIndex,
+            // AM (PLAYBACK_QUEUE)
+            continuesQueue = continuesQueue,
         )
         logcat(LogPriority.INFO) {
             "CROSS_ANIME_IN_PLACE_SWITCH init() returned initResult=$initResult loadResult=$loadResult"
@@ -7962,6 +8173,18 @@ class PlayerViewModel(
         val incognitoMode: Boolean = false,
         val currentPlaylist: List<Episode> = emptyList(),
         val currentPlaylistIndex: Int = -1,
+        // AM (PLAYBACK_QUEUE) -->
+        /**
+         * The queue's episode ids as they were when this playlist was built -
+         * the same role [playlistShuffleSeed] plays for the shuffle. Compared
+         * against the live queue in observeQueue to tell whether the playlist
+         * still matches it.
+         *
+         * Every episode id in the queue, in order - which is now the whole
+         * playlist, so this and the playlist are built from the same read.
+         */
+        val playlistQueueIds: List<Long> = emptyList(),
+        // <-- AM (PLAYBACK_QUEUE)
         // AM (CUSTOM_EPISODE_ORDER) -->
         /**
          * Season of each playlist episode, or empty when the playlist has no
@@ -8079,6 +8302,28 @@ class PlayerViewModel(
             return episode.id?.let { playlistEpisodeNames[it] } ?: episode.name
         }
         // <-- AM (EPISODE_NAMES)
+
+        // AM (PLAYBACK_QUEUE) -->
+        /**
+         * Whether to show a number or a name for this episode, by its OWN
+         * entry's setting.
+         *
+         * The playlist used the session entry's mode for every row, which is
+         * right for a merged host - its children have no mode of their own
+         * that the user ever set - but wrong for a queued episode of another
+         * entry: in number mode it rendered "Episode 1" and never consulted
+         * [displayNameOf] at all, so the single-episode naming rule could not
+         * reach the row no matter what resolved it.
+         *
+         * Falls back to the session's entry, which is what every row got
+         * before, so an episode whose owner is not resolved yet behaves as it
+         * always did.
+         */
+        fun displayModeOf(episode: Episode): Long? {
+            val owner = episode.anime_id?.let { playlistOwnerByAnimeId[it] }
+            return owner?.displayMode ?: currentAnime?.displayMode
+        }
+        // <-- AM (PLAYBACK_QUEUE)
 
         // AM (EPISODE_TAG_SEARCH) -->
         /**

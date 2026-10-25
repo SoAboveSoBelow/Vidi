@@ -29,8 +29,27 @@ sealed interface PlaybackRequest {
     /** What this request will be playing, once loaded. */
     val sessionKey: SessionKey
 
-    /** See AnimeScreen.openEpisode()'s forceResume param - only "Continue" passes true. */
+    /**
+     * See AnimeScreen.openEpisode()'s forceResume param - only "Continue" and
+     * the Recents reselect gesture, the two actions that specifically mean
+     * "resume", pass true.
+     */
     val forceResume: Boolean
+
+    // AM (PLAYBACK_QUEUE) -->
+    /**
+     * Whether this request continues the queue rather than picking something.
+     *
+     * The distinction cannot be inferred downstream, which is why it travels
+     * here. Opening something is "queue it and skip to it", so its block is
+     * repositioned to play next and, under clear-on-episode-selection, the
+     * queue is emptied first (see PlayerViewModel.setupEpisodeList). Resuming
+     * is the opposite: the queue already says what to play and where, so it
+     * must be left exactly as it is - a resume that repositioned would pull
+     * its own entry in front of the items the user had lined up ahead of it.
+     */
+    val continuesQueue: Boolean
+    // <-- AM (PLAYBACK_QUEUE)
 
     data class Library(
         val animeId: Long,
@@ -39,6 +58,8 @@ sealed interface PlaybackRequest {
         val hosterIndex: Int = -1,
         val videoIndex: Int = -1,
         override val forceResume: Boolean = false,
+        // AM (PLAYBACK_QUEUE)
+        override val continuesQueue: Boolean = false,
     ) : PlaybackRequest {
         override val sessionKey: SessionKey
             get() = SessionKey.Library(animeId = animeId, episodeId = episodeId)
@@ -72,6 +93,8 @@ sealed interface PlaybackRequest {
         /** The app this was opened from, for naming where a save of it lands. */
         val appLabel: String? = null,
         override val forceResume: Boolean = false,
+        // AM (PLAYBACK_QUEUE)
+        override val continuesQueue: Boolean = false,
     ) : PlaybackRequest {
         override val sessionKey: SessionKey
             get() = SessionKey.External(uri = uri)
@@ -94,6 +117,8 @@ sealed interface PlaybackRequest {
         fun fromIntent(intent: Intent): PlaybackRequest? {
             val extras = intent.extras ?: return null
             val forceResume = extras.getBoolean(EXTRA_FORCE_RESUME, false)
+            // AM (PLAYBACK_QUEUE)
+            val continuesQueue = extras.getBoolean(EXTRA_CONTINUES_QUEUE, false)
             return when (extras.getString(EXTRA_KIND) ?: KIND_LIBRARY) {
                 KIND_LIBRARY -> {
                     val animeId = extras.getLong(EXTRA_ANIME_ID, -1L)
@@ -109,6 +134,8 @@ sealed interface PlaybackRequest {
                         hosterIndex = extras.getInt(EXTRA_HOST_INDEX, -1),
                         videoIndex = extras.getInt(EXTRA_VID_INDEX, -1),
                         forceResume = forceResume,
+                        // AM (PLAYBACK_QUEUE)
+                        continuesQueue = continuesQueue,
                     )
                 }
                 KIND_EXTERNAL -> {
@@ -120,6 +147,8 @@ sealed interface PlaybackRequest {
                         // AM (EXTERNAL_APP_LABEL)
                         appLabel = extras.getString(EXTRA_APP_LABEL)?.takeIf { it.isNotBlank() },
                         forceResume = forceResume,
+                        // AM (PLAYBACK_QUEUE)
+                        continuesQueue = continuesQueue,
                     )
                 }
                 else -> null
@@ -139,6 +168,8 @@ sealed interface PlaybackRequest {
  */
 fun PlaybackRequest.writeToIntent(intent: Intent): Intent = intent.apply {
     putExtra(EXTRA_FORCE_RESUME, forceResume)
+    // AM (PLAYBACK_QUEUE)
+    putExtra(EXTRA_CONTINUES_QUEUE, continuesQueue)
     when (this@writeToIntent) {
         is PlaybackRequest.Library -> {
             putExtra(EXTRA_KIND, KIND_LIBRARY)
@@ -174,6 +205,9 @@ private const val EXTRA_HOST_LIST = "hostList"
 private const val EXTRA_HOST_INDEX = "hostIndex"
 private const val EXTRA_VID_INDEX = "vidIndex"
 private const val EXTRA_FORCE_RESUME = "forceResume"
+
+// AM (PLAYBACK_QUEUE)
+private const val EXTRA_CONTINUES_QUEUE = "continuesQueue"
 private const val EXTRA_URI = "externalUri"
 private const val EXTRA_TITLE = "externalTitle"
 private const val EXTRA_POSITION_MS = "externalPositionMs"
