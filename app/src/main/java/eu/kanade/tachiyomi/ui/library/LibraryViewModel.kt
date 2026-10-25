@@ -793,6 +793,20 @@ class LibraryViewModel(
      * thread, the work runs non-cancellable so it survives the screen, and the
      * selection clears at once rather than when the work finishes.
      */
+    /**
+     * Queues one entry, without selecting it first - what a double tap does.
+     *
+     * A library entry has its episodes already, so nothing has to be fetched
+     * for it and no fill run is asked for; [AddToQueue] fills the block
+     * outright. Non-cancellable for the same reason as the selection action
+     * below: the write should survive the screen going away.
+     */
+    fun addAnimeToQueue(anime: Anime) {
+        viewModelScope.launchNonCancellable {
+            addToQueue.await(anime)
+        }
+    }
+
     fun addSelectionToQueue() {
         val selection = selectedAnime
         viewModelScope.launchNonCancellable {

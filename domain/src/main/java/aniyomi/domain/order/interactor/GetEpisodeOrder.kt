@@ -328,9 +328,27 @@ class GetEpisodeOrder(
         applyScanlatorFilter: Boolean,
     ): ExtraContributors {
         if (ownerIds.isEmpty()) return ExtraContributors()
+        // A queued MERGED entry is recorded by its parent, which owns no
+        // episodes of its own - every episode the queue holds for it belongs to
+        // a child. Resolving only the parent left those episodes with no
+        // contributor at all, so everything per-episode (the source's title,
+        // its cover, the single-episode naming rule) fell back to the session's
+        // host. The children are what actually contribute, so they are resolved
+        // alongside the parent; the parent stays because it is the entry the
+        // item was queued AS, which is a different question from which source
+        // an episode came from.
         val owners = ownerIds.distinct()
             .filterNot { it == host.id }
             .mapNotNull { getAnime.await(it) }
+            .flatMap { owner ->
+                if (owner.isMerged()) {
+                    listOf(owner) + mergeChildRepository.getChildrenByMergeParentId(owner.id)
+                } else {
+                    listOf(owner)
+                }
+            }
+            .distinctBy { it.id }
+            .filterNot { it.id == host.id }
         if (owners.isEmpty()) return ExtraContributors()
         return ExtraContributors(
             anime = owners.associateBy { it.id },

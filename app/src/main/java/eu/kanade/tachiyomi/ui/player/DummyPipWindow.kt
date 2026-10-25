@@ -167,6 +167,15 @@ class DummyPipActions(
     val onTogglePlayPause: () -> Unit,
     val onSkipPrevious: () -> Unit,
     val onSkipNext: () -> Unit,
+    // AM (QUEUE_SOURCE_STEP) -->
+    /**
+     * Double tap on the previous/next button: skip a whole queued source.
+     * Null when the queue holds only one, in which case a double tap on those
+     * buttons keeps its existing meaning - the window's size toggle.
+     */
+    val onSkipPreviousSource: (() -> Unit)?,
+    val onSkipNextSource: (() -> Unit)?,
+    // <-- AM (QUEUE_SOURCE_STEP)
     /** Called AFTER the exit morph has visually completed - flip isDummyPipActive false here. */
     val onExpand: () -> Unit,
     /** Pause + end the session UI (close button / swipe-down dismiss). */
@@ -2614,15 +2623,51 @@ fun DummyPipContainer(
                                         lastTapTime = 0L
                                         lastTapPosition = Offset.Unspecified
                                         lastDoubleTapTime = now
-                                        // Real PiP doesn't keep its buttons
-                                        // up through the resize: the
-                                        // double-tap hides the controls
-                                        // outright (snap, not fade - the
-                                        // reveal-shrink is instant anyway)
-                                        // and they stay hidden afterward
-                                        // until a fresh tap reveals them.
-                                        controlsShown = false
-                                        startToggleSize()
+                                        // AM (QUEUE_SOURCE_STEP) -->
+                                        // A double tap ON the previous/next
+                                        // button skips a source instead of
+                                        // toggling the window size. Guarded
+                                        // the same way the single tap below
+                                        // is - controls up and the reveal
+                                        // settled - because the regions are
+                                        // meaningless otherwise, and it falls
+                                        // through to the size toggle whenever
+                                        // the tap was not on one of those two
+                                        // buttons, which is every double tap
+                                        // that worked before this.
+                                        val sourceStepRegion = if (
+                                            controlsShown &&
+                                            !toggleRunning &&
+                                            abs(
+                                                controlsRevealScaleAnim.value - controlsRevealGrowFactor(),
+                                            ) < 0.01f
+                                        ) {
+                                            hitRegion(downPosition, overlayW, overlayH)
+                                        } else {
+                                            PipHitRegion.None
+                                        }
+                                        val sourceStep = when (sourceStepRegion) {
+                                            PipHitRegion.Previous -> currentActions.value.onSkipPreviousSource
+                                            PipHitRegion.Next -> currentActions.value.onSkipNextSource
+                                            else -> null
+                                        }
+                                        if (sourceStep != null) {
+                                            flashRegion = sourceStepRegion
+                                            flashTick++
+                                            sourceStep()
+                                            controlsRevision++
+                                        } else {
+                                            // <-- AM (QUEUE_SOURCE_STEP)
+                                            // Real PiP doesn't keep its buttons
+                                            // up through the resize: the
+                                            // double-tap hides the controls
+                                            // outright (snap, not fade - the
+                                            // reveal-shrink is instant anyway)
+                                            // and they stay hidden afterward
+                                            // until a fresh tap reveals them.
+                                            controlsShown = false
+                                            startToggleSize()
+                                        }
                                     } else if (now - lastDoubleTapTime <= DOUBLE_TAP_EXTRA_TAP_SUPPRESS_MS) {
                                         // Finger-bounce right after a
                                         // double-tap (see lastDoubleTapTime):

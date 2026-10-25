@@ -385,6 +385,20 @@ class BrowseSourceViewModel(
      * AddToQueue fills its block outright; the run then finds nothing pending
      * and stops, so there is no need to work out which case applies here.
      */
+    /**
+     * Queues one result, without selecting it first - what a double tap does.
+     *
+     * Goes through the same [AddToQueue] call and the same fill request as the
+     * selection action above rather than a path of its own: the only thing a
+     * double tap decides is WHICH entry, and one entry is a selection of one.
+     */
+    fun addAnimeToQueue(anime: Anime, onRequestFill: () -> Unit) {
+        viewModelScope.launchIO {
+            addToQueue.await(anime)
+            onRequestFill()
+        }
+    }
+
     fun addSelectionToQueue(onRequestFill: () -> Unit) {
         viewModelScope.launchIO {
             val animeList = selectedAnime()

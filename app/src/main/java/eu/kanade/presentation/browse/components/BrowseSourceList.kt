@@ -30,6 +30,8 @@ fun BrowseSourceList(
     contentPadding: PaddingValues,
     onAnimeClick: (Anime) -> Unit,
     onAnimeLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onAnimeDoubleClick: ((Anime) -> Unit)? = null,
     // AM (BROWSE_SELECTION)
     selection: Set<Long> = emptySet(),
 ) {
@@ -58,6 +60,8 @@ fun BrowseSourceList(
                     inMerge = anime.id in mergeChildIds,
                     onClick = { onAnimeClick(anime) },
                     onLongClick = { onAnimeLongClick(anime) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onAnimeDoubleClick?.let { handler -> { handler(anime) } },
                     // AM (BROWSE_SELECTION)
                     isSelected = anime.id in selection,
                     // AY -->
@@ -85,6 +89,8 @@ private fun BrowseSourceListItem(
     inMerge: Boolean,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = onClick,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: (() -> Unit)? = null,
     // AM (BROWSE_SELECTION)
     isSelected: Boolean = false,
     // AY -->
@@ -116,6 +122,8 @@ private fun BrowseSourceListItem(
         },
         onLongClick = onLongClick,
         onClick = onClick,
+        // AM (DOUBLE_TAP_QUEUE)
+        onDoubleClick = onDoubleClick,
         // AM (BROWSE_SELECTION)
         isSelected = isSelected,
         // AY -->

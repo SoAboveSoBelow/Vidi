@@ -41,6 +41,8 @@ fun RelatedAnimeRows(
     displayMode: LibraryDisplayMode,
     onRelatedClick: (Anime) -> Unit,
     onRelatedLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedDoubleClick: ((Anime) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     if (relations.isEmpty()) return
@@ -97,6 +99,9 @@ fun RelatedAnimeRows(
                                                     displayMode = displayMode,
                                                     onClick = { onRelatedClick(anime) },
                                                     onLongClick = { onRelatedLongClick(anime) },
+                                                    // AM (DOUBLE_TAP_QUEUE)
+                                                    onDoubleClick = onRelatedDoubleClick
+                                                        ?.let { handler -> { handler(anime) } },
                                                 )
                                             }
                                         }
@@ -136,6 +141,8 @@ fun RelatedAnimeRows(
                             displayMode = displayMode,
                             onClick = { onRelatedClick(anime) },
                             onLongClick = { onRelatedLongClick(anime) },
+                            // AM (DOUBLE_TAP_QUEUE)
+                            onDoubleClick = onRelatedDoubleClick?.let { handler -> { handler(anime) } },
                         )
                     }
                 }
@@ -150,6 +157,8 @@ private fun RelatedAnimeItem(
     displayMode: LibraryDisplayMode,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: (() -> Unit)? = null,
 ) {
     val coverAlpha = if (anime.favorite) CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha else 1f
 
@@ -165,6 +174,8 @@ private fun RelatedAnimeItem(
                 coverBadgeStart = { InLibraryBadge(enabled = anime.favorite) },
                 onClick = onClick,
                 onLongClick = onLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onDoubleClick,
             )
         }
         LibraryDisplayMode.CompactGrid -> {
@@ -175,6 +186,8 @@ private fun RelatedAnimeItem(
                 coverBadgeStart = { InLibraryBadge(enabled = anime.favorite) },
                 onClick = onClick,
                 onLongClick = onLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onDoubleClick,
             )
         }
         LibraryDisplayMode.CoverOnlyGrid -> {
@@ -184,6 +197,8 @@ private fun RelatedAnimeItem(
                 coverBadgeStart = { InLibraryBadge(enabled = anime.favorite) },
                 onClick = onClick,
                 onLongClick = onLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onDoubleClick,
             )
         }
     }

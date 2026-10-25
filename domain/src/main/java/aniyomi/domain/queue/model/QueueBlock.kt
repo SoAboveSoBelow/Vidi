@@ -13,6 +13,17 @@ data class QueueBlock(
     val position: Long,
     val animeId: Long?,
     val fillState: QueueFillState,
+    // AM (QUEUE_BLOCK_PROGRESS) -->
+    /**
+     * Where the user left this source in THIS queued run, or null when nothing
+     * in the block has played yet.
+     *
+     * What a step crossing into the block from a later one lands on - see
+     * queue_blocks.sq for why this is the queue's own memory rather than a
+     * history lookup.
+     */
+    val lastPlayedEpisodeId: Long? = null,
+    // <-- AM (QUEUE_BLOCK_PROGRESS)
 )
 
 /**

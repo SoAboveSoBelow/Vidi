@@ -139,6 +139,15 @@ fun PlayerControls(
     }
     // <-- AM (MEDIA_CONTROLS)
 
+    // AM (QUEUE_SOURCE_STEP) -->
+    // Offered only when the queue actually holds more than one source. With
+    // one, a double tap has nowhere to go, and a handler that does nothing
+    // would still cost every single tap the double-tap timeout.
+    val hasMultipleSources = remember(stateData.playlistBlockByEpisodeId) {
+        stateData.playlistBlockByEpisodeId.values.distinct().size > 1
+    }
+    // <-- AM (QUEUE_SOURCE_STEP)
+
     // AM (SYSTEM_BAR_CONTROLS_INSET) -->
     // When "show system status bar with controls" is on, PlayerControls' edge-to-edge
     // ConstraintLayout otherwise draws the top settings row and bottom seekbar right
@@ -364,6 +373,14 @@ fun PlayerControls(
                     hasNext = nextEnabled,
                     onSkipNext = { onPlayerEvent(PlayerEvent.NextEpisode(true)) },
                     // <-- AM (MEDIA_CONTROLS)
+                    // AM (QUEUE_SOURCE_STEP) -->
+                    onSkipPreviousSource = {
+                        onPlayerEvent(PlayerEvent.NextSource(false))
+                    }.takeIf { hasMultipleSources },
+                    onSkipNextSource = {
+                        onPlayerEvent(PlayerEvent.NextSource(true))
+                    }.takeIf { hasMultipleSources },
+                    // <-- AM (QUEUE_SOURCE_STEP)
                     isStopped = stateData.isStopped,
                     isLoading = pausedForCache == true || (coreIdle == true && !playbackData.paused),
                     isLoadingEpisode = uiData.isLoadingEpisode,
@@ -434,7 +451,16 @@ fun PlayerControls(
                 },
             ) {
                 TopLeftPlayerControls(
-                    animeTitle = uiData.animeTitle,
+                    // AM (PLAYLIST_SOURCE_IDENTITY) -->
+                    // The source the PLAYING episode came from, not the entry
+                    // the session was opened on: a playlist can run across a
+                    // merged entry's children and anything queued, and
+                    // uiData.animeTitle is written once per load, so it named
+                    // whichever entry started the session for the rest of it.
+                    animeTitle = stateData.currentEpisode
+                        ?.let(stateData::sourceTitleOf)
+                        ?: uiData.animeTitle,
+                    // <-- AM (PLAYLIST_SOURCE_IDENTITY)
                     // AM (EPISODE_NAMES) -->
                     // Resolved here rather than stored, so it matches the
                     // episode list and follows a rename made while this

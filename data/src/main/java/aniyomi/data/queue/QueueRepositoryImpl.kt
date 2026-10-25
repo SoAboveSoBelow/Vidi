@@ -91,6 +91,11 @@ class QueueRepositoryImpl(
         database.queue_blocksQueries.setFillState(fillState.value, blockId)
     }
 
+    // AM (QUEUE_BLOCK_PROGRESS)
+    override suspend fun setBlockLastPlayedEpisode(blockId: Long, episodeId: Long?) {
+        database.queue_blocksQueries.setLastPlayedEpisode(episodeId, blockId)
+    }
+
     override suspend fun setBlockOrder(orderedBlockIds: List<Long>) {
         database.transaction {
             orderedBlockIds.forEachIndexed { index, blockId ->
@@ -185,12 +190,16 @@ class QueueRepositoryImpl(
         position: Long,
         animeId: Long?,
         fillState: Long,
+        // AM (QUEUE_BLOCK_PROGRESS)
+        lastPlayedEpisodeId: Long?,
     ): QueueBlock {
         return QueueBlock(
             id = id,
             position = position,
             animeId = animeId,
             fillState = QueueFillState.from(fillState),
+            // AM (QUEUE_BLOCK_PROGRESS)
+            lastPlayedEpisodeId = lastPlayedEpisodeId,
         )
     }
 

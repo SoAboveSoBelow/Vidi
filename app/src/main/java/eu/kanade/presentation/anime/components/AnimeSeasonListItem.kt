@@ -24,6 +24,8 @@ fun AnimeSeasonListItem(
     item: AnimeSeasonItem,
     containerHeight: Int,
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)?,
     onClickContinueWatching: ((SeasonAnime) -> Unit)?,
     listItemModifier: Modifier = Modifier,
 ) {
@@ -60,6 +62,8 @@ fun AnimeSeasonListItem(
                 },
                 onLongClick = { onSeasonClicked(item.seasonAnime) },
                 onClick = { onSeasonClicked(item.seasonAnime) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onSeasonDoubleClicked?.let { handler -> { handler(item.seasonAnime) } },
                 onClickContinueWatching = if (onClickContinueWatching != null && item.showContinueOverlay) {
                     { onClickContinueWatching(item.seasonAnime) }
                 } else {
@@ -89,6 +93,8 @@ fun AnimeSeasonListItem(
                 },
                 onLongClick = { onSeasonClicked(item.seasonAnime) },
                 onClick = { onSeasonClicked(item.seasonAnime) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onSeasonDoubleClicked?.let { handler -> { handler(item.seasonAnime) } },
                 onClickContinueWatching = if (onClickContinueWatching != null && item.showContinueOverlay) {
                     { onClickContinueWatching(item.seasonAnime) }
                 } else {
@@ -116,6 +122,8 @@ fun AnimeSeasonListItem(
                 },
                 onLongClick = { onSeasonClicked(item.seasonAnime) },
                 onClick = { onSeasonClicked(item.seasonAnime) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onSeasonDoubleClicked?.let { handler -> { handler(item.seasonAnime) } },
                 onClickContinueWatching = if (onClickContinueWatching != null && item.showContinueOverlay) {
                     { onClickContinueWatching(item.seasonAnime) }
                 } else {

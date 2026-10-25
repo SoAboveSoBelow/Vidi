@@ -7,10 +7,13 @@ import androidx.compose.runtime.Composable
 import eu.kanade.presentation.anime.DuplicateAnimeDialog
 import eu.kanade.presentation.category.components.ChangeCategoryDialog
 import eu.kanade.tachiyomi.data.database.models.Episode
+import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.ui.player.Dialogs
+import eu.kanade.tachiyomi.ui.player.components.PlaylistSeasons
 import eu.kanade.tachiyomi.ui.player.controls.components.dialogs.EpisodeListDialog
 import eu.kanade.tachiyomi.ui.player.controls.components.dialogs.IntegerPickerDialog
 import mihon.feature.library.EpisodeSearchFields
+import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
@@ -38,6 +41,22 @@ fun PlayerDialogs(
     // <-- AM (EPISODE_NAMES)
     // AM (EPISODE_TAG_SEARCH) -->
     searchFieldsOf: (Episode) -> EpisodeSearchFields?,
+    // AM (PLAYLIST_LIBRARY_BADGE)
+    isFromLibraryEntry: (Episode) -> Boolean,
+    // AM (QUEUE_GROUPED_PLAYLIST) -->
+    blockOf: (Episode) -> Long?,
+    sourceTitleOf: (Episode) -> String?,
+    blockSeasons: Map<Long, PlaylistSeasons>,
+    blockLastPlayed: Map<Long, Long>,
+    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+    swipeStartAction: LibraryPreferences.EpisodeSwipeAction,
+    swipeEndAction: LibraryPreferences.EpisodeSwipeAction,
+    downloadStates: Map<Long, Download.State>,
+    onSeenClicked: (List<Episode>, Boolean) -> Unit,
+    onDownloadClicked: (Episode) -> Unit,
+    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+    onExpandSource: (Long) -> Unit,
+    // <-- AM (QUEUE_GROUPED_PLAYLIST)
     // <-- AM (EPISODE_TAG_SEARCH)
     // AM (PLAYLIST_SEARCH_SCOPE) -->
     playlistAnimeId: Long?,
@@ -99,6 +118,22 @@ fun PlayerDialogs(
                 // <-- AM (EPISODE_NAMES)
                 // AM (EPISODE_TAG_SEARCH) -->
                 searchFieldsOf = searchFieldsOf,
+                // AM (PLAYLIST_LIBRARY_BADGE)
+                isFromLibraryEntry = isFromLibraryEntry,
+                // AM (QUEUE_GROUPED_PLAYLIST) -->
+                blockOf = blockOf,
+                sourceTitleOf = sourceTitleOf,
+                blockSeasons = blockSeasons,
+                blockLastPlayed = blockLastPlayed,
+                // AM (PLAYLIST_SWIPE_ACTIONS) -->
+                swipeStartAction = swipeStartAction,
+                swipeEndAction = swipeEndAction,
+                downloadStates = downloadStates,
+                onSeenClicked = onSeenClicked,
+                onDownloadClicked = onDownloadClicked,
+                // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+                onExpandSource = onExpandSource,
+                // <-- AM (QUEUE_GROUPED_PLAYLIST)
                 // <-- AM (EPISODE_TAG_SEARCH)
                 // AM (PLAYLIST_SEARCH_SCOPE) -->
                 playlistAnimeId = playlistAnimeId,

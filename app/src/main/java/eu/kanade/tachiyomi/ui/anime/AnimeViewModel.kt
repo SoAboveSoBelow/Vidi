@@ -28,6 +28,7 @@ import aniyomi.domain.anime.model.SeasonAnime
 import aniyomi.domain.anime.model.SeasonDisplayMode
 // AM (MERGED_SOURCES) -->
 import aniyomi.domain.episode.repository.EpisodeNameRepository
+import aniyomi.domain.queue.interactor.AddToQueue
 import aniyomi.domain.merge.interactor.GetRemovedMergeEpisodes
 import aniyomi.domain.merge.interactor.RemoveEpisodeFromMerge
 import aniyomi.domain.merge.interactor.RemoveFromMerge
@@ -227,6 +228,8 @@ class AnimeViewModel(
     // AM (MERGED_SOURCES) -->
     private val mergeChildRepository: MergeChildRepository,
     // <-- AM (MERGED_SOURCES)
+    // AM (DOUBLE_TAP_QUEUE)
+    private val addToQueue: AddToQueue,
     // AM (CUSTOM_EPISODE_ORDER) -->
     private val getEpisodeOrder: GetEpisodeOrder,
     private val moveEpisodesInOrder: MoveEpisodesInOrder,
@@ -1519,6 +1522,24 @@ class AnimeViewModel(
     }
 
     // AY -->
+
+    // AM (DOUBLE_TAP_QUEUE) -->
+    /**
+     * Queues one entry - a season of this one, or a related result - as a
+     * double tap on it does.
+     *
+     * [onRequestFill] starts the fill worker, because either can be an entry
+     * nothing has fetched episodes for yet; AddToQueue records a block as
+     * pending in that case and the worker completes it. Non-cancellable so the
+     * write survives the screen being left straight afterwards.
+     */
+    fun addAnimeToQueue(anime: Anime, onRequestFill: () -> Unit) {
+        viewModelScope.launchNonCancellable {
+            addToQueue.await(anime)
+            onRequestFill()
+        }
+    }
+    // <-- AM (DOUBLE_TAP_QUEUE)
     suspend fun getNextUnseenEpisode(anime: Anime): Episode? {
         return getEpisodesByAnimeId.await(anime.id).getNextUnseen(anime, downloadManager)
     }

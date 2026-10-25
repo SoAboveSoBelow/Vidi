@@ -67,6 +67,16 @@ interface QueueRepository {
 
     suspend fun setBlockFillState(blockId: Long, fillState: QueueFillState)
 
+    // AM (QUEUE_BLOCK_PROGRESS) -->
+    /**
+     * Records where the user is in [blockId] - see [QueueBlock.lastPlayedEpisodeId].
+     *
+     * Null clears it, which is what a block being re-filled with a different
+     * set of episodes means: the remembered one may not be in it any more.
+     */
+    suspend fun setBlockLastPlayedEpisode(blockId: Long, episodeId: Long?)
+    // <-- AM (QUEUE_BLOCK_PROGRESS)
+
     /** Rewrites the order of the blocks, in the order given. */
     suspend fun setBlockOrder(orderedBlockIds: List<Long>)
 

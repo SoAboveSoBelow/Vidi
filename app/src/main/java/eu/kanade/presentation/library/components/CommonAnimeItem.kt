@@ -74,6 +74,8 @@ fun AnimeCompactGridItem(
     coverData: AnimeCoverModel,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: (() -> Unit)? = null,
     isSelected: Boolean = false,
     title: String? = null,
     onClickContinueWatching: (() -> Unit)? = null,
@@ -85,6 +87,8 @@ fun AnimeCompactGridItem(
         isSelected = isSelected,
         onClick = onClick,
         onLongClick = onLongClick,
+        // AM (DOUBLE_TAP_QUEUE)
+        onDoubleClick = onDoubleClick,
     ) {
         AnimeGridCover(
             cover = {
@@ -180,6 +184,8 @@ fun AnimeComfortableGridItem(
     title: String,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: (() -> Unit)? = null,
     isSelected: Boolean = false,
     titleMaxLines: Int = 2,
     coverAlpha: Float = 1f,
@@ -191,6 +197,8 @@ fun AnimeComfortableGridItem(
         isSelected = isSelected,
         onClick = onClick,
         onLongClick = onLongClick,
+        // AM (DOUBLE_TAP_QUEUE)
+        onDoubleClick = onDoubleClick,
     ) {
         Column {
             AnimeGridCover(
@@ -295,6 +303,16 @@ private fun GridItemSelectable(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     modifier: Modifier = Modifier,
+    // AM (DOUBLE_TAP_QUEUE) -->
+    /**
+     * Null where the surface has nothing for a double tap, and deliberately so
+     * rather than a no-op lambda: a non-null handler makes every single tap on
+     * the item wait out the double-tap timeout before it opens anything, since
+     * the gesture detector cannot know a second tap is not coming. Only the
+     * surfaces that actually offer the gesture pay for it.
+     */
+    onDoubleClick: (() -> Unit)? = null,
+    // <-- AM (DOUBLE_TAP_QUEUE)
     content: @Composable () -> Unit,
 ) {
     Box(
@@ -303,6 +321,8 @@ private fun GridItemSelectable(
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onDoubleClick,
             )
             .selectedOutline(isSelected = isSelected, color = MaterialTheme.colorScheme.secondary)
             .padding(4.dp),
@@ -336,6 +356,8 @@ fun AnimeListItem(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     badge: @Composable (RowScope.() -> Unit),
+    // AM (DOUBLE_TAP_QUEUE): see GridItemSelectable for why this is nullable.
+    onDoubleClick: (() -> Unit)? = null,
     isSelected: Boolean = false,
     coverAlpha: Float = 1f,
     onClickContinueWatching: (() -> Unit)? = null,
@@ -362,6 +384,8 @@ fun AnimeListItem(
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onDoubleClick,
             )
             // AY -->
             .padding(horizontal = 16.dp, vertical = 3.dp),

@@ -491,7 +491,17 @@ fun PlayerHostScreen(
     val playbackData by currentViewModel.playbackData.collectAsStateWithLifecycle()
     val dummyPipController = rememberDummyPipController()
 
-    val dummyPipActions = remember(currentViewModel) {
+    // AM (QUEUE_SOURCE_STEP) -->
+    // A key rather than a check inside the callbacks: whether the double tap
+    // is wired at all decides whether it steals the window's size-toggle
+    // gesture, so a queue of one source has to leave that gesture alone
+    // rather than consume it and do nothing.
+    val hasMultipleQueuedSources = remember(videoState.playlistBlockByEpisodeId) {
+        videoState.playlistBlockByEpisodeId.values.distinct().size > 1
+    }
+    // <-- AM (QUEUE_SOURCE_STEP)
+
+    val dummyPipActions = remember(currentViewModel, hasMultipleQueuedSources) {
         DummyPipActions(
             onTogglePlayPause = {
                 if (currentViewModel.playbackData.value.paused) {
@@ -502,6 +512,14 @@ fun PlayerHostScreen(
             },
             onSkipPrevious = { currentViewModel.nextEpisode(next = false) },
             onSkipNext = { currentViewModel.nextEpisode(next = true) },
+            // AM (QUEUE_SOURCE_STEP) -->
+            onSkipPreviousSource = {
+                currentViewModel.nextSource(next = false)
+            }.takeIf { hasMultipleQueuedSources },
+            onSkipNextSource = {
+                currentViewModel.nextSource(next = true)
+            }.takeIf { hasMultipleQueuedSources },
+            // <-- AM (QUEUE_SOURCE_STEP)
             // Called by DummyPipContainer only AFTER its exit morph has
             // visually completed - flipping this any earlier would swap the
             // video Box back to fillMaxSize mid-animation.

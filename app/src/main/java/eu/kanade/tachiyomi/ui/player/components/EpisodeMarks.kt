@@ -12,7 +12,10 @@ import androidx.compose.runtime.setValue
 import eu.kanade.tachiyomi.data.database.models.Episode
 
 /** One episode's marks, as a row draws them. */
-data class EpisodeMarks(val bookmarked: Boolean, val fillermarked: Boolean)
+// AM (PLAYLIST_SWIPE_ACTIONS): seen belongs here for the same reason the other
+// two do - it is written straight to the database and nothing tells the
+// player's list, so a row marked watched went on drawing itself unwatched.
+data class EpisodeMarks(val bookmarked: Boolean, val fillermarked: Boolean, val seen: Boolean)
 
 /**
  * Marks for the player's episode lists, which have no reactive source for them.
@@ -31,6 +34,8 @@ data class EpisodeMarks(val bookmarked: Boolean, val fillermarked: Boolean)
 class EpisodeMarkState(
     private val onBookmarkClicked: (Long?, Boolean) -> Unit,
     private val onFillermarkClicked: (Long?, Boolean) -> Unit,
+    // AM (PLAYLIST_SWIPE_ACTIONS)
+    private val onSeenClicked: (Long?, Boolean) -> Unit,
 ) {
     private var marks by mutableStateOf(emptyMap<Long, EpisodeMarks>())
     private val episodes = HashMap<Long, Episode>()
@@ -45,13 +50,13 @@ class EpisodeMarkState(
             val id = episode.id ?: return@mapNotNull null
             episodes[id] = episode
             if (id in marks) return@mapNotNull null
-            id to EpisodeMarks(episode.bookmark, episode.fillermark)
+            id to EpisodeMarks(episode.bookmark, episode.fillermark, episode.seen)
         }
         if (added.isNotEmpty()) marks = marks + added
     }
 
     fun marksOf(episode: Episode): EpisodeMarks {
-        return marks[episode.id] ?: EpisodeMarks(episode.bookmark, episode.fillermark)
+        return marks[episode.id] ?: EpisodeMarks(episode.bookmark, episode.fillermark, episode.seen)
     }
 
     fun setBookmark(episodeId: Long?, bookmarked: Boolean) {
@@ -64,12 +69,20 @@ class EpisodeMarkState(
         onFillermarkClicked(episodeId, fillermarked)
     }
 
+    // AM (PLAYLIST_SWIPE_ACTIONS)
+    fun setSeen(episodeId: Long?, seen: Boolean) {
+        update(episodeId) { it.copy(seen = seen) }
+        onSeenClicked(episodeId, seen)
+    }
+
     private fun update(episodeId: Long?, transform: (EpisodeMarks) -> EpisodeMarks) {
         val id = episodeId ?: return
         val episode = episodes[id]
         val current = marks[id] ?: EpisodeMarks(
             bookmarked = episode?.bookmark ?: false,
             fillermarked = episode?.fillermark ?: false,
+            // AM (PLAYLIST_SWIPE_ACTIONS)
+            seen = episode?.seen ?: false,
         )
         val updated = transform(current)
         marks = marks + (id to updated)
@@ -77,6 +90,8 @@ class EpisodeMarkState(
         // list, the selection bar's "is anything unmarked" checks - agrees.
         episode?.bookmark = updated.bookmarked
         episode?.fillermark = updated.fillermarked
+        // AM (PLAYLIST_SWIPE_ACTIONS)
+        episode?.seen = updated.seen
     }
 }
 
@@ -85,15 +100,21 @@ fun rememberEpisodeMarks(
     episodes: List<Episode>,
     onBookmarkClicked: (Long?, Boolean) -> Unit,
     onFillermarkClicked: (Long?, Boolean) -> Unit,
+    // AM (PLAYLIST_SWIPE_ACTIONS)
+    onSeenClicked: (Long?, Boolean) -> Unit = { _, _ -> },
 ): EpisodeMarkState {
     // Through rememberUpdatedState so the state outliving a recomposition does
     // not pin the first lambdas it was handed.
     val bookmark by rememberUpdatedState(onBookmarkClicked)
     val fillermark by rememberUpdatedState(onFillermarkClicked)
+    // AM (PLAYLIST_SWIPE_ACTIONS)
+    val seen by rememberUpdatedState(onSeenClicked)
     val state = remember {
         EpisodeMarkState(
             onBookmarkClicked = { id, value -> bookmark(id, value) },
             onFillermarkClicked = { id, value -> fillermark(id, value) },
+            // AM (PLAYLIST_SWIPE_ACTIONS)
+            onSeenClicked = { id, value -> seen(id, value) },
         )
     }
     // After composition, not during it: sync writes state, and marksOf falls

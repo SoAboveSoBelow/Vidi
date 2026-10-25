@@ -51,6 +51,7 @@ import eu.kanade.presentation.util.AssistContentScreen
 import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.data.queue.QueueFillJob
+import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.ui.browse.extension.details.SourcePreferencesScreen
 import eu.kanade.tachiyomi.ui.browse.migration.season.MigrateSeasonSelectScreen
@@ -65,6 +66,7 @@ import mihon.presentation.core.util.collectAsLazyPagingItems
 import tachiyomi.core.common.Constants
 import tachiyomi.domain.source.model.StubSource
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
@@ -284,6 +286,17 @@ data class BrowseSourceScreen(
                     viewModel.toggleSelection(anime)
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                 },
+                // AM (DOUBLE_TAP_QUEUE) -->
+                // Queues the result outright. Ignored while a selection is
+                // running: the taps there are building a selection, and the
+                // bottom bar's own queue action is what acts on it.
+                onAnimeDoubleClick = { anime ->
+                    if (!state.selectionMode) {
+                        viewModel.addAnimeToQueue(anime) { QueueFillJob.start(context) }
+                        context.toast(AMMR.strings.am_action_added_to_queue)
+                    }
+                },
+                // <-- AM (DOUBLE_TAP_QUEUE)
                 selection = state.selection,
                 // <-- AM (BROWSE_SELECTION)
                 // AM (MERGED_SOURCES)

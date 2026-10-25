@@ -120,6 +120,9 @@ fun PlayerScreen(
     val interactionSource = remember { MutableInteractionSource() }
     val uiPreferences = remember { appGraph.uiPreferences }
     val playerPreferences = remember { appGraph.playerPreferences }
+    // AM (PLAYLIST_SWIPE_ACTIONS): the playlist obeys the same swipe settings
+    // the entry's episode list does.
+    val libraryPreferences = remember { appGraph.libraryPreferences }
     // AM (ASPECT_OVERRIDE_PICKER) -->
     val aspectState by playerPreferences.aspectState.collectAsState()
     val aspectOverride by playerPreferences.aspectOverride.collectAsState()
@@ -151,6 +154,14 @@ fun PlayerScreen(
     // See PlayerViewModel's comment of the same tag.
     // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
     val showStatusBarWithControls by playerPreferences.showSystemStatusBar.collectAsState()
+    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+    // Crossed, exactly as AnimeViewModel crosses them: the two preference KEYS
+    // are swapped relative to their property names (swipeToStartAction is
+    // stored under pref_episode_swipe_end_action), so reading them straight
+    // through puts each action on the opposite side from the entry list.
+    val swipeStartAction by libraryPreferences.swipeToEndAction.collectAsState()
+    val swipeEndAction by libraryPreferences.swipeToStartAction.collectAsState()
+    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
     val relativeTime by uiPreferences.relativeTime.collectAsState()
     val dateFormat by uiPreferences.dateFormat.collectAsState()
 
@@ -1154,6 +1165,25 @@ fun PlayerScreen(
                     // <-- AM (EPISODE_NAMES)
                     // AM (EPISODE_TAG_SEARCH) -->
                     searchFieldsOf = stateData::searchFieldsOf,
+                    // AM (PLAYLIST_LIBRARY_BADGE)
+                    isFromLibraryEntry = stateData::isFromLibraryEntry,
+                    // AM (QUEUE_GROUPED_PLAYLIST) -->
+                    blockOf = { episode -> episode.id?.let { stateData.playlistBlockByEpisodeId[it] } },
+                    sourceTitleOf = { episode ->
+                        episode.id?.let { stateData.playlistQueuedEntryByEpisodeId[it] }?.title
+                            ?: stateData.currentAnime?.title
+                    },
+                    blockSeasons = stateData.playlistBlockSeasons,
+                    blockLastPlayed = stateData.playlistBlockLastPlayed,
+                    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+                    swipeStartAction = swipeStartAction,
+                    swipeEndAction = swipeEndAction,
+                    downloadStates = stateData.playlistDownloadStates,
+                    onSeenClicked = viewModel::setEpisodesSeen,
+                    onDownloadClicked = viewModel::toggleEpisodeDownload,
+                    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+                    onExpandSource = viewModel::loadBlockSeasons,
+                    // <-- AM (QUEUE_GROUPED_PLAYLIST)
                     // <-- AM (EPISODE_TAG_SEARCH)
                     // AM (PLAYLIST_SEARCH_SCOPE) -->
                     playlistAnimeId = stateData.currentAnime?.id,

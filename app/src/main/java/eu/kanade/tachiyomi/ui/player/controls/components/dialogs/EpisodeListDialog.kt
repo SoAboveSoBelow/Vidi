@@ -16,9 +16,11 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Done
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.NewLabel
+import androidx.compose.material.icons.outlined.RemoveDone
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,11 +45,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.util.formatEpisodeNumber
 import eu.kanade.tachiyomi.data.database.models.Episode
+import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.ui.player.PlaylistSearchScope
+import aniyomi.domain.season.model.EntrySeason
 import eu.kanade.tachiyomi.ui.player.components.EpisodeListItem
+import eu.kanade.tachiyomi.ui.player.components.PlaylistExpansion
+import eu.kanade.tachiyomi.ui.player.components.PlaylistGroupItem
+import eu.kanade.tachiyomi.ui.player.components.PlaylistRow
+import eu.kanade.tachiyomi.ui.player.components.PlaylistSeasons
+import eu.kanade.tachiyomi.ui.player.components.buildPlaylistRows
 import eu.kanade.tachiyomi.ui.player.components.rememberEpisodeMarks
 import eu.kanade.tachiyomi.util.lang.toRelativeString
 import kotlinx.datetime.TimeZone
@@ -56,10 +66,13 @@ import mihon.domain.library.model.search.QueryNode
 import mihon.feature.library.EpisodeSearchFields
 import mihon.feature.library.matches
 import tachiyomi.domain.anime.model.Anime
+import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.VerticalFastScroller
+import tachiyomi.presentation.core.i18n.pluralStringResource
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.clearFocusOnSoftKeyboardHide
 import tachiyomi.presentation.core.util.runOnEnterKeyPressed
@@ -90,6 +103,37 @@ fun EpisodeListDialog(
     /** What search matches an episode against - see PlayerStateData.searchFieldsOf. */
     searchFieldsOf: (Episode) -> EpisodeSearchFields?,
     // <-- AM (EPISODE_TAG_SEARCH)
+    // AM (PLAYLIST_LIBRARY_BADGE) -->
+    /** Whether an episode's source is in the library - see PlayerStateData.isFromLibraryEntry. */
+    isFromLibraryEntry: (Episode) -> Boolean,
+    // <-- AM (PLAYLIST_LIBRARY_BADGE)
+    // AM (QUEUE_GROUPED_PLAYLIST) -->
+    /** Which queued source an episode belongs to - see PlayerStateData.playlistBlockByEpisodeId. */
+    blockOf: (Episode) -> Long?,
+    /** The title of the entry a source was queued as. */
+    sourceTitleOf: (Episode) -> String?,
+    /**
+     * Seasons per source, by block id - absent until that source's resolve
+     * lands (see loadBlockSeasons). A map rather than a lambda so the row list
+     * can be remembered against it: a lambda returning something new is
+     * invisible to remember, and the season layer would not appear until
+     * something else happened to invalidate the list.
+     */
+    blockSeasons: Map<Long, PlaylistSeasons>,
+    /** Where the user left each source, by block id - see QueueBlock.lastPlayedEpisodeId. */
+    blockLastPlayed: Map<Long, Long>,
+    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+    /** The user's episode swipe settings, the same pair the entry list obeys. */
+    swipeStartAction: LibraryPreferences.EpisodeSwipeAction,
+    swipeEndAction: LibraryPreferences.EpisodeSwipeAction,
+    /** Download state per episode - see PlayerStateData.playlistDownloadStates. */
+    downloadStates: Map<Long, Download.State>,
+    onSeenClicked: (List<Episode>, Boolean) -> Unit,
+    onDownloadClicked: (Episode) -> Unit,
+    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+    /** Asks for a source's seasons; called when its group is first expanded. */
+    onExpandSource: (Long) -> Unit,
+    // <-- AM (QUEUE_GROUPED_PLAYLIST)
     // AM (PLAYLIST_SEARCH_SCOPE) -->
     /** The entry this playlist belongs to, which the submitted search is keyed to. */
     playlistAnimeId: Long?,
@@ -190,10 +234,25 @@ fun EpisodeListDialog(
     // Positioned by the playing episode's id rather than by an index into the
     // playlist: episodeList is now the unscoped list, so a playlist index no
     // longer addresses the same element.
-    val itemScrollIndex = orderedEpisodeList
-        .indexOfFirst { it.id != null && it.id == currentEpisodeId }
-        .coerceAtLeast(0)
+    //
+    // AM (QUEUE_GROUPED_PLAYLIST): the index is into the ROWS now, since a
+    // group may sit between two episodes - see rowScrollIndex below.
     // <-- AM (NOW_PLAYING_INDICATOR)
+    // AM (QUEUE_GROUPED_PLAYLIST) -->
+    // The same label every other season surface shows, resolved off the
+    // context rather than through the composable helper so the row list can
+    // be built inside remember.
+    val seasonLabels = remember(context) {
+        { seasonNumber: Long, seasons: List<EntrySeason> ->
+            val index = seasons.indexOfFirst { it.number == seasonNumber }
+            seasons.getOrNull(index)?.name
+                ?: context.stringResource(
+                    AMMR.strings.am_merge_season_number,
+                    (index + 1).coerceAtLeast(1),
+                )
+        }
+    }
+    // <-- AM (QUEUE_GROUPED_PLAYLIST)
     // AM (PLAYER_MARK_BADGES) -->
     // Marking goes through this rather than straight to the callbacks, so rows
     // redraw when the selection bar marks several at once - the playlist itself
@@ -202,9 +261,105 @@ fun EpisodeListDialog(
         episodes = episodeList,
         onBookmarkClicked = onBookmarkClicked,
         onFillermarkClicked = onFillermarkClicked,
+        // AM (PLAYLIST_SWIPE_ACTIONS): the write goes through the entry
+        // screen's own interactor; this layer only keeps the rows in step with
+        // it, since the playlist itself is never refetched.
+        onSeenClicked = { episodeId, seen ->
+            val episode = episodeList.firstOrNull { it.id != null && it.id == episodeId }
+            if (episode != null) onSeenClicked(listOf(episode), seen)
+        },
     )
     // <-- AM (PLAYER_MARK_BADGES)
-    val episodeListState = rememberLazyListState(initialFirstVisibleItemIndex = itemScrollIndex)
+    // AM (PLAYLIST_LIBRARY_BADGE) -->
+    // Only drawn when the list actually holds both kinds. A badge on every row
+    // distinguishes nothing and is read as decoration, and a playlist that is
+    // one entry's episodes - or one queue of library entries - is exactly that
+    // case. The moment something from outside the library is queued alongside
+    // them, every row says which it is.
+    val showLibraryBadges = remember(episodeList) {
+        val states = episodeList.asSequence().map(isFromLibraryEntry).distinct().take(2).toList()
+        states.size > 1
+    }
+    // <-- AM (PLAYLIST_LIBRARY_BADGE)
+    // AM (QUEUE_GROUPED_PLAYLIST) -->
+    // Local to the dialog, like the selection: which groups are open is a
+    // property of this list being on screen, and reopening it should show the
+    // queue the way a queue is read - sources, not several hundred episodes.
+    // The source holding the playing episode starts open, so the list still
+    // opens on what is playing.
+    var expansion by remember(currentEpisodeId) {
+        val playingBlock = orderedEpisodeList
+            .firstOrNull { it.id != null && it.id == currentEpisodeId }
+            ?.let(blockOf)
+        mutableStateOf(PlaylistExpansion(sources = setOfNotNull(playingBlock)))
+    }
+
+    // Searching flattens the groups. A query is a search for episodes, and
+    // answering it with a list of collapsed sources that might contain one
+    // would make the user open each to find out.
+    val isSearching = searchQuery.isNotBlank()
+    val rows = remember(filteredEpisodeList, expansion, currentEpisodeId, isSearching, blockSeasons) {
+        if (isSearching) {
+            filteredEpisodeList.map { PlaylistRow.EpisodeItem(it, depth = 0) }
+        } else {
+            buildPlaylistRows(
+                episodes = filteredEpisodeList,
+                blockOf = blockOf,
+                titleOf = { _, items -> items.firstNotNullOfOrNull(sourceTitleOf).orEmpty() },
+                displayNameOf = displayNameOf,
+                seasonsOf = blockSeasons::get,
+                seasonLabelOf = seasonLabels,
+                expansion = expansion,
+                currentEpisodeId = currentEpisodeId,
+                lastPlayedByBlockId = blockLastPlayed,
+            )
+        }
+    }
+
+    // Opening a source opens it all the way down to the season the user was
+    // last in, so the row they left is on screen rather than behind one more
+    // tap. Runs when a source is expanded and again when its seasons land,
+    // since the resolve is lazy and usually finishes after the expand.
+    //
+    // Once per source: the user collapsing a season again must stick, and
+    // re-expanding the source is them asking for it afresh.
+    var seasonAutoExpanded by remember(currentEpisodeId) { mutableStateOf(emptySet<Long>()) }
+    LaunchedEffect(expansion.sources, blockSeasons, currentEpisodeId) {
+        val pending = expansion.sources - seasonAutoExpanded
+        if (pending.isEmpty()) return@LaunchedEffect
+        var seasons = expansion.seasons
+        val resolved = mutableSetOf<Long>()
+        pending.forEach { blockId ->
+            val blockSeason = blockSeasons[blockId] ?: return@forEach
+            resolved += blockId
+            val target = orderedEpisodeList
+                .filter { blockOf(it) == blockId }
+                .let { items ->
+                    items.firstOrNull { it.id != null && it.id == currentEpisodeId }
+                        ?: items.firstOrNull { it.id != null && it.id == blockLastPlayed[blockId] }
+                }
+            val seasonNumber = target?.id?.let { blockSeason.seasonByEpisodeId[it] } ?: return@forEach
+            seasons = seasons + (blockId to seasonNumber)
+        }
+        if (resolved.isEmpty()) return@LaunchedEffect
+        seasonAutoExpanded = seasonAutoExpanded + resolved
+        if (seasons != expansion.seasons) expansion = expansion.copy(seasons = seasons)
+    }
+
+    // The playing episode's own row when its group is open, otherwise the
+    // group that holds it - either way the list opens on what is playing
+    // rather than at the top of a queue it may be deep inside.
+    val rowScrollIndex = rows
+        .indexOfFirst { row ->
+            when (row) {
+                is PlaylistRow.EpisodeItem -> row.episode.id != null && row.episode.id == currentEpisodeId
+                is PlaylistRow.Source -> row.containsCurrent
+                is PlaylistRow.Season -> row.containsCurrent
+            }
+        }
+        .coerceAtLeast(0)
+    // <-- AM (QUEUE_GROUPED_PLAYLIST)
+    val episodeListState = rememberLazyListState(initialFirstVisibleItemIndex = rowScrollIndex)
     val dateFormatter = remember(dateFormat) { UiPreferences.dateFormat(dateFormat) }
 
     PlayerDialog(
@@ -221,13 +376,38 @@ fun EpisodeListDialog(
         titleContent = {
             // AM (PLAYER_EPISODE_LIST_SELECTION) -->
             if (selectionMode) {
+                // AM (PLAYLIST_SWIPE_ACTIONS) -->
+                // An action that is already a swipe is left off the bar. The
+                // swipe reaches it in one gesture on any row, and a bar button
+                // beside it is a second way to do the same thing that has to
+                // be read past every time the bar is open. What is NOT a swipe
+                // stays here, which is the only place it can be reached at
+                // all - including marking seen, which the bar never offered
+                // until the swipe settings could take it away again.
+                val swipes = setOf(swipeStartAction, swipeEndAction)
+                val offersSeen = LibraryPreferences.EpisodeSwipeAction.ToggleSeen !in swipes
+                val offersBookmark = LibraryPreferences.EpisodeSwipeAction.ToggleBookmark !in swipes
+                val offersFillermark = LibraryPreferences.EpisodeSwipeAction.ToggleFillermark !in swipes
+                val offersDownload = LibraryPreferences.EpisodeSwipeAction.Download !in swipes
+                // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                 EpisodeListSelectionHeader(
                     selectedCount = selectedIds.size,
+                    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+                    onSeen = {
+                        selectedEpisodes.forEach { marks.setSeen(it.id, true) }
+                        selectedIds = emptySet()
+                    }.takeIf { offersSeen && selectedEpisodes.any { !marks.marksOf(it).seen } },
+                    onUnseen = {
+                        selectedEpisodes.forEach { marks.setSeen(it.id, false) }
+                        selectedIds = emptySet()
+                    }.takeIf { offersSeen && selectedEpisodes.any { marks.marksOf(it).seen } },
+                    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                     // AM (LOCAL_SOURCE_DOWNLOAD) -->
                     // Clears the selection, like the entry list's own download
                     // action: the selection described what to act on, and it has
                     // been acted on.
-                    onDownload = onDownloadEpisodes?.let { download ->
+                    // AM (PLAYLIST_SWIPE_ACTIONS): and only when it is not a swipe.
+                    onDownload = onDownloadEpisodes?.takeIf { offersDownload }?.let { download ->
                         {
                             download(selectedEpisodes)
                             selectedIds = emptySet()
@@ -241,13 +421,13 @@ fun EpisodeListDialog(
                     // offered-only-when-useful checks read from it too, so they
                     // follow what the bar itself has just done.
                     onBookmark = { selectedEpisodes.forEach { marks.setBookmark(it.id, true) } }
-                        .takeIf { selectedEpisodes.any { !marks.marksOf(it).bookmarked } },
+                        .takeIf { offersBookmark && selectedEpisodes.any { !marks.marksOf(it).bookmarked } },
                     onRemoveBookmark = { selectedEpisodes.forEach { marks.setBookmark(it.id, false) } }
-                        .takeIf { selectedEpisodes.any { marks.marksOf(it).bookmarked } },
+                        .takeIf { offersBookmark && selectedEpisodes.any { marks.marksOf(it).bookmarked } },
                     onFillermark = { selectedEpisodes.forEach { marks.setFillermark(it.id, true) } }
-                        .takeIf { selectedEpisodes.any { !marks.marksOf(it).fillermarked } },
+                        .takeIf { offersFillermark && selectedEpisodes.any { !marks.marksOf(it).fillermarked } },
                     onRemoveFillermark = { selectedEpisodes.forEach { marks.setFillermark(it.id, false) } }
-                        .takeIf { selectedEpisodes.any { marks.marksOf(it).fillermarked } },
+                        .takeIf { offersFillermark && selectedEpisodes.any { marks.marksOf(it).fillermarked } },
                     onClearSelection = { selectedIds = emptySet() },
                 )
             } else {
@@ -288,10 +468,86 @@ fun EpisodeListDialog(
                 state = episodeListState,
             ) {
                 items(
-                    items = filteredEpisodeList,
-                    key = { "episode-${it.id}" },
-                    contentType = { "episode" },
-                ) { episode ->
+                    items = rows,
+                    key = { it.key },
+                    contentType = { row ->
+                        when (row) {
+                            is PlaylistRow.EpisodeItem -> "episode"
+                            else -> "group"
+                        }
+                    },
+                ) { row ->
+                    // AM (QUEUE_GROUPED_PLAYLIST) -->
+                    // A tap on a group plays; the chevron expands. Playing
+                    // goes through the same submit-then-open path an episode
+                    // row takes, since playing the first episode of a source
+                    // IS opening that episode.
+                    val playFromGroup: (Long?) -> Unit = { id ->
+                        if (!selectionMode && id != null) {
+                            playlistAnimeId?.let { PlaylistSearchScope.submit(it, searchQuery) }
+                            onEpisodeClicked(id)
+                        }
+                    }
+                    when (row) {
+                        is PlaylistRow.Source -> {
+                            PlaylistGroupItem(
+                                title = row.title,
+                                subtitle = row.singleEpisodeName
+                                    ?: pluralStringResource(
+                                        AYMR.plurals.anime_num_episodes,
+                                        row.episodeCount,
+                                        row.episodeCount,
+                                    ),
+                                depth = 0,
+                                isCurrent = row.containsCurrent,
+                                expanded = row.expanded,
+                                onClick = { playFromGroup(row.playEpisodeId) },
+                                onToggle = if (row.expandable) {
+                                    {
+                                        expansion = if (row.blockId in expansion.sources) {
+                                            expansion.copy(sources = expansion.sources - row.blockId)
+                                        } else {
+                                            // The seasons are asked for on the
+                                            // way open, not with the playlist -
+                                            // see loadBlockSeasons.
+                                            onExpandSource(row.blockId)
+                                            expansion.copy(sources = expansion.sources + row.blockId)
+                                        }
+                                    }
+                                } else {
+                                    null
+                                },
+                            )
+                            return@items
+                        }
+                        is PlaylistRow.Season -> {
+                            val seasonKey = row.blockId to row.seasonNumber
+                            PlaylistGroupItem(
+                                title = row.label,
+                                subtitle = pluralStringResource(
+                                    AYMR.plurals.anime_num_episodes,
+                                    row.episodeCount,
+                                    row.episodeCount,
+                                ),
+                                depth = 1,
+                                isCurrent = row.containsCurrent,
+                                expanded = row.expanded,
+                                onClick = { playFromGroup(row.playEpisodeId) },
+                                onToggle = {
+                                    expansion = if (seasonKey in expansion.seasons) {
+                                        expansion.copy(seasons = expansion.seasons - seasonKey)
+                                    } else {
+                                        expansion.copy(seasons = expansion.seasons + seasonKey)
+                                    }
+                                },
+                            )
+                            return@items
+                        }
+                        is PlaylistRow.EpisodeItem -> Unit
+                    }
+                    val episodeRow = row as PlaylistRow.EpisodeItem
+                    val episode = episodeRow.episode
+                    // <-- AM (QUEUE_GROUPED_PLAYLIST)
 
                     // AM (NOW_PLAYING_INDICATOR) -->
                     val isCurrentEpisode = currentEpisodeId != null && episode.id == currentEpisodeId
@@ -335,6 +591,32 @@ fun EpisodeListDialog(
                         onBookmarkClicked = marks::setBookmark,
                         onFillermarkClicked = marks::setFillermark,
                         // <-- AM (PLAYER_MARK_BADGES)
+                        // AM (PLAYLIST_LIBRARY_BADGE)
+                        isFromLibraryEntry = showLibraryBadges && isFromLibraryEntry(episode),
+                        // AM (PLAYLIST_SWIPE_ACTIONS)
+                        isSeen = episodeMarks.seen,
+                        // AM (QUEUE_GROUPED_PLAYLIST)
+                        nestingDepth = episodeRow.depth,
+                        // AM (PLAYLIST_SWIPE_ACTIONS) -->
+                        swipeStartAction = swipeStartAction,
+                        swipeEndAction = swipeEndAction,
+                        downloadState = episode.id
+                            ?.let { downloadStates[it] }
+                            ?: Download.State.NOT_DOWNLOADED,
+                        onSwipe = { action ->
+                            when (action) {
+                                LibraryPreferences.EpisodeSwipeAction.ToggleSeen ->
+                                    marks.setSeen(episode.id, !episodeMarks.seen)
+                                LibraryPreferences.EpisodeSwipeAction.ToggleBookmark ->
+                                    marks.setBookmark(episode.id, !episodeMarks.bookmarked)
+                                LibraryPreferences.EpisodeSwipeAction.ToggleFillermark ->
+                                    marks.setFillermark(episode.id, !episodeMarks.fillermarked)
+                                LibraryPreferences.EpisodeSwipeAction.Download ->
+                                    onDownloadClicked(episode)
+                                LibraryPreferences.EpisodeSwipeAction.Disabled -> Unit
+                            }
+                        },
+                        // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                         // AM (PLAYER_EPISODE_LIST_SELECTION) -->
                         onEpisodeClicked = { id ->
                             when {
@@ -502,6 +784,9 @@ private fun EpisodeListDialogHeader(
 @Composable
 private fun EpisodeListSelectionHeader(
     selectedCount: Int,
+    // AM (PLAYLIST_SWIPE_ACTIONS)
+    onSeen: (() -> Unit)?,
+    onUnseen: (() -> Unit)?,
     // AM (LOCAL_SOURCE_DOWNLOAD) -->
     /** Null when the playlist has no entry to download from - see the dialog. */
     onDownload: (() -> Unit)?,
@@ -530,6 +815,24 @@ private fun EpisodeListSelectionHeader(
             modifier = Modifier.weight(1f),
         )
 
+        // AM (PLAYLIST_SWIPE_ACTIONS) -->
+        if (onSeen != null) {
+            IconButton(onClick = onSeen) {
+                Icon(
+                    imageVector = Icons.Outlined.Done,
+                    contentDescription = stringResource(AYMR.strings.action_mark_as_seen),
+                )
+            }
+        }
+        if (onUnseen != null) {
+            IconButton(onClick = onUnseen) {
+                Icon(
+                    imageVector = Icons.Outlined.RemoveDone,
+                    contentDescription = stringResource(AYMR.strings.action_mark_as_unseen),
+                )
+            }
+        }
+        // <-- AM (PLAYLIST_SWIPE_ACTIONS)
         // AM (LOCAL_SOURCE_DOWNLOAD) -->
         // Ahead of the mark actions: downloading is the one that fetches
         // something, and the marks are bookkeeping beside it.

@@ -237,11 +237,15 @@ fun AnimeScreen(
     // AY -->
     // Season clicked
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onContinueWatchingClicked: ((SeasonAnime) -> Unit)?,
 
     // Related anime clicked
     onRelatedAnimeClicked: (Anime) -> Unit,
     onRelatedAnimeLongClicked: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedAnimeDoubleClicked: ((Anime) -> Unit)? = null,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
     // AM (TAG_LIMIT) -->
@@ -346,9 +350,13 @@ fun AnimeScreen(
             // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = onSeasonClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = onSeasonDoubleClicked,
             onClickContinueWatching = onContinueWatchingClicked,
             onRelatedAnimeClicked = onRelatedAnimeClicked,
             onRelatedAnimeLongClicked = onRelatedAnimeLongClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onRelatedAnimeDoubleClicked = onRelatedAnimeDoubleClicked,
             relatedAnimeDisplayMode = relatedAnimeDisplayMode,
             // <-- AY
             // AM (TAG_LIMIT) -->
@@ -446,9 +454,13 @@ fun AnimeScreen(
             // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = onSeasonClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = onSeasonDoubleClicked,
             onClickContinueWatching = onContinueWatchingClicked,
             onRelatedAnimeClicked = onRelatedAnimeClicked,
             onRelatedAnimeLongClicked = onRelatedAnimeLongClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onRelatedAnimeDoubleClicked = onRelatedAnimeDoubleClicked,
             relatedAnimeDisplayMode = relatedAnimeDisplayMode,
             // <-- AY
             // AM (TAG_LIMIT) -->
@@ -571,11 +583,15 @@ private fun AnimeScreenSmallImpl(
     // AY -->
     // Season clicked
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onClickContinueWatching: ((SeasonAnime) -> Unit)?,
 
     // Related anime clicked
     onRelatedAnimeClicked: (Anime) -> Unit,
     onRelatedAnimeLongClicked: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedAnimeDoubleClicked: ((Anime) -> Unit)? = null,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
     // AM (TAG_LIMIT) -->
@@ -973,6 +989,8 @@ private fun AnimeScreenSmallImpl(
                             relations = state.relatedAnime,
                             onRelatedClick = onRelatedAnimeClicked,
                             onRelatedLongClick = onRelatedAnimeLongClicked,
+                            // AM (DOUBLE_TAP_QUEUE)
+                            onRelatedDoubleClick = onRelatedAnimeDoubleClicked,
                             relatedDisplayMode = relatedAnimeDisplayMode,
                             // <-- AY
                             // AY -->
@@ -1033,6 +1051,8 @@ private fun AnimeScreenSmallImpl(
                                 seasons = seasons,
                                 containerHeight = containerHeightPx - toolbarHeight,
                                 onSeasonClicked = onSeasonClicked,
+                                // AM (DOUBLE_TAP_QUEUE)
+                                onSeasonDoubleClicked = onSeasonDoubleClicked,
                                 onClickContinueWatching = onClickContinueWatching,
                                 listItemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
                             )
@@ -1250,11 +1270,15 @@ fun AnimeScreenLargeImpl(
     // AY -->
     // Season clicked
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onClickContinueWatching: ((SeasonAnime) -> Unit)?,
 
     // Related anime clicked
     onRelatedAnimeClicked: (Anime) -> Unit,
     onRelatedAnimeLongClicked: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedAnimeDoubleClicked: ((Anime) -> Unit)? = null,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
     // AM (TAG_LIMIT) -->
@@ -1612,6 +1636,8 @@ fun AnimeScreenLargeImpl(
                                 relations = state.relatedAnime,
                                 onRelatedClick = onRelatedAnimeClicked,
                                 onRelatedLongClick = onRelatedAnimeLongClicked,
+                                // AM (DOUBLE_TAP_QUEUE)
+                                onRelatedDoubleClick = onRelatedAnimeDoubleClicked,
                                 relatedDisplayMode = relatedAnimeDisplayMode,
                                 // <-- AY
                             )
@@ -1680,6 +1706,8 @@ fun AnimeScreenLargeImpl(
                                         seasons = seasons,
                                         containerHeight = containerHeightPx - topBarHeight,
                                         onSeasonClicked = onSeasonClicked,
+                                        // AM (DOUBLE_TAP_QUEUE)
+                                        onSeasonDoubleClicked = onSeasonDoubleClicked,
                                         onClickContinueWatching = onClickContinueWatching,
                                         listItemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
                                     )
@@ -2001,6 +2029,8 @@ private fun LazyGridScope.sharedSeasons(
     seasons: List<AnimeSeasonItem>,
     containerHeight: Int,
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onClickContinueWatching: ((SeasonAnime) -> Unit)?,
     listItemModifier: Modifier = Modifier,
 ) {
@@ -2014,6 +2044,8 @@ private fun LazyGridScope.sharedSeasons(
             item = item,
             containerHeight = containerHeight,
             onSeasonClicked = onSeasonClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = onSeasonDoubleClicked,
             onClickContinueWatching = onClickContinueWatching,
             listItemModifier = listItemModifier,
         )

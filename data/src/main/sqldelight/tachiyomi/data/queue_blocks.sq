@@ -27,32 +27,47 @@
 --
 -- position is a sparse ordering key, not an index: it is never renumbered on
 -- insert, so appending a block does not rewrite every row after it.
+--
+-- AM (QUEUE_BLOCK_PROGRESS): last_played_episode_id is where the user left
+-- this source, which is where a step that crosses INTO the block from a later
+-- one lands. Deliberately the queue's own memory rather than a history lookup:
+-- history answers "what did they last watch of this entry, ever", which for a
+-- source queued today and watched months ago names an episode that is not even
+-- in this block. This answers only "where were they in THIS queued run", so it
+-- is written while playing and dies with the block, and an entry watched long
+-- ago contributes nothing. NULL means nothing in the block has played yet.
 CREATE TABLE queue_blocks(
     _id INTEGER NOT NULL PRIMARY KEY,
     position INTEGER NOT NULL,
     anime_id INTEGER,
     fill_state INTEGER NOT NULL DEFAULT 0,
+    -- AM (QUEUE_BLOCK_PROGRESS): SET NULL rather than CASCADE - an episode
+    -- dropped by a source refresh should forget the bookmark, not delete the
+    -- block the user queued.
+    last_played_episode_id INTEGER DEFAULT NULL,
     FOREIGN KEY(anime_id) REFERENCES animes(_id)
-    ON DELETE CASCADE
+    ON DELETE CASCADE,
+    FOREIGN KEY(last_played_episode_id) REFERENCES episodes(_id)
+    ON DELETE SET NULL
 );
 
 CREATE INDEX queue_blocks_position_index ON queue_blocks(position);
 CREATE INDEX queue_blocks_anime_id_index ON queue_blocks(anime_id);
 
 getAllBlocks:
-SELECT _id, position, anime_id, fill_state
+SELECT _id, position, anime_id, fill_state, last_played_episode_id
 FROM queue_blocks
 ORDER BY position ASC;
 
 getBlockById:
-SELECT _id, position, anime_id, fill_state
+SELECT _id, position, anime_id, fill_state, last_played_episode_id
 FROM queue_blocks
 WHERE _id = :blockId;
 
 -- Blocks still waiting on a fetch, oldest first - what a fill worker picks up,
 -- including after process death.
 getBlocksByFillState:
-SELECT _id, position, anime_id, fill_state
+SELECT _id, position, anime_id, fill_state, last_played_episode_id
 FROM queue_blocks
 WHERE fill_state = :fillState
 ORDER BY position ASC;
@@ -66,6 +81,13 @@ setFillState:
 UPDATE queue_blocks
 SET fill_state = :fillState
 WHERE _id = :blockId;
+
+-- AM (QUEUE_BLOCK_PROGRESS) -->
+setLastPlayedEpisode:
+UPDATE queue_blocks
+SET last_played_episode_id = :episodeId
+WHERE _id = :blockId;
+-- <-- AM (QUEUE_BLOCK_PROGRESS)
 
 setPosition:
 UPDATE queue_blocks

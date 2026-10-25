@@ -37,6 +37,8 @@ fun LibraryContent(
     onChangeCurrentPage: (Int) -> Unit,
     onClickAnime: (Long) -> Unit,
     onContinueWatchingClicked: ((LibraryAnime) -> Unit)?,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClickAnime: ((LibraryAnime) -> Unit)?,
     onToggleSelection: (Category, LibraryAnime) -> Unit,
     onToggleRangeSelection: (Category, LibraryAnime) -> Unit,
     onRefresh: () -> Boolean,
@@ -109,6 +111,12 @@ fun LibraryContent(
                     }
                 },
                 onLongClickAnime = onToggleRangeSelection,
+                // AM (DOUBLE_TAP_QUEUE) -->
+                // Nothing while a selection is running, for the same reason as
+                // in Browse: the taps are building a selection then, and the
+                // selection's own queue action is what acts on it.
+                onDoubleClickAnime = onDoubleClickAnime?.takeIf { selection.isEmpty() },
+                // <-- AM (DOUBLE_TAP_QUEUE)
                 onClickContinueWatching = onContinueWatchingClicked,
             )
         }

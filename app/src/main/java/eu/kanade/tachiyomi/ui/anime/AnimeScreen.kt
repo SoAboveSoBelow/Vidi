@@ -37,6 +37,7 @@ import eu.kanade.presentation.anime.components.ClearAnimeDialog
 import eu.kanade.presentation.anime.components.ConfirmRemoveFromMergeDialog
 // AM (MERGE_SEASONS) -->
 import eu.kanade.presentation.anime.components.RenameEpisodeDialog
+import eu.kanade.tachiyomi.data.queue.QueueFillJob
 import eu.kanade.tachiyomi.ui.anime.merged.MergeSettingsDialog
 // <-- AM (MERGE_SEASONS)
 import eu.kanade.presentation.anime.components.DeleteEpisodesDialog
@@ -87,6 +88,7 @@ import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.episode.model.Episode
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.LoadingScreen
@@ -635,6 +637,11 @@ class AnimeScreen(
             onSeasonClicked = {
                 navigator.push(AnimeScreen(it.id))
             },
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = { seasonAnime ->
+                viewModel.addAnimeToQueue(seasonAnime.anime) { QueueFillJob.start(context) }
+                context.toast(AMMR.strings.am_action_added_to_queue)
+            },
             onContinueWatchingClicked = {
                 scope.launchIO {
                     val episode = viewModel.getNextUnseenEpisode(it.anime)
@@ -649,6 +656,15 @@ class AnimeScreen(
             onRelatedAnimeLongClicked = { relatedAnime ->
                 navigator.push(GlobalSearchScreen(relatedAnime.title))
             },
+            // AM (DOUBLE_TAP_QUEUE) -->
+            // A related result is a browse result: it may have no episodes in
+            // the database yet, so the fill worker is asked for, exactly as in
+            // Browse.
+            onRelatedAnimeDoubleClicked = { relatedAnime ->
+                viewModel.addAnimeToQueue(relatedAnime) { QueueFillJob.start(context) }
+                context.toast(AMMR.strings.am_action_added_to_queue)
+            },
+            // <-- AM (DOUBLE_TAP_QUEUE)
             relatedAnimeDisplayMode = viewModel.relatedAnimeDisplayMode,
             // <-- AY
             // AM (TAG_LIMIT) -->

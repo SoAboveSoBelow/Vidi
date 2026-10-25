@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.outlined.CollectionsBookmark
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,8 +40,12 @@ import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.dp
 import eu.kanade.presentation.anime.components.DotSeparatorText
 import eu.kanade.presentation.theme.TachiyomiPreviewTheme
+import eu.kanade.presentation.anime.components.SwipeBox
+import eu.kanade.presentation.anime.components.getSwipeAction
 import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.data.database.models.EpisodeImpl
+import eu.kanade.tachiyomi.data.download.model.Download
+import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -88,7 +93,38 @@ fun EpisodeListItem(
      */
     isBookmarked: Boolean = episode.bookmark,
     isFillermarked: Boolean = episode.fillermark,
+    // AM (PLAYLIST_SWIPE_ACTIONS): passed in for the same reason as the two
+    // above - the playlist is a snapshot, so a row told to mark itself watched
+    // has to be told it worked rather than re-reading a stale Episode.
+    isSeen: Boolean = episode.seen,
     // <-- AM (PLAYER_MARK_BADGES)
+    // AM (PLAYLIST_LIBRARY_BADGE) -->
+    /**
+     * Whether this row's source is one the library holds, drawn as a badge of
+     * its own. Off by default, and the list decides when to ask for it at all -
+     * see the dialog: a badge every row carries says nothing.
+     */
+    isFromLibraryEntry: Boolean = false,
+    // <-- AM (PLAYLIST_LIBRARY_BADGE)
+    // AM (QUEUE_GROUPED_PLAYLIST) -->
+    /**
+     * How deep inside its groups the row sits, drawn as a rule rather than as
+     * indent - see playlistNesting. Zero for an ungrouped list, which is what
+     * the cast playlist sheet and a one-source queue both are.
+     */
+    nestingDepth: Int = 0,
+    // <-- AM (QUEUE_GROUPED_PLAYLIST)
+    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+    /**
+     * The user's own episode swipe settings, the same two the entry list
+     * obeys. Disabled by default, which is what the cast playlist sheet wants:
+     * it has no handler to act on a swipe.
+     */
+    swipeStartAction: LibraryPreferences.EpisodeSwipeAction = LibraryPreferences.EpisodeSwipeAction.Disabled,
+    swipeEndAction: LibraryPreferences.EpisodeSwipeAction = LibraryPreferences.EpisodeSwipeAction.Disabled,
+    downloadState: Download.State = Download.State.NOT_DOWNLOADED,
+    onSwipe: (LibraryPreferences.EpisodeSwipeAction) -> Unit = {},
+    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
 ) {
     var textHeight by remember { mutableStateOf(0) }
 
@@ -97,18 +133,56 @@ fun EpisodeListItem(
     val bookmarkColor = if (isBookmarked) MaterialTheme.colorScheme.primary else defaultColor
     val fillermarkAlpha = if (isFillermarked) 1f else DISABLED_ALPHA
     val fillermarkColor = if (isFillermarked) MaterialTheme.colorScheme.tertiary else defaultColor
-    val episodeColor = if (isBookmarked) {
-        bookmarkColor
-    } else if (isFillermarked) {
-        fillermarkColor
-    } else {
-        defaultColor
-    }
-    val textAlpha = if (episode.seen) DISABLED_ALPHA else 1f
+    // AM (PLAYLIST_LIBRARY_BADGE) -->
+    // The row's text is no longer tinted by its marks. A mark is already drawn
+    // as a badge, so the tint said the same thing twice - and said it badly,
+    // since one colour cannot show both marks at once.
+    //
+    // Where an episode's source sits is a badge too rather than the freed-up
+    // tint: the row already carries two states in colour and weight - seen
+    // dims it, playing makes it bold italic - so a third meaning in the text
+    // colour reads as "this row is odd somehow" rather than as one fact, and
+    // it is the one fact here that is about something OUTSIDE the row. A badge
+    // says it in the same vocabulary as the marks beside it.
+    val episodeColor = defaultColor
+    // <-- AM (PLAYLIST_LIBRARY_BADGE)
+    // AM (PLAYLIST_SWIPE_ACTIONS)
+    val textAlpha = if (isSeen) DISABLED_ALPHA else 1f
     val textWeight = if (isCurrentEpisode) FontWeight.Bold else FontWeight.Normal
     val textStyle = if (isCurrentEpisode) FontStyle.Italic else FontStyle.Normal
 
 
+    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+    // The entry list's own swipe resolution and its own box, so the two lists
+    // obey one pair of settings and behave identically under the finger. The
+    // box renders nothing extra when both actions are Disabled, which is what
+    // keeps the cast sheet's rows as they were.
+    val swipeBackground = MaterialTheme.colorScheme.primaryContainer
+    val startSwipe = getSwipeAction(
+        action = swipeStartAction,
+        seen = isSeen,
+        bookmark = isBookmarked,
+        fillermark = isFillermarked,
+        downloadState = downloadState,
+        background = swipeBackground,
+        onSwipe = { onSwipe(swipeStartAction) },
+    )
+    val endSwipe = getSwipeAction(
+        action = swipeEndAction,
+        seen = isSeen,
+        bookmark = isBookmarked,
+        fillermark = isFillermarked,
+        downloadState = downloadState,
+        background = swipeBackground,
+        onSwipe = { onSwipe(swipeEndAction) },
+    )
+
+    SwipeBox(
+        start = startSwipe,
+        end = endSwipe,
+        modifier = Modifier,
+    ) {
+        // <-- AM (PLAYLIST_SWIPE_ACTIONS)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -129,6 +203,8 @@ fun EpisodeListItem(
                 onLongClick = onLongClick,
             )
             // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+            // AM (QUEUE_GROUPED_PLAYLIST)
+            .playlistNesting(nestingDepth)
             .padding(vertical = MaterialTheme.padding.extraSmall),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -199,28 +275,6 @@ fun EpisodeListItem(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // AM (PLAYER_MARK_BADGES) -->
-                // Leading the subtitle line, where there is room, rather than
-                // tinting the row: a row can carry one mark, both or neither,
-                // and a single highlight cannot say which. Two badges can, and
-                // they read the same whatever the row's seen/playing state.
-                if (isBookmarked) {
-                    MarkBadge(
-                        imageVector = Icons.Filled.Bookmark,
-                        contentDescription = stringResource(MR.strings.action_filter_bookmarked),
-                        container = MaterialTheme.colorScheme.primaryContainer,
-                        content = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                }
-                if (isFillermarked) {
-                    MarkBadge(
-                        imageVector = Icons.AutoMirrored.Filled.Label,
-                        contentDescription = stringResource(AYMR.strings.action_filter_fillermarked),
-                        container = MaterialTheme.colorScheme.tertiaryContainer,
-                        content = MaterialTheme.colorScheme.onTertiaryContainer,
-                    )
-                }
-                // <-- AM (PLAYER_MARK_BADGES)
                 if (date != null) {
                     Text(
                         text = date,
@@ -250,8 +304,45 @@ fun EpisodeListItem(
                         fontStyle = textStyle,
                     )
                 }
+                // AM (PLAYER_MARK_BADGES) -->
+                // After the timestamp rather than leading the line: a badge is
+                // there only when the mark is, so leading with them moved the
+                // date left and right from row to row. The date is on every
+                // row, so anchoring to it keeps the line steady and the badges
+                // line up down the list.
+                if (isBookmarked) {
+                    MarkBadge(
+                        imageVector = Icons.Filled.Bookmark,
+                        contentDescription = stringResource(MR.strings.action_filter_bookmarked),
+                        container = MaterialTheme.colorScheme.primaryContainer,
+                        content = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                if (isFillermarked) {
+                    MarkBadge(
+                        imageVector = Icons.AutoMirrored.Filled.Label,
+                        contentDescription = stringResource(AYMR.strings.action_filter_fillermarked),
+                        container = MaterialTheme.colorScheme.tertiaryContainer,
+                        content = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                }
+                // <-- AM (PLAYER_MARK_BADGES)
+                // AM (PLAYLIST_LIBRARY_BADGE) -->
+                // The same icon Browse marks a library result with, so "this is
+                // in your library" looks the same wherever it is said.
+                if (isFromLibraryEntry) {
+                    MarkBadge(
+                        imageVector = Icons.Outlined.CollectionsBookmark,
+                        contentDescription = stringResource(MR.strings.in_library),
+                        container = MaterialTheme.colorScheme.secondaryContainer,
+                        content = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                }
+                // <-- AM (PLAYLIST_LIBRARY_BADGE)
             }
         }
+    }
+    // AM (PLAYLIST_SWIPE_ACTIONS)
     }
 }
 
@@ -266,7 +357,7 @@ private fun MarkBadge(
 ) {
     Box(
         modifier = Modifier
-            .padding(end = 4.dp)
+            .padding(start = 4.dp)
             .clip(RoundedCornerShape(4.dp))
             .background(container)
             .padding(horizontal = 4.dp, vertical = 2.dp),

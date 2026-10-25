@@ -31,6 +31,8 @@ fun GlobalSearchCardRow(
     mergeChildIds: Set<Long>,
     onClick: (Anime) -> Unit,
     onLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: ((Anime) -> Unit)? = null,
 ) {
     if (titles.isEmpty()) {
         EmptyResultItem()
@@ -51,6 +53,8 @@ fun GlobalSearchCardRow(
                 inMerge = title.id in mergeChildIds,
                 onClick = { onClick(title) },
                 onLongClick = { onLongClick(title) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onDoubleClick?.let { handler -> { handler(title) } },
             )
         }
     }
@@ -65,6 +69,8 @@ private fun AnimeItem(
     inMerge: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: (() -> Unit)? = null,
 ) {
     Box(modifier = Modifier.width(96.dp)) {
         AnimeComfortableGridItem(
@@ -84,6 +90,8 @@ private fun AnimeItem(
             },
             onClick = onClick,
             onLongClick = onLongClick,
+            // AM (DOUBLE_TAP_QUEUE)
+            onDoubleClick = onDoubleClick,
         )
     }
 }

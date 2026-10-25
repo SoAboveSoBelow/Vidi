@@ -7,11 +7,15 @@ import dev.zacsweers.metro.AssistedInject
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
+import androidx.lifecycle.viewModelScope
 import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
+import aniyomi.domain.queue.interactor.AddToQueue
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.extension.ExtensionManager
+import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.domain.anime.interactor.GetAnime
+import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.interactor.NetworkToLocalAnime
 import tachiyomi.domain.source.service.SourceManager
 
@@ -27,6 +31,8 @@ class GlobalSearchViewModel(
     preferences: SourcePreferences,
     // AM (MERGED_SOURCES)
     getLibraryMergeChildIds: GetLibraryMergeChildIds,
+    // AM (DOUBLE_TAP_QUEUE)
+    private val addToQueue: AddToQueue,
 ) : SearchViewModel(
     initialState = State(searchQuery = initialQuery),
     sourcePreferences = sourcePreferences,
@@ -55,6 +61,22 @@ class GlobalSearchViewModel(
             search()
         }
     }
+
+    // AM (DOUBLE_TAP_QUEUE) -->
+    /**
+     * Queues one result - what a double tap on it does.
+     *
+     * A search result has no episodes in the database yet, so the block is
+     * recorded pending and the caller starts the fill worker, exactly as
+     * BrowseSourceViewModel.addAnimeToQueue does.
+     */
+    fun addAnimeToQueue(anime: Anime, onRequestFill: () -> Unit) {
+        viewModelScope.launchIO {
+            addToQueue.await(anime)
+            onRequestFill()
+        }
+    }
+    // <-- AM (DOUBLE_TAP_QUEUE)
 
     override fun getEnabledSources(): List<AnimeSource> {
         return super.getEnabledSources()

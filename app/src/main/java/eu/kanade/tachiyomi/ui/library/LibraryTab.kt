@@ -18,6 +18,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import eu.kanade.tachiyomi.util.system.toast
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.util.fastAll
@@ -246,6 +247,11 @@ data object LibraryTab : Tab {
                             }
                             Unit
                         }.takeIf { state.showAnimeContinueButton },
+                        // AM (DOUBLE_TAP_QUEUE)
+                        onDoubleClickAnime = { libraryAnime ->
+                            viewModel.addAnimeToQueue(libraryAnime.anime)
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
                         onToggleSelection = viewModel::toggleSelection,
                         onToggleRangeSelection = { category, anime ->
                             viewModel.toggleRangeSelection(category, anime)

@@ -52,6 +52,10 @@ fun BrowseSourceContent(
     onLocalSourceHelpClick: () -> Unit,
     onAnimeClick: (Anime) -> Unit,
     onAnimeLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE): null on the screens that pick a migration target,
+    // where queueing a result means nothing - and where a non-null handler
+    // would make every tap wait out the double-tap timeout for nothing.
+    onAnimeDoubleClick: ((Anime) -> Unit)? = null,
     // AM (MERGED_SOURCES): ids of results that already belong to a merged
     // entry in the library. Defaulted so the screens that pick a migration
     // target, where merge membership says nothing useful, need not supply it.
@@ -137,6 +141,8 @@ fun BrowseSourceContent(
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onAnimeDoubleClick = onAnimeDoubleClick,
                 // AM (BROWSE_SELECTION)
                 selection = selection,
             )
@@ -153,6 +159,8 @@ fun BrowseSourceContent(
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onAnimeDoubleClick = onAnimeDoubleClick,
                 // AM (BROWSE_SELECTION)
                 selection = selection,
             )
@@ -166,6 +174,8 @@ fun BrowseSourceContent(
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onAnimeDoubleClick = onAnimeDoubleClick,
                 // AM (BROWSE_SELECTION)
                 selection = selection,
             )

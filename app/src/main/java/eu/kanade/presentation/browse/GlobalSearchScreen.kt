@@ -30,6 +30,8 @@ fun GlobalSearchScreen(
     onClickSource: (AnimeSource) -> Unit,
     onClickItem: (Anime) -> Unit,
     onLongClickItem: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClickItem: ((Anime) -> Unit)? = null,
 ) {
     Scaffold(
         topBar = { scrollBehavior ->
@@ -58,6 +60,8 @@ fun GlobalSearchScreen(
             onClickSource = onClickSource,
             onClickItem = onClickItem,
             onLongClickItem = onLongClickItem,
+            // AM (DOUBLE_TAP_QUEUE)
+            onDoubleClickItem = onDoubleClickItem,
         )
     }
 }
@@ -72,6 +76,9 @@ internal fun GlobalSearchContent(
     onClickSource: (AnimeSource) -> Unit,
     onClickItem: (Anime) -> Unit,
     onLongClickItem: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE): null for the migration picker - see
+    // BrowseSourceContent for why a handler is not simply always supplied.
+    onDoubleClickItem: ((Anime) -> Unit)? = null,
     fromSourceId: Long? = null,
 ) {
     LazyColumn(
@@ -98,6 +105,8 @@ internal fun GlobalSearchContent(
                                 mergeChildIds = mergeChildIds,
                                 onClick = onClickItem,
                                 onLongClick = onLongClickItem,
+                                // AM (DOUBLE_TAP_QUEUE)
+                                onDoubleClick = onDoubleClickItem,
                             )
                         }
                         is SearchItemResult.Error -> {
