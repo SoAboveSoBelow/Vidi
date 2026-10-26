@@ -38,6 +38,7 @@ import aniyomi.domain.merge.model.DedupeMode
 import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
 import aniyomi.domain.merge.model.MergeSettings
 import aniyomi.domain.merge.model.RemovedMergeEpisode
+import aniyomi.domain.merge.model.MERGED_SOURCE_ID
 import aniyomi.domain.merge.repository.MergeChildRepository
 import aniyomi.domain.merge.repository.MergeEpisodeExclusionRepository
 // <-- AM (MERGED_SOURCES)
@@ -95,6 +96,7 @@ import eu.kanade.tachiyomi.data.torrent.service.TorrentServerService
 import eu.kanade.tachiyomi.data.track.EnhancedTracker
 import eu.kanade.tachiyomi.data.track.TrackerManager
 // AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.source.MergedSource
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.source.isSourceForTorrents
@@ -122,6 +124,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withContext
 import logcat.LogPriority
 import mihon.domain.episode.interactor.FilterEpisodesForDownload
 import mihon.domain.source.interactor.UpdateAnimeFromRemote
@@ -1533,12 +1536,48 @@ class AnimeViewModel(
      * pending in that case and the worker completes it. Non-cancellable so the
      * write survives the screen being left straight afterwards.
      */
-    fun addAnimeToQueue(anime: Anime, onRequestFill: () -> Unit) {
+    fun addAnimeToQueue(
+        anime: Anime,
+        onRequestFill: () -> Unit,
+        unwatchedOnly: Boolean? = null,
+    ) {
         viewModelScope.launchNonCancellable {
-            addToQueue.await(anime)
-            onRequestFill()
+            // AM (QUEUE_WATCH_FILTER) -->
+            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
+                updateSuccessState { it.copy(dialogStack = it.dialogStack + Dialog.AddToQueue(anime)) }
+                return@launchNonCancellable
+            }
+            addToQueue.await(
+                anime = anime,
+                unwatchedOnly = unwatchedOnly ?: false,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onRequestFill() }
         }
     }
+
+    // AM (QUEUE_EPISODE_SELECTION) -->
+    /**
+     * Queues an episode selection as source blocks rather than one flat run.
+     *
+     * A merged entry is one queue source, so its children do not split the
+     * selection into separate blocks. Ordinary multi-source selections still
+     * become one block per owning source in display order.
+     */
+    fun addEpisodesToQueue(items: List<EpisodeList.Item>) {
+        if (items.isEmpty()) return
+        val host = successState?.anime ?: return
+        toggleAllSelection(false)
+        viewModelScope.launchNonCancellable {
+            items.groupBy { item ->
+                if (host.source == MERGED_SOURCE_ID) host else item.owner ?: host
+            }.forEach { (owner, selected) ->
+                addToQueue.await(owner, selected.map { it.episode })
+            }
+        }
+    }
+    // <-- AM (QUEUE_EPISODE_SELECTION)
     // <-- AM (DOUBLE_TAP_QUEUE)
     suspend fun getNextUnseenEpisode(anime: Anime): Episode? {
         return getEpisodesByAnimeId.await(anime.id).getNextUnseen(anime, downloadManager)
@@ -2618,6 +2657,8 @@ class AnimeViewModel(
             // <-- AM (HEART_OPENS_CATEGORIES)
         ) : Dialog
         data class DeleteEpisodes(val episodes: List<Episode>) : Dialog
+        // AM (QUEUE_WATCH_FILTER)
+        data class AddToQueue(val anime: Anime) : Dialog
         data class DuplicateAnime(
             val anime: Anime,
             val duplicates: List<AnimeWithEpisodeCount>,

@@ -28,11 +28,13 @@
 -- queued episodes with it, which is the same thing happening to the queue that
 -- has already happened to the library.
 --
--- position orders items WITHIN a block; the block's own position orders the
--- blocks (see queue_blocks.sq). Sparse, like the block's, so inserting does
--- not renumber what follows. Note that position is not unique and no id pair
--- is either: the same episode may legitimately be queued twice, which is why
--- identity here is the row's own _id and not any combination of its contents.
+-- position is the GLOBAL play-order key. block_id records source membership
+-- and progress, not play position, so episodes from different sources may be
+-- interleaved without changing which source the UI says they belong to.
+-- Positions are sparse; inserts and reorders renumber them when they need room.
+-- Note that position is not unique and no id pair is either: the same episode
+-- may legitimately be queued twice, which is why identity here is the row's
+-- own _id and not any combination of its contents.
 CREATE TABLE queue_items(
     _id INTEGER NOT NULL PRIMARY KEY,
     block_id INTEGER NOT NULL,
@@ -53,16 +55,17 @@ CREATE TABLE queue_items(
 );
 
 CREATE INDEX queue_items_block_id_index ON queue_items(block_id);
+CREATE INDEX queue_items_position_index ON queue_items(position);
 CREATE INDEX queue_items_anime_id_index ON queue_items(anime_id);
 CREATE INDEX queue_items_episode_id_index ON queue_items(episode_id);
 
--- The whole queue in play order. The join is on the block only to sort by its
--- position; nothing about the block's contents is read here.
+-- The whole queue in play order. Source membership does not constrain where
+-- an item sits; the block remains available on every row for grouping and
+-- progress independently of that position.
 getAllItems:
-SELECT QI._id, QI.block_id, QI.position, QI.anime_id, QI.episode_id, QI.uri
-FROM queue_items QI
-JOIN queue_blocks QB ON QB._id = QI.block_id
-ORDER BY QB.position ASC, QI.position ASC;
+SELECT _id, block_id, position, anime_id, episode_id, uri
+FROM queue_items
+ORDER BY position ASC, _id ASC;
 
 getItemsByBlockId:
 SELECT _id, block_id, position, anime_id, episode_id, uri
@@ -96,6 +99,12 @@ DELETE FROM queue_items;
 deleteByEpisodeIds:
 DELETE FROM queue_items
 WHERE episode_id IN :episodeIds;
+
+-- Watch filtering applies to the entry the rows were queued as. The same
+-- episode may also occur under another entry after queue moves.
+deleteByAnimeAndEpisodeIds:
+DELETE FROM queue_items
+WHERE anime_id = :animeId AND episode_id IN :episodeIds;
 
 countItems:
 SELECT count(*)

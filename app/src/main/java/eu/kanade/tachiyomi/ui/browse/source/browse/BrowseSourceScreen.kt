@@ -47,6 +47,7 @@ import eu.kanade.presentation.browse.components.BrowseSourceSelectionBottomBar
 import eu.kanade.presentation.browse.components.BrowseSourceSelectionToolbar
 import eu.kanade.presentation.browse.components.BrowseSourceToolbar
 import eu.kanade.presentation.category.components.ChangeCategoryDialog
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.util.AssistContentScreen
 import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
@@ -292,8 +293,13 @@ data class BrowseSourceScreen(
                 // bottom bar's own queue action is what acts on it.
                 onAnimeDoubleClick = { anime ->
                     if (!state.selectionMode) {
-                        viewModel.addAnimeToQueue(anime) { QueueFillJob.start(context) }
-                        context.toast(AMMR.strings.am_action_added_to_queue)
+                        viewModel.addAnimeToQueue(
+                            anime = anime,
+                            onRequestFill = {
+                                QueueFillJob.start(context)
+                                context.toast(AMMR.strings.am_action_added_to_queue)
+                            },
+                        )
                     }
                 },
                 // <-- AM (DOUBLE_TAP_QUEUE)
@@ -315,6 +321,24 @@ data class BrowseSourceScreen(
                     onUpdate = viewModel::setFilters,
                 )
             }
+            // AM (QUEUE_WATCH_FILTER) -->
+            is BrowseSourceViewModel.Dialog.AddToQueue -> {
+                AddToQueueDialog(
+                    anime = dialog.animeList.first(),
+                    onAddUnwatched = {
+                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = true) {
+                            QueueFillJob.start(context)
+                        }
+                    },
+                    onAddAll = {
+                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = false) {
+                            QueueFillJob.start(context)
+                        }
+                    },
+                    onDismissRequest = onDismissRequest,
+                )
+            }
+            // <-- AM (QUEUE_WATCH_FILTER)
             is BrowseSourceViewModel.Dialog.AddDuplicateAnime -> {
                 DuplicateAnimeDialog(
                     duplicates = dialog.duplicates,

@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.CollectionsBookmark
+import androidx.compose.material.icons.outlined.DragHandle
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,6 +62,8 @@ fun EpisodeListItem(
     isCurrentEpisode: Boolean,
     title: String,
     date: String?,
+    /** Optional parent label; the rest remains the ordinary episode row. */
+    groupTitle: String? = null,
     onBookmarkClicked: (Long?, Boolean) -> Unit,
     onFillermarkClicked: (Long?, Boolean) -> Unit,
     onEpisodeClicked: (Long?) -> Unit,
@@ -125,6 +128,9 @@ fun EpisodeListItem(
     downloadState: Download.State = Download.State.NOT_DOWNLOADED,
     onSwipe: (LibraryPreferences.EpisodeSwipeAction) -> Unit = {},
     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+    // AM (QUEUE_REORDER): supplied by the row's ReorderableItem scope; replaces
+    // the open-entry eye while active, just as the entry list's handle does.
+    reorderHandleModifier: Modifier? = null,
 ) {
     var textHeight by remember { mutableStateOf(0) }
 
@@ -214,7 +220,15 @@ fun EpisodeListItem(
         // goes inert while selecting, mirroring how that list disables the
         // download indicator rather than swapping it out - a row that changes
         // shape on selection makes the list jump.
-        if (onOpenEntryClicked != null) {
+        if (reorderHandleModifier != null) {
+            Icon(
+                imageVector = Icons.Outlined.DragHandle,
+                contentDescription = stringResource(AMMR.strings.am_episode_drag_handle),
+                modifier = reorderHandleModifier
+                    .size(48.dp)
+                    .padding(12.dp),
+            )
+        } else if (onOpenEntryClicked != null) {
             IconButton(
                 onClick = { onOpenEntryClicked(episode.id) },
                 enabled = !selectionMode,
@@ -260,6 +274,18 @@ fun EpisodeListItem(
         Spacer(modifier = Modifier.width(2.dp))
 
         Column {
+            if (groupTitle != null) {
+                Text(
+                    text = groupTitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = episodeColor,
+                    modifier = Modifier.alpha(textAlpha),
+                    fontWeight = textWeight,
+                    fontStyle = textStyle,
+                )
+            }
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyMedium,

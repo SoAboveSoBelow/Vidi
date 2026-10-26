@@ -78,6 +78,57 @@ class AddToQueue(
         return animeList.map { await(it) }
     }
 
+    // AM (QUEUE_WATCH_FILTER) -->
+    /** Whether queueing [anime] needs an "unwatched or all" answer from the user. */
+    suspend fun hasMixedWatchState(anime: Anime): Boolean {
+        val episodes = orderFor(anime)
+        return episodes.any { it.seen } && episodes.any { !it.seen }
+    }
+
+    /**
+     * Queues [anime] as one source block, optionally keeping only unwatched episodes.
+     *
+     * A source with no resolved episodes still goes through the ordinary pending-
+     * block path; "unwatched" is only a choice the UI offers once a mixed list is
+     * actually available, so this cannot accidentally create an empty block.
+     */
+    suspend fun await(anime: Anime, unwatchedOnly: Boolean, currentEpisodeId: Long? = null): Long? {
+        val ordered = orderFor(anime)
+        // A merged entry is one queue source even if some of its rows were
+        // added through a child. Match the resolved episode set rather than
+        // whichever entry id each row happened to record.
+        val orderedEpisodeIds = ordered.mapTo(mutableSetOf()) { it.id }
+        val queuedItems = queueRepository.getItems().filter { it.episodeId in orderedEpisodeIds }
+        val currentIsQueued = currentEpisodeId != null && queuedItems.any { it.episodeId == currentEpisodeId }
+
+        if (!unwatchedOnly) {
+            val queuedEpisodeIds = queuedItems.mapNotNull { it.episodeId }.toSet()
+            val trimmedSourceIsQueued = ordered.any { it.seen && it.id !in queuedEpisodeIds }
+            if (!trimmedSourceIsQueued) return await(anime)
+
+            // Inverse of the unwatched cleanup: a trimmed source gets its
+            // watched episodes back. Keep the active episode in its existing
+            // position rather than moving it into the restored block.
+            return await(
+                anime,
+                ordered.filterNot { currentIsQueued && it.id == currentEpisodeId },
+            )
+        }
+
+        // Re-adding unwatched also cleans watched positions already queued as
+        // this source. The active episode is left exactly where it is: removing
+        // it, or moving it into the new block, would change the live playlist.
+        queueRepository.removeItemsByEpisodeIds(
+            ordered.filter { it.seen && it.id != currentEpisodeId }.map { it.id },
+        )
+        val episodes = ordered.filter { episode ->
+            !episode.seen && !(currentIsQueued && episode.id == currentEpisodeId)
+        }
+        if (episodes.isEmpty()) return queuedItems.firstOrNull()?.blockId
+        return await(anime, episodes)
+    }
+    // <-- AM (QUEUE_WATCH_FILTER)
+
     /**
      * Queues particular episodes of [anime] as one block, in the order given -
      * the caller's order is kept, because a selection made from a list the user

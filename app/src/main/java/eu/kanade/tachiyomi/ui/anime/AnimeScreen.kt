@@ -45,6 +45,7 @@ import eu.kanade.presentation.anime.components.EpisodeReorderActions
 import eu.kanade.presentation.anime.components.ScanlatorFilterDialog
 import eu.kanade.presentation.anime.components.SetIntervalDialog
 import eu.kanade.presentation.category.components.ChangeCategoryDialog
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.components.NavigatorAdaptiveSheet
 import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsGesturesScreen.SkipIntroLengthDialog
 import eu.kanade.presentation.util.AssistContentScreen
@@ -198,6 +199,32 @@ class AnimeScreen(
                     )
                 }
 
+                // AM (QUEUE_WATCH_FILTER) -->
+                is AnimeViewModel.Dialog.AddToQueue -> {
+                    AddToQueueDialog(
+                        anime = dialog.anime,
+                        onAddUnwatched = {
+                            onDismissRequest()
+                            viewModel.addAnimeToQueue(
+                                anime = dialog.anime,
+                                unwatchedOnly = true,
+                                onRequestFill = { QueueFillJob.start(context) },
+                            )
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                        onAddAll = {
+                            onDismissRequest()
+                            viewModel.addAnimeToQueue(
+                                anime = dialog.anime,
+                                unwatchedOnly = false,
+                                onRequestFill = { QueueFillJob.start(context) },
+                            )
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                        onDismissRequest = onDismissRequest,
+                    )
+                }
+                // <-- AM (QUEUE_WATCH_FILTER)
                 is AnimeViewModel.Dialog.DuplicateAnime -> {
                     DuplicateAnimeDialog(
                         duplicates = dialog.duplicates,
@@ -608,6 +635,11 @@ class AnimeScreen(
             onMultiMarkAsSeenClicked = viewModel::markEpisodesSeen,
             onMarkPreviousAsSeenClicked = viewModel::markPreviousEpisodeSeen,
             onMultiDeleteClicked = viewModel::showDeleteEpisodeDialog,
+            // AM (QUEUE_EPISODE_SELECTION)
+            onAddEpisodesToQueue = {
+                viewModel.addEpisodesToQueue(successState.selectedEpisodes)
+                context.toast(AMMR.strings.am_action_added_to_queue)
+            },
             onEpisodeSwipe = viewModel::episodeSwipe,
             onEpisodeSelected = viewModel::toggleSelection,
             onAllEpisodeSelected = viewModel::toggleAllSelection,
@@ -639,8 +671,13 @@ class AnimeScreen(
             },
             // AM (DOUBLE_TAP_QUEUE)
             onSeasonDoubleClicked = { seasonAnime ->
-                viewModel.addAnimeToQueue(seasonAnime.anime) { QueueFillJob.start(context) }
-                context.toast(AMMR.strings.am_action_added_to_queue)
+                viewModel.addAnimeToQueue(
+                    anime = seasonAnime.anime,
+                    onRequestFill = {
+                        QueueFillJob.start(context)
+                        context.toast(AMMR.strings.am_action_added_to_queue)
+                    },
+                )
             },
             onContinueWatchingClicked = {
                 scope.launchIO {
@@ -661,8 +698,13 @@ class AnimeScreen(
             // the database yet, so the fill worker is asked for, exactly as in
             // Browse.
             onRelatedAnimeDoubleClicked = { relatedAnime ->
-                viewModel.addAnimeToQueue(relatedAnime) { QueueFillJob.start(context) }
-                context.toast(AMMR.strings.am_action_added_to_queue)
+                viewModel.addAnimeToQueue(
+                    anime = relatedAnime,
+                    onRequestFill = {
+                        QueueFillJob.start(context)
+                        context.toast(AMMR.strings.am_action_added_to_queue)
+                    },
+                )
             },
             // <-- AM (DOUBLE_TAP_QUEUE)
             relatedAnimeDisplayMode = viewModel.relatedAnimeDisplayMode,

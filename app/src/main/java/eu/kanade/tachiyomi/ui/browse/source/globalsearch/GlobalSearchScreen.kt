@@ -13,11 +13,13 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.core.util.ifSourcesLoaded
 import eu.kanade.presentation.browse.GlobalSearchScreen
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.data.queue.QueueFillJob
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceScreen
 import eu.kanade.tachiyomi.util.system.toast
+import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.screens.LoadingScreen
 
@@ -36,6 +38,7 @@ class GlobalSearchScreen(
         val navigator = LocalNavigator.currentOrThrow
         // AM (DOUBLE_TAP_QUEUE)
         val context = LocalContext.current
+        var queuePrompt by remember { mutableStateOf<Anime?>(null) }
 
         val viewModel =
             assistedMetroViewModel<GlobalSearchViewModel, GlobalSearchViewModel.Factory> {
@@ -80,10 +83,47 @@ class GlobalSearchScreen(
                 onLongClickItem = { navigator.push(AnimeScreen(it.id, true)) },
                 // AM (DOUBLE_TAP_QUEUE)
                 onDoubleClickItem = { anime ->
-                    viewModel.addAnimeToQueue(anime) { QueueFillJob.start(context) }
-                    context.toast(AMMR.strings.am_action_added_to_queue)
+                    viewModel.addAnimeToQueue(
+                        anime = anime,
+                        onRequestFill = {
+                            QueueFillJob.start(context)
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                        onChoiceNeeded = { queuePrompt = it },
+                    )
                 },
             )
         }
+
+        // AM (QUEUE_WATCH_FILTER) -->
+        queuePrompt?.let { anime ->
+            AddToQueueDialog(
+                anime = anime,
+                onAddUnwatched = {
+                    queuePrompt = null
+                    viewModel.addAnimeToQueue(
+                        anime = anime,
+                        unwatchedOnly = true,
+                        onRequestFill = {
+                            QueueFillJob.start(context)
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                    )
+                },
+                onAddAll = {
+                    queuePrompt = null
+                    viewModel.addAnimeToQueue(
+                        anime = anime,
+                        unwatchedOnly = false,
+                        onRequestFill = {
+                            QueueFillJob.start(context)
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                    )
+                },
+                onDismissRequest = { queuePrompt = null },
+            )
+        }
+        // <-- AM (QUEUE_WATCH_FILTER)
     }
 }

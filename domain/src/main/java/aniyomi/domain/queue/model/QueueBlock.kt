@@ -23,6 +23,17 @@ data class QueueBlock(
      * history lookup.
      */
     val lastPlayedEpisodeId: Long? = null,
+
+    /**
+     * Whether [lastPlayedEpisodeId] was finished - playback crossed the
+     * mark-as-watched threshold - rather than left part way through.
+     *
+     * Recorded as the event it is, at the moment the threshold fires, rather
+     * than read back off the episode's seen column later: seen cannot tell an
+     * episode finished today from one watched a year ago, and the column is
+     * the same either way. See GetQueueResumePoint for what reads it.
+     */
+    val lastPlayedCompleted: Boolean = false,
     // <-- AM (QUEUE_BLOCK_PROGRESS)
 )
 

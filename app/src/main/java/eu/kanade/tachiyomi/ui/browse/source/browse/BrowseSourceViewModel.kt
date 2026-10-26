@@ -28,7 +28,9 @@ import eu.kanade.domain.category.interactor.GetCategorySelection
 import eu.kanade.domain.source.interactor.GetIncognitoState
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.interactor.AddTracks
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +41,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.preference.mapAsCheckboxState
 import tachiyomi.core.common.util.lang.launchIO
@@ -376,6 +379,34 @@ class BrowseSourceViewModel(
     }
 
     /**
+     * Queues one result, without selecting it first - what a double tap does.
+     *
+     * Goes through the same [AddToQueue] call and the same fill request as the
+     * selection action above rather than a path of its own: the only thing a
+     * double tap decides is WHICH entry, and one entry is a selection of one.
+     */
+    fun addAnimeToQueue(
+        anime: Anime,
+        onRequestFill: () -> Unit,
+        unwatchedOnly: Boolean? = null,
+    ) {
+        viewModelScope.launchIO {
+            // AM (QUEUE_WATCH_FILTER) -->
+            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
+                setDialog(Dialog.AddToQueue(listOf(anime)))
+                return@launchIO
+            }
+            addToQueue.await(
+                anime = anime,
+                unwatchedOnly = unwatchedOnly ?: false,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onRequestFill() }
+        }
+    }
+
+    /**
      * Queues the selection, one block per entry.
      *
      * A browse result has no episodes in the database yet, so [AddToQueue]
@@ -385,29 +416,45 @@ class BrowseSourceViewModel(
      * AddToQueue fills its block outright; the run then finds nothing pending
      * and stops, so there is no need to work out which case applies here.
      */
-    /**
-     * Queues one result, without selecting it first - what a double tap does.
-     *
-     * Goes through the same [AddToQueue] call and the same fill request as the
-     * selection action above rather than a path of its own: the only thing a
-     * double tap decides is WHICH entry, and one entry is a selection of one.
-     */
-    fun addAnimeToQueue(anime: Anime, onRequestFill: () -> Unit) {
-        viewModelScope.launchIO {
-            addToQueue.await(anime)
-            onRequestFill()
-        }
-    }
-
     fun addSelectionToQueue(onRequestFill: () -> Unit) {
         viewModelScope.launchIO {
             val animeList = selectedAnime()
             clearSelection()
             if (animeList.isEmpty()) return@launchIO
-            addToQueue.await(animeList)
-            onRequestFill()
+            // AM (QUEUE_WATCH_FILTER) -->
+            // Unambiguous sources queue immediately. Each mixed source asks its
+            // own question, since watched state belongs to the source, not to
+            // the selection as a whole.
+            val needsChoice = mutableListOf<Anime>()
+            animeList.forEach { anime ->
+                if (addToQueue.hasMixedWatchState(anime)) {
+                    needsChoice += anime
+                } else {
+                    addToQueue.await(anime)
+                }
+            }
+            if (needsChoice.isNotEmpty()) setDialog(Dialog.AddToQueue(needsChoice))
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onRequestFill() }
         }
     }
+
+    // AM (QUEUE_WATCH_FILTER) -->
+    /** Applies one source's answer, then advances a multi-source prompt. */
+    fun addQueueChoice(animeList: List<Anime>, unwatchedOnly: Boolean, onRequestFill: () -> Unit) {
+        val anime = animeList.firstOrNull() ?: return
+        viewModelScope.launchIO {
+            addToQueue.await(
+                anime = anime,
+                unwatchedOnly = unwatchedOnly,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            val remaining = animeList.drop(1)
+            setDialog(if (remaining.isEmpty()) null else Dialog.AddToQueue(remaining))
+            withContext(Dispatchers.Main) { onRequestFill() }
+        }
+    }
+    // <-- AM (QUEUE_WATCH_FILTER)
 
     /**
      * Resolved from the DB by id rather than from the pager: a selected result
@@ -555,6 +602,8 @@ class BrowseSourceViewModel(
         data object Filter : Dialog
 
         data class AddDuplicateAnime(val anime: Anime, val duplicates: List<AnimeWithEpisodeCount>) : Dialog
+        // AM (QUEUE_WATCH_FILTER)
+        data class AddToQueue(val animeList: List<Anime>) : Dialog
         data class ChangeAnimeCategory(
             val animeList: List<Anime>,
             // AM (BROWSE_SELECTION): CheckboxState rather than its State

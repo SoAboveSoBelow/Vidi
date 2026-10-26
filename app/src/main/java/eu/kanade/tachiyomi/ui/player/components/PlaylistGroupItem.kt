@@ -1,7 +1,7 @@
 // AM (QUEUE_GROUPED_PLAYLIST) -->
 package eu.kanade.tachiyomi.ui.player.components
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.outlined.DragHandle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +28,7 @@ import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.nowPlayingBackground
 import tachiyomi.presentation.core.util.secondaryItemAlpha
+import tachiyomi.presentation.core.util.selectedBackground
 
 /**
  * A collapsible row in the player playlist: one queued source, or one season
@@ -47,17 +49,25 @@ fun PlaylistGroupItem(
     subtitle: String?,
     depth: Int,
     isCurrent: Boolean,
+    isSelected: Boolean,
     expanded: Boolean,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     onToggle: (() -> Unit)?,
+    // AM (QUEUE_REORDER)
+    reorderHandleModifier: Modifier? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .selectedBackground(isSelected)
             // The same tint the episode rows use for the playing episode, so a
             // collapsed source still says the playing episode is inside it.
             .nowPlayingBackground(isCurrent)
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
             // Depth is drawn as a rule down the left rather than as indent -
             // see playlistNesting.
             .playlistNesting(depth)
@@ -68,6 +78,15 @@ fun PlaylistGroupItem(
             ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (reorderHandleModifier != null) {
+            Icon(
+                imageVector = Icons.Outlined.DragHandle,
+                contentDescription = stringResource(AMMR.strings.am_episode_drag_handle),
+                modifier = reorderHandleModifier
+                    .size(48.dp)
+                    .padding(12.dp),
+            )
+        }
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,

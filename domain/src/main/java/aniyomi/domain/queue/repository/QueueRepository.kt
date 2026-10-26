@@ -16,7 +16,7 @@ import kotlinx.coroutines.flow.Flow
  */
 interface QueueRepository {
 
-    /** The whole queue in play order: block position, then item position. */
+    /** The whole queue in global item-position order. */
     suspend fun getItems(): List<QueueItem>
 
     /**
@@ -75,10 +75,27 @@ interface QueueRepository {
      * set of episodes means: the remembered one may not be in it any more.
      */
     suspend fun setBlockLastPlayedEpisode(blockId: Long, episodeId: Long?)
+
+    /**
+     * Marks [blockId]'s remembered episode finished, if [episodeId] is still
+     * the one remembered - see [QueueBlock.lastPlayedCompleted].
+     */
+    suspend fun setBlockLastPlayedCompleted(blockId: Long, episodeId: Long)
     // <-- AM (QUEUE_BLOCK_PROGRESS)
 
-    /** Rewrites the order of the blocks, in the order given. */
+    /** Rewrites coarse source order and gathers each source's item runs into it. */
     suspend fun setBlockOrder(orderedBlockIds: List<Long>)
+
+    // AM (QUEUE_REORDER) -->
+    /**
+     * Moves queue rows as one group, preserving their relative order.
+     *
+     * [afterItemId] null means the start of the whole queue. Moving rows never
+     * changes block membership: source identity and progress stay with the
+     * original block even when its episodes are interleaved with another's.
+     */
+    suspend fun moveItems(itemIds: List<Long>, afterItemId: Long?)
+    // <-- AM (QUEUE_REORDER)
 
     suspend fun removeItem(itemId: Long)
 
@@ -91,6 +108,9 @@ interface QueueRepository {
      * one. Pending blocks are never pruned - see queue_blocks.deleteEmptyComplete.
      */
     suspend fun removeItemsByEpisodeIds(episodeIds: List<Long>)
+
+    /** Removes only positions queued as [animeId], leaving other entries' rows alone. */
+    suspend fun removeItemsByAnimeAndEpisodeIds(animeId: Long, episodeIds: List<Long>)
 
     suspend fun removeBlock(blockId: Long)
 

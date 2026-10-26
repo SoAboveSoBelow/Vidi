@@ -2,6 +2,8 @@
 <resources>
     <string name="am_action_add_to_queue">Add to queue</string>
     <string name="am_action_added_to_queue">Added to queue</string>
+    <string name="am_action_add_unwatched">Add unwatched</string>
+    <string name="am_action_add_all">Add all</string>
     <string name="am_action_expand">Expand</string>
     <string name="am_action_collapse">Collapse</string>
     <string name="am_pref_category_queue">Queue</string>

@@ -36,6 +36,7 @@ import eu.kanade.presentation.library.DeleteLibraryAnimeDialog
 import eu.kanade.presentation.library.LibrarySettingsDialog
 import eu.kanade.presentation.library.components.LibraryContent
 import eu.kanade.presentation.library.components.LibraryToolbar
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.more.onboarding.GETTING_STARTED_URL
 import eu.kanade.presentation.util.Tab
 import eu.kanade.tachiyomi.R
@@ -249,8 +250,9 @@ data object LibraryTab : Tab {
                         }.takeIf { state.showAnimeContinueButton },
                         // AM (DOUBLE_TAP_QUEUE)
                         onDoubleClickAnime = { libraryAnime ->
-                            viewModel.addAnimeToQueue(libraryAnime.anime)
-                            context.toast(AMMR.strings.am_action_added_to_queue)
+                            viewModel.addAnimeToQueue(libraryAnime.anime) {
+                                context.toast(AMMR.strings.am_action_added_to_queue)
+                            }
                         },
                         onToggleSelection = viewModel::toggleSelection,
                         onToggleRangeSelection = { category, anime ->
@@ -296,6 +298,20 @@ data object LibraryTab : Tab {
                     },
                 )
             }
+            // AM (QUEUE_WATCH_FILTER) -->
+            is LibraryViewModel.Dialog.AddToQueue -> {
+                AddToQueueDialog(
+                    anime = dialog.animeList.first(),
+                    onAddUnwatched = {
+                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = true)
+                    },
+                    onAddAll = {
+                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = false)
+                    },
+                    onDismissRequest = onDismissRequest,
+                )
+            }
+            // <-- AM (QUEUE_WATCH_FILTER)
             is LibraryViewModel.Dialog.DeleteAnime -> {
                 DeleteLibraryAnimeDialog(
                     containsLocalAnime = dialog.anime.any(Anime::isLocal),

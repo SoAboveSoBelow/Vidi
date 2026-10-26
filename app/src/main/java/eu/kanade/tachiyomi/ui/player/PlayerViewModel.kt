@@ -2041,6 +2041,41 @@ class PlayerViewModel(
     }
     // <-- AM (QUEUE_BLOCK_SEASONS)
 
+    // AM (QUEUE_REORDER) -->
+    /** Rewrites only the queue's source order, never the entries' own order. */
+    fun reorderQueueBlocks(orderedBlockIds: List<Long>) {
+        viewModelScope.launchNonCancellable {
+            // Pending blocks have no episode rows to drag. Keep each one in its
+            // existing slot while permuting the visible blocks around it.
+            val allBlockIds = queueRepository.getBlocks().map { it.id }
+            val visibleIds = orderedBlockIds.toSet()
+            if (visibleIds.size != orderedBlockIds.size || !allBlockIds.containsAll(visibleIds)) {
+                return@launchNonCancellable
+            }
+            val visible = orderedBlockIds.iterator()
+            queueRepository.setBlockOrder(
+                allBlockIds.map { blockId ->
+                    if (blockId in visibleIds) visible.next() else blockId
+                },
+            )
+        }
+    }
+
+    /** Moves selected queue episodes as one run, after [afterEpisodeId] or at the queue's start. */
+    fun moveQueueEpisodes(episodeIds: List<Long>, afterEpisodeId: Long?) {
+        viewModelScope.launchNonCancellable {
+            val items = queueRepository.getItems()
+            val selected = episodeIds.toSet()
+            val itemIds = items.filter { item -> item.episodeId?.let(selected::contains) == true }.map { it.id }
+            val afterItemId = afterEpisodeId?.let { episodeId ->
+                items.firstOrNull { it.episodeId == episodeId }?.id
+                    ?: return@launchNonCancellable
+            }
+            queueRepository.moveItems(itemIds, afterItemId)
+        }
+    }
+    // <-- AM (QUEUE_REORDER)
+
     // AM (QUEUE_BLOCK_PROGRESS) -->
     /**
      * Records [episodeId] as where the user is in its block.
@@ -2059,6 +2094,16 @@ class PlayerViewModel(
             ?: return
         queueRepository.setBlockLastPlayedEpisode(blockId, episodeId)
         updateStateData { it.copy(playlistBlockLastPlayed = it.playlistBlockLastPlayed + (blockId to episodeId)) }
+    }
+    // <-- AM (QUEUE_BLOCK_PROGRESS)
+
+    // AM (QUEUE_BLOCK_PROGRESS) -->
+    /** Records that [episodeId] was watched to the threshold, for its block. */
+    private suspend fun rememberQueueCompletion(episodeId: Long) {
+        val blockId = stateData.value.playlistBlockByEpisodeId[episodeId]
+            ?: queueRepository.getItems().firstOrNull { it.episodeId == episodeId }?.blockId
+            ?: return
+        queueRepository.setBlockLastPlayedCompleted(blockId, episodeId)
     }
     // <-- AM (QUEUE_BLOCK_PROGRESS)
 
@@ -4938,6 +4983,14 @@ class PlayerViewModel(
         viewModelScope.launchNonCancellable {
             try {
                 updateEpisodeProgressOnComplete(episode)
+                // AM (QUEUE_BLOCK_PROGRESS) -->
+                // The queue is told the episode FINISHED, not merely that it
+                // played - which is what lets resuming step past it instead of
+                // handing back an episode the user watched to the end. Written
+                // here because this is the one place that knows the threshold
+                // was crossed; nothing downstream can work it out afterwards.
+                rememberQueueCompletion(id)
+                // <-- AM (QUEUE_BLOCK_PROGRESS)
                 completedEpisodeId = id
             } catch (e: Throwable) {
                 if (e is CancellationException) throw e

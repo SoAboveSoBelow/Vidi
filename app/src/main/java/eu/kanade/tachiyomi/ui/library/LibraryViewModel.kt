@@ -33,6 +33,7 @@ import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.track.TrackStatus
 import eu.kanade.tachiyomi.data.track.TrackerManager
 // AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.source.MergedSource
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.util.episode.getNextUnseen
@@ -58,6 +59,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import mihon.core.common.utils.mutate
 import mihon.domain.library.model.search.QueryNode
 import mihon.feature.library.matches
@@ -787,13 +789,6 @@ class LibraryViewModel(
      */
     // AM (PLAYBACK_QUEUE) -->
     /**
-     * Queues the selection, one block per entry, in the order it is selected.
-     *
-     * Shaped like [markSeenSelection]: the selection is read on the caller's
-     * thread, the work runs non-cancellable so it survives the screen, and the
-     * selection clears at once rather than when the work finishes.
-     */
-    /**
      * Queues one entry, without selecting it first - what a double tap does.
      *
      * A library entry has its episodes already, so nothing has to be fetched
@@ -801,19 +796,67 @@ class LibraryViewModel(
      * outright. Non-cancellable for the same reason as the selection action
      * below: the write should survive the screen going away.
      */
-    fun addAnimeToQueue(anime: Anime) {
+    fun addAnimeToQueue(
+        anime: Anime,
+        unwatchedOnly: Boolean? = null,
+        onAdded: () -> Unit = {},
+    ) {
         viewModelScope.launchNonCancellable {
-            addToQueue.await(anime)
+            // AM (QUEUE_WATCH_FILTER) -->
+            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
+                dialog.update { Dialog.AddToQueue(listOf(anime)) }
+                return@launchNonCancellable
+            }
+            addToQueue.await(
+                anime = anime,
+                unwatchedOnly = unwatchedOnly ?: false,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onAdded() }
         }
     }
 
+    /**
+     * Queues the selection, one block per entry, in the order it is selected.
+     *
+     * Shaped like [markSeenSelection]: the selection is read on the caller's
+     * thread, the work runs non-cancellable so it survives the screen, and the
+     * selection clears at once rather than when the work finishes.
+     */
     fun addSelectionToQueue() {
         val selection = selectedAnime
         viewModelScope.launchNonCancellable {
-            addToQueue.await(selection)
+            // AM (QUEUE_WATCH_FILTER) -->
+            val needsChoice = mutableListOf<Anime>()
+            selection.forEach { anime ->
+                if (addToQueue.hasMixedWatchState(anime)) {
+                    needsChoice += anime
+                } else {
+                    addToQueue.await(anime)
+                }
+            }
+            if (needsChoice.isNotEmpty()) dialog.update { Dialog.AddToQueue(needsChoice) }
+            // <-- AM (QUEUE_WATCH_FILTER)
         }
         clearSelection()
     }
+
+    // AM (QUEUE_WATCH_FILTER) -->
+    fun addQueueChoice(animeList: List<Anime>, unwatchedOnly: Boolean, onAdded: () -> Unit = {}) {
+        val anime = animeList.firstOrNull() ?: return
+        viewModelScope.launchNonCancellable {
+            addToQueue.await(
+                anime = anime,
+                unwatchedOnly = unwatchedOnly,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            val remaining = animeList.drop(1)
+            dialog.update { if (remaining.isEmpty()) null else Dialog.AddToQueue(remaining) }
+            withContext(Dispatchers.Main) { onAdded() }
+        }
+    }
+    // <-- AM (QUEUE_WATCH_FILTER)
     // <-- AM (PLAYBACK_QUEUE)
 
     fun markSeenSelection(seen: Boolean) {
@@ -1134,6 +1177,8 @@ class LibraryViewModel(
             val initialSelection: List<CheckboxState<Category>>,
         ) : Dialog
         data class DeleteAnime(val anime: List<Anime>) : Dialog
+        // AM (QUEUE_WATCH_FILTER)
+        data class AddToQueue(val animeList: List<Anime>) : Dialog
     }
 
     // AM (MERGED_SOURCES) -->

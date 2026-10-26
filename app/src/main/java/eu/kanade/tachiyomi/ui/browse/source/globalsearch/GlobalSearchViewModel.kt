@@ -13,6 +13,9 @@ import aniyomi.domain.queue.interactor.AddToQueue
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.extension.ExtensionManager
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.anime.model.Anime
@@ -70,10 +73,25 @@ class GlobalSearchViewModel(
      * recorded pending and the caller starts the fill worker, exactly as
      * BrowseSourceViewModel.addAnimeToQueue does.
      */
-    fun addAnimeToQueue(anime: Anime, onRequestFill: () -> Unit) {
+    fun addAnimeToQueue(
+        anime: Anime,
+        onRequestFill: () -> Unit,
+        unwatchedOnly: Boolean? = null,
+        onChoiceNeeded: (Anime) -> Unit = {},
+    ) {
         viewModelScope.launchIO {
-            addToQueue.await(anime)
-            onRequestFill()
+            // AM (QUEUE_WATCH_FILTER) -->
+            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
+                withContext(Dispatchers.Main) { onChoiceNeeded(anime) }
+                return@launchIO
+            }
+            addToQueue.await(
+                anime = anime,
+                unwatchedOnly = unwatchedOnly ?: false,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onRequestFill() }
         }
     }
     // <-- AM (DOUBLE_TAP_QUEUE)

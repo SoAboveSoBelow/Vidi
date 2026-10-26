@@ -62,10 +62,10 @@ fun PlaybackQueue.hasPrevious(index: Int): Boolean = index != 0
  * source, as the user added it.
  *
  * Computed by walking out from [index] while the block id holds, rather than
- * by grouping the whole order: the caller always asks about a position, the
- * runs are contiguous by construction (play order is block position then item
- * position), and a walk costs the length of one run instead of the length of
- * the queue.
+ * by grouping the whole order: the caller always asks about a position, and a
+ * walk costs the length of one run instead of the length of the queue. Episode
+ * dragging may make later runs of the same source; each remains a separate
+ * step rather than being gathered across whatever plays between them.
  *
  * An order with no blocks answers with the whole of itself, so callers need no
  * branch for it.

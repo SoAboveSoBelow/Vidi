@@ -63,6 +63,21 @@ class GetQueueResumePoint(
             val position = items.indexOfFirst {
                 it.episodeId != null && it.episodeId == lastPlayed.episodeId
             }
+            // AM (QUEUE_BLOCK_PROGRESS) -->
+            // One exception to "identity only": an episode the player saw
+            // FINISH. Everything this function refuses to infer from is stored
+            // state that cannot tell when or whether an episode was watched to
+            // the end - but the player records the threshold crossing as it
+            // happens (see runEpisodeCompletion), and resuming onto an episode
+            // the user watched out is not resuming, it is replaying.
+            //
+            // Only what follows it in the queue, never history's own notion of
+            // next: the queue IS the play order, and the episode after this one
+            // may well belong to another entry entirely.
+            if (position != -1 && finishedInQueue(items[position])) {
+                items.drop(position + 1).firstResumePoint()?.let { return it }
+            }
+            // <-- AM (QUEUE_BLOCK_PROGRESS)
             val animeId = items.getOrNull(position)?.animeId ?: lastPlayed.animeId
             return ResumePoint(animeId = animeId, episodeId = lastPlayed.episodeId)
         }
@@ -72,6 +87,22 @@ class GetQueueResumePoint(
         // history alone.
         return items.firstResumePoint()
     }
+
+    // AM (QUEUE_BLOCK_PROGRESS) -->
+    /**
+     * Whether [item] is the episode its block remembers, finished.
+     *
+     * Both halves matter: the block remembers one episode, and the flag is
+     * about that episode. An item that is no longer the remembered one is an
+     * episode the user has since moved away from, and whatever it was doing
+     * when they left it is not this question.
+     */
+    private suspend fun finishedInQueue(item: QueueItem): Boolean {
+        val episodeId = item.episodeId ?: return false
+        val block = queueRepository.getBlock(item.blockId) ?: return false
+        return block.lastPlayedCompleted && block.lastPlayedEpisodeId == episodeId
+    }
+    // <-- AM (QUEUE_BLOCK_PROGRESS)
 
     /**
      * The first item that can be opened as an entry's episode.

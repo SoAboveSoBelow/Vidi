@@ -218,6 +218,8 @@ fun AnimeScreen(
     onMultiMarkAsSeenClicked: (List<Episode>, markAsSeen: Boolean) -> Unit,
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
 
     // For episode swipe
     onEpisodeSwipe: (EpisodeList.Item, LibraryPreferences.EpisodeSwipeAction) -> Unit,
@@ -337,6 +339,7 @@ fun AnimeScreen(
             onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
             onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
             onMultiDeleteClicked = onMultiDeleteClicked,
+            onAddEpisodesToQueue = onAddEpisodesToQueue,
             onEpisodeSwipe = onEpisodeSwipe,
             onEpisodeSelected = onEpisodeSelected,
             onAllEpisodeSelected = onAllEpisodeSelected,
@@ -441,6 +444,7 @@ fun AnimeScreen(
             onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
             onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
             onMultiDeleteClicked = onMultiDeleteClicked,
+            onAddEpisodesToQueue = onAddEpisodesToQueue,
             onEpisodeSwipe = onEpisodeSwipe,
             onEpisodeSelected = onEpisodeSelected,
             onAllEpisodeSelected = onAllEpisodeSelected,
@@ -564,6 +568,8 @@ private fun AnimeScreenSmallImpl(
     onMultiMarkAsSeenClicked: (List<Episode>, markAsSeen: Boolean) -> Unit,
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
 
     // For episode swipe
     onEpisodeSwipe: (EpisodeList.Item, LibraryPreferences.EpisodeSwipeAction) -> Unit,
@@ -854,6 +860,7 @@ private fun AnimeScreenSmallImpl(
                     onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
                     onDownloadEpisode = onDownloadEpisode,
                     onMultiDeleteClicked = onMultiDeleteClicked,
+                    onAddEpisodesToQueue = onAddEpisodesToQueue,
                     // AM (EPISODE_NAMES) -->
                     onRenameEpisode = onRenameEpisode,
                     // <-- AM (EPISODE_NAMES)
@@ -1251,6 +1258,8 @@ fun AnimeScreenLargeImpl(
     onMultiMarkAsSeenClicked: (List<Episode>, markAsSeen: Boolean) -> Unit,
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
 
     // For swipe actions
     onEpisodeSwipe: (EpisodeList.Item, LibraryPreferences.EpisodeSwipeAction) -> Unit,
@@ -1532,6 +1541,7 @@ fun AnimeScreenLargeImpl(
                         onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
                         onDownloadEpisode = onDownloadEpisode,
                         onMultiDeleteClicked = onMultiDeleteClicked,
+                        onAddEpisodesToQueue = onAddEpisodesToQueue,
                         // AM (EPISODE_NAMES) -->
                         onRenameEpisode = onRenameEpisode,
                         // <-- AM (EPISODE_NAMES)
@@ -1840,6 +1850,8 @@ private fun SharedAnimeBottomActionMenu(
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onDownloadEpisode: ((List<EpisodeList.Item>, EpisodeDownloadAction) -> Unit)?,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
     // AM (EPISODE_NAMES) -->
     onRenameEpisode: () -> Unit,
     // <-- AM (EPISODE_NAMES)
@@ -1900,6 +1912,8 @@ private fun SharedAnimeBottomActionMenu(
         // <-- AM (EPISODE_NAMES)
         // AM (CUSTOM_EPISODE_ORDER)
         onChangeSeasonClicked = onChangeSeason.takeIf { selected.isNotEmpty() },
+        // AM (QUEUE_EPISODE_SELECTION)
+        onAddToQueueClicked = onAddEpisodesToQueue,
     )
 }
 

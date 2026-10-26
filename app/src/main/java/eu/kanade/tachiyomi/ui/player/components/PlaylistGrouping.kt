@@ -43,22 +43,29 @@ sealed interface PlaylistRow {
     @Immutable
     data class Source(
         val blockId: Long,
+        /** Identifies this consecutive run; one block may appear several times. */
+        val runId: Int,
+        /** The run's full play order, including children hidden while collapsed. */
+        val episodeIds: List<Long>,
         val title: String,
         val episodeCount: Int,
         val playEpisodeId: Long?,
         val expandable: Boolean,
         val expanded: Boolean,
         val containsCurrent: Boolean,
-        /** The single queued episode's name, for a run of one. */
-        val singleEpisodeName: String?,
+        /** The episode itself for a run of one, rendered by the shared episode row. */
+        val singleEpisode: Episode?,
     ) : PlaylistRow {
-        override val key: String get() = "source-$blockId"
+        override val key: String get() = "source-$runId-$blockId"
     }
 
     /** One season of a source, where that source has more than one. */
     @Immutable
     data class Season(
         val blockId: Long,
+        /** The source run plus season run keeps repeated headers distinct. */
+        val runId: String,
+        val episodeIds: List<Long>,
         val seasonNumber: Long,
         val label: String,
         val episodeCount: Int,
@@ -66,7 +73,7 @@ sealed interface PlaylistRow {
         val expanded: Boolean,
         val containsCurrent: Boolean,
     ) : PlaylistRow {
-        override val key: String get() = "season-$blockId-$seasonNumber"
+        override val key: String get() = "season-$runId-$blockId-$seasonNumber"
     }
 
     /** An episode, at [depth] 0 when the list is ungrouped. */
@@ -127,9 +134,10 @@ data class PlaylistExpansion(
 /**
  * The consecutive runs of [episodes] that belong to the same queued source.
  *
- * Consecutive rather than grouped by key: play order is block position then
- * item position, so one source's items are already contiguous, and grouping by
- * key would silently merge two separate runs of the same entry into one.
+ * Consecutive rather than grouped by key: episode dragging may interleave a
+ * source with others, and gathering by block would silently merge separate
+ * runs and lie about global play order. Stable block membership still supplies
+ * the source label for every run.
  */
 fun playlistBlocks(
     episodes: List<Episode>,
@@ -165,7 +173,6 @@ fun buildPlaylistRows(
     episodes: List<Episode>,
     blockOf: (Episode) -> Long?,
     titleOf: (Long, List<Episode>) -> String,
-    displayNameOf: (Episode) -> String,
     seasonsOf: (Long) -> PlaylistSeasons?,
     seasonLabelOf: (Long, List<EntrySeason>) -> String,
     expansion: PlaylistExpansion,
@@ -178,13 +185,16 @@ fun buildPlaylistRows(
 
     // No blocks at all (an external session, or a playlist read before the
     // queue was), or exactly one source: a plain list of episodes.
-    if (blocks.size <= 1 || blocks.any { it.first == null }) {
+    if (blocks.size <= 1) {
         val single = blocks.singleOrNull()
         val blockId = single?.first
         val seasons = blockId?.let(seasonsOf)
-        if (single != null && blockId != null && seasons != null && seasons.dividesMoreThanOne(single.second)) {
+        if (single != null && blockId != null && seasons != null &&
+            seasons.dividesMoreThanOne(single.second)
+        ) {
             rows += seasonRows(
                 blockId = blockId,
+                sourceRunId = 0,
                 episodes = single.second,
                 seasons = seasons,
                 seasonLabelOf = seasonLabelOf,
@@ -198,30 +208,33 @@ fun buildPlaylistRows(
         return episodes.map { PlaylistRow.EpisodeItem(it, depth = 0) }
     }
 
-    blocks.forEach { (blockId, items) ->
+    blocks.forEachIndexed { sourceRunId, (blockId, items) ->
         if (blockId == null) {
             rows += items.map { PlaylistRow.EpisodeItem(it, depth = 0) }
-            return@forEach
+            return@forEachIndexed
         }
         val containsCurrent = currentEpisodeId != null && items.any { it.id == currentEpisodeId }
         val expandable = items.size > 1
         val expanded = expandable && blockId in expansion.sources
         rows += PlaylistRow.Source(
             blockId = blockId,
+            runId = sourceRunId,
+            episodeIds = items.mapNotNull { it.id },
             title = titleOf(blockId, items),
             episodeCount = items.size,
             playEpisodeId = playTarget(items, lastPlayedByBlockId[blockId]),
             expandable = expandable,
             expanded = expanded,
             containsCurrent = containsCurrent,
-            singleEpisodeName = items.singleOrNull()?.let(displayNameOf),
+            singleEpisode = items.singleOrNull(),
         )
-        if (!expanded) return@forEach
+        if (!expanded) return@forEachIndexed
 
         val seasons = seasonsOf(blockId)
         if (seasons != null && seasons.dividesMoreThanOne(items)) {
             rows += seasonRows(
                 blockId = blockId,
+                sourceRunId = sourceRunId,
                 episodes = items,
                 seasons = seasons,
                 seasonLabelOf = seasonLabelOf,
@@ -247,6 +260,7 @@ fun buildPlaylistRows(
  */
 private fun seasonRows(
     blockId: Long,
+    sourceRunId: Int,
     episodes: List<Episode>,
     seasons: PlaylistSeasons,
     seasonLabelOf: (Long, List<EntrySeason>) -> String,
@@ -267,18 +281,20 @@ private fun seasonRows(
         }
     }
 
-    runs.forEach { (seasonNumber, items) ->
+    runs.forEachIndexed { seasonRunId, (seasonNumber, items) ->
         if (seasonNumber == null) {
             // An episode the resolve has no season for - a queued episode of
             // another entry caught in this block, or one dropped since. It
             // belongs to the source, not to a season, so it lists directly.
             rows += items.map { PlaylistRow.EpisodeItem(it, depth = depth + 1) }
-            return@forEach
+            return@forEachIndexed
         }
         val containsCurrent = currentEpisodeId != null && items.any { it.id == currentEpisodeId }
         val expanded = (blockId to seasonNumber) in expansion.seasons
         rows += PlaylistRow.Season(
             blockId = blockId,
+            runId = "$sourceRunId-$seasonRunId",
+            episodeIds = items.mapNotNull { it.id },
             seasonNumber = seasonNumber,
             label = seasonLabelOf(seasonNumber, seasons.seasons),
             episodeCount = items.size,

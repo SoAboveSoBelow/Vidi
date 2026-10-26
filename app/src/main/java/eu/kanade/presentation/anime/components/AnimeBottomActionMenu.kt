@@ -287,6 +287,8 @@ fun AnimeBottomActionMenu(
     // AM (CUSTOM_EPISODE_ORDER) -->
     onChangeSeasonClicked: (() -> Unit)? = null,
     // <-- AM (CUSTOM_EPISODE_ORDER)
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddToQueueClicked: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     // AY -->
@@ -429,6 +431,19 @@ fun AnimeBottomActionMenu(
             )
         }
         // <-- AY
+        // AM (QUEUE_EPISODE_SELECTION) -->
+        if (onAddToQueueClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "add_to_queue",
+                    title = stringResource(AMMR.strings.am_action_add_to_queue),
+                    icon = ImageVector.vectorResource(R.drawable.ic_playlist_add_24dp),
+                    onClick = onAddToQueueClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        // <-- AM (QUEUE_EPISODE_SELECTION)
         // AM (CUSTOM_EPISODE_ORDER) -->
         // Moving the selection between seasons is an ordinary bulk action on
         // the selection, not something reorder mode owns, so it sits in this

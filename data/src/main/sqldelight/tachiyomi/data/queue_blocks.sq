@@ -1,23 +1,19 @@
 -- AM (PLAYBACK_QUEUE) -->
--- A run of queued items that were added together, and the queue's coarse
--- order.
+-- A set of queued items that were added together, its source identity, and
+-- the queue's coarse source order. Fine play order belongs to queue_items:
+-- episode dragging may interleave blocks, but never changes their membership.
 --
--- The queue is banded rather than one flat list of positions, the same way
--- merge_children bands children by season before ordering them by priority
--- (see merge_children.sq): play order is (queue_blocks.position,
--- queue_items.position). Three things need the band to exist:
+-- Blocks still exist independently of their item rows for three reasons:
 --
 --   * A block holds its place in the order while its items are still being
 --     fetched. Queueing an entry whose episodes are not in the database yet
 --     has no item rows to insert, and appending them later would land them at
 --     the end rather than where the user put the entry. The block is inserted
---     at once with fill_state PENDING and the items arrive into it.
---   * Shuffle and search scope rewrite one entry's order mid-session (see
---     PlayerViewModel.observeShuffleSeed). With a band that is a rewrite of
---     one block's item positions; flat, it would be a search for which rows
---     happened to come from that entry.
+--     at once with fill_state PENDING and the items arrive into its slot.
+--   * Shuffle and search scope rewrite one entry's items mid-session (see
+--     PlayerViewModel.observeShuffleSeed) without losing source identity.
 --   * "These twelve came from X" is a fact the queue holds rather than one the
---     UI has to infer, which is what a queue screen needs to group by.
+--     UI has to infer from wherever those episodes currently sit.
 --
 -- anime_id is the entry the block came from, or NULL for a block of items
 -- that have no library entry behind them (a file handed to the app from
@@ -45,6 +41,10 @@ CREATE TABLE queue_blocks(
     -- dropped by a source refresh should forget the bookmark, not delete the
     -- block the user queued.
     last_played_episode_id INTEGER DEFAULT NULL,
+    -- AM (QUEUE_BLOCK_PROGRESS): whether that episode was finished rather than
+    -- left part way through. Cleared whenever last_played_episode_id moves,
+    -- since the new episode has not been finished by having been started.
+    last_played_completed INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(anime_id) REFERENCES animes(_id)
     ON DELETE CASCADE,
     FOREIGN KEY(last_played_episode_id) REFERENCES episodes(_id)
@@ -55,19 +55,19 @@ CREATE INDEX queue_blocks_position_index ON queue_blocks(position);
 CREATE INDEX queue_blocks_anime_id_index ON queue_blocks(anime_id);
 
 getAllBlocks:
-SELECT _id, position, anime_id, fill_state, last_played_episode_id
+SELECT _id, position, anime_id, fill_state, last_played_episode_id, last_played_completed
 FROM queue_blocks
 ORDER BY position ASC;
 
 getBlockById:
-SELECT _id, position, anime_id, fill_state, last_played_episode_id
+SELECT _id, position, anime_id, fill_state, last_played_episode_id, last_played_completed
 FROM queue_blocks
 WHERE _id = :blockId;
 
 -- Blocks still waiting on a fetch, oldest first - what a fill worker picks up,
 -- including after process death.
 getBlocksByFillState:
-SELECT _id, position, anime_id, fill_state, last_played_episode_id
+SELECT _id, position, anime_id, fill_state, last_played_episode_id, last_played_completed
 FROM queue_blocks
 WHERE fill_state = :fillState
 ORDER BY position ASC;
@@ -85,8 +85,18 @@ WHERE _id = :blockId;
 -- AM (QUEUE_BLOCK_PROGRESS) -->
 setLastPlayedEpisode:
 UPDATE queue_blocks
-SET last_played_episode_id = :episodeId
+SET last_played_episode_id = :episodeId,
+    last_played_completed = 0
 WHERE _id = :blockId;
+
+-- Marks the remembered episode finished. Guarded on it still BEING the
+-- remembered one: a completion landing after the user has moved on must not
+-- claim the episode they moved to was finished.
+setLastPlayedCompleted:
+UPDATE queue_blocks
+SET last_played_completed = 1
+WHERE _id = :blockId
+AND last_played_episode_id = :episodeId;
 -- <-- AM (QUEUE_BLOCK_PROGRESS)
 
 setPosition:

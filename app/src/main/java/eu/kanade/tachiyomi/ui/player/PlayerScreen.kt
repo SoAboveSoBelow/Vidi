@@ -1183,6 +1183,9 @@ fun PlayerScreen(
                     onDownloadClicked = viewModel::toggleEpisodeDownload,
                     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                     onExpandSource = viewModel::loadBlockSeasons,
+                    // AM (QUEUE_REORDER)
+                    onMoveQueueEpisodes = viewModel::moveQueueEpisodes,
+                    onReorderQueueBlocks = viewModel::reorderQueueBlocks,
                     // <-- AM (QUEUE_GROUPED_PLAYLIST)
                     // <-- AM (EPISODE_TAG_SEARCH)
                     // AM (PLAYLIST_SEARCH_SCOPE) -->

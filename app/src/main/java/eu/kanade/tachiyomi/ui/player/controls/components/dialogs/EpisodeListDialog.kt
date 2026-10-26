@@ -59,6 +59,7 @@ import eu.kanade.tachiyomi.ui.player.components.PlaylistRow
 import eu.kanade.tachiyomi.ui.player.components.PlaylistSeasons
 import eu.kanade.tachiyomi.ui.player.components.buildPlaylistRows
 import eu.kanade.tachiyomi.ui.player.components.rememberEpisodeMarks
+import eu.kanade.tachiyomi.ui.player.components.rememberPlaylistReorder
 import eu.kanade.tachiyomi.util.lang.toRelativeString
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -77,6 +78,7 @@ import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.clearFocusOnSoftKeyboardHide
 import tachiyomi.presentation.core.util.runOnEnterKeyPressed
 import tachiyomi.presentation.core.util.secondaryItemAlpha
+import sh.calvin.reorderable.ReorderableItem
 import kotlin.time.Instant
 
 @Composable
@@ -133,6 +135,9 @@ fun EpisodeListDialog(
     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
     /** Asks for a source's seasons; called when its group is first expanded. */
     onExpandSource: (Long) -> Unit,
+    // AM (QUEUE_REORDER)
+    onMoveQueueEpisodes: (List<Long>, Long?) -> Unit,
+    onReorderQueueBlocks: (List<Long>) -> Unit,
     // <-- AM (QUEUE_GROUPED_PLAYLIST)
     // AM (PLAYLIST_SEARCH_SCOPE) -->
     /** The entry this playlist belongs to, which the submitted search is keyed to. */
@@ -186,6 +191,19 @@ fun EpisodeListDialog(
     // list being open, and closing the dialog should end it. Keeping it here
     // means it cannot outlive the dialog or leak into a later session.
     var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
+    val clearSelection = { selectedIds = emptySet() }
+    // A parent selects its episode run, so clicking it toggles exactly like an
+    // episode and every existing bulk action works without a parent-only path.
+    val toggleSelection: (List<Long>) -> Unit = { ids ->
+        val selection = ids.toSet()
+        selectedIds = if (selection.all(selectedIds::contains)) {
+            selectedIds - selection
+        } else {
+            selectedIds + selection
+        }
+    }
+    // Long-press selection is also queue reorder mode; there is no second
+    // mode to enable before the drag handles appear.
     val selectionMode = selectedIds.isNotEmpty()
     val selectedEpisodes = remember(selectedIds, episodeList) {
         episodeList.filter { it.id in selectedIds }
@@ -206,9 +224,12 @@ fun EpisodeListDialog(
     // special case for a queue being present, and the order on screen is the
     // order things actually play in.
     val orderedEpisodeList = episodeList
-    val filteredEpisodeList = remember(orderedEpisodeList, searchQuery) {
+    val canReorderQueue = orderedEpisodeList.any { blockOf(it) != null }
+    val isReordering = selectionMode && canReorderQueue
+    val filteredEpisodeList = remember(orderedEpisodeList, searchQuery, isReordering) {
         val query = searchQuery
-        if (query.isBlank()) {
+        // Reorder edits the full queue, not the subset a search happens to show.
+        if (query.isBlank() || isReordering) {
             orderedEpisodeList
         } else {
             // AM (EPISODE_TAG_SEARCH) -->
@@ -297,8 +318,8 @@ fun EpisodeListDialog(
     // Searching flattens the groups. A query is a search for episodes, and
     // answering it with a list of collapsed sources that might contain one
     // would make the user open each to find out.
-    val isSearching = searchQuery.isNotBlank()
-    val rows = remember(filteredEpisodeList, expansion, currentEpisodeId, isSearching, blockSeasons) {
+    val isSearching = searchQuery.isNotBlank() && !isReordering
+    val baseRows = remember(filteredEpisodeList, expansion, currentEpisodeId, isSearching, blockSeasons) {
         if (isSearching) {
             filteredEpisodeList.map { PlaylistRow.EpisodeItem(it, depth = 0) }
         } else {
@@ -306,7 +327,6 @@ fun EpisodeListDialog(
                 episodes = filteredEpisodeList,
                 blockOf = blockOf,
                 titleOf = { _, items -> items.firstNotNullOfOrNull(sourceTitleOf).orEmpty() },
-                displayNameOf = displayNameOf,
                 seasonsOf = blockSeasons::get,
                 seasonLabelOf = seasonLabels,
                 expansion = expansion,
@@ -349,7 +369,7 @@ fun EpisodeListDialog(
     // The playing episode's own row when its group is open, otherwise the
     // group that holds it - either way the list opens on what is playing
     // rather than at the top of a queue it may be deep inside.
-    val rowScrollIndex = rows
+    val rowScrollIndex = baseRows
         .indexOfFirst { row ->
             when (row) {
                 is PlaylistRow.EpisodeItem -> row.episode.id != null && row.episode.id == currentEpisodeId
@@ -360,6 +380,25 @@ fun EpisodeListDialog(
         .coerceAtLeast(0)
     // <-- AM (QUEUE_GROUPED_PLAYLIST)
     val episodeListState = rememberLazyListState(initialFirstVisibleItemIndex = rowScrollIndex)
+    val reorderUi = rememberPlaylistReorder(
+        enabled = isReordering,
+        listState = episodeListState,
+        rows = baseRows,
+        episodes = orderedEpisodeList,
+        selectedIds = selectedIds,
+        blockOf = blockOf,
+        seasonOf = { episode ->
+            val blockId = blockOf(episode)
+            val episodeId = episode.id
+            if (blockId != null && episodeId != null) {
+                blockSeasons[blockId]?.seasonByEpisodeId?.get(episodeId)
+            } else {
+                null
+            }
+        },
+        onMoveEpisodes = onMoveQueueEpisodes,
+        onReorderBlocks = onReorderQueueBlocks,
+    )
     val dateFormatter = remember(dateFormat) { UiPreferences.dateFormat(dateFormat) }
 
     PlayerDialog(
@@ -370,7 +409,11 @@ fun EpisodeListDialog(
         // the dialog under it, matching how the entry list treats back while
         // its own selection is active.
         onDismissRequest = {
-            if (selectionMode) selectedIds = emptySet() else onDismissRequest()
+            if (selectionMode) {
+                clearSelection()
+            } else {
+                onDismissRequest()
+            }
         },
         // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
         titleContent = {
@@ -395,11 +438,11 @@ fun EpisodeListDialog(
                     // AM (PLAYLIST_SWIPE_ACTIONS) -->
                     onSeen = {
                         selectedEpisodes.forEach { marks.setSeen(it.id, true) }
-                        selectedIds = emptySet()
+                        clearSelection()
                     }.takeIf { offersSeen && selectedEpisodes.any { !marks.marksOf(it).seen } },
                     onUnseen = {
                         selectedEpisodes.forEach { marks.setSeen(it.id, false) }
-                        selectedIds = emptySet()
+                        clearSelection()
                     }.takeIf { offersSeen && selectedEpisodes.any { marks.marksOf(it).seen } },
                     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                     // AM (LOCAL_SOURCE_DOWNLOAD) -->
@@ -410,7 +453,7 @@ fun EpisodeListDialog(
                     onDownload = onDownloadEpisodes?.takeIf { offersDownload }?.let { download ->
                         {
                             download(selectedEpisodes)
-                            selectedIds = emptySet()
+                            clearSelection()
                         }
                     },
                     // <-- AM (LOCAL_SOURCE_DOWNLOAD)
@@ -428,7 +471,7 @@ fun EpisodeListDialog(
                         .takeIf { offersFillermark && selectedEpisodes.any { !marks.marksOf(it).fillermarked } },
                     onRemoveFillermark = { selectedEpisodes.forEach { marks.setFillermark(it.id, false) } }
                         .takeIf { offersFillermark && selectedEpisodes.any { marks.marksOf(it).fillermarked } },
-                    onClearSelection = { selectedIds = emptySet() },
+                    onClearSelection = clearSelection,
                 )
             } else {
                 EpisodeListDialogHeader(
@@ -468,7 +511,7 @@ fun EpisodeListDialog(
                 state = episodeListState,
             ) {
                 items(
-                    items = rows,
+                    items = reorderUi.rows,
                     key = { it.key },
                     contentType = { row ->
                         when (row) {
@@ -477,175 +520,234 @@ fun EpisodeListDialog(
                         }
                     },
                 ) { row ->
-                    // AM (QUEUE_GROUPED_PLAYLIST) -->
-                    // A tap on a group plays; the chevron expands. Playing
-                    // goes through the same submit-then-open path an episode
-                    // row takes, since playing the first episode of a source
-                    // IS opening that episode.
-                    val playFromGroup: (Long?) -> Unit = { id ->
-                        if (!selectionMode && id != null) {
-                            playlistAnimeId?.let { PlaylistSearchScope.submit(it, searchQuery) }
-                            onEpisodeClicked(id)
+                    ReorderableItem(
+                        state = reorderUi.state,
+                        key = row.key,
+                        enabled = isReordering,
+                    ) {
+                        val canDragRow = when (row) {
+                            is PlaylistRow.EpisodeItem -> blockOf(row.episode) != null
+                            else -> true
                         }
-                    }
-                    when (row) {
-                        is PlaylistRow.Source -> {
-                            PlaylistGroupItem(
-                                title = row.title,
-                                subtitle = row.singleEpisodeName
-                                    ?: pluralStringResource(
+                        val reorderHandleModifier = reorderUi.row?.takeIf { canDragRow }?.let { reorderRow ->
+                            Modifier.draggableHandle(
+                                onDragStarted = { reorderRow.onDragStarted(row.key) },
+                                onDragStopped = { reorderRow.onDragStopped(row.key) },
+                            )
+                        }
+                        // AM (QUEUE_GROUPED_PLAYLIST) -->
+                        // A tap on a group plays; the chevron expands. Playing
+                        // goes through the same submit-then-open path an episode
+                        // row takes, since playing the first episode of a source
+                        // IS opening that episode.
+                        val playFromGroup: (Long?) -> Unit = { id ->
+                            if (!selectionMode && id != null) {
+                                playlistAnimeId?.let { PlaylistSearchScope.submit(it, searchQuery) }
+                                onEpisodeClicked(id)
+                            }
+                        }
+                        when (row) {
+                            is PlaylistRow.Source -> {
+                                if (row.singleEpisode == null) {
+                                    PlaylistGroupItem(
+                                        title = row.title,
+                                        subtitle = pluralStringResource(
+                                            AYMR.plurals.anime_num_episodes,
+                                            row.episodeCount,
+                                            row.episodeCount,
+                                        ),
+                                        depth = 0,
+                                        isCurrent = row.containsCurrent,
+                                        isSelected = row.episodeIds.all(selectedIds::contains),
+                                        expanded = row.expanded,
+                                        onClick = {
+                                            if (selectionMode) {
+                                                toggleSelection(row.episodeIds)
+                                            } else {
+                                                playFromGroup(row.playEpisodeId)
+                                            }
+                                        },
+                                        onLongClick = { selectedIds = selectedIds + row.episodeIds },
+                                        reorderHandleModifier = reorderHandleModifier,
+                                        onToggle = if (row.expandable && !isReordering) {
+                                            {
+                                                expansion = if (row.blockId in expansion.sources) {
+                                                    expansion.copy(sources = expansion.sources - row.blockId)
+                                                } else {
+                                                    // The seasons are asked for on the
+                                                    // way open, not with the playlist -
+                                                    // see loadBlockSeasons.
+                                                    onExpandSource(row.blockId)
+                                                    expansion.copy(sources = expansion.sources + row.blockId)
+                                                }
+                                            }
+                                        } else {
+                                            null
+                                        },
+                                    )
+                                    return@ReorderableItem
+                                }
+                                // A one-episode source falls through to the same
+                                // EpisodeListItem as an ungrouped episode below.
+                            }
+                            is PlaylistRow.Season -> {
+                                val seasonKey = row.blockId to row.seasonNumber
+                                PlaylistGroupItem(
+                                    title = row.label,
+                                    subtitle = pluralStringResource(
                                         AYMR.plurals.anime_num_episodes,
                                         row.episodeCount,
                                         row.episodeCount,
                                     ),
-                                depth = 0,
-                                isCurrent = row.containsCurrent,
-                                expanded = row.expanded,
-                                onClick = { playFromGroup(row.playEpisodeId) },
-                                onToggle = if (row.expandable) {
-                                    {
-                                        expansion = if (row.blockId in expansion.sources) {
-                                            expansion.copy(sources = expansion.sources - row.blockId)
+                                    depth = 1,
+                                    isCurrent = row.containsCurrent,
+                                    isSelected = row.episodeIds.all(selectedIds::contains),
+                                    expanded = row.expanded,
+                                    onClick = {
+                                        if (selectionMode) {
+                                            toggleSelection(row.episodeIds)
                                         } else {
-                                            // The seasons are asked for on the
-                                            // way open, not with the playlist -
-                                            // see loadBlockSeasons.
-                                            onExpandSource(row.blockId)
-                                            expansion.copy(sources = expansion.sources + row.blockId)
+                                            playFromGroup(row.playEpisodeId)
                                         }
-                                    }
-                                } else {
-                                    null
-                                },
-                            )
-                            return@items
-                        }
-                        is PlaylistRow.Season -> {
-                            val seasonKey = row.blockId to row.seasonNumber
-                            PlaylistGroupItem(
-                                title = row.label,
-                                subtitle = pluralStringResource(
-                                    AYMR.plurals.anime_num_episodes,
-                                    row.episodeCount,
-                                    row.episodeCount,
-                                ),
-                                depth = 1,
-                                isCurrent = row.containsCurrent,
-                                expanded = row.expanded,
-                                onClick = { playFromGroup(row.playEpisodeId) },
-                                onToggle = {
-                                    expansion = if (seasonKey in expansion.seasons) {
-                                        expansion.copy(seasons = expansion.seasons - seasonKey)
+                                    },
+                                    onLongClick = { selectedIds = selectedIds + row.episodeIds },
+                                    reorderHandleModifier = reorderHandleModifier,
+                                    onToggle = if (isReordering) {
+                                        null
                                     } else {
-                                        expansion.copy(seasons = expansion.seasons + seasonKey)
-                                    }
-                                },
-                            )
-                            return@items
-                        }
-                        is PlaylistRow.EpisodeItem -> Unit
-                    }
-                    val episodeRow = row as PlaylistRow.EpisodeItem
-                    val episode = episodeRow.episode
-                    // <-- AM (QUEUE_GROUPED_PLAYLIST)
-
-                    // AM (NOW_PLAYING_INDICATOR) -->
-                    val isCurrentEpisode = currentEpisodeId != null && episode.id == currentEpisodeId
-                    // <-- AM (NOW_PLAYING_INDICATOR)
-
-                    val title = if (displayModeOf(episode) == Anime.EPISODE_DISPLAY_NUMBER) {
-                        stringResource(
-                            AYMR.strings.display_mode_episode,
-                            formatEpisodeNumber(episode.episode_number.toDouble()),
-                        )
-                    } else {
-                        // AM (EPISODE_NAMES) -->
-                        displayNameOf(episode)
-                        // <-- AM (EPISODE_NAMES)
-                    }
-
-                    val date = episode.date_upload
-                        .takeIf { it > 0L }
-                        ?.let {
-                            Instant.fromEpochMilliseconds(it)
-                                .toLocalDateTime(TimeZone.currentSystemDefault())
-                                .date
-                                .toRelativeString(
-                                    context = context,
-                                    relative = dateRelativeTime,
-                                    dateFormat = dateFormatter,
+                                        {
+                                            expansion = if (seasonKey in expansion.seasons) {
+                                                expansion.copy(seasons = expansion.seasons - seasonKey)
+                                            } else {
+                                                expansion.copy(seasons = expansion.seasons + seasonKey)
+                                            }
+                                        }
+                                    },
                                 )
-                        } ?: ""
-
-                    // AM (PLAYER_MARK_BADGES)
-                    val episodeMarks = marks.marksOf(episode)
-
-                    EpisodeListItem(
-                        episode = episode,
-                        isCurrentEpisode = isCurrentEpisode,
-                        title = title,
-                        date = date,
-                        // AM (PLAYER_MARK_BADGES) -->
-                        isBookmarked = episodeMarks.bookmarked,
-                        isFillermarked = episodeMarks.fillermarked,
-                        onBookmarkClicked = marks::setBookmark,
-                        onFillermarkClicked = marks::setFillermark,
-                        // <-- AM (PLAYER_MARK_BADGES)
-                        // AM (PLAYLIST_LIBRARY_BADGE)
-                        isFromLibraryEntry = showLibraryBadges && isFromLibraryEntry(episode),
-                        // AM (PLAYLIST_SWIPE_ACTIONS)
-                        isSeen = episodeMarks.seen,
-                        // AM (QUEUE_GROUPED_PLAYLIST)
-                        nestingDepth = episodeRow.depth,
-                        // AM (PLAYLIST_SWIPE_ACTIONS) -->
-                        swipeStartAction = swipeStartAction,
-                        swipeEndAction = swipeEndAction,
-                        downloadState = episode.id
-                            ?.let { downloadStates[it] }
-                            ?: Download.State.NOT_DOWNLOADED,
-                        onSwipe = { action ->
-                            when (action) {
-                                LibraryPreferences.EpisodeSwipeAction.ToggleSeen ->
-                                    marks.setSeen(episode.id, !episodeMarks.seen)
-                                LibraryPreferences.EpisodeSwipeAction.ToggleBookmark ->
-                                    marks.setBookmark(episode.id, !episodeMarks.bookmarked)
-                                LibraryPreferences.EpisodeSwipeAction.ToggleFillermark ->
-                                    marks.setFillermark(episode.id, !episodeMarks.fillermarked)
-                                LibraryPreferences.EpisodeSwipeAction.Download ->
-                                    onDownloadClicked(episode)
-                                LibraryPreferences.EpisodeSwipeAction.Disabled -> Unit
+                                return@ReorderableItem
                             }
-                        },
-                        // <-- AM (PLAYLIST_SWIPE_ACTIONS)
-                        // AM (PLAYER_EPISODE_LIST_SELECTION) -->
-                        onEpisodeClicked = { id ->
-                            when {
-                                // AM (PLAYLIST_SEARCH_SCOPE) -->
-                                // The confirmation. Submitted before the switch
-                                // so the playlist this builds is the list the
-                                // user was looking at when they tapped.
-                                !selectionMode -> {
-                                    playlistAnimeId?.let { PlaylistSearchScope.submit(it, searchQuery) }
-                                    onEpisodeClicked(id)
+                            is PlaylistRow.EpisodeItem -> Unit
+                        }
+                        val episodeRow = when (row) {
+                            is PlaylistRow.Source -> PlaylistRow.EpisodeItem(
+                                episode = requireNotNull(row.singleEpisode),
+                                depth = 0,
+                            )
+                            is PlaylistRow.EpisodeItem -> row
+                            is PlaylistRow.Season -> return@ReorderableItem
+                        }
+                        val selectionIds = when (row) {
+                            is PlaylistRow.Source -> row.episodeIds
+                            else -> listOfNotNull(episodeRow.episode.id)
+                        }
+                        val groupTitle = (row as? PlaylistRow.Source)?.title
+                        val episode = episodeRow.episode
+                        // <-- AM (QUEUE_GROUPED_PLAYLIST)
+
+                        // AM (NOW_PLAYING_INDICATOR) -->
+                        val isCurrentEpisode = currentEpisodeId != null && episode.id == currentEpisodeId
+                        // <-- AM (NOW_PLAYING_INDICATOR)
+
+                        val title = if (displayModeOf(episode) == Anime.EPISODE_DISPLAY_NUMBER) {
+                            stringResource(
+                                AYMR.strings.display_mode_episode,
+                                formatEpisodeNumber(episode.episode_number.toDouble()),
+                            )
+                        } else {
+                            // AM (EPISODE_NAMES) -->
+                            displayNameOf(episode)
+                            // <-- AM (EPISODE_NAMES)
+                        }
+
+                        val date = episode.date_upload
+                            .takeIf { it > 0L }
+                            ?.let {
+                                Instant.fromEpochMilliseconds(it)
+                                    .toLocalDateTime(TimeZone.currentSystemDefault())
+                                    .date
+                                    .toRelativeString(
+                                        context = context,
+                                        relative = dateRelativeTime,
+                                        dateFormat = dateFormatter,
+                                    )
+                            } ?: ""
+
+                        // AM (PLAYER_MARK_BADGES)
+                        val episodeMarks = marks.marksOf(episode)
+
+                        EpisodeListItem(
+                            episode = episode,
+                            isCurrentEpisode = isCurrentEpisode,
+                            title = title,
+                            date = date,
+                            groupTitle = groupTitle,
+                            // AM (PLAYER_MARK_BADGES) -->
+                            isBookmarked = episodeMarks.bookmarked,
+                            isFillermarked = episodeMarks.fillermarked,
+                            onBookmarkClicked = marks::setBookmark,
+                            onFillermarkClicked = marks::setFillermark,
+                            // <-- AM (PLAYER_MARK_BADGES)
+                            // AM (PLAYLIST_LIBRARY_BADGE)
+                            isFromLibraryEntry = showLibraryBadges && isFromLibraryEntry(episode),
+                            // AM (PLAYLIST_SWIPE_ACTIONS)
+                            isSeen = episodeMarks.seen,
+                            // AM (QUEUE_GROUPED_PLAYLIST)
+                            nestingDepth = episodeRow.depth,
+                            // AM (PLAYLIST_SWIPE_ACTIONS) -->
+                            swipeStartAction = if (isReordering) {
+                                LibraryPreferences.EpisodeSwipeAction.Disabled
+                            } else {
+                                swipeStartAction
+                            },
+                            swipeEndAction = if (isReordering) {
+                                LibraryPreferences.EpisodeSwipeAction.Disabled
+                            } else {
+                                swipeEndAction
+                            },
+                            downloadState = episode.id
+                                ?.let { downloadStates[it] }
+                                ?: Download.State.NOT_DOWNLOADED,
+                            onSwipe = { action ->
+                                when (action) {
+                                    LibraryPreferences.EpisodeSwipeAction.ToggleSeen ->
+                                        marks.setSeen(episode.id, !episodeMarks.seen)
+                                    LibraryPreferences.EpisodeSwipeAction.ToggleBookmark ->
+                                        marks.setBookmark(episode.id, !episodeMarks.bookmarked)
+                                    LibraryPreferences.EpisodeSwipeAction.ToggleFillermark ->
+                                        marks.setFillermark(episode.id, !episodeMarks.fillermarked)
+                                    LibraryPreferences.EpisodeSwipeAction.Download ->
+                                        onDownloadClicked(episode)
+                                    LibraryPreferences.EpisodeSwipeAction.Disabled -> Unit
                                 }
-                                // <-- AM (PLAYLIST_SEARCH_SCOPE)
-                                id == null -> Unit
-                                id in selectedIds -> selectedIds = selectedIds - id
-                                else -> selectedIds = selectedIds + id
-                            }
-                        },
-                        onOpenEntryClicked = onOpenEntryClicked,
-                        // AM (OPEN_ENTRY_MERGED_ONLY) -->
-                        // This list has a selection bar, so the marks live there.
-                        marksInRow = false,
-                        // <-- AM (OPEN_ENTRY_MERGED_ONLY)
-                        onLongClick = {
-                            episode.id?.let { selectedIds = selectedIds + it }
-                        },
-                        selectionMode = selectionMode,
-                        isSelected = episode.id in selectedIds,
-                        // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
-                    )
+                            },
+                            // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+                            // AM (PLAYER_EPISODE_LIST_SELECTION) -->
+                            onEpisodeClicked = { id ->
+                                when {
+                                    // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                    // The confirmation. Submitted before the switch
+                                    // so the playlist this builds is the list the
+                                    // user was looking at when they tapped.
+                                    !selectionMode -> {
+                                        playlistAnimeId?.let { PlaylistSearchScope.submit(it, searchQuery) }
+                                        onEpisodeClicked(id)
+                                    }
+                                    // <-- AM (PLAYLIST_SEARCH_SCOPE)
+                                    else -> toggleSelection(selectionIds)
+                                }
+                            },
+                            onOpenEntryClicked = onOpenEntryClicked,
+                            // AM (OPEN_ENTRY_MERGED_ONLY) -->
+                            // This list has a selection bar, so the marks live there.
+                            marksInRow = false,
+                            // <-- AM (OPEN_ENTRY_MERGED_ONLY)
+                            onLongClick = { selectedIds = selectedIds + selectionIds },
+                            selectionMode = selectionMode,
+                            isSelected = selectionIds.isNotEmpty() && selectionIds.all(selectedIds::contains),
+                            // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+                            reorderHandleModifier = reorderHandleModifier,
+                        )
+                    }
                 }
             }
         }

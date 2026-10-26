@@ -56,6 +56,9 @@ fun PlayerDialogs(
     onDownloadClicked: (Episode) -> Unit,
     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
     onExpandSource: (Long) -> Unit,
+    // AM (QUEUE_REORDER)
+    onMoveQueueEpisodes: (List<Long>, Long?) -> Unit,
+    onReorderQueueBlocks: (List<Long>) -> Unit,
     // <-- AM (QUEUE_GROUPED_PLAYLIST)
     // <-- AM (EPISODE_TAG_SEARCH)
     // AM (PLAYLIST_SEARCH_SCOPE) -->
@@ -133,6 +136,9 @@ fun PlayerDialogs(
                 onDownloadClicked = onDownloadClicked,
                 // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                 onExpandSource = onExpandSource,
+                // AM (QUEUE_REORDER)
+                onMoveQueueEpisodes = onMoveQueueEpisodes,
+                onReorderQueueBlocks = onReorderQueueBlocks,
                 // <-- AM (QUEUE_GROUPED_PLAYLIST)
                 // <-- AM (EPISODE_TAG_SEARCH)
                 // AM (PLAYLIST_SEARCH_SCOPE) -->
