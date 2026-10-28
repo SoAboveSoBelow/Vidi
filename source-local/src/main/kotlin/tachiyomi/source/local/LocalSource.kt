@@ -785,38 +785,60 @@ class LocalSource(
         tempFileSuffix: String,
         updateImage: (InputStream) -> Unit,
     ) {
-        val tempFile = File.createTempFile(
-            "tmp_",
-            tempFileSuffix,
-        )
+        // AM (FRAME_EXTRACT_TEMP_FILE_LEAK) -->
+        // Was File.createTempFile("tmp_", suffix) with no directory argument, so
+        // it landed in java.io.tmpdir - which on Android is the app's internal
+        // cache root - and was never deleted. No deleteOnExit, no delete in a
+        // finally, and the `length() > 0` guard below means the failures (ffmpeg
+        // not producing a frame) skip straight past and leave a zero-byte file
+        // behind for good. Several hundred of them accumulate loose in the cache
+        // root, which is also why they were indistinguishable from anything else
+        // living there.
+        //
+        // A named subdirectory and a finally fix both halves: the files are
+        // identifiable as this function's scratch, and they do not outlive the
+        // call that made them.
+        val tempDir = File(context.cacheDir, FRAME_EXTRACT_DIR).apply { mkdirs() }
+        val tempFile = File.createTempFile("tmp_", tempFileSuffix, tempDir)
         val outFile = tempFile.path
+        try {
+        // <-- AM (FRAME_EXTRACT_TEMP_FILE_LEAK)
 
-        // AM (LOCAL_NESTED_ENTRY_URLS)
-        // The file name is the LAST segment, not everything after the first.
-        // An entry inside an app folder has a two-segment url
-        // (`Chrome/archive`), so its episode url has three - and the old
-        // split(limit = 2) handed findFile "archive/video.mkv", which resolves
-        // to nothing. The !! below then threw and the caller logged a failed
-        // extraction, which is why such an entry never got a cover, a
-        // background or episode thumbnails.
-        val episodeName = episode.url.substringAfterLast('/')
-        val animeDir = fileSystem.getAnimeDirectory(anime.url)!!
-        val episodeFile = animeDir.findFile(episodeName)!!
-        val episodeFilename = { episodeFile.toFFmpegString(context) }
+            // AM (LOCAL_NESTED_ENTRY_URLS)
+            // The file name is the LAST segment, not everything after the first.
+            // An entry inside an app folder has a two-segment url
+            // (`Chrome/archive`), so its episode url has three - and the old
+            // split(limit = 2) handed findFile "archive/video.mkv", which resolves
+            // to nothing. The !! below then threw and the caller logged a failed
+            // extraction, which is why such an entry never got a cover, a
+            // background or episode thumbnails.
+            val episodeName = episode.url.substringAfterLast('/')
+            val animeDir = fileSystem.getAnimeDirectory(anime.url)!!
+            val episodeFile = animeDir.findFile(episodeName)!!
+            val episodeFilename = { episodeFile.toFFmpegString(context) }
 
-        val ffProbe = FFprobeKit.execute(
-            "-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"${episodeFilename()}\"",
-        )
-        val duration = ffProbe.allLogsAsString.trim().toFloat()
-        val second = duration.toInt() / 2
+            val ffProbe = FFprobeKit.execute(
+                "-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 " +
+                    "\"${episodeFilename()}\"",
+            )
+            val duration = ffProbe.allLogsAsString.trim().toFloat()
+            val second = duration.toInt() / 2
 
-        FFmpegKit.execute(
-            "-ss $second -i \"${episodeFilename()}\" -frames:v 1 -update true \"$outFile\" -y",
-        )
+            FFmpegKit.execute(
+                "-ss $second -i \"${episodeFilename()}\" -frames:v 1 -update true \"$outFile\" -y",
+            )
 
-        if (tempFile.length() > 0L) {
-            updateImage(tempFile.inputStream())
+        // AM (FRAME_EXTRACT_TEMP_FILE_LEAK) -->
+        // The stream was also never closed - updateImage takes an InputStream and
+        // has no contract to close what it is handed, so use() does it here where
+        // ownership actually sits.
+            if (tempFile.length() > 0L) {
+                tempFile.inputStream().use { updateImage(it) }
+            }
+        } finally {
+            tempFile.delete()
         }
+        // <-- AM (FRAME_EXTRACT_TEMP_FILE_LEAK)
     }
     // <-- AY
 
@@ -828,6 +850,11 @@ class LocalSource(
         private val dateFormat by lazy { SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()) }
         private const val DEFAULT_COVER_NAME = "cover.jpg"
         private const val DEFAULT_BACKGROUND_NAME = "background.jpg"
+        // AM (FRAME_EXTRACT_TEMP_FILE_LEAK) -->
+        /** Scratch directory for ffmpeg frame extraction, emptied per call. */
+        private const val FRAME_EXTRACT_DIR = "frame_extract"
+        // <-- AM (FRAME_EXTRACT_TEMP_FILE_LEAK)
+
         private const val DEFAULT_THUMBNAIL_NAME = "thumbnail.jpg"
         // <-- AY
 

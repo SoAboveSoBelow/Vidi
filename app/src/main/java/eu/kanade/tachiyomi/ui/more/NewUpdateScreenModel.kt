@@ -104,7 +104,20 @@ class NewUpdateScreenModel(
         val installer = AppUpdateInstaller(context)
         if (!installer.install(apkFile)) {
             installer.installWithSystemUi(apkFile)
+            // AM (UPDATE_APK_NOT_KEPT): the system-UI fallback hands the file
+            // itself to the installer via a content URI and returns immediately,
+            // so it is still being read after this call - it has to stay. The
+            // next download overwrites it under the same name.
+            return
         }
+        // AM (UPDATE_APK_NOT_KEPT) -->
+        // The session install above has already copied the APK into the
+        // PackageInstaller session (openWrite + fsync in AppUpdateInstaller), so
+        // nothing reads this file again. It used to be deleted only in the
+        // download-failure catch, which meant a SUCCESSFUL update parked the full
+        // APK - ~78MB - in the external cache indefinitely.
+        runCatching { apkFile.delete() }
+        // <-- AM (UPDATE_APK_NOT_KEPT)
     }
     // <-- AM (SILENT_SELF_UPDATE)
 

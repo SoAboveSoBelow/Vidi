@@ -811,7 +811,10 @@ fun PlayerScreen(
                     onSelectSubtitle = viewModel::selectSub,
                     audioTracks = audioTracks,
                     onAddAudio = viewModel::addAudio,
-                    onSelectAudio = viewModel::selectAudio,
+                    // AM (AUDIO_DESELECT_IS_EXPLICIT): the sheet is the only place
+                    // a deselect can be intended, so it is the only place that
+                    // decides one.
+                    onSelectAudio = viewModel::toggleAudio,
                     isLoadingHosters = uiData.isLoadingHosters,
                     hosterState = stateData.hosterState,
                     expandedState = uiData.hosterExpandedList,

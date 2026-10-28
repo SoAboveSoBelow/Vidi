@@ -427,6 +427,11 @@ object MediaProxyServer {
                     if (!upstream.throttled) entry.notePlayerFetch(position + read)
                     // <-- AM (PLAYER_LEADS_DOWNLOAD_FOLLOWS)
                     entry.write(position, buffer, read)
+                    // AM (EVICT_ON_WRITE): outside entry.write's own lock on
+                    // purpose - the check takes the cache lock and reads every
+                    // entry's byte count, so calling it while holding an entry
+                    // would invert the two locks against the cache's own sweeps.
+                    mediaCache?.noteBytesWritten(read)
                     output.write(buffer, 0, read)
                     position += read
                     upstreamPosition = position

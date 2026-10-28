@@ -1194,6 +1194,9 @@ class PlayerViewModel(
      * <-- AM (AUDIO_BLIP_FIX_2)
      */
     private fun loadFile(url: String, options: String) {
+        // AM (TRACK_LIST_FILE_GENERATION) -->
+        noteLoadFileIssued()
+        // <-- AM (TRACK_LIST_FILE_GENERATION)
         // AM (SHARED_LOAD_FILE_FIX) -->
         // See loadFileWithHwdecGuard's own doc comment - this used to duplicate that
         // exact logic inline; now both this and PlayerMediaHolder's background-skip
@@ -4852,7 +4855,14 @@ class PlayerViewModel(
                 // Zero allowance is the off state - see the preference's own note.
                 playerPreferences.retainRecentEpisodeMediaMaxBytes.get() > 0,
                 playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
-            ),
+            ).also {
+                // AM (ACTIVE_EPISODE_NEVER_EVICTED) -->
+                // Set here because this runs immediately before the loadfile for
+                // this episode, so the cache knows what is playing before the
+                // first byte of it is ever requested.
+                it.setActiveEpisode(episodeId)
+                // <-- AM (ACTIVE_EPISODE_NEVER_EVICTED)
+            },
         )
         return MediaProxyServer.proxyUrlFor(
             url = url,
@@ -4870,6 +4880,9 @@ class PlayerViewModel(
 
     private suspend fun torrentLinkHandler(videoUrl: String, title: String, videoOptions: String) {
         val videoTorrentUrl = getTorrentUrl(videoUrl, title)
+        // AM (TRACK_LIST_FILE_GENERATION): this path issues its own loadfile
+        // rather than going through loadFile(), so it has to be counted too.
+        noteLoadFileIssued()
         mpvCommand(
             "loadfile",
             videoTorrentUrl,
@@ -5108,6 +5121,11 @@ class PlayerViewModel(
     // <-- AM (CUSTOM_EPISODE_ORDER)
 
     private fun endFile(node: MPVNode) {
+        // AM (TRACK_LIST_FILE_GENERATION) -->
+        // Before the early return below: a load that ends without ever reaching
+        // FILE_LOADED still has to clear the gate.
+        noteLoadFileSettled()
+        // <-- AM (TRACK_LIST_FILE_GENERATION)
         val errorNode = node.asMap()?.get("file_error") ?: return
         var errorMessage = errorNode.asString() ?: "Error: File ended"
 
@@ -5300,6 +5318,10 @@ class PlayerViewModel(
 
     private fun fileLoaded() {
         if (player.isReleased) return
+
+        // AM (TRACK_LIST_FILE_GENERATION) -->
+        noteLoadFileSettled()
+        // <-- AM (TRACK_LIST_FILE_GENERATION)
 
         // AM (EOF_REPLAY_NO_RELOAD) -->
         currentFileReachedEof = false
@@ -5611,8 +5633,58 @@ class PlayerViewModel(
         }
     }
 
+    // AM (TRACK_LIST_FILE_GENERATION) -->
+    /**
+     * Counts every `loadfile` this view model issues; [loadedFileGeneration] is
+     * brought up to it once mpv confirms the new file. While the two differ, a
+     * load is outstanding and any track list mpv reports still describes the
+     * OUTGOING file.
+     *
+     * Track state - hasLoadedTracks/hasLoadedAudio/hasLoadedSubs and
+     * lastKnownAudioTrackId - was global to this view model with nothing tying an
+     * event to the file it came from, and `loadfile` is asynchronous. Switching
+     * episodes while one was still loading let a late track-list event from the
+     * file being replaced arrive after clearTracks() had already reset the flags:
+     * onTrackListChanged saw hasLoadedTracks == false, treated the old file's
+     * tracks as the new file's, and set hasLoadedTracks and hasLoadedAudio true.
+     * The incoming file's real track list then took the already-loaded branch and
+     * the !hasLoadedAudio retry was skipped, so nothing ever selected audio for
+     * it; aid kept the previous file's track id, mpv dropped it as invalid, and
+     * the restore below put back lastKnownAudioTrackId - also the previous file's.
+     *
+     * Discriminating on mpv's own FILE_LOADED/END_FILE rather than on elapsed
+     * time: the question "is this event about the file I asked for" has an exact
+     * answer, and a delay would only be a guess at it.
+     */
+    private var pendingLoadGeneration = 0
+    private var loadedFileGeneration = 0
+
+    /** Raised by every `loadfile`, including the torrent path's direct command. */
+    private fun noteLoadFileIssued() {
+        pendingLoadGeneration++
+    }
+
+    /**
+     * Opens the gate once mpv has actually switched files.
+     *
+     * Also called from [endFile] so a load that never completes - a dead link, an
+     * unplayable file - does not leave track events discarded indefinitely. There
+     * is no file to select tracks for in that case, but the next genuine load must
+     * not inherit a stuck gate.
+     */
+    private fun noteLoadFileSettled() {
+        loadedFileGeneration = pendingLoadGeneration
+    }
+
+    /** Whether a `loadfile` is outstanding, so reported tracks are the old file's. */
+    private fun isLoadFileOutstanding(): Boolean = loadedFileGeneration != pendingLoadGeneration
+    // <-- AM (TRACK_LIST_FILE_GENERATION)
+
     /** Selects the preferred subtitle/audio track once all tracks are loaded. */
     fun onTrackListChanged(tracks: MPVNode) {
+        // AM (TRACK_LIST_FILE_GENERATION) -->
+        if (isLoadFileOutstanding()) return
+        // <-- AM (TRACK_LIST_FILE_GENERATION)
         val tracks = tracks.toObject<List<TrackNode>>(json).ifEmpty { return }
         updateStateData {
             it.copy(
@@ -5874,15 +5946,48 @@ class PlayerViewModel(
         }
     }
 
+    // AM (AUDIO_DESELECT_IS_EXPLICIT) -->
+    /**
+     * Turns the audio track off, at the user's request.
+     *
+     * Deselecting used to be inferred inside selectAudioById, from the requested
+     * id being equal to the currently selected aid - the UI's "tap the track
+     * that's already on to turn it off" expressed as a state comparison rather
+     * than as intent. mpv track ids are small per-file integers that get reused,
+     * so a programmatic selection could collide with a stale aid and be read as a
+     * deliberate toggle: onTrackAdded() calls the selection path non-forced for
+     * every external audio track, and a new track whose id matched the outgoing
+     * file's aid silently muted the episode - then set audioDeselectedByUser,
+     * which suppressed the self-heal that would otherwise have caught it.
+     *
+     * Intent now comes from the one place that has it. Every programmatic path
+     * selects; only the UI can deselect.
+     */
+    fun deselectAudio() {
+        audioDeselectedByUser = true
+        pendingAudioTrackRestoreJob?.cancel()
+        setPropertyBoolean("aid", false)
+    }
+
+    /**
+     * What tapping an audio track in the sheet does: turn it off if it is the one
+     * already playing, otherwise switch to it.
+     *
+     * Reads the selection from [MpvVideoTrack.selection], which is the state the
+     * sheet itself rendered, rather than re-deriving it from mpv - the user acted
+     * on what they saw.
+     */
+    fun toggleAudio(track: MpvVideoTrack) {
+        if (track.selection == 0) deselectAudio() else selectAudio(track, force = true)
+    }
+    // <-- AM (AUDIO_DESELECT_IS_EXPLICIT)
+
     private fun selectAudioById(id: Int, force: Boolean) {
-        if (!force && id == mpv.getPropertyInt("aid")) {
-            audioDeselectedByUser = true
-            pendingAudioTrackRestoreJob?.cancel()
-            setPropertyBoolean("aid", false)
-        } else {
-            audioDeselectedByUser = false
-            setPropertyInt("aid", id)
-        }
+        // AM (AUDIO_DESELECT_IS_EXPLICIT): `force` is kept for call-site
+        // compatibility but no longer gates a hidden deselect - selecting a track
+        // selects it, every time. Deselecting is deselectAudio() above.
+        audioDeselectedByUser = false
+        setPropertyInt("aid", id)
     }
 
     // Tracked reactively as the freshest known-good audio track: mpv can spontaneously
@@ -7776,6 +7881,12 @@ class PlayerViewModel(
     // no longer does. See release()'s own doc comment for why.
     public override fun onCleared() {
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
+        // AM (ACTIVE_EPISODE_NEVER_EVICTED) -->
+        // Nothing is playing once this view model is gone, so the exemption ends
+        // with it - otherwise the last episode watched would hold its bytes
+        // against the ceiling for the rest of the process.
+        MediaCache.peek()?.setActiveEpisode(null)
+        // <-- AM (ACTIVE_EPISODE_NEVER_EVICTED)
         stateData.value.currentEpisode?.let {
             // AM (PRESERVE_POSITION_SETTING) -->
             // Per-second saves during playback keep last_second_seen live in the DB so

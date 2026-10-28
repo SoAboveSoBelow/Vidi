@@ -446,6 +446,35 @@ class Downloader(
             download.episode.url,
         )
         val tmpDir = animeDir.createDirectory(episodeDirname + TMP_DIR_SUFFIX)!!
+        // AM (TMP_DIR_IS_SCRATCH) -->
+        // Emptied on entry, every time. Nothing used to clear this directory on a
+        // failure - downloadVideo()'s catch deletes only "$filename.tmp" - so
+        // whatever a failed attempt left behind stayed there for good, and
+        // isDownloadSuccessful() below counted directory entries. One leftover
+        // was therefore permanent: every later attempt at that episode reported
+        // ERROR however cleanly the video itself downloaded, which is why an
+        // episode could fail to download forever while streaming perfectly.
+        //
+        // Leftovers are easy to produce and hard to name individually. The
+        // internal path writes "<episode name>.mkv" while downloadVideoExternal()
+        // writes "<anime> - <episode>_tmp.mkv", and the success path deletes only
+        // the latter spelling; a .nomedia, a partial file from a process killed
+        // mid-write, or a rename of the episode all do the same thing. Treating
+        // the directory as scratch - owned entirely by the attempt in progress -
+        // removes the whole class rather than the instances.
+        //
+        // Safe because nothing outside this function reads it: the finished
+        // download is the renameTo(episodeDirname) below, and the cache indexes
+        // that name, not this one.
+        //
+        // The cost is one case that used to be free: a prior attempt whose video
+        // downloaded and passed verifyDownloadedDuration() but failed afterwards
+        // left a complete .mkv that getOrDownloadVideoFile() would reuse, and that
+        // is now re-fetched. Keeping it would mean deciding which of possibly
+        // several leftover files is the real one - the ambiguity this change
+        // exists to remove - so the scratch directory stays scratch.
+        clearTmpDir(tmpDir)
+        // <-- AM (TMP_DIR_IS_SCRATCH)
 
         try {
             // AY -->
@@ -1274,9 +1303,40 @@ class Downloader(
         download: Download,
         tmpDir: UniFile,
     ): Boolean {
-        val downloadedVideo = tmpDir.listFiles().orEmpty().filterNot { it.extension == ".tmp" }
-        return downloadedVideo.size == 1
+        // AM (TMP_DIR_IS_SCRATCH) -->
+        // Was `downloadedVideo.size == 1`, which asked about the directory rather
+        // than about the download: an extra file made a good download fail, and a
+        // single wrong file made a bad one pass. With the directory cleared on
+        // entry the count is no longer load-bearing, so this asks the question it
+        // always meant to - is there a finished video file here with bytes in it.
+        //
+        // Completeness is already checked where it can be: verifyDownloadedDuration()
+        // runs against ffmpeg's own statistics before the .tmp is renamed, so a
+        // truncated transfer never reaches this point as a .mkv at all.
+        //
+        // The exclusion was also spelled ".tmp" against UniFile.extension, which
+        // is name.substringAfterLast('.') and so yields "tmp" with no dot - it
+        // never matched, and an in-progress scratch file counted toward the total
+        // like any other. Corrected here rather than left alongside the new test,
+        // since a stale .tmp is still not a finished download.
+        val downloadedVideo = tmpDir.listFiles().orEmpty()
+            .filterNot { it.extension == "tmp" }
+            .filterNot { it.name.orEmpty().startsWith(".") }
+        return downloadedVideo.any { it.length() > 0L }
+        // <-- AM (TMP_DIR_IS_SCRATCH)
     }
+
+    // AM (TMP_DIR_IS_SCRATCH) -->
+    /** Empties [tmpDir] without removing it, so the attempt starts from nothing. */
+    private fun clearTmpDir(tmpDir: UniFile) {
+        tmpDir.listFiles().orEmpty().forEach { file ->
+            runCatching { file.delete() }
+                .onFailure {
+                    logcat(LogPriority.WARN, it) { "TMP_DIR_IS_SCRATCH could not delete ${file.name}" }
+                }
+        }
+    }
+    // <-- AM (TMP_DIR_IS_SCRATCH)
     // <-- AY
 
     /**
