@@ -25,6 +25,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.contentColorFor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+// AM (DOUBLE_TAP_QUEUE_TAIL_GUARD)
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -34,6 +36,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalDensity
+// AM (DOUBLE_TAP_QUEUE_TAIL_GUARD)
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -45,6 +49,60 @@ import tachiyomi.presentation.core.components.BadgeGroup
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.selectedBackground
 import tachiyomi.domain.anime.model.AnimeCover as AnimeCoverModel
+
+// AM (DOUBLE_TAP_QUEUE_TAIL_GUARD) -->
+/**
+ * [combinedClickable] with the tail of a double tap absorbed.
+ *
+ * Compose resolves a triple tap as a double tap followed by a fresh single tap:
+ * the third tap begins a new gesture and commits as [onClick] one double-tap
+ * timeout later. On these items that means a slipped finger queues the entry
+ * and then opens it, which is the pair of things the user did not ask for.
+ *
+ * The entry's episode list answers the same problem with a state test - by the
+ * time its third tap lands, the rename dialog the double tap opened is in state
+ * and the tap is dropped (see AnimeScreen). Queueing opens nothing, so there is
+ * no such state to test against; what is left is the gesture's own fact, that a
+ * tap arriving while the double tap it belongs to is still resolving is part of
+ * that gesture rather than a click of its own. The window is the platform's
+ * double-tap timeout doubled, which is what it takes to span a third tap landing
+ * at the end of the timeout plus its own timeout before it commits - the same
+ * reasoning behind DummyPipWindow's extra-tap suppression.
+ *
+ * [onClick] is left untouched where there is no [onDoubleClick]: with no double
+ * tap there is no tail, and a single tap commits immediately.
+ */
+@Composable
+internal fun Modifier.animeItemClickable(
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onDoubleClick: (() -> Unit)?,
+): Modifier {
+    if (onDoubleClick == null) {
+        return combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    }
+    val tailWindowMs = LocalViewConfiguration.current.doubleTapTimeoutMillis * 2
+    // A plain holder rather than a State: the guard is read inside the gesture
+    // callbacks, never during composition, so writing it has nothing to redraw.
+    val guard = remember { DoubleTapTailGuard() }
+    return combinedClickable(
+        onClick = {
+            if (android.os.SystemClock.uptimeMillis() - guard.lastDoubleTapAt >= tailWindowMs) {
+                onClick()
+            }
+        },
+        onLongClick = onLongClick,
+        onDoubleClick = {
+            guard.lastDoubleTapAt = android.os.SystemClock.uptimeMillis()
+            onDoubleClick()
+        },
+    )
+}
+
+private class DoubleTapTailGuard {
+    var lastDoubleTapAt = 0L
+}
+// <-- AM (DOUBLE_TAP_QUEUE_TAIL_GUARD)
 
 object CommonAnimeItemDefaults {
     val GridHorizontalSpacer = 4.dp
@@ -318,10 +376,10 @@ private fun GridItemSelectable(
     Box(
         modifier = modifier
             .clip(MaterialTheme.shapes.small)
-            .combinedClickable(
+            // AM (DOUBLE_TAP_QUEUE) / AM (DOUBLE_TAP_QUEUE_TAIL_GUARD)
+            .animeItemClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
-                // AM (DOUBLE_TAP_QUEUE)
                 onDoubleClick = onDoubleClick,
             )
             .selectedOutline(isSelected = isSelected, color = MaterialTheme.colorScheme.secondary)
@@ -381,10 +439,10 @@ fun AnimeListItem(
                 },
                 // <-- AY
             )
-            .combinedClickable(
+            // AM (DOUBLE_TAP_QUEUE) / AM (DOUBLE_TAP_QUEUE_TAIL_GUARD)
+            .animeItemClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
-                // AM (DOUBLE_TAP_QUEUE)
                 onDoubleClick = onDoubleClick,
             )
             // AY -->

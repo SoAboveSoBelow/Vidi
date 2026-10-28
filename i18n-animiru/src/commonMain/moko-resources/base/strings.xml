@@ -6,14 +6,20 @@
     <string name="am_action_add_all">Add all</string>
     <string name="am_action_expand">Expand</string>
     <string name="am_action_collapse">Collapse</string>
+    <!-- AM (PLAYLIST_MARK_TRISTATE): announced as the state of a cycling mark button. -->
+    <!-- AM (QUEUE_SOURCE_TOTALS): how much of a split source sits under one header. -->
+    <string name="am_queue_run_of_source">%1$d of %2$d episodes</string>
+    <string name="am_mark_state_all">All</string>
+    <string name="am_mark_state_partial">Mixed</string>
+    <string name="am_mark_state_none">None</string>
     <string name="am_pref_category_queue">Queue</string>
     <string name="am_pref_queue_cleaning">Queue cleaning</string>
     <string name="am_pref_queue_cleaning_on_close">Clear on close</string>
     <string name="am_pref_queue_cleaning_on_selection">Clear on episode selection</string>
     <string name="am_pref_queue_cleaning_keep">Keep queue on close</string>
-    <string name="am_pref_queue_auto_trim">Queue auto trim</string>
-    <string name="am_pref_queue_auto_trim_summary">Watched entries to keep behind the one playing. Entries queued ahead are never trimmed.</string>
-    <string name="am_pref_queue_auto_trim_off">Off</string>
+    <string name="am_pref_queue_tail_length">Queue tail length</string>
+    <string name="am_pref_queue_tail_length_summary">%s stored sources in queue before trimming</string>
+    <string name="am_pref_number_out_of_range">Enter a number from %1$d to %2$d</string>
     <string name="action_filter_fillermarked">Fillermarked</string>
     <string name="action_fillermark_episode">Fillermark episode</string>
     <string name="action_remove_fillermark_episode">Unfillermark episode</string>

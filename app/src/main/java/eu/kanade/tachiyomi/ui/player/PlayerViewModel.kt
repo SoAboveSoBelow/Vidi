@@ -65,6 +65,8 @@ import dev.zacsweers.metrox.viewmodel.ViewModelAssistedFactoryKey
 import eu.kanade.domain.anime.interactor.SetAnimeViewerFlags
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.base.BasePreferences
+// AM (PLAYLIST_ADD_TO_LIBRARY)
+import eu.kanade.domain.category.interactor.GetCategorySelection
 import eu.kanade.domain.connection.SyncPreferences
 import eu.kanade.domain.episode.model.toDbEpisode
 import eu.kanade.domain.source.interactor.GetIncognitoState
@@ -204,6 +206,8 @@ import tachiyomi.domain.anime.interactor.GetDuplicateLibraryAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeUpdate
 import tachiyomi.domain.category.interactor.GetCategories
+// AM (PLAYLIST_ADD_TO_LIBRARY)
+import tachiyomi.domain.category.interactor.GetVisibleCategories
 import tachiyomi.domain.category.interactor.SetAnimeCategories
 import tachiyomi.domain.custombutton.interactor.GetCustomButtons
 import tachiyomi.domain.custombutton.model.CustomButton
@@ -262,6 +266,9 @@ class PlayerViewModel(
     private val getEpisodeTags: GetEpisodeTags,
     // <-- AM (CUSTOM_EPISODE_ORDER)
     private val getCategories: GetCategories,
+    // AM (PLAYLIST_ADD_TO_LIBRARY)
+    private val getVisibleCategories: GetVisibleCategories,
+    private val getCategorySelection: GetCategorySelection,
     private val getTracks: GetTracks,
     private val getIncognitoState: GetIncognitoState,
 
@@ -1935,6 +1942,8 @@ class PlayerViewModel(
         episodes: List<Episode>,
         reposition: Boolean,
         hostsTargetEpisode: Boolean,
+        // AM (QUEUE_REBUILD_READ_ONLY)
+        reshuffle: Boolean,
     ) {
         val episodeIds = episodes.mapNotNull { it.id }
         if (episodeIds.isEmpty()) return
@@ -1953,11 +1962,30 @@ class PlayerViewModel(
             )
             return
         }
-        // Several blocks for one entry is possible - it was queued, then
-        // opened. The first keeps its place; the rest are duplicates an append
-        // left behind, and they go.
-        addToQueue.refreshBlock(existing.first().id, anime, episodeIds)
-        existing.drop(1).forEach { queueRepository.removeBlock(it.id) }
+        // AM (QUEUE_REBUILD_READ_ONLY) -->
+        // A rebuild READS the queue; it must not write it. This used to
+        // refreshBlock the session's entry here - delete its queued items and
+        // re-insert the entry's whole episode list in one contiguous run -
+        // which undid two things the user had done deliberately. Splitting a
+        // source by dragging something into it was reassembled, because the
+        // re-insert lands at the block's first run; and episodes deliberately
+        // left out of the queue came back, because the list re-inserted is the
+        // entry's, not the queue's. A rebuild fires on ANY queue change, the
+        // user's own drag included, so it was undoing the very edit that
+        // triggered it.
+        //
+        // The one case that legitimately changes a queued run's order is the
+        // entry's shuffle seed, and that reorders the items already queued
+        // among the positions they hold - so membership, the entry's place in
+        // the queue, and anything interleaved between its runs all survive.
+        if (!reshuffle) return
+        val blockIds = existing.mapTo(mutableSetOf()) { it.id }
+        val queued = queueRepository.getItems().filter { it.blockId in blockIds }
+        val orderedItemIds = episodeIds.mapNotNull { episodeId ->
+            queued.firstOrNull { it.episodeId == episodeId }?.id
+        }
+        queueRepository.reorderItems(orderedItemIds)
+        // <-- AM (QUEUE_REBUILD_READ_ONLY)
     }
 
     /** The queue, in play order, as playlist entries. */
@@ -2042,7 +2070,14 @@ class PlayerViewModel(
     // <-- AM (QUEUE_BLOCK_SEASONS)
 
     // AM (QUEUE_REORDER) -->
-    /** Rewrites only the queue's source order, never the entries' own order. */
+    // AM (QUEUE_SOURCE_INTERLEAVE) -->
+    /**
+     * Repositions a source that has no episodes queued yet - the coarse slot a
+     * pending block waits in. A source with episodes is moved by
+     * [moveQueueEpisodes], which can place it inside another source's run.
+     *
+     * Never touches the entries' own episode order.
+     */
     fun reorderQueueBlocks(orderedBlockIds: List<Long>) {
         viewModelScope.launchNonCancellable {
             // Pending blocks have no episode rows to drag. Keep each one in its
@@ -2464,6 +2499,9 @@ class PlayerViewModel(
             unscoped,
             reposition = repositionQueueBlock,
             hostsTargetEpisode = selectedEpisode != null,
+            // AM (QUEUE_REBUILD_READ_ONLY): only a changed shuffle seed asks
+            // for a queued run to be reordered - see syncQueueBlock.
+            reshuffle = shuffleSeed != stateData.value.playlistShuffleSeed,
         )
         val queuePlaylist = queueEpisodes()
         val playlistIds = queuePlaylist.mapNotNull { it.id }
@@ -7869,6 +7907,12 @@ class PlayerViewModel(
 
     private suspend fun updateEpisodeProgressOnComplete(currentEp: Episode) {
         currentEp.seen = true
+        // AM (PLAYBACK_SEEN_REACHES_PLAYLIST): the Episode object above is the
+        // playlist's own, but nothing observes it - so the same fact is put in
+        // state, where the list can see it. See PlayerStateData.
+        currentEp.id?.let { id ->
+            updateStateData { it.copy(playlistPlaybackSeen = it.playlistPlaybackSeen + id) }
+        }
         // Reset resume position now that it's finished, otherwise it stays near the
         // "seen" threshold (close to the end) for anything reading it later.
         currentEp.last_second_seen = 0L
@@ -7953,7 +7997,14 @@ class PlayerViewModel(
      * follows.
      */
     fun toggleCurrentAnimeFavorite(checkDuplicate: Boolean = true) {
-        val anime = stateData.value.currentAnime ?: return
+        toggleAnimeFavorite(stateData.value.currentAnime ?: return, checkDuplicate)
+    }
+
+    // AM (PLAYLIST_ADD_TO_LIBRARY): by entry rather than always the session's
+    // own, because the playlist's selection can name any entry in the queue -
+    // and because the duplicate prompt has to be answerable for the entry it
+    // was raised about rather than for whatever happens to be playing.
+    fun toggleAnimeFavorite(anime: Anime, checkDuplicate: Boolean = true) {
         viewModelScope.launchIO {
             if (!anime.favorite && checkDuplicate) {
                 val duplicates = getDuplicateLibraryAnime(anime)
@@ -7978,12 +8029,164 @@ class PlayerViewModel(
             }
             setDialog(
                 Dialogs.ChangeCategory(
-                    anime = anime,
+                    // AM (PLAYLIST_ADD_TO_LIBRARY): a list of one, so the
+                    // dialog has one shape whether it was raised by this
+                    // button or by a selection of several entries.
+                    animeList = listOf(anime),
                     initialSelection = categories.mapAsCheckboxState { it.id in checked },
                 ),
             )
         }
     }
+
+    // AM (PLAYLIST_ROW_ENTRY_RESOLUTION) -->
+    /**
+     * The entry a source or season row stands for: the one its block was
+     * queued AS, which on a merged entry is the merge parent.
+     *
+     * Here rather than at each caller because two of them now ask it - the
+     * double tap that opens the row, and the selection bar's library action -
+     * and a second copy of this is a second chance for the two to disagree
+     * about what a merge row means. Falls back to the session's own entry,
+     * which is the same answer for a playlist with no queue behind it.
+     */
+    fun playlistEntryOfBlock(blockId: Long): Anime? {
+        val state = stateData.value
+        return state.playlistBlockByEpisodeId.entries
+            .firstOrNull { it.value == blockId }
+            ?.key
+            ?.let { state.playlistQueuedEntryByEpisodeId[it] }
+            ?: state.currentAnime
+    }
+
+    /**
+     * The id of the entry an episode came FROM - the merge child that owns it,
+     * where the block was queued as a merge.
+     *
+     * The id rather than the entry, because that is all opening it needs and
+     * the episode carries it directly; [playlistEntryOfEpisode] is the same
+     * answer as an entry, for the callers that need one.
+     */
+    fun playlistEntryIdOfEpisode(episodeId: Long): Long? {
+        val state = stateData.value
+        return state.currentPlaylist.firstOrNull { it.id == episodeId }?.anime_id
+            ?: state.currentAnime?.id
+    }
+
+    /**
+     * [playlistEntryIdOfEpisode] as the entry itself, or null where the
+     * playlist's owners have not resolved yet - which is a reason to leave that
+     * episode out rather than to fall back to the entry being played, since
+     * that would act on an entry the user did not select.
+     */
+    fun playlistEntryOfEpisode(episodeId: Long): Anime? {
+        val animeId = playlistEntryIdOfEpisode(episodeId) ?: return null
+        val state = stateData.value
+        return state.playlistOwnerByAnimeId[animeId]
+            ?: state.currentAnime?.takeIf { it.id == animeId }
+    }
+    // <-- AM (PLAYLIST_ROW_ENTRY_RESOLUTION)
+
+    // AM (PLAYLIST_ADD_TO_LIBRARY) -->
+    /**
+     * Library membership for the playlist's selection, from the selection bar.
+     *
+     * The selection names rows, and a row stands for one of two different
+     * entries once a merge is in the queue - which is the whole of why this
+     * takes two lists rather than a set of episode ids. A source or season
+     * header stands for the entry its block was queued AS, the merge parent;
+     * an episode stands for the entry it came FROM, the merge child that owns
+     * it. The two have their own library status, and acting on the wrong one
+     * either files a merge the user never selected or leaves the child they
+     * did select untouched. It is the same split the double tap draws when it
+     * opens one of these rows, read off the same two maps.
+     *
+     * [blockIds] are the blocks whose header was selected as a header;
+     * [episodeIds] the episodes selected on their own. The caller has already
+     * taken the second from the first, so nothing is counted twice.
+     *
+     * From here it is browse's selection bar exactly: a duplicate prompt for a
+     * lone entry on its way in, and otherwise the tri-state category dialog,
+     * whose cleared state is what takes an entry back out. See
+     * BrowseSourceViewModel.openChangeCategoryDialog.
+     */
+    fun changePlaylistSelectionCategories(blockIds: List<Long>, episodeIds: List<Long>) {
+        viewModelScope.launchIO {
+            // AM (PLAYLIST_ROW_ENTRY_RESOLUTION): the same two resolutions the
+            // double tap opens a row with, not a second reading of the maps.
+            val animeList = (
+                blockIds.mapNotNull(::playlistEntryOfBlock) +
+                    episodeIds.mapNotNull(::playlistEntryOfEpisode)
+                )
+                .ifEmpty { listOfNotNull(stateData.value.currentAnime) }
+                .distinctBy { it.id }
+            if (animeList.isEmpty()) return@launchIO
+
+            val single = animeList.singleOrNull()
+            if (single != null) {
+                // One entry is the heart's own question, asked the heart's own
+                // way - duplicates, the default category, the downloads offer
+                // on the way out.
+                toggleAnimeFavorite(single)
+                return@launchIO
+            }
+
+            val categories = getCategories.await().filterNot { it.isSystemCategory }
+            if (categories.isEmpty()) {
+                // Nothing to ask with. Adding what is not in the library is the
+                // only half of this that can be done without a dialog: with no
+                // categories there is no cleared state to mean "remove".
+                animeList.filterNot { it.favorite }.forEach {
+                    applyFavoriteCategories(it, emptyList(), hadCategoriesToChooseFrom = false)
+                }
+                return@launchIO
+            }
+            setDialog(
+                Dialogs.ChangeCategory(
+                    animeList = animeList,
+                    initialSelection = getCategorySelection.await(animeList.map { it.id }, categories),
+                ),
+            )
+        }
+    }
+
+    /**
+     * The category dialog's confirm, for however many entries it was raised
+     * about.
+     *
+     * One entry goes back through [applyFavoriteCategories], which is the
+     * heart's path and has the parts that only make sense for one entry - the
+     * offer to delete downloads after a removal, the tracker binding. Several
+     * take browse's: each entry keeps the categories it had minus [exclude]
+     * plus [include], so a category left on the dash keeps whatever each entry
+     * already had, and an entry left with none is out of the library.
+     */
+    fun applyCategorySelection(animeList: List<Anime>, include: List<Long>, exclude: List<Long>) {
+        val single = animeList.singleOrNull()
+        if (single != null) {
+            applyFavoriteCategories(single, include)
+            return
+        }
+        viewModelScope.launchIO {
+            animeList.forEach { anime ->
+                val categoryIds = getVisibleCategories.await(anime.id)
+                    .map { it.id }
+                    .subtract(exclude.toSet())
+                    .plus(include)
+                    .toList()
+                setAnimeCategories.await(anime.id, categoryIds)
+                val favorite = categoryIds.isNotEmpty()
+                if (anime.favorite == favorite) return@forEach
+                if (!updateAnime.awaitUpdateFavorite(anime.id, favorite)) return@forEach
+                // The playing entry's own copy, so anything reading it agrees -
+                // the same line the single-entry path writes.
+                if (anime.id == stateData.value.currentAnime?.id) {
+                    updateStateData { it.copy(currentAnime = anime.copy(favorite = favorite)) }
+                }
+            }
+        }
+    }
+    // <-- AM (PLAYLIST_ADD_TO_LIBRARY)
 
     /**
      * The categories dialog's confirm: [categoryIds] decides membership. Empty
@@ -8644,6 +8847,24 @@ class PlayerViewModel(
         // AM (PLAYLIST_SWIPE_ACTIONS)
         /** Download state per playlist episode - see observePlaylistDownloads. */
         val playlistDownloadStates: Map<Long, Download.State> = emptyMap(),
+
+        // AM (PLAYBACK_SEEN_REACHES_PLAYLIST) -->
+        /**
+         * Episodes this session watched past the seen threshold.
+         *
+         * The playlist is a snapshot the player never refetches, and crossing
+         * the threshold writes seen straight to the database, so the list had
+         * no way to hear about it: an episode finished while the dialog was
+         * open went on drawing itself unwatched. This is the one thing the
+         * write can also say in state, and the list folds it into its own marks
+         * (see EpisodeMarkState.syncPlaybackSeen).
+         *
+         * Ids only, and only ever added to: it says "playback made this seen",
+         * which is a fact that does not stop being true, and so it cannot
+         * fight the user unmarking the episode afterwards.
+         */
+        val playlistPlaybackSeen: Set<Long> = emptySet(),
+        // <-- AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
         /**
          * A block's seasons, resolved only once its group is first expanded -
          * see loadBlockSeasons. Absent means "not asked for yet", which the

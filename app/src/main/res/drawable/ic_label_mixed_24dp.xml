@@ -1,0 +1,21 @@
+<!-- AM (PLAYLIST_MARK_TRISTATE) -->
+<!--
+  The same label as ic_label_remove_24dp, carrying "=" instead: the remove
+  bar doubled, with the pair centred where the "+" and "-" sit.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:autoMirrored="true"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#000"
+        android:pathData="M21,12l-4.37,6.16C16.26,18.68,15.65,19,15,19h-3l0,-2h3l3.55,-5L15,7H5v3H3V7c0,-1.1,0.9,-2,2,-2h10c0.65,0,1.26,0.31,1.63,0.84L21,12z" />
+    <path
+        android:fillColor="#000"
+        android:pathData="M10,13H2v2h8V13z" />
+    <path
+        android:fillColor="#000"
+        android:pathData="M10,17H2v2h8V17z" />
+</vector>

@@ -1,9 +1,15 @@
 package eu.kanade.tachiyomi.ui.player.controls.components.dialogs
 
+// AM (QUEUE_DIALOG_LANDSCAPE_HEIGHT)
+import android.content.res.Configuration
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Row
+// AM (PLAYLIST_ADD_TO_LIBRARY)
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+// AM (PLAYLIST_ADD_TO_LIBRARY)
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -11,20 +17,18 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.LabelOff
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Done
+import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Download
+// AM (PLAYLIST_ADD_TO_LIBRARY)
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.NewLabel
 import androidx.compose.material.icons.outlined.RemoveDone
-import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
@@ -34,30 +38,44 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
+// AM (QUEUE_DIALOG_LANDSCAPE_HEIGHT)
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.util.formatEpisodeNumber
+import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.database.models.Episode
 import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.ui.player.PlaylistSearchScope
 import aniyomi.domain.season.model.EntrySeason
 import eu.kanade.tachiyomi.ui.player.components.EpisodeListItem
+import eu.kanade.tachiyomi.ui.player.components.MarkCycle
+import eu.kanade.tachiyomi.ui.player.components.MarkTriState
+import eu.kanade.tachiyomi.ui.player.components.MarkTriStateButton
+import eu.kanade.tachiyomi.ui.player.components.MarkTriStateIcons
 import eu.kanade.tachiyomi.ui.player.components.PlaylistExpansion
 import eu.kanade.tachiyomi.ui.player.components.PlaylistGroupItem
+// AM (PLAYLIST_ADD_TO_LIBRARY)
+import eu.kanade.tachiyomi.ui.player.components.PlaylistGroupSelection
 import eu.kanade.tachiyomi.ui.player.components.PlaylistRow
 import eu.kanade.tachiyomi.ui.player.components.PlaylistSeasons
 import eu.kanade.tachiyomi.ui.player.components.buildPlaylistRows
+import eu.kanade.tachiyomi.ui.player.components.contains
+import eu.kanade.tachiyomi.ui.player.components.playingSourceKey
 import eu.kanade.tachiyomi.ui.player.components.rememberEpisodeMarks
 import eu.kanade.tachiyomi.ui.player.components.rememberPlaylistReorder
 import eu.kanade.tachiyomi.util.lang.toRelativeString
@@ -67,13 +85,15 @@ import mihon.domain.library.model.search.QueryNode
 import mihon.feature.library.EpisodeSearchFields
 import mihon.feature.library.matches
 import tachiyomi.domain.anime.model.Anime
+import tachiyomi.core.common.i18n.pluralStringResource
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.VerticalFastScroller
-import tachiyomi.presentation.core.i18n.pluralStringResource
+// AM (PLAYLIST_ADD_TO_LIBRARY)
+import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.clearFocusOnSoftKeyboardHide
 import tachiyomi.presentation.core.util.runOnEnterKeyPressed
@@ -114,6 +134,9 @@ fun EpisodeListDialog(
     blockOf: (Episode) -> Long?,
     /** The title of the entry a source was queued as. */
     sourceTitleOf: (Episode) -> String?,
+    // AM (QUEUE_SOURCE_TOTALS)
+    /** The id of that entry, for totalling a source's episodes across its runs. */
+    sourceIdOf: (Episode) -> Long?,
     /**
      * Seasons per source, by block id - absent until that source's resolve
      * lands (see loadBlockSeasons). A map rather than a lambda so the row list
@@ -131,6 +154,9 @@ fun EpisodeListDialog(
     /** Download state per episode - see PlayerStateData.playlistDownloadStates. */
     downloadStates: Map<Long, Download.State>,
     onSeenClicked: (List<Episode>, Boolean) -> Unit,
+    // AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+    /** Episodes playback itself finished - see PlayerStateData.playlistPlaybackSeen. */
+    playbackSeen: Set<Long>,
     onDownloadClicked: (Episode) -> Unit,
     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
     /** Asks for a source's seasons; called when its group is first expanded. */
@@ -143,17 +169,31 @@ fun EpisodeListDialog(
     /** The entry this playlist belongs to, which the submitted search is keyed to. */
     playlistAnimeId: Long?,
     // <-- AM (PLAYLIST_SEARCH_SCOPE)
-    // AM (PLAYER_EPISODE_LIST_SELECTION) -->
-    /** Null hides the row's open-entry button - see EpisodeListItem. */
-    onOpenEntryClicked: ((Long?) -> Unit)?,
-    /** Opens the entry this playlist belongs to - the merge parent, or the entry itself. */
-    onOpenPlaylistEntry: (() -> Unit)?,
-    // AM (PLAYER_ADD_TO_LIBRARY) -->
-    /** Whether the playlist's entry is already in the library. */
-    isFavorited: Boolean,
-    onAddToLibrary: () -> Unit,
-    // <-- AM (PLAYER_ADD_TO_LIBRARY)
-    // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
+    // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+    /**
+     * Opens the entry a source or season row stands for - the merge parent on
+     * a merged entry, since that is the entry those rows describe.
+     *
+     * Null where the player cannot get out of the way to show it.
+     */
+    onOpenSource: ((blockId: Long) -> Unit)?,
+    /**
+     * Opens the entry an episode actually came from - the merge CHILD on a
+     * merged entry, which is the source that episode is.
+     */
+    onOpenEpisodeEntry: ((episodeId: Long) -> Unit)?,
+    // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
+    // AM (PLAYLIST_ADD_TO_LIBRARY) -->
+    /**
+     * Library membership for the selection, from the selection bar.
+     *
+     * Takes the blocks whose header was selected and the episodes selected on
+     * their own, separately, because on a merged entry those name different
+     * entries - see PlayerViewModel.changePlaylistSelectionCategories. Null
+     * where the player cannot raise the dialog it leads to.
+     */
+    onChangeCategories: ((blockIds: List<Long>, episodeIds: List<Long>) -> Unit)?,
+    // <-- AM (PLAYLIST_ADD_TO_LIBRARY)
     // AM (LOCAL_SOURCE_DOWNLOAD) -->
     /**
      * Downloads the selection. Where the files land follows the entry, not this
@@ -191,7 +231,24 @@ fun EpisodeListDialog(
     // list being open, and closing the dialog should end it. Keeping it here
     // means it cannot outlive the dialog or leak into a later session.
     var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
-    val clearSelection = { selectedIds = emptySet() }
+    // AM (PLAYLIST_ADD_TO_LIBRARY) -->
+    // Which group rows were selected AS groups, by row key.
+    //
+    // The selection itself is a set of episode ids, which is all the episode
+    // actions need - but it cannot say whether the user picked a source header
+    // or happened to pick every episode under it, and on a merged entry those
+    // two name different entries (the merge, or the child an episode came
+    // from). Inferring it from "all of them are selected" would answer wrongly
+    // for a child that holds a single episode, so the intent is recorded where
+    // it is expressed instead. Each record still has to hold up: a group whose
+    // episodes are no longer all selected does not count, so deselecting one
+    // episode out of a selected source puts the rest back to being episodes.
+    var selectedGroups by remember { mutableStateOf(emptyMap<String, PlaylistGroupSelection>()) }
+    val clearSelection = {
+        selectedIds = emptySet()
+        selectedGroups = emptyMap()
+    }
+    // <-- AM (PLAYLIST_ADD_TO_LIBRARY)
     // A parent selects its episode run, so clicking it toggles exactly like an
     // episode and every existing bulk action works without a parent-only path.
     val toggleSelection: (List<Long>) -> Unit = { ids ->
@@ -202,6 +259,24 @@ fun EpisodeListDialog(
             selectedIds + selection
         }
     }
+    // AM (PLAYLIST_ADD_TO_LIBRARY) -->
+    // The two ways a group row enters the selection, recording the row as a
+    // group as they go. Both defer to the plain episode-id selection for the
+    // selection itself; only the record is new.
+    val toggleGroup: (String, Long, List<Long>) -> Unit = { key, blockId, ids ->
+        val wasSelected = ids.isNotEmpty() && ids.all(selectedIds::contains)
+        toggleSelection(ids)
+        selectedGroups = if (wasSelected) {
+            selectedGroups - key
+        } else {
+            selectedGroups + (key to PlaylistGroupSelection(blockId, ids))
+        }
+    }
+    val selectGroup: (String, Long, List<Long>) -> Unit = { key, blockId, ids ->
+        selectedIds = selectedIds + ids
+        selectedGroups = selectedGroups + (key to PlaylistGroupSelection(blockId, ids))
+    }
+    // <-- AM (PLAYLIST_ADD_TO_LIBRARY)
     // Long-press selection is also queue reorder mode; there is no second
     // mode to enable before the drag handles appear.
     val selectionMode = selectedIds.isNotEmpty()
@@ -289,8 +364,52 @@ fun EpisodeListDialog(
             val episode = episodeList.firstOrNull { it.id != null && it.id == episodeId }
             if (episode != null) onSeenClicked(listOf(episode), seen)
         },
+        // AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+        playbackSeen = playbackSeen,
     )
     // <-- AM (PLAYER_MARK_BADGES)
+    // AM (PLAYLIST_MARK_TRISTATE) -->
+    // One cycle per mark, reading and writing through the mark state so a tap
+    // redraws the rows as well as the button. Each reads the selection live
+    // rather than capturing it, so growing the selection mid-cycle acts on
+    // what is selected now.
+    val currentSelection = rememberUpdatedState(selectedEpisodes)
+    val seenCycle = remember(marks) {
+        MarkCycle<Long>(
+            idsOf = { currentSelection.value.mapNotNull { it.id } },
+            markedOf = { id: Long ->
+                currentSelection.value.firstOrNull { it.id == id }?.let { marks.marksOf(it).seen } == true
+            },
+            setMark = { id: Long, value: Boolean -> marks.setSeen(id, value) },
+        )
+    }
+    val bookmarkCycle = remember(marks) {
+        MarkCycle<Long>(
+            idsOf = { currentSelection.value.mapNotNull { it.id } },
+            markedOf = { id: Long ->
+                currentSelection.value.firstOrNull { it.id == id }?.let { marks.marksOf(it).bookmarked } == true
+            },
+            setMark = { id: Long, value: Boolean -> marks.setBookmark(id, value) },
+        )
+    }
+    val fillermarkCycle = remember(marks) {
+        MarkCycle<Long>(
+            idsOf = { currentSelection.value.mapNotNull { it.id } },
+            markedOf = { id: Long ->
+                currentSelection.value.firstOrNull { it.id == id }?.let { marks.marksOf(it).fillermarked } == true
+            },
+            setMark = { id: Long, value: Boolean -> marks.setFillermark(id, value) },
+        )
+    }
+    // A changed selection is a different question, so the cycles start over
+    // rather than restoring a snapshot taken of other rows.
+    LaunchedEffect(selectedIds) {
+        seenCycle.reset()
+        bookmarkCycle.reset()
+        fillermarkCycle.reset()
+    }
+    // <-- AM (PLAYLIST_MARK_TRISTATE)
+
     // AM (PLAYLIST_LIBRARY_BADGE) -->
     // Only drawn when the list actually holds both kinds. A badge on every row
     // distinguishes nothing and is read as decoration, and a playlist that is
@@ -308,11 +427,12 @@ fun EpisodeListDialog(
     // queue the way a queue is read - sources, not several hundred episodes.
     // The source holding the playing episode starts open, so the list still
     // opens on what is playing.
+    // AM (QUEUE_EXPAND_PER_RUN): the RUN holding the playing episode, not its
+    // block - a split source has several runs, and only the one being played
+    // should open.
     var expansion by remember(currentEpisodeId) {
-        val playingBlock = orderedEpisodeList
-            .firstOrNull { it.id != null && it.id == currentEpisodeId }
-            ?.let(blockOf)
-        mutableStateOf(PlaylistExpansion(sources = setOfNotNull(playingBlock)))
+        val playingSource = playingSourceKey(orderedEpisodeList, blockOf, currentEpisodeId)
+        mutableStateOf(PlaylistExpansion(sources = setOfNotNull(playingSource)))
     }
 
     // Searching flattens the groups. A query is a search for episodes, and
@@ -326,6 +446,9 @@ fun EpisodeListDialog(
             buildPlaylistRows(
                 episodes = filteredEpisodeList,
                 blockOf = blockOf,
+                // AM (QUEUE_SOURCE_TOTALS): the entry an episode was queued as,
+                // which is what makes a split source still count as one.
+                sourceIdOf = sourceIdOf,
                 titleOf = { _, items -> items.firstNotNullOfOrNull(sourceTitleOf).orEmpty() },
                 seasonsOf = blockSeasons::get,
                 seasonLabelOf = seasonLabels,
@@ -343,23 +466,35 @@ fun EpisodeListDialog(
     //
     // Once per source: the user collapsing a season again must stick, and
     // re-expanding the source is them asking for it afresh.
-    var seasonAutoExpanded by remember(currentEpisodeId) { mutableStateOf(emptySet<Long>()) }
+    // AM (QUEUE_EXPAND_PER_RUN): tracked by source row key, like the expansion
+    // itself, and the season to open is found among the rows now on screen -
+    // the season rows for an expanded source exist by the time this runs, and
+    // the target episode falls in exactly one of them.
+    var seasonAutoExpanded by remember(currentEpisodeId) { mutableStateOf(emptySet<String>()) }
+    // AM (QUEUE_HOVER_EXPAND): groups opened by a hover rather than by hand,
+    // so they can be closed again when the drag moves out of them.
+    var hoverExpanded by remember(currentEpisodeId) { mutableStateOf(emptySet<String>()) }
+    val currentRows = rememberUpdatedState(baseRows)
     LaunchedEffect(expansion.sources, blockSeasons, currentEpisodeId) {
         val pending = expansion.sources - seasonAutoExpanded
         if (pending.isEmpty()) return@LaunchedEffect
+        val rows = currentRows.value
         var seasons = expansion.seasons
-        val resolved = mutableSetOf<Long>()
-        pending.forEach { blockId ->
-            val blockSeason = blockSeasons[blockId] ?: return@forEach
-            resolved += blockId
-            val target = orderedEpisodeList
-                .filter { blockOf(it) == blockId }
-                .let { items ->
-                    items.firstOrNull { it.id != null && it.id == currentEpisodeId }
-                        ?: items.firstOrNull { it.id != null && it.id == blockLastPlayed[blockId] }
-                }
-            val seasonNumber = target?.id?.let { blockSeason.seasonByEpisodeId[it] } ?: return@forEach
-            seasons = seasons + (blockId to seasonNumber)
+        val resolved = mutableSetOf<String>()
+        pending.forEach { sourceKey ->
+            val sourceRow = rows.filterIsInstance<PlaylistRow.Source>()
+                .firstOrNull { it.key == sourceKey }
+                ?: return@forEach
+            // Not resolved yet; the effect runs again when it lands.
+            blockSeasons[sourceRow.blockId] ?: return@forEach
+            resolved += sourceKey
+            val target = sourceRow.episodeIds.firstOrNull { it == currentEpisodeId }
+                ?: sourceRow.episodeIds.firstOrNull { it == blockLastPlayed[sourceRow.blockId] }
+                ?: return@forEach
+            val seasonRow = rows.filterIsInstance<PlaylistRow.Season>()
+                .firstOrNull { target in it.episodeIds }
+                ?: return@forEach
+            seasons = seasons + seasonRow.key
         }
         if (resolved.isEmpty()) return@LaunchedEffect
         seasonAutoExpanded = seasonAutoExpanded + resolved
@@ -384,26 +519,76 @@ fun EpisodeListDialog(
         enabled = isReordering,
         listState = episodeListState,
         rows = baseRows,
-        episodes = orderedEpisodeList,
         selectedIds = selectedIds,
         blockOf = blockOf,
-        seasonOf = { episode ->
-            val blockId = blockOf(episode)
-            val episodeId = episode.id
-            if (blockId != null && episodeId != null) {
-                blockSeasons[blockId]?.seasonByEpisodeId?.get(episodeId)
-            } else {
-                null
+        // AM (QUEUE_HOVER_EXPAND) -->
+        // Resting the drag on a closed group opens it, so something can be
+        // dropped inside a source without breaking the drag to go and open it
+        // first. A source opens its seasons too - see the cascade below -
+        // since a source that reveals only collapsed seasons is no more
+        // droppable than it was shut.
+        onHoverExpand = { key ->
+            val row = baseRows.firstOrNull { it.key == key }
+            val opened = when (row) {
+                // One layer per hover: a source reveals its SEASONS and
+                // stops. Opening its seasons as well dumped every episode of
+                // the source into the list at once, which is a lot of rows to
+                // appear under a moving finger - and the season the drop is
+                // actually headed for gets its own hover.
+                is PlaylistRow.Source -> (row.expandable && !row.expanded).also {
+                    if (it) {
+                        onExpandSource(row.blockId)
+                        expansion = expansion.copy(sources = expansion.sources + key)
+                    }
+                }
+                is PlaylistRow.Season -> (!row.expanded).also {
+                    if (it) expansion = expansion.copy(seasons = expansion.seasons + key)
+                }
+                else -> false
+            }
+            if (row != null) {
+                // Whatever the drag has moved on from closes again, so the
+                // list does not fill up with everything hovered on the way.
+                // Only the branch the drag is in stays open: a group holding
+                // the row now under the finger is an ancestor of it, not
+                // somewhere the drag has left.
+                val keep = hoverExpanded.filterTo(mutableSetOf()) { openKey ->
+                    openKey == key || baseRows.firstOrNull { it.key == openKey }.contains(row)
+                }
+                val closing = hoverExpanded - keep
+                if (closing.isNotEmpty()) {
+                    expansion = expansion.copy(
+                        sources = expansion.sources - closing,
+                        seasons = expansion.seasons - closing,
+                    )
+                }
+                hoverExpanded = if (opened) keep + key else keep
             }
         },
+        // <-- AM (QUEUE_HOVER_EXPAND)
         onMoveEpisodes = onMoveQueueEpisodes,
         onReorderBlocks = onReorderQueueBlocks,
     )
     val dateFormatter = remember(dateFormat) { UiPreferences.dateFormat(dateFormat) }
 
+    // AM (QUEUE_DIALOG_LANDSCAPE_HEIGHT) -->
+    // A list wants height, and landscape is where there is least of it - the
+    // orientation the player is almost always in. One fraction for both left
+    // the dialog with room to spare at the sides and a handful of rows in the
+    // middle. Landscape takes nearly all of the height instead; portrait is
+    // unchanged, where 0.8 of a tall screen is already a long list.
+    // See PlayerSheet, which varies its width the same way.
+    val heightFraction = if (LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+        0.95F
+    } else {
+        0.8F
+    }
+    // <-- AM (QUEUE_DIALOG_LANDSCAPE_HEIGHT)
+
     PlayerDialog(
         title = stringResource(AYMR.strings.episodes),
-        modifier = Modifier.fillMaxHeight(fraction = 0.8F).fillMaxWidth(fraction = 0.8F),
+        // AM (QUEUE_DIALOG_LANDSCAPE_HEIGHT)
+        modifier = Modifier.fillMaxHeight(fraction = heightFraction).fillMaxWidth(fraction = 0.8F),
         // AM (PLAYER_EPISODE_LIST_SELECTION) -->
         // Back and outside-tap clear the selection first rather than closing
         // the dialog under it, matching how the entry list treats back while
@@ -433,18 +618,48 @@ fun EpisodeListDialog(
                 val offersFillermark = LibraryPreferences.EpisodeSwipeAction.ToggleFillermark !in swipes
                 val offersDownload = LibraryPreferences.EpisodeSwipeAction.Download !in swipes
                 // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+                // AM (PLAYLIST_ADD_TO_LIBRARY) -->
+                // Group records that still hold, and the episodes left over
+                // once their episodes are accounted for - the two halves the
+                // merge-aware resolution needs.
+                val liveGroups = remember(selectedGroups, selectedIds) {
+                    selectedGroups.values.filter { group ->
+                        group.episodeIds.isNotEmpty() && group.episodeIds.all(selectedIds::contains)
+                    }
+                }
+                val groupBlockIds = remember(liveGroups) {
+                    liveGroups.map { it.blockId }.distinct()
+                }
+                val looseEpisodeIds = remember(liveGroups, selectedIds) {
+                    val claimed = liveGroups.flatMap { it.episodeIds }.toSet()
+                    (selectedIds - claimed).toList()
+                }
+                // <-- AM (PLAYLIST_ADD_TO_LIBRARY)
                 EpisodeListSelectionHeader(
                     selectedCount = selectedIds.size,
-                    // AM (PLAYLIST_SWIPE_ACTIONS) -->
-                    onSeen = {
-                        selectedEpisodes.forEach { marks.setSeen(it.id, true) }
-                        clearSelection()
-                    }.takeIf { offersSeen && selectedEpisodes.any { !marks.marksOf(it).seen } },
-                    onUnseen = {
-                        selectedEpisodes.forEach { marks.setSeen(it.id, false) }
-                        clearSelection()
-                    }.takeIf { offersSeen && selectedEpisodes.any { marks.marksOf(it).seen } },
-                    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+                    // AM (PLAYLIST_ADD_TO_LIBRARY) -->
+                    // Clears the selection: the dialog that follows is about
+                    // entries, and leaving a row selection standing behind it
+                    // would say the episodes are still about to be acted on.
+                    onAddToLibrary = onChangeCategories?.let { change ->
+                        {
+                            change(groupBlockIds, looseEpisodeIds)
+                            clearSelection()
+                        }
+                    },
+                    // <-- AM (PLAYLIST_ADD_TO_LIBRARY)
+                    // AM (PLAYLIST_MARK_TRISTATE) -->
+                    // The cycle keeps the selection: unlike download, which
+                    // acts once and is done, these three are states the user
+                    // may step through - clearing the selection under them
+                    // would end the cycle after one tap.
+                    seenState = seenCycle.observed.takeIf { offersSeen },
+                    onCycleSeen = seenCycle::advance,
+                    bookmarkState = bookmarkCycle.observed.takeIf { offersBookmark },
+                    onCycleBookmark = bookmarkCycle::advance,
+                    fillermarkState = fillermarkCycle.observed.takeIf { offersFillermark },
+                    onCycleFillermark = fillermarkCycle::advance,
+                    // <-- AM (PLAYLIST_MARK_TRISTATE)
                     // AM (LOCAL_SOURCE_DOWNLOAD) -->
                     // Clears the selection, like the entry list's own download
                     // action: the selection described what to act on, and it has
@@ -457,20 +672,6 @@ fun EpisodeListDialog(
                         }
                     },
                     // <-- AM (LOCAL_SOURCE_DOWNLOAD)
-                    // Offered only when it would change something: with every
-                    // selected episode already bookmarked there is nothing for
-                    // the add action to do, and the same in reverse.
-                    // AM (PLAYER_MARK_BADGES): through the mark state, and the
-                    // offered-only-when-useful checks read from it too, so they
-                    // follow what the bar itself has just done.
-                    onBookmark = { selectedEpisodes.forEach { marks.setBookmark(it.id, true) } }
-                        .takeIf { offersBookmark && selectedEpisodes.any { !marks.marksOf(it).bookmarked } },
-                    onRemoveBookmark = { selectedEpisodes.forEach { marks.setBookmark(it.id, false) } }
-                        .takeIf { offersBookmark && selectedEpisodes.any { marks.marksOf(it).bookmarked } },
-                    onFillermark = { selectedEpisodes.forEach { marks.setFillermark(it.id, true) } }
-                        .takeIf { offersFillermark && selectedEpisodes.any { !marks.marksOf(it).fillermarked } },
-                    onRemoveFillermark = { selectedEpisodes.forEach { marks.setFillermark(it.id, false) } }
-                        .takeIf { offersFillermark && selectedEpisodes.any { marks.marksOf(it).fillermarked } },
                     onClearSelection = clearSelection,
                 )
             } else {
@@ -494,10 +695,6 @@ fun EpisodeListDialog(
                         }
                     },
                     // <-- AM (PLAYLIST_SEARCH_SCOPE)
-                    onOpenPlaylistEntry = onOpenPlaylistEntry,
-                    // AM (PLAYER_ADD_TO_LIBRARY)
-                    isFavorited = isFavorited,
-                    onAddToLibrary = onAddToLibrary,
                 )
             }
             // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
@@ -540,45 +737,76 @@ fun EpisodeListDialog(
                         // goes through the same submit-then-open path an episode
                         // row takes, since playing the first episode of a source
                         // IS opening that episode.
+                        // AM (QUEUE_SOURCE_TOTALS) -->
+                        // A header that holds the whole source states its
+                        // size; one that holds part of a split source states
+                        // which part, since either number alone misreads - the
+                        // run understates the source and the source overstates
+                        // the run. Resolved off the context so both arms are
+                        // one expression.
+                        val groupSubtitle: (Int, Int) -> String = { inRun, inSource ->
+                            if (inRun == inSource) {
+                                context.pluralStringResource(AYMR.plurals.anime_num_episodes, inRun, inRun)
+                            } else {
+                                context.stringResource(AMMR.strings.am_queue_run_of_source, inRun, inSource)
+                            }
+                        }
+                        // <-- AM (QUEUE_SOURCE_TOTALS)
                         val playFromGroup: (Long?) -> Unit = { id ->
                             if (!selectionMode && id != null) {
                                 playlistAnimeId?.let { PlaylistSearchScope.submit(it, searchQuery) }
                                 onEpisodeClicked(id)
                             }
                         }
+                        // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+                        // A parent row stands for the entry the block was
+                        // queued as, so both source and season headers open
+                        // that - the merge on a merged entry. Off while
+                        // selecting or reordering, where a tap means something
+                        // else entirely.
+                        val openSource: ((Long) -> (() -> Unit))? = onOpenSource
+                            ?.takeIf { !selectionMode && !isReordering }
+                            ?.let { open -> { blockId: Long -> { open(blockId) } } }
+                        // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
                         when (row) {
                             is PlaylistRow.Source -> {
                                 if (row.singleEpisode == null) {
                                     PlaylistGroupItem(
                                         title = row.title,
-                                        subtitle = pluralStringResource(
-                                            AYMR.plurals.anime_num_episodes,
-                                            row.episodeCount,
-                                            row.episodeCount,
-                                        ),
+                                        // AM (QUEUE_SOURCE_TOTALS)
+                                        subtitle = groupSubtitle(row.episodeCount, row.sourceEpisodeCount),
                                         depth = 0,
                                         isCurrent = row.containsCurrent,
                                         isSelected = row.episodeIds.all(selectedIds::contains),
                                         expanded = row.expanded,
                                         onClick = {
                                             if (selectionMode) {
-                                                toggleSelection(row.episodeIds)
+                                                // AM (PLAYLIST_ADD_TO_LIBRARY)
+                                                toggleGroup(row.key, row.blockId, row.episodeIds)
                                             } else {
                                                 playFromGroup(row.playEpisodeId)
                                             }
                                         },
-                                        onLongClick = { selectedIds = selectedIds + row.episodeIds },
+                                        // AM (PLAYLIST_ADD_TO_LIBRARY)
+                                        onLongClick = { selectGroup(row.key, row.blockId, row.episodeIds) },
+                                        // AM (OPEN_ENTRY_ON_DOUBLE_TAP)
+                                        onDoubleClick = openSource?.invoke(row.blockId),
                                         reorderHandleModifier = reorderHandleModifier,
-                                        onToggle = if (row.expandable && !isReordering) {
+                                        // AM (QUEUE_HOVER_EXPAND): live while
+                                        // reordering too - hovering opens
+                                        // groups, so there has to be a way to
+                                        // shut them without leaving the view.
+                                        onToggle = if (row.expandable) {
                                             {
-                                                expansion = if (row.blockId in expansion.sources) {
-                                                    expansion.copy(sources = expansion.sources - row.blockId)
+                                                // AM (QUEUE_EXPAND_PER_RUN)
+                                                expansion = if (row.key in expansion.sources) {
+                                                    expansion.copy(sources = expansion.sources - row.key)
                                                 } else {
                                                     // The seasons are asked for on the
                                                     // way open, not with the playlist -
                                                     // see loadBlockSeasons.
                                                     onExpandSource(row.blockId)
-                                                    expansion.copy(sources = expansion.sources + row.blockId)
+                                                    expansion.copy(sources = expansion.sources + row.key)
                                                 }
                                             }
                                         } else {
@@ -591,36 +819,38 @@ fun EpisodeListDialog(
                                 // EpisodeListItem as an ungrouped episode below.
                             }
                             is PlaylistRow.Season -> {
-                                val seasonKey = row.blockId to row.seasonNumber
+                                // AM (QUEUE_EXPAND_PER_RUN)
+                                val seasonKey = row.key
                                 PlaylistGroupItem(
                                     title = row.label,
-                                    subtitle = pluralStringResource(
-                                        AYMR.plurals.anime_num_episodes,
-                                        row.episodeCount,
-                                        row.episodeCount,
-                                    ),
+                                    // AM (QUEUE_SOURCE_TOTALS)
+                                    subtitle = groupSubtitle(row.episodeCount, row.sourceEpisodeCount),
                                     depth = 1,
                                     isCurrent = row.containsCurrent,
                                     isSelected = row.episodeIds.all(selectedIds::contains),
                                     expanded = row.expanded,
                                     onClick = {
                                         if (selectionMode) {
-                                            toggleSelection(row.episodeIds)
+                                            // AM (PLAYLIST_ADD_TO_LIBRARY)
+                                            toggleGroup(row.key, row.blockId, row.episodeIds)
                                         } else {
                                             playFromGroup(row.playEpisodeId)
                                         }
                                     },
-                                    onLongClick = { selectedIds = selectedIds + row.episodeIds },
+                                    // AM (PLAYLIST_ADD_TO_LIBRARY)
+                                    onLongClick = { selectGroup(row.key, row.blockId, row.episodeIds) },
+                                    // AM (OPEN_ENTRY_ON_DOUBLE_TAP): the season of
+                                    // a merge is still the merge, not the child
+                                    // whichever of its episodes happens to be first.
+                                    onDoubleClick = openSource?.invoke(row.blockId),
                                     reorderHandleModifier = reorderHandleModifier,
-                                    onToggle = if (isReordering) {
-                                        null
-                                    } else {
-                                        {
-                                            expansion = if (seasonKey in expansion.seasons) {
-                                                expansion.copy(seasons = expansion.seasons - seasonKey)
-                                            } else {
-                                                expansion.copy(seasons = expansion.seasons + seasonKey)
-                                            }
+                                    // AM (QUEUE_HOVER_EXPAND): live while
+                                    // reordering, as the source chevron is.
+                                    onToggle = {
+                                        expansion = if (seasonKey in expansion.seasons) {
+                                            expansion.copy(seasons = expansion.seasons - seasonKey)
+                                        } else {
+                                            expansion.copy(seasons = expansion.seasons + seasonKey)
                                         }
                                     },
                                 )
@@ -640,7 +870,6 @@ fun EpisodeListDialog(
                             is PlaylistRow.Source -> row.episodeIds
                             else -> listOfNotNull(episodeRow.episode.id)
                         }
-                        val groupTitle = (row as? PlaylistRow.Source)?.title
                         val episode = episodeRow.episode
                         // <-- AM (QUEUE_GROUPED_PLAYLIST)
 
@@ -671,6 +900,19 @@ fun EpisodeListDialog(
                                         dateFormat = dateFormatter,
                                     )
                             } ?: ""
+
+                        // AM (QUEUE_SINGLE_EPISODE_SOURCE_TITLE) -->
+                        // The source's name above the episode's, which is what
+                        // tells a one-episode run apart from the rows of the
+                        // source above it - unless the two are the same name, as
+                        // they are for a film or any other entry whose single
+                        // episode is titled after it. Saying it twice is not
+                        // provenance, it is a row with its date pushed out by a
+                        // repeat of its own title, so the duplicate goes and the
+                        // row reads like any other episode: title, then date.
+                        val groupTitle = (row as? PlaylistRow.Source)?.title
+                            ?.takeIf { !it.trim().equals(title.trim(), ignoreCase = true) }
+                        // <-- AM (QUEUE_SINGLE_EPISODE_SOURCE_TITLE)
 
                         // AM (PLAYER_MARK_BADGES)
                         val episodeMarks = marks.marksOf(episode)
@@ -736,7 +978,15 @@ fun EpisodeListDialog(
                                     else -> toggleSelection(selectionIds)
                                 }
                             },
-                            onOpenEntryClicked = onOpenEntryClicked,
+                            // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+                            // An episode opens the entry it actually came
+                            // from, which on a merged entry is the child - the
+                            // source this episode is - rather than the parent
+                            // its headers describe.
+                            onDoubleClick = onOpenEpisodeEntry
+                                ?.takeIf { !selectionMode && !isReordering }
+                                ?.let { open -> episode.id?.let { id -> { open(id) } } },
+                            // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
                             // AM (OPEN_ENTRY_MERGED_ONLY) -->
                             // This list has a selection bar, so the marks live there.
                             marksInRow = false,
@@ -769,11 +1019,6 @@ fun EpisodeListDialog(
 private fun EpisodeListDialogHeader(
     searchQuery: String,
     onChangeSearchQuery: (String) -> Unit,
-    onOpenPlaylistEntry: (() -> Unit)?,
-    // AM (PLAYER_ADD_TO_LIBRARY) -->
-    isFavorited: Boolean,
-    onAddToLibrary: () -> Unit,
-    // <-- AM (PLAYER_ADD_TO_LIBRARY)
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -787,18 +1032,10 @@ private fun EpisodeListDialogHeader(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Opens the entry the playlist itself belongs to, which on a merged
-        // entry is the parent rather than whichever child the current episode
-        // came from.
-        if (onOpenPlaylistEntry != null) {
-            IconButton(onClick = onOpenPlaylistEntry) {
-                Icon(
-                    imageVector = Icons.Outlined.Visibility,
-                    contentDescription = stringResource(AMMR.strings.am_action_open_entry),
-                )
-            }
-        }
-
+        // AM (OPEN_ENTRY_ON_DOUBLE_TAP): the open-entry eye is gone from here.
+        // Every row can be opened by double tapping it, and which entry that
+        // means is a property of the row rather than of the list, so a single
+        // header button could only ever offer one of the answers.
         BasicTextField(
             value = searchQuery,
             onValueChange = onChangeSearchQuery,
@@ -854,21 +1091,10 @@ private fun EpisodeListDialogHeader(
             }
         }
 
-        // AM (PLAYER_ADD_TO_LIBRARY) -->
-        // The entry screen's heart, same filled/outlined pair and the same
-        // behaviour: it opens the categories dialog, whose checked set decides
-        // whether the entry is in the library. Live in both states - a filled
-        // heart is how an entry gets taken back out.
-        IconButton(onClick = onAddToLibrary) {
-            Icon(
-                imageVector = if (isFavorited) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                contentDescription = stringResource(
-                    if (isFavorited) MR.strings.in_library else MR.strings.add_to_library,
-                ),
-                tint = if (isFavorited) MaterialTheme.colorScheme.primary else LocalContentColor.current,
-            )
-        }
-        // <-- AM (PLAYER_ADD_TO_LIBRARY)
+        // AM (OPEN_ENTRY_ON_DOUBLE_TAP): the add-to-library heart is gone too.
+        // Opening an entry is now a double tap away, and adding it to the
+        // library is something its own screen already does - with its
+        // categories, its duplicate check and its cover in front of the user.
     }
 }
 // <-- AM (ALWAYS_OPEN_EPISODE_SEARCH)
@@ -886,17 +1112,24 @@ private fun EpisodeListDialogHeader(
 @Composable
 private fun EpisodeListSelectionHeader(
     selectedCount: Int,
-    // AM (PLAYLIST_SWIPE_ACTIONS)
-    onSeen: (() -> Unit)?,
-    onUnseen: (() -> Unit)?,
+    // AM (PLAYLIST_MARK_TRISTATE) -->
+    /**
+     * One cycling button per mark, null where that mark is already a swipe
+     * action. Replaces the add/remove pair each one needed.
+     */
+    seenState: MarkTriState?,
+    onCycleSeen: () -> Unit,
+    bookmarkState: MarkTriState?,
+    onCycleBookmark: () -> Unit,
+    fillermarkState: MarkTriState?,
+    onCycleFillermark: () -> Unit,
+    // <-- AM (PLAYLIST_MARK_TRISTATE)
     // AM (LOCAL_SOURCE_DOWNLOAD) -->
     /** Null when the playlist has no entry to download from - see the dialog. */
     onDownload: (() -> Unit)?,
     // <-- AM (LOCAL_SOURCE_DOWNLOAD)
-    onBookmark: (() -> Unit)?,
-    onRemoveBookmark: (() -> Unit)?,
-    onFillermark: (() -> Unit)?,
-    onRemoveFillermark: (() -> Unit)?,
+    // AM (PLAYLIST_ADD_TO_LIBRARY)
+    onAddToLibrary: (() -> Unit)?,
     onClearSelection: () -> Unit,
 ) {
     Row(
@@ -917,24 +1150,38 @@ private fun EpisodeListSelectionHeader(
             modifier = Modifier.weight(1f),
         )
 
-        // AM (PLAYLIST_SWIPE_ACTIONS) -->
-        if (onSeen != null) {
-            IconButton(onClick = onSeen) {
+        // AM (PLAYLIST_ADD_TO_LIBRARY) -->
+        // First of the actions, and on its own: the three that follow are
+        // marks on the episodes selected, while this one is about the entries
+        // those episodes belong to - a different object with a different
+        // lifetime, which is worth a gap rather than a fourth button in the
+        // same run of them.
+        if (onAddToLibrary != null) {
+            IconButton(onClick = onAddToLibrary) {
                 Icon(
-                    imageVector = Icons.Outlined.Done,
-                    contentDescription = stringResource(AYMR.strings.action_mark_as_seen),
+                    imageVector = Icons.Outlined.FavoriteBorder,
+                    contentDescription = stringResource(MR.strings.add_to_library),
                 )
             }
+            Spacer(modifier = Modifier.width(MaterialTheme.padding.small))
         }
-        if (onUnseen != null) {
-            IconButton(onClick = onUnseen) {
-                Icon(
-                    imageVector = Icons.Outlined.RemoveDone,
-                    contentDescription = stringResource(AYMR.strings.action_mark_as_unseen),
-                )
-            }
+        // <-- AM (PLAYLIST_ADD_TO_LIBRARY)
+        // AM (PLAYLIST_MARK_TRISTATE) -->
+        if (seenState != null) {
+            MarkTriStateButton(
+                state = seenState,
+                // Two checks for all of them, one for some, the struck-through
+                // pair for none.
+                icons = MarkTriStateIcons(
+                    all = Icons.Outlined.DoneAll,
+                    partial = Icons.Outlined.Done,
+                    none = Icons.Outlined.RemoveDone,
+                ),
+                contentDescription = stringResource(AYMR.strings.action_mark_as_seen),
+                onClick = onCycleSeen,
+            )
         }
-        // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+        // <-- AM (PLAYLIST_MARK_TRISTATE)
         // AM (LOCAL_SOURCE_DOWNLOAD) -->
         // Ahead of the mark actions: downloading is the one that fetches
         // something, and the marks are bookkeeping beside it.
@@ -947,38 +1194,38 @@ private fun EpisodeListSelectionHeader(
             }
         }
         // <-- AM (LOCAL_SOURCE_DOWNLOAD)
-        if (onBookmark != null) {
-            IconButton(onClick = onBookmark) {
-                Icon(
-                    imageVector = Icons.Outlined.BookmarkAdd,
-                    contentDescription = stringResource(AYMR.strings.action_bookmark_episode),
-                )
-            }
+        // AM (PLAYLIST_MARK_TRISTATE) -->
+        if (bookmarkState != null) {
+            MarkTriStateButton(
+                state = bookmarkState,
+                // AM (PLAYLIST_MARK_TRISTATE): one family - the same bookmark
+                // carrying +, = or - in the badge corner.
+                icons = MarkTriStateIcons(
+                    all = Icons.Outlined.BookmarkAdd,
+                    partial = ImageVector.vectorResource(R.drawable.ic_bookmark_mixed_24dp),
+                    none = Icons.Outlined.BookmarkRemove,
+                ),
+                contentDescription = stringResource(AYMR.strings.action_bookmark_episode),
+                onClick = onCycleBookmark,
+            )
         }
-        if (onRemoveBookmark != null) {
-            IconButton(onClick = onRemoveBookmark) {
-                Icon(
-                    imageVector = Icons.Outlined.BookmarkRemove,
-                    contentDescription = stringResource(AYMR.strings.action_remove_bookmark_episode),
-                )
-            }
+        if (fillermarkState != null) {
+            MarkTriStateButton(
+                state = fillermarkState,
+                // AM (PLAYLIST_MARK_TRISTATE): likewise - the add label's own
+                // shape, with its "+" replaced by "=" and "-". Material has no
+                // label_remove or label_mixed, so both are drawn from
+                // new_label's geometry; see those drawables.
+                icons = MarkTriStateIcons(
+                    all = Icons.Outlined.NewLabel,
+                    partial = ImageVector.vectorResource(R.drawable.ic_label_mixed_24dp),
+                    none = ImageVector.vectorResource(R.drawable.ic_label_remove_24dp),
+                ),
+                contentDescription = stringResource(AYMR.strings.action_fillermark_episode),
+                onClick = onCycleFillermark,
+            )
         }
-        if (onFillermark != null) {
-            IconButton(onClick = onFillermark) {
-                Icon(
-                    imageVector = Icons.Outlined.NewLabel,
-                    contentDescription = stringResource(AYMR.strings.action_fillermark_episode),
-                )
-            }
-        }
-        if (onRemoveFillermark != null) {
-            IconButton(onClick = onRemoveFillermark) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Outlined.LabelOff,
-                    contentDescription = stringResource(AYMR.strings.action_remove_fillermark_episode),
-                )
-            }
-        }
+        // <-- AM (PLAYLIST_MARK_TRISTATE)
     }
 }
 // <-- AM (PLAYER_EPISODE_LIST_SELECTION)

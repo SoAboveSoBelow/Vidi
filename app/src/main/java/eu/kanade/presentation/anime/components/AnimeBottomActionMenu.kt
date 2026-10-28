@@ -29,7 +29,6 @@ import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.automirrored.outlined.Input
-import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.BookmarkAdd
@@ -39,6 +38,8 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
+// AM (LIBRARY_HEART_ICON)
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NewLabel
 import androidx.compose.material.icons.outlined.RemoveDone
@@ -549,8 +550,14 @@ fun LibraryBottomActionMenu(
         add(
             BottomActionItem(
                 key = "move_category",
-                title = stringResource(MR.strings.action_move_category),
-                icon = Icons.AutoMirrored.Outlined.Label,
+                // AM (LIBRARY_HEART_ICON): the same heart and the same label
+                // browse's selection bar carries, because it is the same
+                // action - the dialog it opens decides library membership,
+                // removal included, and a label icon said tagging in the glyph
+                // fillermark already uses. "Set categories" named the dialog
+                // rather than what the button does.
+                title = stringResource(MR.strings.label_library),
+                icon = Icons.Outlined.FavoriteBorder,
                 onClick = onChangeCategoryClicked,
             ),
         )

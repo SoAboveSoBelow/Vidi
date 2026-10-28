@@ -117,13 +117,15 @@ class QueueRepositoryImpl(
             orderedIds.forEachIndexed { index, blockId ->
                 database.queue_blocksQueries.setPosition(index.toLong() * POSITION_STEP, blockId)
             }
-
-            // A source reorder gathers each source's runs into its new coarse
-            // slot. Episode reorder, by contrast, never changes block_id.
-            val itemsByBlock = database.queue_itemsQueries.getAllItems(::mapItem)
-                .awaitAsList()
-                .groupBy { it.blockId }
-            renumberItems(orderedIds.flatMap { itemsByBlock[it].orEmpty() })
+            // AM (QUEUE_SOURCE_INTERLEAVE) -->
+            // Block positions only. This used to gather every source's items
+            // into its new coarse slot, which is why a source could never sit
+            // inside another one: any reorder flattened the queue back into
+            // one contiguous run per source. Moving a source is an item move
+            // now (see PlaylistReorder), so this is left to do the one thing
+            // only a block position can express - where a block with no items
+            // yet sits while it waits for its fetch (see blockInsertionIndex).
+            // <-- AM (QUEUE_SOURCE_INTERLEAVE)
         }
     }
 
@@ -141,14 +143,49 @@ class QueueRepositoryImpl(
                 remaining.indexOfFirst { it.id == anchor }
                     .also { if (it == -1) return@transaction }
             } ?: -1
-            val reordered = remaining.take(anchorIndex + 1) + moving + remaining.drop(anchorIndex + 1)
-            renumberItems(reordered)
+            // AM (QUEUE_SPARSE_POSITIONS): only the moved rows are rewritten,
+            // into the gap after the anchor; the rest of the queue is left
+            // alone unless that gap has run out.
+            val positions = placeItems(remaining, anchorIndex + 1, moving.size)
+            moving.forEachIndexed { index, item ->
+                database.queue_itemsQueries.setPosition(positions[index], item.id)
+            }
         }
     }
     // <-- AM (QUEUE_REORDER)
 
+    // AM (QUEUE_REBUILD_READ_ONLY)
+    override suspend fun reorderItems(orderedItemIds: List<Long>) {
+        if (orderedItemIds.size < 2) return
+        database.transaction {
+            val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
+            val byId = all.associateBy { it.id }
+            val moving = orderedItemIds.mapNotNull(byId::get)
+            if (moving.size < 2) return@transaction
+            // The positions this set already holds, handed back out in the new
+            // order: nothing outside the set moves, and the set as a whole
+            // stays exactly where it was in the queue.
+            val slots = moving.map { it.position }.sorted()
+            moving.forEachIndexed { index, item ->
+                val position = slots[index]
+                if (item.position != position) {
+                    database.queue_itemsQueries.setPosition(position, item.id)
+                }
+            }
+        }
+    }
+
     override suspend fun removeItem(itemId: Long) {
         database.queue_itemsQueries.delete(itemId)
+    }
+
+    // AM (QUEUE_TRIM_BY_POSITION)
+    override suspend fun removeItems(itemIds: List<Long>) {
+        if (itemIds.isEmpty()) return
+        database.transaction {
+            database.queue_itemsQueries.deleteByItemIds(itemIds)
+            database.queue_blocksQueries.deleteEmptyComplete()
+        }
     }
 
     override suspend fun removeItemsByEpisodeIds(episodeIds: List<Long>) {
@@ -224,25 +261,71 @@ class QueueRepositoryImpl(
         return if (nextBlockItem == -1) all.size else nextBlockItem
     }
 
-    /** Makes global room at [insertAt], then writes the new rows into the gap. */
+    /** Writes the new rows into the gap at [insertAt]. */
     private suspend fun insertItemsAt(blockId: Long, insertAt: Int, items: List<QueueItem.New>) {
         if (items.isEmpty()) return
         val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
         check(insertAt in 0..all.size)
-        all.forEachIndexed { index, item ->
-            val shiftedIndex = if (index >= insertAt) index + items.size else index
-            database.queue_itemsQueries.setPosition(shiftedIndex.toLong() * POSITION_STEP, item.id)
-        }
+        // AM (QUEUE_SPARSE_POSITIONS): into the gap between neighbours rather
+        // than rewriting every row - see placeItems.
+        val positions = placeItems(all, insertAt, items.size)
         items.forEachIndexed { index, item ->
             database.queue_itemsQueries.insert(
                 blockId = blockId,
-                position = (insertAt + index).toLong() * POSITION_STEP,
+                position = positions[index],
                 animeId = item.animeId,
                 episodeId = item.episodeId,
                 uri = item.uri,
             )
         }
     }
+
+    // AM (QUEUE_SPARSE_POSITIONS) -->
+    /**
+     * Positions for [count] rows landing at [insertAt] among [rows].
+     *
+     * The gap first, and a full renumber only when the gap cannot hold them.
+     * Writing every row's position on every insert and every move - which is
+     * what this replaces - made each queue add and each drag cost one UPDATE
+     * per queued item, and an open performs both; it also quietly gave up the
+     * sparse ordering the table is documented to have (see queue_items.sq).
+     * One renumber restores a full step between every pair, so the expensive
+     * path is rare by construction.
+     */
+    private suspend fun placeItems(rows: List<QueueItem>, insertAt: Int, count: Int): List<Long> {
+        positionsBetween(rows, insertAt, count)?.let { return it }
+        renumberItems(rows)
+        val renumbered = rows.mapIndexed { index, row -> row.copy(position = index.toLong() * POSITION_STEP) }
+        return positionsBetween(renumbered, insertAt, count)
+            ?: error("No room for $count queue items at $insertAt")
+    }
+
+    /**
+     * [count] strictly increasing positions between the rows either side of
+     * [insertAt], or null when there is not enough room between them.
+     *
+     * A head insert steps DOWN from the first row, which can go negative:
+     * ordering is the whole meaning of this column and negatives order
+     * correctly, so there is no reason to renumber the queue to make room at
+     * the front.
+     */
+    private fun positionsBetween(rows: List<QueueItem>, insertAt: Int, count: Int): List<Long>? {
+        val before = rows.getOrNull(insertAt - 1)?.position
+        val after = rows.getOrNull(insertAt)?.position
+        return when {
+            before == null && after == null -> List(count) { FIRST_POSITION + it * POSITION_STEP }
+            before == null -> {
+                val start = after!! - POSITION_STEP * count
+                List(count) { start + it * POSITION_STEP }
+            }
+            after == null -> List(count) { before + POSITION_STEP * (it + 1) }
+            else -> {
+                val step = (after - before) / (count + 1)
+                if (step <= 0) null else List(count) { before + step * (it + 1) }
+            }
+        }
+    }
+    // <-- AM (QUEUE_SPARSE_POSITIONS)
 
     private suspend fun renumberItems(items: List<QueueItem>) {
         items.forEachIndexed { index, item ->

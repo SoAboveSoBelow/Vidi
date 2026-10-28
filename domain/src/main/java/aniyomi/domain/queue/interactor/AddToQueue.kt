@@ -51,8 +51,45 @@ class AddToQueue(
      *
      * Returns the new block's id.
      */
-    suspend fun await(anime: Anime): Long {
-        val episodes = orderFor(anime)
+    suspend fun await(anime: Anime): Long = await(resolve(anime))
+
+    // AM (QUEUE_RESOLVE_ONCE) -->
+    /**
+     * An entry's episodes in queue order, resolved once.
+     *
+     * Every queue add needs this list, and so does the question of whether the
+     * entry has a mixed watch state - which is asked first, from the UI, to
+     * decide whether to prompt. Resolving it is a full [GetEpisodeOrder] pass
+     * (a merged entry's union across its children, seasons, custom order), so
+     * asking and then adding used to pay for it two or three times per entry;
+     * a multi-select paid that per entry before anything was queued.
+     *
+     * Passing the resolved list around instead means one pass per add. It also
+     * makes the prompt and the add agree by construction: with two passes, an
+     * episode arriving between them could leave the user answering a question
+     * about a list that is not the one queued.
+     */
+    data class QueueSource(
+        val anime: Anime,
+        val episodes: List<Episode>,
+    ) {
+        /**
+         * Whether this needs an "unwatched or all" answer. An entry that is
+         * entirely watched, or entirely unwatched, has nothing to choose
+         * between and is never prompted for.
+         */
+        val hasMixedWatchState: Boolean
+            get() = episodes.any { it.seen } && episodes.any { !it.seen }
+    }
+
+    suspend fun resolve(anime: Anime): QueueSource = QueueSource(anime, orderFor(anime))
+
+    suspend fun resolve(animeList: List<Anime>): List<QueueSource> = animeList.map { resolve(it) }
+
+    /** Queues a pre-resolved source - see [QueueSource]. */
+    suspend fun await(source: QueueSource): Long {
+        val anime = source.anime
+        val episodes = source.episodes
         // Queueing something already queued moves it to the end rather than
         // leaving it in two places - see removeItemsByEpisodeIds.
         queueRepository.removeItemsByEpisodeIds(episodes.map { it.id })
@@ -78,13 +115,32 @@ class AddToQueue(
         return animeList.map { await(it) }
     }
 
-    // AM (QUEUE_WATCH_FILTER) -->
-    /** Whether queueing [anime] needs an "unwatched or all" answer from the user. */
-    suspend fun hasMixedWatchState(anime: Anime): Boolean {
-        val episodes = orderFor(anime)
-        return episodes.any { it.seen } && episodes.any { !it.seen }
+    // AM (QUEUE_RESOLVE_ONCE) -->
+    /**
+     * Queues pre-resolved sources, in the order given.
+     *
+     * [unwatchedOnly] is the one answer the user gave for the whole selection
+     * and applies only where it means something: a source with a mixed watch
+     * state. One that is entirely watched is queued whole rather than filtered
+     * down to nothing, and one that is entirely unwatched is unaffected
+     * either way.
+     */
+    suspend fun await(
+        sources: List<QueueSource>,
+        unwatchedOnly: Boolean = false,
+        currentEpisodeId: Long? = null,
+    ) {
+        sources.forEach { source ->
+            if (unwatchedOnly && source.hasMixedWatchState) {
+                await(source, unwatchedOnly = true, currentEpisodeId = currentEpisodeId)
+            } else {
+                await(source, unwatchedOnly = false, currentEpisodeId = currentEpisodeId)
+            }
+        }
     }
+    // <-- AM (QUEUE_RESOLVE_ONCE)
 
+    // AM (QUEUE_WATCH_FILTER) -->
     /**
      * Queues [anime] as one source block, optionally keeping only unwatched episodes.
      *
@@ -92,8 +148,16 @@ class AddToQueue(
      * block path; "unwatched" is only a choice the UI offers once a mixed list is
      * actually available, so this cannot accidentally create an empty block.
      */
-    suspend fun await(anime: Anime, unwatchedOnly: Boolean, currentEpisodeId: Long? = null): Long? {
-        val ordered = orderFor(anime)
+    suspend fun await(anime: Anime, unwatchedOnly: Boolean, currentEpisodeId: Long? = null): Long? =
+        await(resolve(anime), unwatchedOnly, currentEpisodeId)
+
+    suspend fun await(
+        source: QueueSource,
+        unwatchedOnly: Boolean,
+        currentEpisodeId: Long? = null,
+    ): Long? {
+        val anime = source.anime
+        val ordered = source.episodes
         // A merged entry is one queue source even if some of its rows were
         // added through a child. Match the resolved episode set rather than
         // whichever entry id each row happened to record.
@@ -104,7 +168,10 @@ class AddToQueue(
         if (!unwatchedOnly) {
             val queuedEpisodeIds = queuedItems.mapNotNull { it.episodeId }.toSet()
             val trimmedSourceIsQueued = ordered.any { it.seen && it.id !in queuedEpisodeIds }
-            if (!trimmedSourceIsQueued) return await(anime)
+            // AM (QUEUE_RESOLVE_ONCE): the resolved source, not the entry - the
+            // list is already in hand and re-resolving it here was the third
+            // pass over the same entry.
+            if (!trimmedSourceIsQueued) return await(source)
 
             // Inverse of the unwatched cleanup: a trimmed source gets its
             // watched episodes back. Keep the active episode in its existing
@@ -231,31 +298,29 @@ class AddToQueue(
         val newBlockId = awaitEpisodeIds(anime, episodeIds) ?: return null
         if (afterBlockId == newBlockId) return newBlockId
 
-        val order = queueRepository.getBlocks().map { it.id }
-        val without = order.filterNot { it == newBlockId }
-        if (without.isEmpty()) return newBlockId
-
-        // No anchor, or an anchor the add above pruned, both land at the
-        // front: indexOf gives -1 for the missing one, so +1 is 0, which is
-        // exactly where a first play belongs.
-        val insertAt = afterBlockId?.let { without.indexOf(it) + 1 } ?: 0
-        queueRepository.setBlockOrder(without.take(insertAt) + newBlockId + without.drop(insertAt))
+        // AM (QUEUE_REORDER) -->
+        // Moved as ITEMS, not by reordering blocks. setBlockOrder gathers every
+        // source's runs into contiguous coarse slots, which is right for a
+        // source drag and wrong here: opening something is not a request to
+        // rearrange the rest of the queue, and going through it undid any
+        // cross-source interleaving the user had dragged into place - on every
+        // open, silently.
+        //
+        // The anchor is the playing ITEM rather than the end of its block, so
+        // the new run lands directly after what is playing even when that
+        // block's own run continues further down.
+        val items = queueRepository.getItems()
+        val moving = items.filter { it.blockId == newBlockId }.map { it.id }
+        if (moving.isEmpty()) return newBlockId
+        val anchorItemId = afterEpisodeId?.let { id ->
+            items.firstOrNull { it.episodeId == id && it.blockId != newBlockId }?.id
+        }
+        // A null anchor is a fresh session: the front of the queue, which is
+        // where a first play belongs, and which moveItems reads a null anchor
+        // as.
+        queueRepository.moveItems(moving, anchorItemId)
+        // <-- AM (QUEUE_REORDER)
         return newBlockId
-    }
-
-    /**
-     * Rewrites an existing block's contents, keeping its place in the queue.
-     *
-     * The counterpart to [awaitEpisodeIds] for a refresh rather than an add:
-     * the playlist being rebuilt under a playing episode must not move the
-     * block it belongs to. Queue writes all live here rather than half here
-     * and half in callers.
-     */
-    suspend fun refreshBlock(blockId: Long, anime: Anime, episodeIds: List<Long>) {
-        queueRepository.replaceBlockItems(
-            blockId = blockId,
-            items = episodeIds.map { QueueItem.New.library(animeId = anime.id, episodeId = it) },
-        )
     }
 
     /** Queues a video opened from outside the app. */

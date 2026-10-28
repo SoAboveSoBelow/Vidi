@@ -1114,7 +1114,7 @@ fun PlayerScreen(
 
                 // AM (PLAYER_ADD_TO_LIBRARY) -->
                 // Shared exit for the add-to-library dialogs' off-player
-                // actions - same steps as onOpenPlaylistEntry below.
+                // actions - same steps as onOpenSource below.
                 val leavePlayerForEntry: (Long) -> Unit = { animeId ->
                     onEnterDummyPip?.let { enterDummyPip ->
                         viewModel.setDialog(Dialogs.None)
@@ -1173,6 +1173,11 @@ fun PlayerScreen(
                         episode.id?.let { stateData.playlistQueuedEntryByEpisodeId[it] }?.title
                             ?: stateData.currentAnime?.title
                     },
+                    // AM (QUEUE_SOURCE_TOTALS)
+                    sourceIdOf = { episode ->
+                        episode.id?.let { stateData.playlistQueuedEntryByEpisodeId[it]?.id }
+                            ?: stateData.currentAnime?.id
+                    },
                     blockSeasons = stateData.playlistBlockSeasons,
                     blockLastPlayed = stateData.playlistBlockLastPlayed,
                     // AM (PLAYLIST_SWIPE_ACTIONS) -->
@@ -1180,6 +1185,12 @@ fun PlayerScreen(
                     swipeEndAction = swipeEndAction,
                     downloadStates = stateData.playlistDownloadStates,
                     onSeenClicked = viewModel::setEpisodesSeen,
+                    // AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+                    playbackSeen = stateData.playlistPlaybackSeen,
+                    // AM (PLAYLIST_ADD_TO_LIBRARY): the dialog it raises is one
+                    // of the player's own, so unlike opening an entry this
+                    // needs no way out of the player and is always offered.
+                    onChangeCategories = viewModel::changePlaylistSelectionCategories,
                     onDownloadClicked = viewModel::toggleEpisodeDownload,
                     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                     onExpandSource = viewModel::loadBlockSeasons,
@@ -1192,50 +1203,52 @@ fun PlayerScreen(
                     playlistAnimeId = stateData.currentAnime?.id,
                     // <-- AM (PLAYLIST_SEARCH_SCOPE)
                     // AM (PLAYER_EPISODE_LIST_SELECTION) -->
-                    // Only offered where the player can actually get out of
-                    // the way. onEnterDummyPip is null for PlayerActivity and
-                    // the spike screens, and opening an entry behind a
-                    // fullscreen player would look like nothing happened.
-                    // AM (OPEN_ENTRY_MERGED_ONLY) -->
-                    // Also only on a merged entry. playlistOwnerByAnimeId is
-                    // empty for an ordinary one, where every episode already
-                    // belongs to the entry being viewed, so the button would
-                    // open the screen the list was opened from.
-                    onOpenEntryClicked = onEnterDummyPip
-                        ?.takeIf { stateData.playlistOwnerByAnimeId.isNotEmpty() }
-                        ?.let { enterDummyPip ->
-                            { episodeId: Long? ->
-                                val ownerId = stateData.currentPlaylist
-                                    .find { it.id == episodeId }
-                                    ?.anime_id
-                                if (ownerId != null) {
-                                    viewModel.setDialog(Dialogs.None)
-                                    enterDummyPip()
-                                    OpenEntryRequests.open(ownerId)
-                                }
-                            }
-                        },
-                    // <-- AM (OPEN_ENTRY_MERGED_ONLY)
-                    onOpenPlaylistEntry = onEnterDummyPip?.let { enterDummyPip ->
-                        {
-                            // The playlist's own entry, so on a merged entry
-                            // this is the parent rather than the child the
-                            // current episode belongs to.
-                            stateData.currentAnime?.id?.let { animeId ->
+                    // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+                    // Both only where the player can actually get out of the
+                    // way: onEnterDummyPip is null for PlayerActivity and the
+                    // spike screens, and opening an entry behind a fullscreen
+                    // player would look like nothing happened.
+                    //
+                    // A source or season row stands for the entry its block
+                    // was queued AS - the merge parent on a merged entry - so
+                    // it opens that.
+                    //
+                    // AM (PLAYLIST_ROW_ENTRY_RESOLUTION): off the view model's
+                    // own resolution, which the selection bar's library action
+                    // shares - the maps were being read here as well, and two
+                    // readings of what a merge row means is one too many.
+                    onOpenSource = onEnterDummyPip?.let { enterDummyPip ->
+                        { blockId: Long ->
+                            val animeId = viewModel.playlistEntryOfBlock(blockId)?.id
+                            if (animeId != null) {
                                 viewModel.setDialog(Dialogs.None)
                                 enterDummyPip()
                                 OpenEntryRequests.open(animeId)
                             }
-                            Unit
                         }
                     },
+                    // An episode opens the entry it came from, which on a
+                    // merged entry is the child that owns it. Falls back to the
+                    // session's entry, which is the same thing on an ordinary
+                    // one.
+                    // AM (PLAYLIST_ROW_ENTRY_RESOLUTION)
+                    onOpenEpisodeEntry = onEnterDummyPip?.let { enterDummyPip ->
+                        { episodeId: Long ->
+                            val animeId = viewModel.playlistEntryIdOfEpisode(episodeId)
+                            if (animeId != null) {
+                                viewModel.setDialog(Dialogs.None)
+                                enterDummyPip()
+                                OpenEntryRequests.open(animeId)
+                            }
+                        }
+                    },
+                    // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
                     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
                     // AM (PLAYER_ADD_TO_LIBRARY) -->
-                    isFavorited = stateData.currentAnime?.favorite == true,
-                    onAddToLibrary = { viewModel.toggleCurrentAnimeFavorite() },
-                    onAddToLibraryAnyway = {
+                    // AM (PLAYLIST_ADD_TO_LIBRARY)
+                    onAddToLibraryAnyway = { anime ->
                         viewModel.setDialog(Dialogs.None)
-                        viewModel.toggleCurrentAnimeFavorite(checkDuplicate = false)
+                        viewModel.toggleAnimeFavorite(anime, checkDuplicate = false)
                     },
                     // The three actions that cannot be finished over a player.
                     // Migration needs MigrateAnimeDialog, which is an extension
@@ -1253,9 +1266,10 @@ fun PlayerScreen(
                     onEditCategories = {
                         stateData.currentAnime?.id?.let { leavePlayerForEntry(it) }
                     },
-                    onConfirmCategories = { anime, categoryIds ->
+                    // AM (PLAYLIST_ADD_TO_LIBRARY)
+                    onConfirmCategories = { animeList, include, exclude ->
                         viewModel.setDialog(Dialogs.None)
-                        viewModel.applyFavoriteCategories(anime, categoryIds)
+                        viewModel.applyCategorySelection(animeList, include, exclude)
                     },
                     onDeleteDownloads = viewModel::deleteDownloadsOf,
                     // <-- AM (PLAYER_ADD_TO_LIBRARY)

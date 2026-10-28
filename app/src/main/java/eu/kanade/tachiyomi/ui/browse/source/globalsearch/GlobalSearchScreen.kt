@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.ui.browse.source.globalsearch
 
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -19,7 +20,6 @@ import eu.kanade.tachiyomi.data.queue.QueueFillJob
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceScreen
 import eu.kanade.tachiyomi.util.system.toast
-import tachiyomi.domain.anime.model.Anime
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.screens.LoadingScreen
 
@@ -38,7 +38,8 @@ class GlobalSearchScreen(
         val navigator = LocalNavigator.currentOrThrow
         // AM (DOUBLE_TAP_QUEUE)
         val context = LocalContext.current
-        var queuePrompt by remember { mutableStateOf<Anime?>(null) }
+        // AM (QUEUE_RESOLVE_ONCE)
+        var queuePrompt by remember { mutableStateOf<QueueSource?>(null) }
 
         val viewModel =
             assistedMetroViewModel<GlobalSearchViewModel, GlobalSearchViewModel.Factory> {
@@ -96,13 +97,15 @@ class GlobalSearchScreen(
         }
 
         // AM (QUEUE_WATCH_FILTER) -->
-        queuePrompt?.let { anime ->
+        queuePrompt?.let { source ->
             AddToQueueDialog(
-                anime = anime,
+                // AM (QUEUE_RESOLVE_ONCE)
+                mixedCount = 1,
+                mixedTitle = source.anime.title,
                 onAddUnwatched = {
                     queuePrompt = null
                     viewModel.addAnimeToQueue(
-                        anime = anime,
+                        anime = source.anime,
                         unwatchedOnly = true,
                         onRequestFill = {
                             QueueFillJob.start(context)
@@ -113,7 +116,7 @@ class GlobalSearchScreen(
                 onAddAll = {
                     queuePrompt = null
                     viewModel.addAnimeToQueue(
-                        anime = anime,
+                        anime = source.anime,
                         unwatchedOnly = false,
                         onRequestFill = {
                             QueueFillJob.start(context)

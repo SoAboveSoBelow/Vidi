@@ -2646,11 +2646,28 @@ fun DummyPipContainer(
                                         } else {
                                             PipHitRegion.None
                                         }
+                                        // AM (QUEUE_SOURCE_STEP_CONSUMES_TAP) -->
+                                        // The REGION decides whether the window
+                                        // resizes, not whether a source step
+                                        // happens to be available: a double tap
+                                        // on prev/next is aimed at that button,
+                                        // and with no adjacent source to step to
+                                        // it used to fall through and resize the
+                                        // window instead - "the next button
+                                        // resizes the video". So the button
+                                        // always consumes the gesture, and with
+                                        // no source either side of this one it
+                                        // degrades to the button's own single-tap
+                                        // action rather than doing something
+                                        // unrelated or nothing at all.
                                         val sourceStep = when (sourceStepRegion) {
                                             PipHitRegion.Previous -> currentActions.value.onSkipPreviousSource
+                                                ?: currentActions.value.onSkipPrevious
                                             PipHitRegion.Next -> currentActions.value.onSkipNextSource
+                                                ?: currentActions.value.onSkipNext
                                             else -> null
                                         }
+                                        // <-- AM (QUEUE_SOURCE_STEP_CONSUMES_TAP)
                                         if (sourceStep != null) {
                                             flashRegion = sourceStepRegion
                                             flashTick++

@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+// AM (PLAYLIST_ROW_STEADY_HEIGHT)
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
@@ -15,9 +17,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.outlined.CollectionsBookmark
+// AM (LIBRARY_HEART_ICON)
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.DragHandle
-import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -56,6 +58,15 @@ import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.nowPlayingBackground
 import tachiyomi.presentation.core.util.selectedBackground
 
+// AM (PLAYLIST_ROW_STEADY_HEIGHT)
+/**
+ * The drag handle's touch height. Deliberately below the height of the row's
+ * own two lines of text, so the handle can never be what decides how tall a
+ * row is.
+ */
+private val DRAG_HANDLE_HEIGHT = 32.dp
+
+
 @Composable
 fun EpisodeListItem(
     episode: Episode,
@@ -71,11 +82,18 @@ fun EpisodeListItem(
     // All four default to the row's previous behaviour, so the cast playlist
     // sheet - the other caller of this component - is untouched.
     //
-    // A non-null onOpenEntryClicked swaps the two mark buttons for an open-
-    // entry button: the marks move into the list's selection bar, where they
-    // act on a selection rather than on one row. Passing null keeps the marks
-    // in the row.
-    onOpenEntryClicked: ((Long?) -> Unit)? = null,
+    // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+    /**
+     * Opens the entry this episode came from - the merge child on a merged
+     * entry. Replaces the open-entry eye this row used to carry: the eye cost
+     * a permanent slot on every row to offer something only a merged entry
+     * could use, and a double tap costs none.
+     *
+     * Nullable rather than a no-op: a non-null handler delays every single tap
+     * by the double-tap timeout, and the single tap here plays the episode.
+     */
+    onDoubleClick: (() -> Unit)? = null,
+    // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
     // AM (OPEN_ENTRY_MERGED_ONLY) -->
     /**
      * Whether the bookmark/fillermark buttons belong in the row. False for the
@@ -207,11 +225,21 @@ fun EpisodeListItem(
             .combinedClickable(
                 onClick = { onEpisodeClicked(episode.id) },
                 onLongClick = onLongClick,
+                // AM (OPEN_ENTRY_ON_DOUBLE_TAP)
+                onDoubleClick = onDoubleClick,
             )
             // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
             // AM (QUEUE_GROUPED_PLAYLIST)
             .playlistNesting(nestingDepth)
-            .padding(vertical = MaterialTheme.padding.extraSmall),
+            // AM (PLAYLIST_ROW_STEADY_HEIGHT): a touch more than the rows used
+            // to carry. The drag handle selection brings in needs somewhere to
+            // sit, and a row that grows to make room for it makes the whole
+            // list jump and shifts every row out from under the finger that
+            // just long-pressed it. So the room is there from the start, and
+            // the handle below is sized to fit inside it - half the height the
+            // handle used to add, which is enough to hold it without stretching
+            // the list out to where fewer rows fit on screen.
+            .padding(vertical = MaterialTheme.padding.small),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // AM (PLAYER_EPISODE_LIST_SELECTION) -->
@@ -221,31 +249,31 @@ fun EpisodeListItem(
         // download indicator rather than swapping it out - a row that changes
         // shape on selection makes the list jump.
         if (reorderHandleModifier != null) {
-            Icon(
-                imageVector = Icons.Outlined.DragHandle,
-                contentDescription = stringResource(AMMR.strings.am_episode_drag_handle),
+            // AM (PLAYLIST_ROW_STEADY_HEIGHT): a box narrower than it is tall
+            // rather than a 48dp square. The square was taller than the row's
+            // own content, so selecting grew every row; this is shorter than
+            // the content and so changes nothing about the row's height, while
+            // keeping the full width to aim at - and a drag is a deliberate
+            // press and slide, which does not need a 48dp target in the one
+            // direction the row cannot spare.
+            Box(
                 modifier = reorderHandleModifier
-                    .size(48.dp)
-                    .padding(12.dp),
-            )
-        } else if (onOpenEntryClicked != null) {
-            IconButton(
-                onClick = { onOpenEntryClicked(episode.id) },
-                enabled = !selectionMode,
+                    .width(48.dp)
+                    .height(DRAG_HANDLE_HEIGHT),
+                contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = Icons.Outlined.Visibility,
-                    contentDescription = stringResource(AMMR.strings.am_action_open_entry),
+                    imageVector = Icons.Outlined.DragHandle,
+                    contentDescription = stringResource(AMMR.strings.am_episode_drag_handle),
+                    modifier = Modifier.size(24.dp),
                 )
             }
-            // AM (OPEN_ENTRY_MERGED_ONLY) -->
-            // Nothing in the leading slot. The open-entry button is only offered
-            // where an episode can belong to a source other than the one being
-            // viewed - a merged entry - so on an ordinary entry the slot is
-            // simply empty rather than falling back to the row marks: those live
-            // in this list's selection bar, and putting them back here would
-            // duplicate them and make the two lists read differently.
-            // <-- AM (OPEN_ENTRY_MERGED_ONLY)
+            // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+            // Where the eye used to sit. The player's list leaves this slot
+            // empty rather than falling back to the row marks: those live in
+            // its selection bar, and putting them back here would duplicate
+            // them and make the two lists read differently.
+            // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
         } else if (marksInRow) {
             IconButton(onClick = { onBookmarkClicked(episode.id, !isBookmarked) }) {
                 Icon(
@@ -354,11 +382,14 @@ fun EpisodeListItem(
                 }
                 // <-- AM (PLAYER_MARK_BADGES)
                 // AM (PLAYLIST_LIBRARY_BADGE) -->
-                // The same icon Browse marks a library result with, so "this is
-                // in your library" looks the same wherever it is said.
+                // The same heart Browse marks a library result with, so "this
+                // is in your library" looks the same wherever it is said - and
+                // is not read as another mark on the episode, which the two
+                // badges beside it are.
                 if (isFromLibraryEntry) {
                     MarkBadge(
-                        imageVector = Icons.Outlined.CollectionsBookmark,
+                        // AM (LIBRARY_HEART_ICON)
+                        imageVector = Icons.Filled.Favorite,
                         contentDescription = stringResource(MR.strings.in_library),
                         container = MaterialTheme.colorScheme.secondaryContainer,
                         content = MaterialTheme.colorScheme.onSecondaryContainer,

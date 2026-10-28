@@ -10,7 +10,8 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Label
+// AM (LIBRARY_HEART_ICON)
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -65,8 +66,19 @@ fun BrowseSourceSelectionBottomBar(
     val actions = listOf(
         BottomActionItem(
             key = "move_category",
-            title = stringResource(MR.strings.action_move_category),
-            icon = Icons.AutoMirrored.Outlined.Label,
+            // AM (LIBRARY_HEART_ICON): "Set categories" describes the dialog
+            // rather than the action - which is library membership, removal
+            // included, and is the whole of what this button does here. So it
+            // is labelled for the library, like the heart beside it.
+            title = stringResource(MR.strings.label_library),
+            // AM (LIBRARY_HEART_ICON): this button is library membership, not
+            // tagging - the category dialog it opens is what adds and removes
+            // the entry (see BrowseSourceViewModel.openChangeCategoryDialog). A
+            // label icon said tagging, and said it in the same glyph fillermark
+            // uses, so the one action in browse that puts an entry in the
+            // library looked like neither. The heart is what that means
+            // everywhere else, including the entry screen's own button.
+            icon = Icons.Outlined.FavoriteBorder,
             onClick = onChangeCategoryClicked,
             placement = BottomActionPlacement.Auto,
         ),

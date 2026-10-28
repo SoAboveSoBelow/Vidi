@@ -152,7 +152,6 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
     // AM (PLAYBACK_QUEUE) -->
     @Composable
     private fun getQueueGroup(playerPreferences: PlayerPreferences): Preference.PreferenceGroup {
-        val autoTrim by playerPreferences.queueAutoTrim.collectAsState()
         return Preference.PreferenceGroup(
             title = stringResource(AMMR.strings.am_pref_category_queue),
             preferenceItems = listOf(
@@ -174,17 +173,15 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 // which is a quantity a user can reason about directly, unlike
                 // the old cap on queue length - and it caps nothing, so there
                 // is no trade to steer them away from.
-                Preference.PreferenceItem.SliderPreference(
-                    value = autoTrim,
-                    valueRange = 0..10,
-                    title = stringResource(AMMR.strings.am_pref_queue_auto_trim),
-                    subtitle = stringResource(AMMR.strings.am_pref_queue_auto_trim_summary),
-                    valueString = if (autoTrim == 0) {
-                        stringResource(AMMR.strings.am_pref_queue_auto_trim_off)
-                    } else {
-                        autoTrim.toString()
-                    },
-                    onValueChanged = { playerPreferences.queueAutoTrim.set(it) },
+                //
+                // AM (NUMBER_PREFERENCE): typed, not dragged. The slider's
+                // range had to stay small to stay aimable, which made the
+                // ceiling the control's limit rather than the feature's.
+                Preference.PreferenceItem.NumberPreference(
+                    preference = playerPreferences.queueAutoTrim,
+                    range = 0..99,
+                    title = stringResource(AMMR.strings.am_pref_queue_tail_length),
+                    subtitle = stringResource(AMMR.strings.am_pref_queue_tail_length_summary),
                 ),
             ),
         )

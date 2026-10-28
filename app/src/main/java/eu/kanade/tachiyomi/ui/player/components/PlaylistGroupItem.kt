@@ -53,6 +53,15 @@ fun PlaylistGroupItem(
     expanded: Boolean,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
+    // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+    /**
+     * Opens the entry this row stands for. Null while selecting or reordering,
+     * and deliberately nullable rather than a no-op: a non-null handler makes
+     * every single tap wait out the double-tap timeout before it can play,
+     * and playing is what this row is mostly for.
+     */
+    onDoubleClick: (() -> Unit)? = null,
+    // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
     onToggle: (() -> Unit)?,
     // AM (QUEUE_REORDER)
     reorderHandleModifier: Modifier? = null,
@@ -67,6 +76,8 @@ fun PlaylistGroupItem(
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
+                // AM (OPEN_ENTRY_ON_DOUBLE_TAP)
+                onDoubleClick = onDoubleClick,
             )
             // Depth is drawn as a rule down the left rather than as indent -
             // see playlistNesting.

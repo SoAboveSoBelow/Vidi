@@ -202,11 +202,14 @@ class AnimeScreen(
                 // AM (QUEUE_WATCH_FILTER) -->
                 is AnimeViewModel.Dialog.AddToQueue -> {
                     AddToQueueDialog(
-                        anime = dialog.anime,
+                        // AM (QUEUE_RESOLVE_ONCE): one entry here, so the title
+                        // is what the question is about.
+                        mixedCount = 1,
+                        mixedTitle = dialog.source.anime.title,
                         onAddUnwatched = {
                             onDismissRequest()
                             viewModel.addAnimeToQueue(
-                                anime = dialog.anime,
+                                anime = dialog.source.anime,
                                 unwatchedOnly = true,
                                 onRequestFill = { QueueFillJob.start(context) },
                             )
@@ -215,7 +218,7 @@ class AnimeScreen(
                         onAddAll = {
                             onDismissRequest()
                             viewModel.addAnimeToQueue(
-                                anime = dialog.anime,
+                                anime = dialog.source.anime,
                                 unwatchedOnly = false,
                                 onRequestFill = { QueueFillJob.start(context) },
                             )

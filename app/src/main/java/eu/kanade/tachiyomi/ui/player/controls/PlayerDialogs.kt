@@ -46,6 +46,8 @@ fun PlayerDialogs(
     // AM (QUEUE_GROUPED_PLAYLIST) -->
     blockOf: (Episode) -> Long?,
     sourceTitleOf: (Episode) -> String?,
+    // AM (QUEUE_SOURCE_TOTALS)
+    sourceIdOf: (Episode) -> Long?,
     blockSeasons: Map<Long, PlaylistSeasons>,
     blockLastPlayed: Map<Long, Long>,
     // AM (PLAYLIST_SWIPE_ACTIONS) -->
@@ -53,6 +55,10 @@ fun PlayerDialogs(
     swipeEndAction: LibraryPreferences.EpisodeSwipeAction,
     downloadStates: Map<Long, Download.State>,
     onSeenClicked: (List<Episode>, Boolean) -> Unit,
+    // AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+    playbackSeen: Set<Long>,
+    // AM (PLAYLIST_ADD_TO_LIBRARY)
+    onChangeCategories: ((blockIds: List<Long>, episodeIds: List<Long>) -> Unit)?,
     onDownloadClicked: (Episode) -> Unit,
     // <-- AM (PLAYLIST_SWIPE_ACTIONS)
     onExpandSource: (Long) -> Unit,
@@ -65,17 +71,24 @@ fun PlayerDialogs(
     playlistAnimeId: Long?,
     // <-- AM (PLAYLIST_SEARCH_SCOPE)
     // AM (PLAYER_EPISODE_LIST_SELECTION) -->
-    onOpenEntryClicked: ((Long?) -> Unit)?,
-    onOpenPlaylistEntry: (() -> Unit)?,
+    // AM (OPEN_ENTRY_ON_DOUBLE_TAP)
+    onOpenSource: ((Long) -> Unit)?,
+    onOpenEpisodeEntry: ((Long) -> Unit)?,
     // AM (PLAYER_ADD_TO_LIBRARY) -->
-    isFavorited: Boolean,
-    onAddToLibrary: () -> Unit,
+    // AM (OPEN_ENTRY_ON_DOUBLE_TAP): isFavorited/onAddToLibrary are gone with
+    // the playlist header's heart. The dialogs below are still here because
+    // the add-to-library flow itself is unchanged; nothing in the player opens
+    // them now.
     /** The duplicate dialog's "add anyway" - the same call with the check off. */
-    onAddToLibraryAnyway: () -> Unit,
+    // AM (PLAYLIST_ADD_TO_LIBRARY): the entry the prompt is about, which is
+    // not always the one playing once a selection can raise it.
+    onAddToLibraryAnyway: (Anime) -> Unit,
     onOpenAnime: (Anime) -> Unit,
     onMigrate: (Anime) -> Unit,
     onEditCategories: () -> Unit,
-    onConfirmCategories: (Anime, List<Long>) -> Unit,
+    // AM (PLAYLIST_ADD_TO_LIBRARY): exclude is no longer dropped - with more
+    // than one entry it is what makes a mixed category clearable.
+    onConfirmCategories: (List<Anime>, List<Long>, List<Long>) -> Unit,
     onDeleteDownloads: (Anime) -> Unit,
     // <-- AM (PLAYER_ADD_TO_LIBRARY)
     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
@@ -126,6 +139,8 @@ fun PlayerDialogs(
                 // AM (QUEUE_GROUPED_PLAYLIST) -->
                 blockOf = blockOf,
                 sourceTitleOf = sourceTitleOf,
+                // AM (QUEUE_SOURCE_TOTALS)
+                sourceIdOf = sourceIdOf,
                 blockSeasons = blockSeasons,
                 blockLastPlayed = blockLastPlayed,
                 // AM (PLAYLIST_SWIPE_ACTIONS) -->
@@ -133,6 +148,10 @@ fun PlayerDialogs(
                 swipeEndAction = swipeEndAction,
                 downloadStates = downloadStates,
                 onSeenClicked = onSeenClicked,
+                // AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+                playbackSeen = playbackSeen,
+                // AM (PLAYLIST_ADD_TO_LIBRARY)
+                onChangeCategories = onChangeCategories,
                 onDownloadClicked = onDownloadClicked,
                 // <-- AM (PLAYLIST_SWIPE_ACTIONS)
                 onExpandSource = onExpandSource,
@@ -145,11 +164,10 @@ fun PlayerDialogs(
                 playlistAnimeId = playlistAnimeId,
                 // <-- AM (PLAYLIST_SEARCH_SCOPE)
                 // AM (PLAYER_EPISODE_LIST_SELECTION) -->
-                onOpenEntryClicked = onOpenEntryClicked,
-                onOpenPlaylistEntry = onOpenPlaylistEntry,
+                // AM (OPEN_ENTRY_ON_DOUBLE_TAP)
+                onOpenSource = onOpenSource,
+                onOpenEpisodeEntry = onOpenEpisodeEntry,
                 // AM (PLAYER_ADD_TO_LIBRARY)
-                isFavorited = isFavorited,
-                onAddToLibrary = onAddToLibrary,
                 // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
                 // AM (LOCAL_SOURCE_DOWNLOAD) -->
                 onDownloadEpisodes = onDownloadEpisodes,
@@ -164,7 +182,8 @@ fun PlayerDialogs(
             DuplicateAnimeDialog(
                 duplicates = dialogShown.duplicates,
                 onDismissRequest = onDismissRequest,
-                onConfirm = onAddToLibraryAnyway,
+                // AM (PLAYLIST_ADD_TO_LIBRARY)
+                onConfirm = { onAddToLibraryAnyway(dialogShown.anime) },
                 onOpenAnime = onOpenAnime,
                 onMigrate = onMigrate,
             )
@@ -174,7 +193,10 @@ fun PlayerDialogs(
                 initialSelection = dialogShown.initialSelection,
                 onDismissRequest = onDismissRequest,
                 onEditCategories = onEditCategories,
-                onConfirm = { include, _ -> onConfirmCategories(dialogShown.anime, include) },
+                // AM (PLAYLIST_ADD_TO_LIBRARY)
+                onConfirm = { include, exclude ->
+                    onConfirmCategories(dialogShown.animeList, include, exclude)
+                },
             )
         }
         is Dialogs.DeleteDownloadsAfterRemoval -> {

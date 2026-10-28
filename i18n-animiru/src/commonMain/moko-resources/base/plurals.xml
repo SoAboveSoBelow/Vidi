@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Changed from aniyomi/mihon -->
+    <!-- AM (QUEUE_WATCH_FILTER) -->
+    <plurals name="am_queue_mixed_entries">
+        <item quantity="one">%1$d entry has both watched and unwatched episodes.</item>
+        <item quantity="other">%1$d entries have both watched and unwatched episodes.</item>
+    </plurals>
     <plurals name="missing_episodes">
         <item quantity="one">Missing %1$s episode</item>
         <item quantity="other">Missing %1$s episodes</item>

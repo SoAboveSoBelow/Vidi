@@ -1,0 +1,21 @@
+<!-- AM (PLAYLIST_MARK_TRISTATE) -->
+<!--
+  Material's bookmark_add / bookmark_remove (outlined) with "=" in the badge
+  corner those two put "+" and "-" in, so the bookmark states read as one
+  family the way the fillermark ones do.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#000"
+        android:pathData="M17,11v6.97l-5,-2.14l-5,2.14V5h6V3H7C5.9,3,5,3.9,5,5v16l7,-3l7,3V11H17z" />
+    <path
+        android:fillColor="#000"
+        android:pathData="M21,3h-6v2h6V3z" />
+    <path
+        android:fillColor="#000"
+        android:pathData="M21,7h-6v2h6V7z" />
+</vector>

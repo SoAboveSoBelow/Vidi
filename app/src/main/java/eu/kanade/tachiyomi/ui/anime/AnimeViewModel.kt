@@ -29,6 +29,7 @@ import aniyomi.domain.anime.model.SeasonDisplayMode
 // AM (MERGED_SOURCES) -->
 import aniyomi.domain.episode.repository.EpisodeNameRepository
 import aniyomi.domain.queue.interactor.AddToQueue
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import aniyomi.domain.merge.interactor.GetRemovedMergeEpisodes
 import aniyomi.domain.merge.interactor.RemoveEpisodeFromMerge
 import aniyomi.domain.merge.interactor.RemoveFromMerge
@@ -1543,12 +1544,14 @@ class AnimeViewModel(
     ) {
         viewModelScope.launchNonCancellable {
             // AM (QUEUE_WATCH_FILTER) -->
-            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
-                updateSuccessState { it.copy(dialogStack = it.dialogStack + Dialog.AddToQueue(anime)) }
+            // AM (QUEUE_RESOLVE_ONCE)
+            val source = addToQueue.resolve(anime)
+            if (unwatchedOnly == null && source.hasMixedWatchState) {
+                updateSuccessState { it.copy(dialogStack = it.dialogStack + Dialog.AddToQueue(source)) }
                 return@launchNonCancellable
             }
             addToQueue.await(
-                anime = anime,
+                source = source,
                 unwatchedOnly = unwatchedOnly ?: false,
                 currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
             )
@@ -2658,7 +2661,8 @@ class AnimeViewModel(
         ) : Dialog
         data class DeleteEpisodes(val episodes: List<Episode>) : Dialog
         // AM (QUEUE_WATCH_FILTER)
-        data class AddToQueue(val anime: Anime) : Dialog
+        // AM (QUEUE_RESOLVE_ONCE)
+        data class AddToQueue(val source: QueueSource) : Dialog
         data class DuplicateAnime(
             val anime: Anime,
             val duplicates: List<AnimeWithEpisodeCount>,

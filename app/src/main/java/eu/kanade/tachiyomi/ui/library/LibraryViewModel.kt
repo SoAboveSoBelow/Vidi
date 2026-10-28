@@ -18,6 +18,7 @@ import eu.kanade.core.util.fastFilterNot
 import aniyomi.domain.order.interactor.GetEpisodeOrder
 import aniyomi.domain.merge.repository.MergeChildRepository
 import aniyomi.domain.queue.interactor.AddToQueue
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import eu.kanade.domain.anime.interactor.MergeAnimeEntries
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.domain.anime.interactor.UpdateAnime
@@ -803,12 +804,15 @@ class LibraryViewModel(
     ) {
         viewModelScope.launchNonCancellable {
             // AM (QUEUE_WATCH_FILTER) -->
-            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
-                dialog.update { Dialog.AddToQueue(listOf(anime)) }
+            // AM (QUEUE_RESOLVE_ONCE): resolved once and carried, so the
+            // prompt and the add work from the same episode list.
+            val source = addToQueue.resolve(anime)
+            if (unwatchedOnly == null && source.hasMixedWatchState) {
+                dialog.update { Dialog.AddToQueue(listOf(source)) }
                 return@launchNonCancellable
             }
             addToQueue.await(
-                anime = anime,
+                source = source,
                 unwatchedOnly = unwatchedOnly ?: false,
                 currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
             )
@@ -828,31 +832,35 @@ class LibraryViewModel(
         val selection = selectedAnime
         viewModelScope.launchNonCancellable {
             // AM (QUEUE_WATCH_FILTER) -->
-            val needsChoice = mutableListOf<Anime>()
-            selection.forEach { anime ->
-                if (addToQueue.hasMixedWatchState(anime)) {
-                    needsChoice += anime
-                } else {
-                    addToQueue.await(anime)
-                }
+            // One question for the whole selection, asked before anything is
+            // queued. Adding the unambiguous entries first and then prompting
+            // for the rest put them in the queue ahead of entries selected
+            // before them, so the order no longer matched the selection.
+            val sources = addToQueue.resolve(selection)
+            if (sources.any { it.hasMixedWatchState }) {
+                dialog.update { Dialog.AddToQueue(sources) }
+                return@launchNonCancellable
             }
-            if (needsChoice.isNotEmpty()) dialog.update { Dialog.AddToQueue(needsChoice) }
+            addToQueue.await(sources)
             // <-- AM (QUEUE_WATCH_FILTER)
         }
         clearSelection()
     }
 
     // AM (QUEUE_WATCH_FILTER) -->
-    fun addQueueChoice(animeList: List<Anime>, unwatchedOnly: Boolean, onAdded: () -> Unit = {}) {
-        val anime = animeList.firstOrNull() ?: return
+    /** Applies the one answer to the whole selection, in selection order. */
+    fun addQueueChoice(
+        sources: List<QueueSource>,
+        unwatchedOnly: Boolean,
+        onAdded: () -> Unit = {},
+    ) {
         viewModelScope.launchNonCancellable {
             addToQueue.await(
-                anime = anime,
+                sources = sources,
                 unwatchedOnly = unwatchedOnly,
                 currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
             )
-            val remaining = animeList.drop(1)
-            dialog.update { if (remaining.isEmpty()) null else Dialog.AddToQueue(remaining) }
+            dialog.update { null }
             withContext(Dispatchers.Main) { onAdded() }
         }
     }
@@ -1178,7 +1186,9 @@ class LibraryViewModel(
         ) : Dialog
         data class DeleteAnime(val anime: List<Anime>) : Dialog
         // AM (QUEUE_WATCH_FILTER)
-        data class AddToQueue(val animeList: List<Anime>) : Dialog
+        // AM (QUEUE_RESOLVE_ONCE): the resolved sources, so answering does not
+        // resolve them again.
+        data class AddToQueue(val sources: List<QueueSource>) : Dialog
     }
 
     // AM (MERGED_SOURCES) -->

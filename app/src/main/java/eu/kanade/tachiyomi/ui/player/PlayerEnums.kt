@@ -61,8 +61,10 @@ sealed class Dialogs {
         val duplicates: List<AnimeWithEpisodeCount>,
     ) : Dialogs()
 
+    // AM (PLAYLIST_ADD_TO_LIBRARY): a list, because the playlist's selection
+    // bar can raise this about several entries at once. The heart passes one.
     data class ChangeCategory(
-        val anime: Anime,
+        val animeList: List<Anime>,
         val initialSelection: List<CheckboxState<Category>>,
     ) : Dialogs()
 

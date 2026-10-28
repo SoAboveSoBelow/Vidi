@@ -288,11 +288,22 @@ data class BrowseSourceScreen(
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                 },
                 // AM (DOUBLE_TAP_QUEUE) -->
-                // Queues the result outright. Ignored while a selection is
-                // running: the taps there are building a selection, and the
-                // bottom bar's own queue action is what acts on it.
-                onAnimeDoubleClick = { anime ->
-                    if (!state.selectionMode) {
+                // Queues the result outright.
+                //
+                // AM (BROWSE_SELECTION_TAP_LAG_FIX): null while a selection is
+                // running, rather than a handler that checks the mode and does
+                // nothing. combinedClickable cannot know a second tap is not
+                // coming, so ANY non-null handler makes every single tap wait
+                // out the double-tap timeout before it commits - and in
+                // selection mode that tap is a checkbox, which is the gesture
+                // being repeated the most. Dropping the handler drops the wait
+                // with it; the bottom bar's own queue action is what acts on a
+                // selection. The library's grids are wired the same way, which
+                // is why they never had the lag (see LibraryContent).
+                onAnimeDoubleClick = if (state.selectionMode) {
+                    null
+                } else {
+                    { anime ->
                         viewModel.addAnimeToQueue(
                             anime = anime,
                             onRequestFill = {
@@ -323,15 +334,18 @@ data class BrowseSourceScreen(
             }
             // AM (QUEUE_WATCH_FILTER) -->
             is BrowseSourceViewModel.Dialog.AddToQueue -> {
+                // AM (QUEUE_RESOLVE_ONCE)
+                val mixed = dialog.sources.filter { it.hasMixedWatchState }
                 AddToQueueDialog(
-                    anime = dialog.animeList.first(),
+                    mixedCount = mixed.size,
+                    mixedTitle = mixed.singleOrNull()?.anime?.title,
                     onAddUnwatched = {
-                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = true) {
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = true) {
                             QueueFillJob.start(context)
                         }
                     },
                     onAddAll = {
-                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = false) {
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = false) {
                             QueueFillJob.start(context)
                         }
                     },

@@ -83,8 +83,17 @@ interface QueueRepository {
     suspend fun setBlockLastPlayedCompleted(blockId: Long, episodeId: Long)
     // <-- AM (QUEUE_BLOCK_PROGRESS)
 
-    /** Rewrites coarse source order and gathers each source's item runs into it. */
+    // AM (QUEUE_SOURCE_INTERLEAVE) -->
+    /**
+     * Rewrites the coarse source order, leaving play order alone.
+     *
+     * Only a block with no items yet is positioned by this - it has nothing in
+     * [moveItems]' terms to place. Moving a source that HAS items is an item
+     * move, so that it can land inside another source's run rather than only
+     * between whole sources.
+     */
     suspend fun setBlockOrder(orderedBlockIds: List<Long>)
+    // <-- AM (QUEUE_SOURCE_INTERLEAVE)
 
     // AM (QUEUE_REORDER) -->
     /**
@@ -95,6 +104,19 @@ interface QueueRepository {
      * original block even when its episodes are interleaved with another's.
      */
     suspend fun moveItems(itemIds: List<Long>, afterItemId: Long?)
+
+    // AM (QUEUE_REBUILD_READ_ONLY) -->
+    /**
+     * Reorders [orderedItemIds] among the positions those items already
+     * occupy, leaving everything else exactly where it is.
+     *
+     * For a change to how one entry's episodes are ordered - a shuffle seed -
+     * which must not move the entry relative to the rest of the queue, must
+     * not disturb anything interleaved between its runs, and must not change
+     * which of its episodes are queued.
+     */
+    suspend fun reorderItems(orderedItemIds: List<Long>)
+    // <-- AM (QUEUE_REBUILD_READ_ONLY)
     // <-- AM (QUEUE_REORDER)
 
     suspend fun removeItem(itemId: Long)
@@ -107,6 +129,17 @@ interface QueueRepository {
      * duplicate it: the old position goes, the new append becomes its only
      * one. Pending blocks are never pruned - see queue_blocks.deleteEmptyComplete.
      */
+    // AM (QUEUE_TRIM_BY_POSITION) -->
+    /**
+     * Removes particular queued positions, and prunes any block left empty.
+     *
+     * By row identity rather than by episode or block, which is what a trim
+     * needs now that one source's items can sit in several places: removing
+     * the whole block would take runs the user has not reached yet.
+     */
+    suspend fun removeItems(itemIds: List<Long>)
+    // <-- AM (QUEUE_TRIM_BY_POSITION)
+
     suspend fun removeItemsByEpisodeIds(episodeIds: List<Long>)
 
     /** Removes only positions queued as [animeId], leaving other entries' rows alone. */

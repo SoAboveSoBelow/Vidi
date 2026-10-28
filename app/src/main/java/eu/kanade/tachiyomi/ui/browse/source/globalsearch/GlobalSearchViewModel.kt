@@ -10,6 +10,7 @@ import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import androidx.lifecycle.viewModelScope
 import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
 import aniyomi.domain.queue.interactor.AddToQueue
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.extension.ExtensionManager
@@ -77,16 +78,18 @@ class GlobalSearchViewModel(
         anime: Anime,
         onRequestFill: () -> Unit,
         unwatchedOnly: Boolean? = null,
-        onChoiceNeeded: (Anime) -> Unit = {},
+        onChoiceNeeded: (QueueSource) -> Unit = {},
     ) {
         viewModelScope.launchIO {
             // AM (QUEUE_WATCH_FILTER) -->
-            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
-                withContext(Dispatchers.Main) { onChoiceNeeded(anime) }
+            // AM (QUEUE_RESOLVE_ONCE)
+            val source = addToQueue.resolve(anime)
+            if (unwatchedOnly == null && source.hasMixedWatchState) {
+                withContext(Dispatchers.Main) { onChoiceNeeded(source) }
                 return@launchIO
             }
             addToQueue.await(
-                anime = anime,
+                source = source,
                 unwatchedOnly = unwatchedOnly ?: false,
                 currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
             )

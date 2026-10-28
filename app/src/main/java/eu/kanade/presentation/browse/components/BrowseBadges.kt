@@ -2,7 +2,8 @@ package eu.kanade.presentation.browse.components
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.FormatListBulleted
-import androidx.compose.material.icons.outlined.CollectionsBookmark
+// AM (LIBRARY_HEART_ICON)
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.runtime.Composable
 import tachiyomi.presentation.core.components.Badge
 
@@ -10,7 +11,12 @@ import tachiyomi.presentation.core.components.Badge
 internal fun InLibraryBadge(enabled: Boolean) {
     if (enabled) {
         Badge(
-            imageVector = Icons.Outlined.CollectionsBookmark,
+            // AM (LIBRARY_HEART_ICON): the heart the entry screen's own
+            // add-to-library button uses, so library membership is said with one
+            // icon everywhere rather than with a shelf here and a heart there -
+            // and so it is not mistaken for the bookmark and fillermark badges,
+            // which are a different thing about a different object.
+            imageVector = Icons.Filled.Favorite,
         )
     }
 }

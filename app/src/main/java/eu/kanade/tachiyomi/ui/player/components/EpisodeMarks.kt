@@ -55,6 +55,30 @@ class EpisodeMarkState(
         if (added.isNotEmpty()) marks = marks + added
     }
 
+    // AM (PLAYBACK_SEEN_REACHES_PLAYLIST) -->
+    /** Ids already folded in, so applying one is a one-time event. */
+    private var playbackSeen = emptySet<Long>()
+
+    /**
+     * Folds in the episodes playback itself watched to the end - see
+     * PlayerStateData.playlistPlaybackSeen.
+     *
+     * Only ids that are NEW to this state are applied. The set outlives the
+     * marking, so re-applying it on every recomposition would put seen back on
+     * an episode the user had since unmarked by hand, and the seen state would
+     * be unclearable for as long as the session lasted.
+     *
+     * No callback: the threshold crossing is what wrote this to the database in
+     * the first place, so writing it again is the one thing this must not do.
+     */
+    fun syncPlaybackSeen(ids: Set<Long>) {
+        val fresh = ids - playbackSeen
+        if (fresh.isEmpty()) return
+        playbackSeen = ids
+        fresh.forEach { id -> update(id) { it.copy(seen = true) } }
+    }
+    // <-- AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+
     fun marksOf(episode: Episode): EpisodeMarks {
         return marks[episode.id] ?: EpisodeMarks(episode.bookmark, episode.fillermark, episode.seen)
     }
@@ -102,6 +126,8 @@ fun rememberEpisodeMarks(
     onFillermarkClicked: (Long?, Boolean) -> Unit,
     // AM (PLAYLIST_SWIPE_ACTIONS)
     onSeenClicked: (Long?, Boolean) -> Unit = { _, _ -> },
+    // AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+    playbackSeen: Set<Long> = emptySet(),
 ): EpisodeMarkState {
     // Through rememberUpdatedState so the state outliving a recomposition does
     // not pin the first lambdas it was handed.
@@ -120,7 +146,13 @@ fun rememberEpisodeMarks(
     // After composition, not during it: sync writes state, and marksOf falls
     // back to the episode's own values for anything it has not seen yet, so the
     // first frame is already correct.
-    SideEffect { state.sync(episodes) }
+    SideEffect {
+        state.sync(episodes)
+        // AM (PLAYBACK_SEEN_REACHES_PLAYLIST): after sync, so an episode that
+        // finished before this list was built is seeded from its own value and
+        // then confirmed rather than skipped.
+        state.syncPlaybackSeen(playbackSeen)
+    }
     return state
 }
 // <-- AM (PLAYER_MARK_BADGES)

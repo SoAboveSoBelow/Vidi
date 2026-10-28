@@ -300,13 +300,17 @@ data object LibraryTab : Tab {
             }
             // AM (QUEUE_WATCH_FILTER) -->
             is LibraryViewModel.Dialog.AddToQueue -> {
+                // AM (QUEUE_RESOLVE_ONCE): only the mixed ones are what the
+                // question is about; the rest ride along with the answer.
+                val mixed = dialog.sources.filter { it.hasMixedWatchState }
                 AddToQueueDialog(
-                    anime = dialog.animeList.first(),
+                    mixedCount = mixed.size,
+                    mixedTitle = mixed.singleOrNull()?.anime?.title,
                     onAddUnwatched = {
-                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = true)
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = true)
                     },
                     onAddAll = {
-                        viewModel.addQueueChoice(dialog.animeList, unwatchedOnly = false)
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = false)
                     },
                     onDismissRequest = onDismissRequest,
                 )

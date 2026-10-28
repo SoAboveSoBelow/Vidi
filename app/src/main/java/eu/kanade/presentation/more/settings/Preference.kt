@@ -74,6 +74,38 @@ sealed class Preference {
             override val icon: ImageVector? = null
         }
 
+        // AM (NUMBER_PREFERENCE) -->
+        /**
+         * A [PreferenceItem] whose value is a whole number, typed into the row.
+         *
+         * For a quantity whose useful span is wider than a slider can be aimed
+         * inside. A slider trades precision for its range: it is the right
+         * control for picking roughly where in a span to sit, and the wrong one
+         * for entering a number the user already has in mind, where every value
+         * costs a careful drag and the ones near the ends are the hardest to
+         * land on. [subtitle] carries the value through the same "%s"
+         * substitution the other preferences use, so it reads from the list
+         * rather than only from inside the dialog, and [range] is what that
+         * dialog accepts - stated in its error rather than silently clamped,
+         * so a rejected number is something the user can see and correct.
+         *
+         * [range] is a [ClosedRange] rather than a kotlin.ranges.IntRange
+         * because this file imports androidx.annotation.IntRange, which takes
+         * that name - and a bound on what a number may be is what a closed
+         * range says anyway. A caller still writes it as `0..99`.
+         */
+        data class NumberPreference(
+            val preference: PreferenceData<Int>,
+            val range: ClosedRange<Int>,
+            override val title: String,
+            override val subtitle: String? = null,
+            override val enabled: Boolean = true,
+            override val onValueChanged: suspend (value: Int) -> Boolean = { true },
+        ) : PreferenceItem<Int, Boolean>() {
+            override val icon: ImageVector? = null
+        }
+        // <-- AM (NUMBER_PREFERENCE)
+
         /**
          * A [PreferenceItem] that displays a list of entries as a dialog.
          */

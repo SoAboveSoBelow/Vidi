@@ -86,6 +86,13 @@ delete:
 DELETE FROM queue_items
 WHERE _id = :itemId;
 
+-- AM (QUEUE_TRIM_BY_POSITION): removal by row identity rather than by episode
+-- or block, for a trim that takes only the positions behind the playing one -
+-- see TrimQueue.
+deleteByItemIds:
+DELETE FROM queue_items
+WHERE _id IN :itemIds;
+
 deleteByBlockId:
 DELETE FROM queue_items
 WHERE block_id = :blockId;

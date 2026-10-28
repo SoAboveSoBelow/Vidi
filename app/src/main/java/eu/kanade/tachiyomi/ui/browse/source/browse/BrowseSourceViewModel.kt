@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
 import aniyomi.domain.queue.interactor.AddToQueue
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
@@ -392,12 +393,15 @@ class BrowseSourceViewModel(
     ) {
         viewModelScope.launchIO {
             // AM (QUEUE_WATCH_FILTER) -->
-            if (unwatchedOnly == null && addToQueue.hasMixedWatchState(anime)) {
-                setDialog(Dialog.AddToQueue(listOf(anime)))
+            // AM (QUEUE_RESOLVE_ONCE): one resolve, shared by the question and
+            // the add.
+            val source = addToQueue.resolve(anime)
+            if (unwatchedOnly == null && source.hasMixedWatchState) {
+                setDialog(Dialog.AddToQueue(listOf(source)))
                 return@launchIO
             }
             addToQueue.await(
-                anime = anime,
+                source = source,
                 unwatchedOnly = unwatchedOnly ?: false,
                 currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
             )
@@ -422,35 +426,35 @@ class BrowseSourceViewModel(
             clearSelection()
             if (animeList.isEmpty()) return@launchIO
             // AM (QUEUE_WATCH_FILTER) -->
-            // Unambiguous sources queue immediately. Each mixed source asks its
-            // own question, since watched state belongs to the source, not to
-            // the selection as a whole.
-            val needsChoice = mutableListOf<Anime>()
-            animeList.forEach { anime ->
-                if (addToQueue.hasMixedWatchState(anime)) {
-                    needsChoice += anime
-                } else {
-                    addToQueue.await(anime)
-                }
+            // One question for the whole selection, before anything is queued:
+            // queueing the unambiguous ones first put them ahead of entries
+            // selected before them, so the queue stopped matching the order
+            // they were picked in.
+            val sources = addToQueue.resolve(animeList)
+            if (sources.any { it.hasMixedWatchState }) {
+                setDialog(Dialog.AddToQueue(sources))
+                return@launchIO
             }
-            if (needsChoice.isNotEmpty()) setDialog(Dialog.AddToQueue(needsChoice))
+            addToQueue.await(sources)
             // <-- AM (QUEUE_WATCH_FILTER)
             withContext(Dispatchers.Main) { onRequestFill() }
         }
     }
 
     // AM (QUEUE_WATCH_FILTER) -->
-    /** Applies one source's answer, then advances a multi-source prompt. */
-    fun addQueueChoice(animeList: List<Anime>, unwatchedOnly: Boolean, onRequestFill: () -> Unit) {
-        val anime = animeList.firstOrNull() ?: return
+    /** Applies the one answer to the whole selection, in selection order. */
+    fun addQueueChoice(
+        sources: List<QueueSource>,
+        unwatchedOnly: Boolean,
+        onRequestFill: () -> Unit,
+    ) {
         viewModelScope.launchIO {
             addToQueue.await(
-                anime = anime,
+                sources = sources,
                 unwatchedOnly = unwatchedOnly,
                 currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
             )
-            val remaining = animeList.drop(1)
-            setDialog(if (remaining.isEmpty()) null else Dialog.AddToQueue(remaining))
+            setDialog(null)
             withContext(Dispatchers.Main) { onRequestFill() }
         }
     }
@@ -603,7 +607,8 @@ class BrowseSourceViewModel(
 
         data class AddDuplicateAnime(val anime: Anime, val duplicates: List<AnimeWithEpisodeCount>) : Dialog
         // AM (QUEUE_WATCH_FILTER)
-        data class AddToQueue(val animeList: List<Anime>) : Dialog
+        // AM (QUEUE_RESOLVE_ONCE)
+        data class AddToQueue(val sources: List<QueueSource>) : Dialog
         data class ChangeAnimeCategory(
             val animeList: List<Anime>,
             // AM (BROWSE_SELECTION): CheckboxState rather than its State

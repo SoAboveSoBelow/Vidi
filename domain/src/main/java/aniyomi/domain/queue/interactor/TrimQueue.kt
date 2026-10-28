@@ -1,11 +1,12 @@
 // AM (PLAYBACK_QUEUE) -->
 package aniyomi.domain.queue.interactor
 
+import aniyomi.domain.queue.model.QueueItem
 import aniyomi.domain.queue.repository.QueueRepository
 import dev.zacsweers.metro.Inject
 
 /**
- * Drops entries the user has already gone past, keeping a trailing window of
+ * Drops runs the user has already gone past, keeping a trailing window of
  * them.
  *
  * Deliberately NOT a cap on the queue's length. A cap punishes the one thing
@@ -14,9 +15,8 @@ import dev.zacsweers.metro.Inject
  * ever removed, so anything queued ahead survives however much of it there is.
  *
  * The window is what makes stepping back work: going forward and then back a
- * couple of entries has to still find them, so the last
- * [QueueRepository] blocks before the current one are kept and only what is
- * further back than that goes.
+ * couple of sources has to still find them, so the last few runs before the
+ * current position are kept and only what is further back than that goes.
  *
  * There is no timer. Progression is the only trigger, which means the only way
  * an entry disappears is the user moving past it, and a queue nobody is
@@ -28,12 +28,20 @@ class TrimQueue(
 ) {
 
     /**
-     * [keepBehind] blocks before the one holding [currentEpisodeId] are kept;
+     * [keepBehind] runs before the one holding [currentEpisodeId] are kept;
      * earlier ones are removed. 0 disables trimming entirely, matching how the
      * rest of the app reads 0 in a limit preference.
      *
-     * Works in BLOCKS, not items: a block is one entry as the user queued it,
-     * and half an entry is not a thing anyone asked to keep.
+     * Works in RUNS, not single items: a run is one source as it appears in
+     * the play order, and half of one is not a thing anyone asked to keep.
+     *
+     * AM (QUEUE_TRIM_BY_POSITION): a run rather than a whole block, and
+     * removal by item rather than by block. Episode dragging can put one
+     * source's items in several places, so a block can have a run behind the
+     * playing position and another ahead of it; removing the block took the
+     * run ahead with it, which is exactly the thing this is not allowed to do.
+     * Walking positions keeps that promise: only what is behind is ever
+     * considered, and a source with anything still ahead simply keeps it.
      */
     suspend fun await(currentEpisodeId: Long, keepBehind: Int) {
         if (keepBehind <= 0) return
@@ -41,17 +49,25 @@ class TrimQueue(
         val items = queueRepository.getItems()
         if (items.isEmpty()) return
 
-        // getItems is in play order, so the blocks in first-seen order ARE the
-        // queue's block order - no second query for the blocks themselves.
-        val blockOrder = items.map { it.blockId }.distinct()
-        val currentBlock = items.firstOrNull { it.episodeId == currentEpisodeId }?.blockId
-            ?: return
-        val position = blockOrder.indexOf(currentBlock)
+        val playingIndex = items.indexOfFirst { it.episodeId == currentEpisodeId }
+        if (playingIndex == -1) return
 
-        val expendable = position - keepBehind
+        // getItems is in play order, so consecutive items sharing a block are
+        // one run - the same grouping the playlist shows.
+        val runs = mutableListOf<MutableList<QueueItem>>()
+        items.take(playingIndex).forEach { item ->
+            val current = runs.lastOrNull()
+            if (current != null && current.first().blockId == item.blockId) {
+                current += item
+            } else {
+                runs += mutableListOf(item)
+            }
+        }
+
+        val expendable = runs.size - keepBehind
         if (expendable <= 0) return
 
-        blockOrder.take(expendable).forEach { queueRepository.removeBlock(it) }
+        queueRepository.removeItems(runs.take(expendable).flatten().map { it.id })
     }
 }
 // <-- AM (PLAYBACK_QUEUE)
