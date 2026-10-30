@@ -267,6 +267,9 @@ data class BrowseSourceScreen(
                 topBarHeight = topBarHeight,
                 // <-- AY
                 displayMode = viewModel.displayMode,
+                // AM (BROWSE_SCROLLER)
+                selectionMode = state.selectionMode,
+                onAnimeFavoriteClick = viewModel::changeAnimeFavorite,
                 snackbarHostState = snackbarHostState,
                 contentPadding = paddingValues,
                 onWebViewClick = onWebViewClick,

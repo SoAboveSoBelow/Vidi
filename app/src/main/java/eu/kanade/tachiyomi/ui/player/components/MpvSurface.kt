@@ -35,6 +35,15 @@ fun MpvSurface(
     // AM (AUDIO_BLIP_FIX) -->
     onSurfaceAttachedChanged: (Boolean) -> Unit = {},
     // <-- AM (AUDIO_BLIP_FIX)
+    // AM (BROWSE_SCROLLER) -->
+    /**
+     * Hands out the TextureView, for a consumer that needs to read the frame
+     * being displayed. mpv's own screenshot-raw reads the decoded frame, which
+     * a hardware decoder need not expose; the view always has the composited
+     * result. Null, and the view never escapes, for every other caller.
+     */
+    onViewAvailable: ((TextureView) -> Unit)? = null,
+    // <-- AM (BROWSE_SCROLLER)
 ) {
     val context = LocalContext.current
     val decoderPreferences: DecoderPreferences = context.appGraph.decoderPreferences
@@ -50,6 +59,8 @@ fun MpvSurface(
         modifier = modifier.fillMaxSize(),
         factory = { context ->
             TextureView(context).apply {
+                // AM (BROWSE_SCROLLER)
+                onViewAvailable?.invoke(this)
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(
                         surfaceTexture: SurfaceTexture,

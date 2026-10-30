@@ -16,6 +16,7 @@ import dev.zacsweers.metro.DependencyGraph
 import dev.zacsweers.metro.Provides
 import dev.zacsweers.metrox.viewmodel.MetroViewModelFactory
 import dev.zacsweers.metrox.viewmodel.ViewModelGraph
+import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.connection.SyncPreferences
 import eu.kanade.domain.connection.service.ConnectionPreferences
@@ -54,6 +55,9 @@ import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
 import eu.kanade.tachiyomi.ui.player.PlayerActivity
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel
+import eu.kanade.tachiyomi.ui.player.loader.EpisodeLoader
+import eu.kanade.tachiyomi.ui.player.loader.HosterLoader
+import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import eu.kanade.tachiyomi.ui.player.RecentEpisodePositionManager
 import eu.kanade.tachiyomi.ui.player.domain.BrightnessManager
 import eu.kanade.tachiyomi.ui.setting.track.BaseOAuthLoginActivity
@@ -197,6 +201,15 @@ interface AppGraph : ViewModelGraph {
     // to a single one's ViewModelStore.
     val playerViewModelFactory: PlayerViewModel.Factory
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
+    // AM (BROWSE_SCROLLER) -->
+    // The browse scroller builds its own mpv instance and resolves its own
+    // videos, outside any ViewModel - see ScrollerPlayer's doc comment for why
+    // it cannot share the service-owned player.
+    val mpvPlayerFactory: MPVPlayer.Factory
+    val episodeLoader: EpisodeLoader
+    val hosterLoader: HosterLoader
+    val updateAnime: UpdateAnime
+    // <-- AM (BROWSE_SCROLLER)
     // <-- AM
 
     @DependencyGraph.Factory

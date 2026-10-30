@@ -433,4 +433,7 @@
     <string name="am_granted_folders_unavailable">Unavailable</string>
     <string name="am_granted_folders_internal_storage">Internal storage</string>
     <string name="am_granted_folders_select_unused">Select not in library</string>
+
+    <!-- AM (BROWSE_SCROLLER) -->
+    <string name="action_display_scroller">Scroller</string>
 </resources>

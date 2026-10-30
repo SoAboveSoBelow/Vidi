@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.ui.browse.migration.season
 
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import aniyomi.domain.source.model.BrowseDisplayMode
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -71,7 +72,9 @@ data class MigrateSeasonSelectScreen(
                 source = viewModel.source,
                 animeList = viewModel.seasonPagerFlowFlow.collectAsLazyPagingItems(),
                 columns = viewModel.getColumnsPreference(LocalConfiguration.current.orientation),
-                displayMode = viewModel.displayMode,
+                // AM (BROWSE_SCROLLER): a migration target picker has no use
+                // for the scroller, so it always renders a standard layout.
+                displayMode = BrowseDisplayMode.Standard(viewModel.displayMode.standard),
                 snackbarHostState = snackbarHostState,
                 contentPadding = paddingValues,
                 onWebViewClick = {

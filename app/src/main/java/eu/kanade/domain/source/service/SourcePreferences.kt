@@ -1,5 +1,6 @@
 package eu.kanade.domain.source.service
 
+import aniyomi.domain.source.model.BrowseDisplayMode
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -10,20 +11,34 @@ import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.preference.getEnum
 import tachiyomi.core.common.preference.getLongArray
-import tachiyomi.domain.library.model.LibraryDisplayMode
 
 @Inject
 @SingleIn(AppScope::class)
 class SourcePreferences(
-    preferenceStore: PreferenceStore,
+    // AM (BROWSE_SCROLLER): held so the per-source display mode override can
+    // be looked up by source id at call time.
+    private val preferenceStore: PreferenceStore,
 ) {
 
-    val sourceDisplayMode: Preference<LibraryDisplayMode> = preferenceStore.getObjectFromString(
+    // AM (BROWSE_SCROLLER): type widened from LibraryDisplayMode to
+    // BrowseDisplayMode. The key and the stored strings are unchanged, so an
+    // existing value still deserializes to the same layout.
+    val sourceDisplayMode: Preference<BrowseDisplayMode> = preferenceStore.getObjectFromString(
         "pref_display_mode_catalogue",
-        LibraryDisplayMode.default,
-        LibraryDisplayMode.Serializer::serialize,
-        LibraryDisplayMode.Serializer::deserialize,
+        BrowseDisplayMode.default,
+        BrowseDisplayMode.Serializer::serialize,
+        BrowseDisplayMode.Serializer::deserialize,
     )
+
+    // AM (BROWSE_SCROLLER) -->
+    /**
+     * Per-source override of [sourceDisplayMode]. Empty means "inherit", which
+     * is what every source starts out as, so changing the layout for one
+     * source leaves the rest alone.
+     */
+    fun sourceDisplayModeOverride(sourceId: Long): Preference<String> =
+        preferenceStore.getString("pref_display_mode_catalogue_$sourceId", "")
+    // <-- AM (BROWSE_SCROLLER)
 
     val enabledLanguages: Preference<Set<String>> = preferenceStore.getStringSet(
         "source_languages",

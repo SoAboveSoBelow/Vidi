@@ -396,7 +396,9 @@ class AnimeViewModel(
     val alwaysUseExternalPlayer = playerPreferences.alwaysUseExternalPlayer.get()
     val useExternalDownloader = downloadPreferences.useExternalDownloader.get()
 
-    val relatedAnimeDisplayMode = sourcePreferences.sourceDisplayMode.get()
+    // AM (BROWSE_SCROLLER): the related rows are horizontal strips, so they
+    // take the standard layout even when browse is set to the scroller.
+    val relatedAnimeDisplayMode = sourcePreferences.sourceDisplayMode.get().standard
 
     internal var isFromChangeCategory: Boolean = false
 

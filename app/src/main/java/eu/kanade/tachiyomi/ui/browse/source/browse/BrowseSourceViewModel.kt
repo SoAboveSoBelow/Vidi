@@ -11,6 +11,8 @@ import androidx.lifecycle.viewModelScope
 import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
 import aniyomi.domain.queue.interactor.AddToQueue
 import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
+import aniyomi.domain.source.model.BrowseDisplayMode
+import aniyomi.ui.browse.BrowseDisplayModeDefaults
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
@@ -98,9 +100,26 @@ class BrowseSourceViewModel(
         fun create(sourceId: Long, listingQuery: String?): BrowseSourceViewModel
     }
 
-    var displayMode by sourcePreferences.sourceDisplayMode.asState(viewModelScope)
-
     val source = sourceManager.getOrStub(sourceId)
+
+    // AM (BROWSE_SCROLLER) -->
+    // Resolution order: a per-source override the user set, then whatever the
+    // source itself declares, then the browse-wide preference. Setting writes
+    // the override, so changing the layout here does not change every other
+    // source's layout with it.
+    private val displayModeGlobal by sourcePreferences.sourceDisplayMode.asState(viewModelScope)
+
+    private var displayModeOverride by sourcePreferences.sourceDisplayModeOverride(sourceId)
+        .asState(viewModelScope)
+
+    var displayMode: BrowseDisplayMode
+        get() = displayModeOverride.takeIf { it.isNotEmpty() }?.let(BrowseDisplayMode::deserialize)
+            ?: BrowseDisplayModeDefaults.forSource(source)
+            ?: displayModeGlobal
+        set(value) {
+            displayModeOverride = value.serialize()
+        }
+    // <-- AM (BROWSE_SCROLLER)
 
     init {
         // AM (LOCAL_SOURCE_FILTER_OFF_MAIN) -->

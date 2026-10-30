@@ -16,9 +16,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
+import aniyomi.domain.source.model.BrowseDisplayMode
 import eu.kanade.presentation.browse.components.BrowseSourceComfortableGrid
 import eu.kanade.presentation.browse.components.BrowseSourceCompactGrid
 import eu.kanade.presentation.browse.components.BrowseSourceList
+import eu.kanade.presentation.browse.components.BrowseSourceScroller
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.util.formattedMessage
 import eu.kanade.tachiyomi.animesource.AnimeSource
@@ -44,7 +46,8 @@ fun BrowseSourceContent(
     entries: Int = 0,
     topBarHeight: Int = 0,
     // <-- AY
-    displayMode: LibraryDisplayMode,
+    // AM (BROWSE_SCROLLER)
+    displayMode: BrowseDisplayMode,
     snackbarHostState: SnackbarHostState,
     contentPadding: PaddingValues,
     onWebViewClick: () -> Unit,
@@ -63,6 +66,17 @@ fun BrowseSourceContent(
     // AM (BROWSE_SELECTION): defaulted for the same reason - a migration
     // target picker has nothing to select across.
     selection: Set<Long> = emptySet(),
+    // AM (BROWSE_SCROLLER): the scroller needs to know whether a row tap
+    // means "select" or nothing at all - unlike the grids, it does not treat a
+    // row tap as "open". Defaulted for the screens that pick a migration
+    // target, which have no selection mode.
+    selectionMode: Boolean = false,
+    // AM (BROWSE_SCROLLER): used only by the scroller, whose cards carry their
+    // own add-to-library button.
+    onAnimeFavoriteClick: ((Anime) -> Unit)? = null,
+    // AM (BROWSE_SCROLLER): the settled item in the scroller layout, for
+    // whoever wants to act on it. Ignored by every other layout.
+    onActiveIndexChange: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
 
@@ -131,7 +145,28 @@ fun BrowseSourceContent(
         return
     }
 
-    when (displayMode) {
+    // AM (BROWSE_SCROLLER) -->
+    if (displayMode == BrowseDisplayMode.Scroller) {
+        BrowseSourceScroller(
+            animeList = animeList,
+            source = source,
+            // AM (MERGED_SOURCES)
+            mergeChildIds = mergeChildIds,
+            contentPadding = contentPadding,
+            onAnimeClick = onAnimeClick,
+            onAnimeLongClick = onAnimeLongClick,
+            // AM (DOUBLE_TAP_QUEUE)
+            onAnimeDoubleClick = onAnimeDoubleClick,
+            // AM (BROWSE_SELECTION)
+            selection = selection,
+            selectionMode = selectionMode,
+            onAnimeFavoriteClick = onAnimeFavoriteClick,
+            onActiveIndexChange = onActiveIndexChange,
+        )
+        return
+    }
+
+    when (displayMode.standard) {
         LibraryDisplayMode.ComfortableGrid -> {
             BrowseSourceComfortableGrid(
                 animeList = animeList,
@@ -181,6 +216,7 @@ fun BrowseSourceContent(
             )
         }
     }
+    // <-- AM (BROWSE_SCROLLER)
 }
 
 @Composable
