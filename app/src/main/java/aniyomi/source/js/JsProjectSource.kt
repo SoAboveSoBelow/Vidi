@@ -1,5 +1,7 @@
 package aniyomi.source.js
 
+import aniyomi.domain.source.model.BrowseDisplayMode
+
 import aniyomi.core.common.jsengine.JsSourceRuntime
 import eu.kanade.tachiyomi.animesource.FaultRecoverableSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -26,7 +28,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import logcat.LogPriority
@@ -70,6 +75,7 @@ class JsProjectSource(
     supportsLatest: Boolean,
     script: String,
     baseUrl: String,
+    defaultBrowseDisplayMode: BrowseDisplayMode? = null,
     private val networkHelper: NetworkHelper,
     private val softTimeoutMillis: Long = DEFAULT_SOFT_TIMEOUT,
     private val hardTimeoutMillis: Long = DEFAULT_HARD_TIMEOUT,
@@ -91,6 +97,9 @@ class JsProjectSource(
         private set
 
     override var supportsLatest: Boolean = supportsLatest
+        private set
+
+    var defaultBrowseDisplayMode: BrowseDisplayMode? = defaultBrowseDisplayMode
         private set
 
     private var script: String = script
@@ -166,6 +175,23 @@ class JsProjectSource(
             it.url = anime.url
             it.initialized = true
         }
+    }
+
+    /**
+     * Runs a source-declared action against a feed entry and returns its new
+     * active state. Keeping the mutation in the project means the host does not
+     * need to know a site's authentication or API conventions.
+     */
+    suspend fun performFeedAction(url: String, action: String, active: Boolean): Boolean {
+        val payload = call(
+            FEED_ACTION,
+            args {
+                put("url", url)
+                put("action", action)
+                put("active", active)
+            },
+        )
+        return payload.trim().toBooleanStrict()
     }
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
@@ -336,12 +362,14 @@ class JsProjectSource(
         name: String,
         lang: String,
         supportsLatest: Boolean,
+        defaultBrowseDisplayMode: BrowseDisplayMode?,
         script: String,
         baseUrl: String,
     ) {
         this.name = name
         this.lang = lang
         this.supportsLatest = supportsLatest
+        this.defaultBrowseDisplayMode = defaultBrowseDisplayMode
 
         if (script == this.script && baseUrl == this.baseUrl) return
 
@@ -379,13 +407,55 @@ class JsProjectSource(
         if (!loaded) {
             loadMutex.withLock {
                 if (!loaded) {
-                    runtime.load()
+                    loadRuntime()
+                    val declaration = readDeclaration(runtime)
+                    if (defaultBrowseDisplayMode == null && declaration?.defaultBrowseDisplayMode == "scroller") {
+                        defaultBrowseDisplayMode = BrowseDisplayMode.Scroller
+                    }
+                    val declaredBaseUrl = declaration?.baseUrl
+                        ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                    if (baseUrl.isBlank() && declaredBaseUrl != null) {
+                        baseUrl = declaredBaseUrl
+                        runtime.close()
+                        runtime = JsSourceRuntime(script, baseUrl, networkHelper)
+                        loadRuntime()
+                    }
                     loaded = true
                     filterList = readFilters(runtime)
                 }
             }
         }
         return runtime
+    }
+
+    /**
+     * A failed script evaluation can leave QuickJs initialized even though the
+     * runtime is unusable. Retrying load() on that instance would hide the real
+     * failure behind "Runtime already loaded", so discard it before propagating
+     * the original error and let the next attempt start cleanly.
+     */
+    private suspend fun loadRuntime() {
+        try {
+            runtime.load()
+        } catch (e: Exception) {
+            runtime.close()
+            runtime = JsSourceRuntime(script, baseUrl, networkHelper)
+            loaded = false
+            throw e
+        }
+    }
+
+    /** Optional, source-level settings that do not belong in the editor's manifest form. */
+    private class JsDeclaration(val baseUrl: String?, val defaultBrowseDisplayMode: String?)
+
+    private suspend fun readDeclaration(runtime: JsSourceRuntime): JsDeclaration? = try {
+        val meta = jsJson.decodeFromString<JsonObject>(runtime.call("meta", "{}", softTimeoutMillis))
+        JsDeclaration(
+            baseUrl = meta["baseUrl"]?.jsonPrimitive?.contentOrNull?.trim()?.trimEnd('/'),
+            defaultBrowseDisplayMode = meta["defaultBrowseDisplayMode"]?.jsonPrimitive?.contentOrNull,
+        )
+    } catch (e: Exception) {
+        null
     }
 
     /**
@@ -426,5 +496,6 @@ class JsProjectSource(
         const val EPISODES = "episodes"
         const val VIDEOS = "videos"
         const val FILTERS = "filters"
+        const val FEED_ACTION = "feedAction"
     }
 }

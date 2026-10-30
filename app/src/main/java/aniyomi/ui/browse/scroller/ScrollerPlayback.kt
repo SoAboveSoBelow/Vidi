@@ -2,7 +2,6 @@ package aniyomi.ui.browse.scroller
 
 import android.content.Context
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -10,9 +9,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import animiru.domain.player.model.SingleActionGesture
 import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
@@ -438,41 +434,26 @@ fun rememberScrollerPlayback(source: AnimeSource?): ScrollerPlaybackState? {
     // Every composable call below runs unconditionally, whatever [source] is:
     // an early return before remember()/DisposableEffect() would change the
     // call site's slot layout if source ever went from null to non-null.
-    val state = remember(source?.id) {
-        if (source == null) {
-            null
-        } else {
-            val graph = context.appGraph
-            val videoOutput = if (graph.decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
-            ScrollerPlaybackState(
-                pool = ScrollerPlayerPool(graph.mpvPlayerFactory, videoOutput),
-                resolver = ScrollerVideoResolver(
-                    episodeLoader = graph.episodeLoader,
-                    hosterLoader = graph.hosterLoader,
-                ),
-                detailsFetcher = ScrollerDetailsFetcher(graph.updateAnime),
-                context = context,
-                playerPreferences = graph.playerPreferences,
-                gesturePreferences = graph.gesturePreferences,
-                videoOutput = videoOutput,
-            )
+    return remember(source?.id) {
+        source?.let {
+            ScrollerSession.playback(it.id) {
+                val graph = context.appGraph
+                val videoOutput = if (graph.decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
+                ScrollerPlaybackState(
+                    pool = ScrollerPlayerPool(graph.mpvPlayerFactory, videoOutput),
+                    resolver = ScrollerVideoResolver(
+                        episodeLoader = graph.episodeLoader,
+                        hosterLoader = graph.hosterLoader,
+                    ),
+                    detailsFetcher = ScrollerDetailsFetcher(graph.updateAnime),
+                    context = context,
+                    playerPreferences = graph.playerPreferences,
+                    gesturePreferences = graph.gesturePreferences,
+                    videoOutput = videoOutput,
+                )
+            }
         }
     }
-
-    DisposableEffect(state) {
-        onDispose { state?.releaseAll() }
-    }
-
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, state) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) state?.pauseAll()
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    return state
 }
 
 /** How often a playing card's position is written down. */

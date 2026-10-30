@@ -1,6 +1,7 @@
 package aniyomi.ui.browse
 
 import aniyomi.domain.source.model.BrowseDisplayMode
+import aniyomi.source.js.JsProjectSource
 import eu.kanade.tachiyomi.animesource.AnimeSource
 
 // AM (BROWSE_SCROLLER) -->
@@ -23,7 +24,9 @@ object BrowseDisplayModeDefaults {
     private val byId = emptyMap<Long, BrowseDisplayMode>()
 
     fun forSource(source: AnimeSource): BrowseDisplayMode? {
-        return (source as? DeclaresBrowseDisplayMode)?.defaultBrowseDisplayMode ?: byId[source.id]
+        return (source as? JsProjectSource)?.defaultBrowseDisplayMode
+            ?: (source as? DeclaresBrowseDisplayMode)?.defaultBrowseDisplayMode
+            ?: byId[source.id]
     }
 }
 // <-- AM (BROWSE_SCROLLER)

@@ -69,7 +69,7 @@ class ScrollerPlayerPool(
         // load again.
         val slot = slots.firstOrNull { it.animeId == null }
             ?: if (slots.size < CAPACITY) {
-                Slot(ScrollerPlayer(factory.create(videoOutput))).also { slots += it }
+                Slot(ScrollerPlayer(factory.create(videoOutput), factory.create(videoOutput))).also { slots += it }
             } else {
                 slots.minByOrNull { it.lastUsed }!!.also { it.player.reset() }
             }

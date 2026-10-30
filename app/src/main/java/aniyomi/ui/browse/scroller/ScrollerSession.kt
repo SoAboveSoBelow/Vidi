@@ -29,6 +29,12 @@ object ScrollerSession {
      */
     var isMuted: Boolean = true
 
+    /** App-owned playback: navigation does not stop a feed's audio. */
+    private val playbackStates = mutableMapOf<Long, ScrollerPlaybackState>()
+
+    internal fun playback(sourceId: Long, create: () -> ScrollerPlaybackState): ScrollerPlaybackState =
+        playbackStates.getOrPut(sourceId, create)
+
     /** Learned media aspect ratios by entry id - see [ScrollerPlaybackState.aspectRatios]. */
     val aspectRatios = mutableMapOf<Long, Float>()
 
@@ -83,6 +89,8 @@ object ScrollerSession {
     }
 
     private fun clear() {
+        playbackStates.values.forEach { it.releaseAll() }
+        playbackStates.clear()
         isMuted = true
         aspectRatios.clear()
         positions.clear()

@@ -101,7 +101,16 @@ fun BrowseSourceContent(
         }
     }
 
-    if (animeList.itemCount == 0 && animeList.loadState.refresh is LoadState.Loading) {
+    if (
+        animeList.itemCount == 0 &&
+        (
+            animeList.loadState.refresh is LoadState.Loading ||
+                animeList.loadState.append is LoadState.Loading ||
+                animeList.loadState.prepend is LoadState.Loading
+        )
+    ) {
+        // Paging can expose an empty item snapshot before a successful page
+        // insertion. That is still loading, not an empty source.
         LoadingScreen(Modifier.padding(contentPadding))
         return
     }

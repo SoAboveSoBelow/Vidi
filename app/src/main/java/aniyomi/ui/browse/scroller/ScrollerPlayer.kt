@@ -7,6 +7,14 @@ import androidx.compose.ui.graphics.asImageBitmap
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import eu.kanade.tachiyomi.ui.player.mpv.loadFileWithHwdecGuard
 import kotlin.math.abs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 // AM (BROWSE_SCROLLER) -->
 /**
@@ -30,10 +38,17 @@ import kotlin.math.abs
  */
 class ScrollerPlayer(
     val player: MPVPlayer,
+    private val audioPlayer: MPVPlayer,
 ) {
 
     private var loadedKey: Long? = null
     private var hasRequestedFocus = false
+    private var shouldPlay = false
+    private var mayHoldAudioFocus = false
+    private val loadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var loadGeneration = 0
+    private var videoReady = false
+    private var audioReady = false
 
     /** True once a surface is attached, which is when loading can use hwdec. */
     private var surfaceReady = false
@@ -59,6 +74,12 @@ class ScrollerPlayer(
         // rather than per load so a newly loaded card cannot briefly play
         // unlooped before the option lands.
         player.mpv.setOptionString("loop-file", "inf")
+        // Separate audio has its own timeline. Attaching it with audio-file makes
+        // the video's loop restart it, so longer Coub audio never plays through.
+        audioPlayer.mpv.setOptionString("aid", "auto")
+        audioPlayer.mpv.setOptionString("vid", "no")
+        audioPlayer.mpv.setOptionString("loop-file", "inf")
+        audioPlayer.mpv.setPropertyBoolean("mute", true)
 
         // Readahead capped, because preloading is not free.
         //
@@ -102,6 +123,7 @@ class ScrollerPlayer(
         if (loadedKey == key) return
         rememberPosition()
         loadedKey = key
+        awaitBothLoaded(key, audioUrl != null)
 
         val issue = {
             // Set before the load, not after: mpv reads these when it opens
@@ -109,25 +131,87 @@ class ScrollerPlayer(
             // without them. Cleared rather than left behind when a card
             // carries none, so one card's headers never go to another's host.
             player.mpv.setOptionString("http-header-fields", httpHeaderFields ?: "")
+            audioPlayer.mpv.setOptionString("http-header-fields", httpHeaderFields ?: "")
             val resumeAt = ScrollerSession.positions[key]
             // pause=yes in the load's own options, so the file is never
             // playing even for a frame before being paused.
             val options = buildList {
                 add("pause=yes")
                 if (resumeAt != null) add("start=$resumeAt")
-                // A source that serves audio separately - Coub serves a looped
-                // mp3 alongside a muted mp4 - gets it added as an external
-                // track rather than needing the two muxed into one file.
-                if (audioUrl != null) add("audio-file=%${audioUrl.length}%$audioUrl")
             }.joinToString(",")
             player.mpv.loadFileWithHwdecGuard(
                 url = url,
                 options = options,
                 hasAttachedSurface = player.hasAttachedSurfaceBefore,
             )
+            if (audioUrl == null) {
+                audioPlayer.mpv.command("stop")
+            } else {
+                val audioOptions = buildList {
+                    add("pause=yes")
+                    add("vid=no")
+                    if (resumeAt != null) add("start=$resumeAt")
+                }.joinToString(",")
+                audioPlayer.mpv.command("loadfile", audioUrl, "replace", "0", audioOptions)
+            }
+            // A surface-delayed load must not overwrite the active card's
+            // requested state with the loadfile pause=yes option. This is most
+            // visible on the first card, whose active selection precedes its
+            // surface and whose separate audio has no later video event to
+            // repair it.
+            applyPlaybackState()
+            applyMuteState()
+            Unit
         }
 
         if (surfaceReady || player.hasAttachedSurfaceBefore) issue() else pendingLoad = issue
+    }
+
+    /**
+     * Separate mpv instances finish opening independently. Neither starts until
+     * every stream this entry needs has reached FileLoaded; otherwise a fast
+     * video runs silently or a fast audio track plays over a placeholder.
+     */
+    private fun awaitBothLoaded(key: Long, hasSeparateAudio: Boolean) {
+        val generation = ++loadGeneration
+        videoReady = false
+        audioReady = !hasSeparateAudio
+        applyPlaybackState()
+
+        loadScope.launch {
+            player.eventFlow.filterIsInstance<MPVPlayer.Event.FileLoaded>().first()
+            if (generation != loadGeneration || loadedKey != key) return@launch
+            videoReady = true
+            applyPlaybackState()
+        }
+        if (hasSeparateAudio) {
+            loadScope.launch {
+                audioPlayer.eventFlow.filterIsInstance<MPVPlayer.Event.FileLoaded>().first()
+                if (generation != loadGeneration || loadedKey != key) return@launch
+                audioReady = true
+                applyPlaybackState()
+            }
+        }
+
+        // MPV's event flow has no replay value. A native event can therefore
+        // be missed during a surface/pool transition even with an early
+        // collector, which used to leave exactly one random card paused.
+        // Properties are the source of truth on this bounded-per-load poll;
+        // the events above merely make the common path immediate.
+        loadScope.launch {
+            while (generation == loadGeneration && loadedKey == key) {
+                if (!videoReady && hasRenderedFrame()) videoReady = true
+                if (hasSeparateAudio && !audioReady) {
+                    val tracks = audioPlayer.mpv.getPropertyInt("track-list/count") ?: 0
+                    if (tracks > 0) audioReady = true
+                }
+                if (videoReady && audioReady) {
+                    applyPlaybackState()
+                    return@launch
+                }
+                delay(READY_POLL_INTERVAL_MS)
+            }
+        }
     }
 
     /** True once this instance has a file loaded, whether playing or held. */
@@ -138,12 +222,14 @@ class ScrollerPlayer(
         // reached. This one has been reached.
         player.mpv.setOptionString("demuxer-max-bytes", ACTIVE_DEMUXER_BYTES)
         player.mpv.setOptionString("demuxer-readahead-secs", ACTIVE_READAHEAD_SECS)
-        player.mpv.setPropertyBoolean("pause", false)
+        shouldPlay = true
+        applyPlaybackState()
     }
 
     fun pause() {
         rememberPosition()
-        player.mpv.setPropertyBoolean("pause", true)
+        shouldPlay = false
+        applyPlaybackState()
     }
 
     fun togglePaused() {
@@ -156,6 +242,7 @@ class ScrollerPlayer(
     /** Relative seek, clamped by mpv itself at both ends of the file. */
     fun seekBy(seconds: Int) {
         player.mpv.command("seek", seconds.toString(), "relative")
+        audioPlayer.mpv.command("seek", seconds.toString(), "relative")
     }
 
     /**
@@ -259,10 +346,8 @@ class ScrollerPlayer(
      */
     fun setMuted(muted: Boolean, mayHoldAudioFocus: Boolean) {
         isMuted = muted
-        // Only the card being looked at makes sound, whatever the feed's own
-        // mute setting says.
-        val effectivelyMuted = muted || !mayHoldAudioFocus
-        player.mpv.setPropertyBoolean("mute", effectivelyMuted)
+        this.mayHoldAudioFocus = mayHoldAudioFocus
+        val effectivelyMuted = applyMuteState()
 
         // Requested lazily and then kept: an unmute/mute/unmute cycle must not
         // re-request, which would make the app's own canonical player see a
@@ -271,6 +356,21 @@ class ScrollerPlayer(
             player.requestAudioFocus()
             hasRequestedFocus = true
         }
+    }
+
+    private fun applyPlaybackState() {
+        val paused = !shouldPlay || !videoReady || !audioReady
+        player.mpv.setPropertyBoolean("pause", paused)
+        audioPlayer.mpv.setPropertyBoolean("pause", paused)
+    }
+
+    private fun applyMuteState(): Boolean {
+        // Only the card being looked at makes sound, whatever the feed's own
+        // mute setting says.
+        val effectivelyMuted = isMuted || !mayHoldAudioFocus
+        player.mpv.setPropertyBoolean("mute", effectivelyMuted)
+        audioPlayer.mpv.setPropertyBoolean("mute", effectivelyMuted)
+        return effectivelyMuted
     }
 
     /** Called while playing, so progress survives a kill mid-clip. */
@@ -291,19 +391,27 @@ class ScrollerPlayer(
      * ScrollerPlayerPool.
      */
     fun reset() {
+        loadGeneration++
+        videoReady = false
+        audioReady = false
+        shouldPlay = false
         rememberPosition()
         pendingLoad = null
         loadedKey = null
         runCatching { player.mpv.command("stop") }
+        runCatching { audioPlayer.mpv.command("stop") }
     }
 
     /** Destroys the instance. Only the feed closing does this. */
     fun release() {
+        loadGeneration++
+        loadScope.cancel()
         rememberPosition()
         textureView = null
         pendingLoad = null
         loadedKey = null
         player.release()
+        audioPlayer.release()
     }
 }
 
@@ -327,4 +435,5 @@ private const val PRELOAD_READAHEAD_SECS = "2"
 /** What the card being watched may buffer. */
 private const val ACTIVE_DEMUXER_BYTES = "64MiB"
 private const val ACTIVE_READAHEAD_SECS = "20"
+private const val READY_POLL_INTERVAL_MS = 100L
 // <-- AM (BROWSE_SCROLLER)

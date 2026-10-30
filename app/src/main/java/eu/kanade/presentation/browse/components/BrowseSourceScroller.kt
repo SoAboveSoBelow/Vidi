@@ -1,5 +1,7 @@
 package eu.kanade.presentation.browse.components
 
+import android.widget.Toast
+
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -22,7 +24,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -36,11 +40,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -56,6 +62,8 @@ import androidx.compose.ui.unit.dp
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import aniyomi.ui.browse.scroller.ScrollerPlaybackState
+import aniyomi.source.js.JsProjectSource
+import aniyomi.ui.browse.scroller.ScrollerFeedAction
 import aniyomi.ui.browse.scroller.ScrollerPlayer
 import aniyomi.ui.browse.scroller.rememberScrollerPlayback
 import coil3.compose.AsyncImage
@@ -64,6 +72,7 @@ import eu.kanade.presentation.util.rememberResourceBitmapPainter
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -131,32 +140,34 @@ fun BrowseSourceScroller(
         // start loading until then.
         snapshotFlow {
             val layoutInfo = listState.layoutInfo
-            val viewport = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
-            layoutInfo.visibleItemsInfo
-                .maxByOrNull { info ->
-                    if (viewport <= 0) {
-                        0f
-                    } else {
+            val index = if (listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
+                // At the exact top, the first card is active even when a later
+                // or taller card currently occupies more of the viewport.
+                0.takeIf { animeList.itemCount > 0 }
+            } else {
+                layoutInfo.visibleItemsInfo
+                    // Visible pixels, not fraction of the viewport: the old
+                    // ratio permanently disadvantaged short cards against
+                    // taller neighbours, however central the short card was.
+                    .maxByOrNull { info ->
                         val start = info.offset.coerceAtLeast(layoutInfo.viewportStartOffset)
                         val end = (info.offset + info.size).coerceAtMost(layoutInfo.viewportEndOffset)
-                        (end - start).coerceAtLeast(0).toFloat() / viewport
+                        (end - start).coerceAtLeast(0)
                     }
-                }
-                ?.index
+                    ?.index
+            }
+            index?.let { it to animeList[it]?.value?.id }
         }
             .distinctUntilChanged()
-            // Settles the choice before acting on it rather than moving the
-            // window onto every card a fling passes over. collectLatest
-            // cancels the wait as soon as the dominant card changes again.
-            .collectLatest { index ->
-                index ?: return@collectLatest
+            // The entry id is part of the emission: replacing a feed can keep
+            // the same index while putting a different card there, and that
+            // replacement must become active instead of staying paused.
+            .collectLatest { selection ->
+                selection ?: return@collectLatest
+                val (index, animeId) = selection
                 delay(ACTIVE_CARD_SETTLE_MS)
                 activeIndex = index
-                // Resolved to an id rather than an index: a player is keyed by
-                // entry, and the list can be repaged under a bare index.
-                playback?.setActive(
-                    if (index in 0 until animeList.itemCount) animeList[index]?.value?.id else null,
-                )
+                playback?.setActive(animeId)
                 currentOnActiveIndexChange(index)
             }
     }
@@ -289,6 +300,7 @@ fun BrowseSourceScroller(
                 // now drives the player.
                 onTitleDoubleClick = onAnimeDoubleClick?.let { handler -> { handler(anime) } },
                 onFavoriteClick = onAnimeFavoriteClick?.let { handler -> { handler(anime) } },
+                feedActionSource = source as? JsProjectSource,
                 // In selection mode a clip tap selects, as in every other
                 // browse layout. Otherwise it pauses or resumes this card.
                 onClipClick = {
@@ -341,6 +353,7 @@ private fun ScrollerCard(
     onTitleClick: () -> Unit,
     onTitleDoubleClick: (() -> Unit)?,
     onFavoriteClick: (() -> Unit)?,
+    feedActionSource: JsProjectSource?,
     onClipClick: () -> Unit,
     onClipLongClick: () -> Unit,
     onClipDoubleTap: ((ScrollerPlaybackState.TapZone) -> Unit)?,
@@ -482,7 +495,7 @@ private fun ScrollerCard(
             }
         }
 
-        ScrollerCardTags(anime = anime)
+        ScrollerCardFooter(anime = anime, feedActionSource = feedActionSource)
     }
 }
 
@@ -576,31 +589,106 @@ private fun ScrollerCardHeader(
  * next card off the screen, and so every card in the feed is the same height.
  */
 @Composable
-private fun ScrollerCardTags(anime: Anime) {
-    val tags = anime.genre?.filter { it.isNotBlank() }.orEmpty()
+private fun ScrollerCardFooter(
+    anime: Anime,
+    feedActionSource: JsProjectSource?,
+) {
+    val actions = remember(anime.memo) { ScrollerFeedAction.from(anime) }
+    val like = actions.firstOrNull { it.icon == "favorite" }
+    val bookmark = actions.firstOrNull { it.icon == "bookmark" }
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = ScrollerTagsVerticalPadding)
-            .height(ScrollerTagsRowHeight),
+            .padding(vertical = ScrollerTagsVerticalPadding),
     ) {
-        if (tags.isEmpty()) return@Box
+        val tags = anime.genre?.filter { it.isNotBlank() }.orEmpty()
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(ScrollerTagGap),
             modifier = Modifier
+                .fillMaxWidth()
+                .height(32.dp)
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = ScrollerCardPadding),
         ) {
             tags.forEach { tag ->
-                // Reuses the entry screen's own chip, so a tag looks the same
-                // wherever it is shown. Not wired to anything yet: a tap here
-                // should search the source for that tag, which needs a handler
-                // threading down from the browse screen.
                 TagsChip(text = tag, onClick = {})
             }
         }
+
+        Row(
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(ScrollerTagsRowHeight)
+                .padding(horizontal = ScrollerCardPadding),
+        ) {
+            Box {
+                if (like != null && feedActionSource != null) {
+                    ScrollerFeedActionButton(anime, like, feedActionSource)
+                }
+            }
+            Box {
+                if (bookmark != null && feedActionSource != null) {
+                    ScrollerFeedActionButton(anime, bookmark, feedActionSource)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScrollerFeedActionButton(
+    anime: Anime,
+    action: ScrollerFeedAction,
+    source: JsProjectSource,
+) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var active by remember(anime.id, action.id, action.initiallyActive) {
+        mutableStateOf(action.initiallyActive)
+    }
+    var pending by remember(anime.id, action.id) { mutableStateOf(false) }
+
+    IconButton(
+        enabled = !pending,
+        onClick = {
+            pending = true
+            scope.launch {
+                try {
+                    active = source.performFeedAction(
+                        url = anime.url,
+                        action = action.id,
+                        active = active,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        context,
+                        action.label.ifBlank { "Action" } + " failed: " + e.message,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                } finally {
+                    pending = false
+                }
+            }
+        },
+    ) {
+        Icon(
+            imageVector = when (action.icon) {
+                "bookmark" -> if (active) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder
+                else -> if (active) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder
+            },
+            contentDescription = action.label,
+            tint = if (active) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
     }
 }
 
@@ -664,7 +752,7 @@ private val ScrollerTagGap = 8.dp
  * and the feed does not jump as tagged and untagged entries scroll past. It is
  * also where the action buttons are going.
  */
-private val ScrollerTagsRowHeight = 32.dp
+private val ScrollerTagsRowHeight = 48.dp
 
 private const val SelectedItemAlpha = 0.76f
 

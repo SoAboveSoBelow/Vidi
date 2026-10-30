@@ -9,6 +9,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
+import aniyomi.source.js.JsProjectSource
 import aniyomi.domain.queue.interactor.AddToQueue
 import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import aniyomi.domain.source.model.BrowseDisplayMode
@@ -134,6 +135,10 @@ class BrowseSourceViewModel(
         // runs its first page against the placeholder filters and reloads
         // once the real ones land.
         viewModelScope.launchIO {
+            // A JS project's filters live in its runtime. Registration normally
+            // warms it, but browse can win that race (or follow an edit) and
+            // otherwise cache an empty list for the lifetime of this screen.
+            if (source is JsProjectSource) source.warmUp()
             val filters = source.getFilterList()
             state.update {
                 var query: String? = null
