@@ -13,6 +13,7 @@ data class ScrollerFeedAction(
     val icon: String,
     val label: String,
     val initiallyActive: Boolean,
+    val target: String?,
 ) {
     companion object {
         fun from(anime: Anime): List<ScrollerFeedAction> {
@@ -35,6 +36,7 @@ data class ScrollerFeedAction(
                     initiallyActive = action["active"]
                         ?.let { runCatching { it.jsonPrimitive.booleanOrNull }.getOrNull() }
                         ?: false,
+                    target = action["target"]?.stringOrNull(),
                 )
             }
         }

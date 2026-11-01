@@ -10,6 +10,7 @@ import animiru.domain.download.repository.PlannedDownloadRepository
 import aniyomi.core.common.torrent.TorrentPreferences
 import aniyomi.core.common.torrent.TorrentServerApi
 import aniyomi.core.common.torrent.TorrentServerUtils
+import aniyomi.player.clip.ClipVideoResolver
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFprobeKit
@@ -662,7 +663,13 @@ class Downloader(
         tmpDir.findFile("$filename.tmp")?.delete()
 
         // Try to find the video file
-        val videoFile = tmpDir.listFiles()?.firstOrNull { it.name!!.startsWith("$filename.mkv") }
+        // AM (SEPARATE_AUDIO_DOWNLOAD): or the video of a pair, which these
+        // entries produce instead of an .mkv - without this the reuse check
+        // never recognised one and fetched it again on every pass.
+        val videoFile = tmpDir.listFiles()?.firstOrNull {
+            val name = it.name.orEmpty()
+            name.startsWith("$filename.mkv") || name == "$filename$VIDEO_SUFFIX"
+        }
 
         try {
             // If the video is already downloaded, do nothing. Otherwise download from network
@@ -938,14 +945,94 @@ class Downloader(
         // this same episode read the bytes this download is pulling instead of
         // fetching its own copy over the same connection.
         val cacheKey = MediaProxyServer.cacheKeyFor(download.episode.id, video.videoTitle)
-        val proxied = proxiedVideoUrl(video.videoUrl, headers, cacheKey)
+        // AM (CLIP_PLAYLIST): the listing's own video where it states one -
+        // see statedVideoUrl.
+        val fetchUrl = statedVideoUrl(download.anime, video) ?: video.videoUrl
+        val proxied = proxiedVideoUrl(fetchUrl, headers, cacheKey)
         // <-- AM (MEDIA_CACHE)
-        val sourceUrl = proxied?.second ?: video.videoUrl
+        val sourceUrl = proxied?.second ?: fetchUrl
         // <-- AM (PLAYBACK_OVER_DOWNLOADS)
 
         try {
-            val ffmpegOptions = getFFmpegOptions(video, headers, headerOptions, ffmpegFilename(), sourceUrl)
-            val duration = getDuration(sourceUrl, headerOptions)?.toLong() ?: 0L
+            // AM (SEPARATE_AUDIO_DOWNLOAD) -->
+            // A clip whose separate audio runs longer than its video - a Coub,
+            // and anything shaped like one - is a looping video under a full
+            // track, which is how the feed and the player both play it. Muxed
+            // into one file it became a video that froze on its last frame for
+            // the rest of the song, so the download did not keep the thing it
+            // downloaded.
+            //
+            // Stored as one ordinary file with the full audio in it, which is
+            // what makes it useful to anything else - and played by
+            // ClipPlayback, which opens that file twice so the video repeats
+            // on its own length under the track. A container cannot say "this
+            // video repeats under this audio", so the file does not try to:
+            // the thing that knows is the player.
+            val extraAudioTracks = feedAudioTracks(download.anime, video)
+            val audioTracks = video.audioTracks + extraAudioTracks
+            // The decision is the presence of a separate audio stream, not a
+            // comparison of durations. Probing both lengths over the network
+            // is two requests that can each fail, and when one did the
+            // download silently took the other path - so the same episode
+            // stored as two files or as one depending on the network, and the
+            // player then disagreed with whatever was on disk. One stream
+            // means one file; two streams mean two files.
+            val asTwoStreams = audioTracks.isNotEmpty()
+
+            // AM (DOWNLOAD_PROGRESS_BY_BYTES) -->
+            // Progress is bytes written over bytes expected, across every run
+            // this download makes.
+            //
+            // It used to be ffmpeg's output timestamp over the media's
+            // duration, which is only the same thing at a constant bitrate
+            // and is not the same thing at all once a download writes more
+            // than one file: the video's run reached the end of the video
+            // while the bar was still measuring against the audio's length,
+            // so it stopped a fraction of the way across and then jumped.
+            //
+            // The expected total is each source's own Content-Length. A
+            // source that will not state one leaves this null and the
+            // duration estimate below stands, so this is an improvement where
+            // the information exists rather than a new way to fail.
+            val videoBytes = contentLength(fetchUrl, headers)
+            val audioBytes = audioTracks.firstOrNull()?.let { contentLength(it.url, headers) } ?: 0L
+            val totalBytes = videoBytes?.let { it + audioBytes }?.takeIf { it > 0L }
+            // What the video's own run accounts for, so the audio's run can
+            // carry on from there rather than restarting the bar.
+            var videoWritten = 0L
+            // <-- AM (DOWNLOAD_PROGRESS_BY_BYTES)
+
+            val videoDuration = getDuration(sourceUrl, headerOptions)?.toDouble() ?: 0.0
+            // Measured against what this ffmpeg session actually writes: the
+            // video alone when the streams are stored apart, both when they
+            // are muxed into one file. Measuring one against the other is
+            // what made the bar stall at a few percent and then fail its own
+            // completeness check as a truncated transfer.
+            val duration = if (asTwoStreams) {
+                videoDuration.toLong()
+            } else {
+                val audioDuration = longestAudioDuration(audioTracks, headerOptions).toDouble()
+                maxOf(videoDuration, audioDuration).toLong()
+            }
+            // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
+
+            val ffmpegOptions = if (asTwoStreams) {
+                // The video alone, into the scratch file this download was
+                // given - exactly where the muxed path writes - and renamed
+                // once both streams are on disk. The audio is its own run
+                // below, into its own scratch file.
+                getStreamFFmpegOptions(headerOptions, sourceUrl, videoFile, audio = false)
+            } else {
+                getFFmpegOptions(
+                    video,
+                    headers,
+                    headerOptions,
+                    ffmpegFilename(),
+                    sourceUrl,
+                    // AM (SEPARATE_AUDIO_DOWNLOAD)
+                    extraAudioTracks = extraAudioTracks,
+                )
+            }
 
             val logCallback = LogCallback { log ->
                 if (log.level <= Level.AV_LOG_WARNING) {
@@ -961,9 +1048,15 @@ class Downloader(
             val statCallback = StatisticsCallback { s ->
                 val outTime = (s.time / 1000.0).toLong()
 
-                if (duration != 0L && outTime > 0) {
+                // AM (DOWNLOAD_PROGRESS_BY_BYTES) -->
+                val written = s.size.toLong()
+                if (written > 0L) videoWritten = written
+                if (totalBytes != null && written > 0L) {
+                    download.progress = (100 * written / totalBytes).toInt().coerceIn(0, 100)
+                } else if (duration != 0L && outTime > 0) {
                     download.progress = (100 * outTime / duration).toInt()
                 }
+                // <-- AM (DOWNLOAD_PROGRESS_BY_BYTES)
                 // AM (VERIFY_FROM_STATS_NOT_PROBE) -->
                 if (outTime > lastOutTime) lastOutTime = outTime
                 // <-- AM (VERIFY_FROM_STATS_NOT_PROBE)
@@ -1001,7 +1094,30 @@ class Downloader(
             // here puts the download through downloadVideo()'s existing retry and
             // cleanup rather than leaving a broken file that looks finished.
             verifyDownloadedDuration(lastOutTime, duration)
-            tmpDir.findFile("$filename.tmp")?.renameTo("$filename.mkv")
+            // AM (SEPARATE_AUDIO_DOWNLOAD) -->
+            if (asTwoStreams) {
+                writeSeparateAudio(
+                    download = download,
+                    tmpDir = tmpDir,
+                    filename = filename,
+                    audioTrack = audioTracks.first(),
+                    headers = headers,
+                    headerOptions = headerOptions,
+                    // AM (DOWNLOAD_PROGRESS_BY_BYTES): the bar carries on from
+                    // whatever the video's run wrote.
+                    writtenBefore = videoWritten,
+                    totalBytes = totalBytes,
+                )
+                // Both renames last, the audio's first: until the video
+                // carries its final name nothing treats this folder as a
+                // finished download, so a failure writing the audio leaves an
+                // unfinished attempt rather than a silent episode.
+                tmpDir.findFile("$filename$AUDIO_SCRATCH")?.renameTo("$filename$AUDIO_SUFFIX")
+                tmpDir.findFile("$filename.tmp")?.renameTo("$filename$VIDEO_SUFFIX")
+            } else {
+                tmpDir.findFile("$filename.tmp")?.renameTo("$filename.mkv")
+            }
+            // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
             // <-- AM (VERIFY_DOWNLOAD_COMPLETE)
         } finally {
             // AM (PLAYBACK_OVER_DOWNLOADS) -->
@@ -1080,6 +1196,8 @@ class Downloader(
         // whatever transport is actually serving those bytes.
         sourceUrl: String,
         // <-- AM (PLAYBACK_OVER_DOWNLOADS)
+        // AM (SEPARATE_AUDIO_DOWNLOAD)
+        extraAudioTracks: List<Track> = emptyList(),
     ): Array<String> {
         fun formatInputs(tracks: List<Track>) = tracks.joinToString(" ", postfix = " ") {
             buildList {
@@ -1107,7 +1225,9 @@ class Downloader(
         val subtitleMetadata = formatMetadata(subtitleTracks, "s")
 
         // AM -->
-        val audioTracks = filterTracks(video.audioTracks, headers)
+        // AM (SEPARATE_AUDIO_DOWNLOAD): plus whatever the entry itself knows
+        // about, for a video the source hands over without its audio.
+        val audioTracks = filterTracks(video.audioTracks + extraAudioTracks, headers)
         // <-- AM
         val audioInputs = formatInputs(audioTracks)
         val audioMaps = formatMaps(audioTracks, "a", subtitleTracks.size)
@@ -1161,6 +1281,189 @@ class Downloader(
         }
     }
     // <-- AM
+
+    // AM (SEPARATE_AUDIO_DOWNLOAD) -->
+    /**
+     * One stream of an entry, remuxed `-c copy` into [output].
+     *
+     * The same remux the muxed path does, writing through the same SAF
+     * parameter - the only difference is which streams are mapped and that
+     * each goes into a file of its own.
+     */
+    private fun getStreamFFmpegOptions(
+        headerOptions: String,
+        sourceUrl: String,
+        output: UniFile,
+        audio: Boolean,
+    ): Array<String> {
+        val command = listOf(
+            if (sourceUrl.startsWith("http")) headerOptions else "",
+            "-i", "\"" + sourceUrl + "\"",
+            if (audio) "-map 0:a -c:a copy -vn -sn" else "-map 0:v -c:v copy -an -sn",
+            "-f mp4 -movflags +faststart",
+            "\"" + output.toFFmpegString(context) + "\" -y",
+        )
+            .filter(String::isNotBlank)
+            .joinToString(" ")
+        return FFmpegKitConfig.parseArguments(command)
+    }
+
+    /**
+     * Fetches the audio into its own scratch file beside the video's.
+     *
+     * A scratch name, renamed by the caller once both streams are written:
+     * a file created under its final name is a file that looks like part of a
+     * finished download the moment it exists, and an attempt that failed here
+     * left exactly that - an empty audio file, one per retry, since a SAF
+     * provider gives the second one a suffixed name of its own rather than
+     * replacing the first.
+     */
+    private suspend fun writeSeparateAudio(
+        download: Download,
+        tmpDir: UniFile,
+        filename: String,
+        audioTrack: Track,
+        headers: Headers,
+        headerOptions: String,
+        // AM (DOWNLOAD_PROGRESS_BY_BYTES)
+        writtenBefore: Long,
+        totalBytes: Long?,
+    ) {
+        tmpDir.findFile(filename + AUDIO_SCRATCH)?.delete()
+        val output = tmpDir.createFile(filename + AUDIO_SCRATCH)
+            ?: throw Exception("Separate audio: could not create the scratch file")
+
+        val proxied = proxiedVideoUrl(audioTrack.url, headers, null)
+        try {
+            suspendCancellableCoroutine { continuation ->
+                val session = FFmpegKit.executeWithArgumentsAsync(
+                    getStreamFFmpegOptions(
+                        headerOptions = headerOptions,
+                        sourceUrl = proxied?.second ?: audioTrack.url,
+                        output = output,
+                        audio = true,
+                    ),
+                    {
+                        if (it.returnCode.isValueSuccess) {
+                            continuation.resume(it)
+                        } else {
+                            continuation.resumeWithException(Exception("Error in ffmpeg: " + it.output))
+                        }
+                    },
+                    { log ->
+                        if (log.level <= Level.AV_LOG_WARNING) {
+                            log.message?.let { logcat(LogPriority.ERROR) { it } }
+                        }
+                    },
+                    // AM (DOWNLOAD_PROGRESS_BY_BYTES)
+                    { stats ->
+                        val written = writtenBefore + stats.size.toLong()
+                        if (totalBytes != null && written > 0L) {
+                            download.progress = (100 * written / totalBytes).toInt().coerceIn(0, 100)
+                        }
+                    },
+                )
+                continuation.invokeOnCancellation { session.cancel() }
+            }
+        } finally {
+            proxied?.let { (key, _) -> MediaProxyServer.release(key) }
+        }
+
+        if (output.length() <= 0L) {
+            throw Exception("Separate audio: the remux produced nothing")
+        }
+    }
+
+    // AM (DOWNLOAD_PROGRESS_BY_BYTES) -->
+    /**
+     * How many bytes [url] will deliver, or null where it will not say.
+     *
+     * A one-byte range request rather than a HEAD: a CDN that answers HEAD
+     * with no length still answers a range request with a Content-Range, and
+     * the body is a byte.
+     */
+    private suspend fun contentLength(url: String, headers: Headers): Long? {
+        if (!url.startsWith("http")) return null
+        return try {
+            withIOContext {
+                val request = Request.Builder()
+                    .url(url)
+                    .headers(headers)
+                    .header("Range", "bytes=0-0")
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    response.header("Content-Range")?.substringAfter('/')?.toLongOrNull()
+                        ?: response.header("Content-Length")?.toLongOrNull()
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+    // <-- AM (DOWNLOAD_PROGRESS_BY_BYTES)
+
+    /**
+     * The entry's own separate audio, for a video that arrived without it.
+     *
+     * A listing that states its media states the audio with it (see
+     * ClipVideoResolver.statedBy, read from the browse memo, which is where the feed
+     * gets it). The episode path does not carry it: a source hands back a url
+     * per stream, so an entry whose site serves video and audio apart gives
+     * either a pre-muxed file - Coub's share file, which needs none of this -
+     * or the bare video, which downloads silent.
+     *
+     * Guarded on the urls matching. The memo describes the raw video; when
+     * the source resolved to something else it resolved to a file that
+     * carries its own audio, and attaching this would mux a second audio
+     * track over it.
+     */
+    private fun feedAudioTracks(anime: Anime, video: Video): List<Track> {
+        if (video.audioTracks.isNotEmpty()) return emptyList()
+        // AM (CLIP_PLAYLIST): through the resolver the player uses, so a
+        // download of one of these entries is the pair its listing states -
+        // not the source's pre-muxed pick, whose audio runs only as long as
+        // its video and so would download exactly the truncated track the
+        // player no longer plays.
+        val stated = ClipVideoResolver.statedBy(anime, null) ?: return emptyList()
+        val audioUrl = stated.audioUrl?.takeIf { it.isNotBlank() } ?: return emptyList()
+        return listOf(Track(audioUrl, "Audio"))
+    }
+
+    /**
+     * The video this entry's own listing states, where it states one.
+     *
+     * Same reason as above: the download should hold what the player plays.
+     */
+    private fun statedVideoUrl(anime: Anime, video: Video): String? {
+        if (video.audioTracks.isNotEmpty()) return null
+        val stated = ClipVideoResolver.statedBy(anime, null) ?: return null
+        if (stated.audioUrl.isNullOrBlank()) return null
+        return stated.url.takeIf { it != video.videoUrl }
+    }
+
+    /**
+     * The longest of [tracks], in seconds, or 0.
+     *
+     * Probed rather than assumed: whether the audio outlasts the video is the
+     * whole question, and only the files answer it. A track that cannot be
+     * probed counts as 0 and simply does not trigger the loop - the download
+     * then behaves exactly as it did before this existed.
+     */
+    private suspend fun longestAudioDuration(tracks: List<Track>, headerOptions: String): Long {
+        if (tracks.isEmpty()) return 0L
+        return tracks.maxOf { track ->
+            try {
+                getDuration(track.url, headerOptions)?.toLong() ?: 0L
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                0L
+            }
+        }
+    }
+    // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
 
     private suspend fun getDuration(videoUrl: String, headerOptions: String): Float? {
         val durationFile = context.createFileInCacheDir("ffprobe_duration.txt")
@@ -1428,6 +1731,25 @@ class Downloader(
         // <-- AM (VERIFY_DOWNLOAD_COMPLETE)
 
         const val TMP_DIR_SUFFIX = "_tmp"
+
+        // AM (SEPARATE_AUDIO_DOWNLOAD) -->
+        /**
+         * What the two files of an entry stored as separate streams are
+         * called, relative to the episode's own name.
+         *
+         * Read back by the player to recognise such an entry and find its
+         * pair, so the names live here rather than at both ends. Ordinary,
+         * well-known extensions: a SAF provider derives a document's type
+         * from the name it is CREATED with, and one it does not recognise
+         * gets the document created as "(invalid)".
+         */
+        const val VIDEO_SUFFIX = ".video.mp4"
+        const val AUDIO_SUFFIX = ".audio.m4a"
+
+        /** The audio's scratch name, before both streams are known good. */
+        const val AUDIO_SCRATCH = ".audio.tmp"
+        // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
+
         const val WARNING_NOTIF_TIMEOUT_MS = 30_000L
         const val EPISODES_PER_SOURCE_QUEUE_WARNING_THRESHOLD = 15
         private const val DOWNLOADS_QUEUED_WARNING_THRESHOLD = 30

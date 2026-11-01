@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -52,6 +53,9 @@ import aniyomi.domain.queue.interactor.TrimQueue
 import aniyomi.domain.queue.repository.QueueRepository
 import aniyomi.domain.season.model.EntrySeason
 // <-- AM (CUSTOM_EPISODE_ORDER)
+// AM (CLIP_PLAYBACK)
+import aniyomi.player.clip.ClipPlayback
+import aniyomi.player.clip.ClipVideoResolver
 import com.yubyf.truetypeparser.TTFFile
 import dev.icerock.moko.resources.StringResource
 import dev.vivvvek.seeker.Segment
@@ -97,6 +101,7 @@ import eu.kanade.tachiyomi.data.database.models.toDomainEpisode
 import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.DownloadProvider
+import eu.kanade.tachiyomi.data.download.Downloader
 import eu.kanade.domain.episode.interactor.SetSeenStatus
 import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.data.download.model.LocalSourceTarget
@@ -395,6 +400,33 @@ class PlayerViewModel(
     // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
     val player get() = _player
     val mpv get() = _player.mpv
+
+    // AM (CLIP_PLAYBACK) -->
+    /**
+     * This session's playback, as the same unit the browse feed plays entries
+     * with - see ClipPlayback, which owns the loop, the clip buffer, the
+     * separate audio stream and the gate that keeps the two in step.
+     *
+     * The video instance is this session's own, not one of its making: it is
+     * the object PlayerMediaHolder adopted and MediaSession, PIP, background
+     * playback, position tracking and cast all read. The companion audio
+     * instance is built on demand and only for an entry that has a separate
+     * stream, so an ordinary episode costs nothing.
+     *
+     * A getter over _player rather than a stored instance: the player itself
+     * can be replaced mid-session (see the reuse and reinit paths above), and
+     * a ClipPlayback holding the previous one would drive an instance nothing
+     * else is reading any more.
+     */
+    private var _clipPlayback: ClipPlayback? = null
+    private val clipPlayback: ClipPlayback
+        get() = _clipPlayback?.takeIf { it.video === _player }
+            ?: ClipPlayback(_player, audioFactory = { mpvFactory.create(videoOutput) })
+                .also {
+                    _clipPlayback?.releaseCompanion()
+                    _clipPlayback = it
+                }
+    // <-- AM (CLIP_PLAYBACK)
 
     // Prefs
     private val reduceMotion = playerPreferences.reduceMotion.get()
@@ -986,14 +1018,92 @@ class PlayerViewModel(
             propFlow<Int>("duration")
                 .filterNotNull()
                 .onEach { v ->
-                    updatePlaybackData { it.copy(duration = v) }
+                    // AM (CLIP_TIMELINE): this instance's own duration is the
+                    // video's, which for a two-stream entry is one repetition
+                    // rather than the entry - ClipPlayback says how long the
+                    // entry is, and the ticker below keeps that published.
+                    if (!clipPlayback.isSplit) updatePlaybackData { it.copy(duration = v) }
                 }
                 .launchIn(viewModelScope)
 
             propFlow<Int>("time-pos")
                 .filterNotNull()
-                .onEach { onSecondReached(it) }
+                .onEach { if (!clipPlayback.isSplit) onSecondReached(it) }
                 .launchIn(viewModelScope)
+
+            // AM (CLIP_TIMELINE) -->
+            // A two-stream entry's position cannot come from a property event
+            // on one instance: the stream the timeline follows is whichever is
+            // longer, and the other one's clock restarts every repetition. The
+            // same once-a-second cadence, read from the pair instead.
+            viewModelScope.launch {
+                while (true) {
+                    delay(1.seconds)
+                    if (!clipPlayback.isSplit) continue
+                    val total = clipPlayback.durationSeconds.toInt()
+                    if (total > 0 && total != playbackData.value.duration) {
+                        updatePlaybackData { it.copy(duration = total) }
+                    }
+                    val position = clipPlayback.positionSeconds.toInt()
+                    if (position != playbackData.value.position) onSecondReached(position)
+                }
+            }
+            // <-- AM (CLIP_TIMELINE)
+
+            // AM (PLAYING_IS_POSITION_ADVANCING) -->
+            // Whether this session is playing is one question with one answer:
+            // is the position moving.
+            //
+            // It was three mpv properties read as proxies for it, and each was
+            // wrong somewhere. `core-idle` is true whenever no new frames are
+            // being rendered, which includes a file held at its last frame by
+            // keep-open and a loop in the instant it turns over - neither of
+            // them waiting for anything. `paused-for-cache` is right when it
+            // fires but says nothing about a stall that does not reach mpv's
+            // cache logic at all, such as one instance of a pair sitting past
+            // its own end. Both also had to be special-cased per kind of
+            // entry, which is how a UI flag called loopingClip ended up
+            // deciding whether a spinner was allowed to appear.
+            //
+            // The position is the fact underneath all of them, and it is
+            // already clip-aware: for a two-stream entry it comes from
+            // ClipPlayback's combined timeline, so a repeating video under a
+            // longer audio track advances exactly as a single file does. Not
+            // moving while nothing is holding it still - not paused by the
+            // user, not finished - is what "loading" means, whatever the
+            // reason.
+            viewModelScope.launch {
+                var lastPosition = Double.NaN
+                var stillSince = 0L
+                while (true) {
+                    delay(STALL_TICK_MS)
+                    val position = currentPositionSeconds()
+                    // Standing still on purpose: paused by the user, stopped,
+                    // or played through and held at the last frame. None of
+                    // those is waiting for anything.
+                    val holding = playbackData.value.paused ||
+                        stateData.value.isStopped ||
+                        currentFileReachedEof
+                    if (position == null || holding) {
+                        lastPosition = position ?: Double.NaN
+                        stillSince = 0L
+                        if (playbackData.value.stalled) updatePlaybackData { it.copy(stalled = false) }
+                        continue
+                    }
+                    if (position != lastPosition) {
+                        lastPosition = position
+                        stillSince = 0L
+                        if (playbackData.value.stalled) updatePlaybackData { it.copy(stalled = false) }
+                        continue
+                    }
+                    if (stillSince == 0L) stillSince = SystemClock.elapsedRealtime()
+                    val stalled = SystemClock.elapsedRealtime() - stillSince >= STALL_AFTER_MS
+                    if (stalled != playbackData.value.stalled) {
+                        updatePlaybackData { it.copy(stalled = stalled) }
+                    }
+                }
+            }
+            // <-- AM (PLAYING_IS_POSITION_ADVANCING)
 
             // AM (PLAYBACK_STARVED_SIGNAL) -->
             // mpv's own buffering state, published for MediaProxyServer's throttle.
@@ -1145,6 +1255,10 @@ class PlayerViewModel(
 
     fun mpvCommand(vararg command: String) {
         mpv.command(*command)
+        // AM (CLIP_PLAYBACK): seeks reach the companion audio the same way -
+        // a separate stream is its own timeline and would otherwise run apart
+        // from the video for the rest of the entry.
+        clipPlayback.mirrorCommand(command)
     }
 
     // AM (AUDIO_BLIP_FIX) -->
@@ -4766,9 +4880,42 @@ class PlayerViewModel(
 
         updateStateData { it.copy(isStopped = false) }
         setHttpOptions(video)
-        resumePosition?.let {
+        // AM (CLIP_PLAYBACK) -->
+        // The session's playback is the same ClipPlayback the feed uses, over
+        // the instance this session already owns: the loop and its buffer, the
+        // separate audio stream where the entry has one, and the gate that
+        // keeps either from starting before both are open.
+        //
+        // prepare() runs for every file, not only looping ones - this session
+        // is reused across episodes and an ordinary episode must not inherit a
+        // loop left behind by a clip that declared one.
+        val anime = stateData.value.currentAnime
+        val statedMedia = statedStreamsFor(anime, video)
+        // Looping if the listing says so, or if this entry is a video with a
+        // separate audio stream - which is a looping clip by construction,
+        // whatever the flag says. The downloaded pair below decides the same
+        // way, off the files rather than off the listing.
+        // AM (SEPARATE_AUDIO_PLAYBACK): a video with a separate audio stream
+        // is a looping clip by construction, whether the two arrive as two
+        // urls or as two files - so the streams decide, not the listing,
+        // whose flag can be absent or overwritten.
+        val separateFiles = separateStreamFiles(video)
+        val loops = ClipPlayback.declaredLooping(anime) ||
+            statedMedia != null ||
+            separateFiles != null
+        clipPlayback.prepare(loops)
+        // <-- AM (CLIP_PLAYBACK)
+        // AM (CLIP_RESUME_FOLDS_ONTO_STREAMS) -->
+        // Not for a pair. This is a global option that the next loadfile on
+        // this instance picks up, so for a two-stream entry it put the video
+        // at a position belonging to the audio - past the short file's own
+        // end, where it renders nothing. ClipPlayback puts a pair in place
+        // itself, once both streams are open and their lengths are known.
+        val pairResumes = statedMedia != null || separateFiles != null
+        resumePosition?.takeIf { !pairResumes }?.let {
             mpvCommand("set", "start", it.toString())
         }
+        // <-- AM (CLIP_RESUME_FOLDS_ONTO_STREAMS)
 
         // We handle selecting these in the viewmodel
         val mpvOpts = listOf(
@@ -4780,13 +4927,91 @@ class PlayerViewModel(
             "$option=\"$value\""
         }
 
-        if (torrentPreferences.torrServerEnable.get() && isTorrent(video)) {
+        // AM (CLIP_PLAYBACK) -->
+        // An entry whose listing states its own streams is loaded by
+        // ClipPlayback, which is the load the feed has always used for these:
+        // both streams issued together with pause=yes, held until each has
+        // actually opened, then started as one.
+        //
+        // Not the session's own load path with pieces of that bolted on. Its
+        // path exists to turn a source's episode into a stream - hosters,
+        // quality, the http server, the cache proxy, the track selection that
+        // follows - and for an entry whose streams are already named, every
+        // one of those steps is something else happening to a clip that was
+        // ready to play. Going through them is what left the player's version
+        // of these entries different from the feed's in a different way after
+        // each fix.
+        if (statedMedia != null) {
+            val episode = stateData.value.currentEpisode
+            val episodeId = episode?.id
+            // anime_id is nullable on this model; the entry it was resolved
+            // against is the same one, so that id is the fallback.
+            val entryId = episode?.anime_id ?: anime?.id
+            if (episodeId != null && entryId != null) {
+                clipPlayback.loadPaused(
+                    key = episodeId,
+                    // Through the same cache, under the same content key the
+                    // feed uses, so the bytes it already pulled for this entry
+                    // are read rather than fetched again.
+                    url = ClipVideoResolver.cacheableUrl(
+                        context = context,
+                        retainMaxBytes = playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
+                        animeId = entryId,
+                        playable = statedMedia,
+                        owner = "player-clip-$entryId",
+                    ),
+                    audioUrl = statedMedia.audioUrl,
+                    httpHeaderFields = statedMedia.httpHeaderFields,
+                    resumeAt = resumePosition?.toDouble(),
+                    // Every call here is a deliberate load - including coming
+                    // back to the episode that was last played, whose file
+                    // this instance no longer has open.
+                    reload = true,
+                )
+                // AM (CLIP_TRACKS_ARE_SETTLED_AT_LOAD): read before settling,
+                // which consumes previousPauseState.
+                val wantsToPlay = uiData.value.previousPauseState != true
+                settleClipTracks()
+                // The load holds both streams paused by design; this is the
+                // session saying it wants them playing, and the gate decides
+                // when that actually happens.
+                if (wantsToPlay) clipPlayback.play()
+            }
+        } else if (torrentPreferences.torrServerEnable.get() && isTorrent(video)) {
+            // AM (CLIP_PLAYBACK): nothing below loads a companion, so whatever
+            // the entry before this one left running has to stop here.
+            clipPlayback.stopCompanion()
             launchIO {
                 TorrentServerService.start(context)
                 torrentLinkHandler(video.videoUrl, video.videoTitle, videoOptions)
             }
         } else {
+            // AM (CLIP_PLAYBACK)
+            clipPlayback.stopCompanion()
             launchIO {
+                // AM (SEPARATE_AUDIO_PLAYBACK) -->
+                // A downloaded pair plays the way the same two streams play
+                // when they are remote: the video repeating on its own
+                // instance under the full audio, neither cut short.
+                separateFiles?.let { (videoUri, audioUri) ->
+                    val episodeId = stateData.value.currentEpisode?.id
+                    if (episodeId != null) {
+                        clipPlayback.loadPaused(
+                            key = episodeId,
+                            url = videoUri,
+                            audioUrl = audioUri,
+                            httpHeaderFields = null,
+                            resumeAt = resumePosition?.toDouble(),
+                            reload = true,
+                        )
+                        // AM (CLIP_TRACKS_ARE_SETTLED_AT_LOAD)
+                        val wantsToPlay = uiData.value.previousPauseState != true
+                        settleClipTracks()
+                        if (wantsToPlay) clipPlayback.play()
+                        return@launchIO
+                    }
+                }
+                // <-- AM (SEPARATE_AUDIO_PLAYBACK)
                 // AM (MERGED_SOURCES) -->
                 val httpSource = stateData.value.currentEpisodeSource as? AnimeHttpSource
                 // <-- AM (MERGED_SOURCES)
@@ -4964,22 +5189,105 @@ class PlayerViewModel(
     }
 
     private fun setHttpOptions(video: Video) {
-        if (!stateData.value.isEpisodeOnline) return
-        // AM (MERGED_SOURCES) -->
-        val source = stateData.value.currentEpisodeSource as? AnimeHttpSource
-            ?: return
-        // <-- AM (MERGED_SOURCES)
-
-        val headers = (video.headers ?: source.headers)
-            .toMultimap()
-            .mapValues { it.value.firstOrNull() ?: "" }
-
-        val httpHeaderString = headers.map {
-            it.key + ": " + it.value.replace(",", "\\,")
-        }.joinToString(",")
-
+        // AM (CLIP_PLAYBACK): built by the function below, which the companion
+        // audio instance is given the same string from - a source that needs a
+        // Referer needs it on both streams or the second one fails its
+        // handshake and the entry plays silent.
+        val httpHeaderString = httpHeaderFieldsFor(video) ?: return
         mpv.setOptionString("http-header-fields", httpHeaderString)
     }
+
+    // AM (CLIP_PLAYBACK) -->
+    /** mpv's own `http-header-fields` form for [video], or null where it needs none. */
+    private fun httpHeaderFieldsFor(video: Video): String? {
+        if (!stateData.value.isEpisodeOnline) return null
+        // AM (MERGED_SOURCES) -->
+        val source = stateData.value.currentEpisodeSource as? AnimeHttpSource
+            ?: return null
+        // <-- AM (MERGED_SOURCES)
+
+        return (video.headers ?: source.headers)
+            .toMultimap()
+            .mapValues { it.value.firstOrNull() ?: "" }
+            .map { it.key + ": " + it.value.replace(",", "\\,") }
+            .joinToString(",")
+    }
+
+    // AM (SEPARATE_AUDIO_PLAYBACK) -->
+    /**
+     * A downloaded entry's two stream files, or null for an ordinary episode.
+     *
+     * Recognised by the video's own name and its pair found beside it - no
+     * probing, no reading of the entry's listing. Both of those were tried and
+     * both were wrong for the same reason: they answer from somewhere other
+     * than the thing being played, so they could disagree with what is
+     * actually on disk. The files are the statement.
+     */
+    private fun separateStreamFiles(video: Video): Pair<String, String>? {
+        if (stateData.value.isEpisodeOnline) return null
+        val uri = video.videoUrl
+        val name = runCatching { UniFile.fromUri(context, uri.toUri())?.name }.getOrNull()
+            ?: return null
+        if (!name.endsWith(Downloader.VIDEO_SUFFIX)) return null
+
+        val episode = stateData.value.currentEpisode ?: return null
+        val anime = stateData.value.currentEpisodeAnime ?: return null
+        val source = stateData.value.currentEpisodeSource ?: return null
+        val folder = downloadProvider.findEpisodeDir(
+            episode.name,
+            episode.scanlator,
+            episode.url,
+            // AM (CUSTOM_INFORMATION)
+            anime.ogTitle,
+            source,
+        ) ?: return null
+
+        val audioName = name.removeSuffix(Downloader.VIDEO_SUFFIX) + Downloader.AUDIO_SUFFIX
+        val audio = folder.findFile(audioName)?.takeIf { it.length() > 0L } ?: return null
+        return uri to audio.uri.toString()
+    }
+    // <-- AM (SEPARATE_AUDIO_PLAYBACK)
+
+    /**
+     * The entry's own separate audio stream, where this video is the bare one.
+     *
+     * A listing that states its media states the audio with it (see
+     * ScrollerFeedMedia, which is where the feed gets it). Where it does, that
+     * pair is what gets played - the video from the same listing rather than
+     * the source's muxed pick, so there is one audio stream and it is the full
+     * one. See the substitution in setVideo.
+     */
+    private fun statedStreamsFor(anime: Anime?, video: Video): ClipVideoResolver.Result.Playable? {
+        // A source that hands over its own external audio has already said
+        // what the audio is; this is for the entries where only the listing
+        // knows.
+        if (video.audioTracks.isNotEmpty()) return null
+        // AM (CLIP_PLAYLIST) -->
+        // Not for a downloaded episode. Its streams are the files in its own
+        // folder, and the listing's urls are remote - so an entry that had
+        // been downloaded was played from the network anyway, which is the one
+        // thing downloading it was for.
+        if (!stateData.value.isEpisodeOnline) return null
+        // <-- AM (CLIP_PLAYLIST)
+        val entry = anime ?: return null
+        // The streams named by an entry belong to that entry and nothing else.
+        //
+        // currentAnime is the session's, and on a switch it is not updated in
+        // the same breath as the episode: reading it unconditionally meant the
+        // outgoing entry's own video url was handed to the incoming episode's
+        // load, so skipping to the next clip played the previous one again.
+        // AM (MERGED_SOURCES): a merged parent's children own their episodes,
+        // so the owner is looked up before the parent is trusted.
+        val episode = stateData.value.currentEpisode ?: return null
+        val episodeAnimeId = episode.anime_id ?: return null
+        val owner = stateData.value.playlistOwnerByAnimeId[episodeAnimeId]
+            ?: entry.takeIf { it.id == episodeAnimeId }
+            ?: return null
+        val stated = ClipVideoResolver.statedBy(owner, stateData.value.currentEpisodeSource)
+            ?: return null
+        return stated.takeIf { !it.audioUrl.isNullOrBlank() }
+    }
+    // <-- AM (CLIP_PLAYBACK)
 
     // AM (EOF_REPLAY_NO_RELOAD) -->
     /**
@@ -5068,6 +5376,14 @@ class PlayerViewModel(
             stateData.value.currentEpisode?.let { runEpisodeCompletion(it) }
         }
         // <-- AM (COMPLETION_RUNS_ONCE)
+        // AM (CLIP_PLAYBACK) -->
+        // A looping entry does not end, so nothing here should treat it as
+        // having ended. mpv reports `eof-reached` as a loop turns over - the
+        // property flips before the repetition restarts, and with keep-open=yes
+        // it flips on every cycle - so an entry that was repeating correctly
+        // still handed the session to whatever was next on its first lap.
+        if (clipPlayback.isLooping) return
+        // <-- AM (CLIP_PLAYBACK)
         if (eofReached && uiData.value.autoPlayEnabled) {
             // AM (CUSTOM_EPISODE_ORDER) -->
             seasonBoundaryAhead()?.let { prompt ->
@@ -5318,6 +5634,19 @@ class PlayerViewModel(
 
     private fun fileLoaded() {
         if (player.isReleased) return
+
+        // AM (LOOPING_CLIP_PLAYBACK) -->
+        // The resume position is set as mpv's `start`, which is an option on
+        // the instance rather than on the file - and mpv seeks to `start` on
+        // every repetition, so a looping clip resumed part way through looped
+        // back to the resume point forever instead of to its beginning. It
+        // also outlived the file it was set for: the next load that did not
+        // set its own start inherited this one's.
+        //
+        // The load has already happened by the time this runs, so clearing it
+        // here leaves the resume intact and takes both of those with it.
+        mpv.setOptionString("start", "0")
+        // <-- AM (LOOPING_CLIP_PLAYBACK)
 
         // AM (TRACK_LIST_FILE_GENERATION) -->
         noteLoadFileSettled()
@@ -5808,6 +6137,32 @@ class PlayerViewModel(
 
     // Debounced fallback for genuinely audio-less files, set in onTracksLoaded() above.
     private var pendingNoAudioFallbackJob: Job? = null
+
+    // AM (CLIP_TRACKS_ARE_SETTLED_AT_LOAD) -->
+    /**
+     * Declares this session's track selection finished, for a load that has
+     * nothing to select.
+     *
+     * A clip's video instance carries no audio the session can choose: the
+     * sound is the companion stream ClipPlayback owns, and where the two come
+     * from one file the video copy is opened with `aid=no` on purpose. So
+     * there is no track to wait for - and waiting is what happened, because
+     * the only thing that clears isLoadingEpisode for a stream with no
+     * selectable audio is [pendingNoAudioFallbackJob]'s one-second delay. That
+     * put a loading indicator over every clip for a full second after it was
+     * already playing, which on a clip a few seconds long is most of the way
+     * through it.
+     *
+     * That fallback is right for what it was written for - a file whose audio
+     * track might still register - and this is not that case. Saying so at
+     * load time is the difference between a known answer and a timeout.
+     */
+    private fun settleClipTracks() {
+        pendingNoAudioFallbackJob?.cancel()
+        updateStateData { it.copy(hasLoadedTracks = true, hasLoadedSubs = true, hasLoadedAudio = true) }
+        checkFileLoaded()
+    }
+    // <-- AM (CLIP_TRACKS_ARE_SETTLED_AT_LOAD)
 
     private fun updateSubtitleTrackAt(index: Int, transform: (MpvVideoTrack.External) -> MpvVideoTrack.External) {
         updateStateData {
@@ -7718,13 +8073,40 @@ class PlayerViewModel(
         if (showSeekBar) showSeekBar()
     }
 
+    // AM (PLAYING_IS_POSITION_ADVANCING) -->
+    /**
+     * Where playback is, in seconds, or null when nothing is loaded.
+     *
+     * The same split the seeks below make: a two-stream entry's position is
+     * the pair's, not either instance's own clock.
+     */
+    private fun currentPositionSeconds(): Double? = if (clipPlayback.isSplit) {
+        clipPlayback.positionSeconds.toDouble().takeIf { clipPlayback.durationSeconds > 0f }
+    } else {
+        player.mpv.getPropertyDouble("time-pos")?.takeIf { it.isFinite() }
+    }
+    // <-- AM (PLAYING_IS_POSITION_ADVANCING)
+
     fun seekBy(offset: Int) {
+        // AM (CLIP_TIMELINE): two streams of different lengths have one
+        // timeline and it is not either instance's own clock - ClipPlayback
+        // owns the arithmetic, so every seek for such an entry goes through
+        // it rather than being issued at mpv directly.
+        if (clipPlayback.isSplit) {
+            clipPlayback.seekBy(offset)
+            return
+        }
         mpvCommand("seek", offset.toString(), if (smoothSeeking) "relative+exact" else "relative")
     }
 
     fun seekTo(position: Int) {
         if (position !in 0..playbackData.value.duration) return
-        mpvCommand("seek", position.toString(), if (smoothSeeking) "absolute" else "absolute+keyframes")
+        // AM (CLIP_TIMELINE)
+        if (clipPlayback.isSplit) {
+            clipPlayback.seekTo(position.toFloat())
+        } else {
+            mpvCommand("seek", position.toString(), if (smoothSeeking) "absolute" else "absolute+keyframes")
+        }
 
         // AM (PERSIST_ON_CADENCE) -->
         // A seek is the other moment the stored position becomes wrong in a way
@@ -7881,6 +8263,12 @@ class PlayerViewModel(
     // no longer does. See release()'s own doc comment for why.
     public override fun onCleared() {
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
+        // AM (CLIP_PLAYBACK) -->
+        // Only the companion: the video instance is the service-owned one and
+        // deliberately outlives this view model.
+        _clipPlayback?.releaseCompanion()
+        _clipPlayback = null
+        // <-- AM (CLIP_PLAYBACK)
         // AM (ACTIVE_EPISODE_NEVER_EVICTED) -->
         // Nothing is playing once this view model is gone, so the exemption ends
         // with it - otherwise the last episode watched would hold its bytes
@@ -7989,7 +8377,14 @@ class PlayerViewModel(
         // Durability is event-shaped, not tick-shaped. Pause, seek, episode change
         // and teardown all persist explicitly; this is only the crash backstop
         // between those moments.
-        if (position - lastPersistedPositionSeconds >= PERSIST_INTERVAL_SECONDS) {
+        // AM (PERSIST_CADENCE_IS_NOT_MONOTONIC): how far the position has moved,
+        // not how much further forward it is. A looping entry goes back to zero
+        // every lap, so a forward-only comparison was satisfied twice on the
+        // first pass and then never again: the stored value stayed at wherever
+        // that pass got to, which for a clip loop meant the entry showed no
+        // progress at all. A seek backwards had the same effect for the rest of
+        // an ordinary episode.
+        if (abs(position - lastPersistedPositionSeconds) >= PERSIST_INTERVAL_SECONDS) {
             lastPersistedPositionSeconds = position
             saveWatchingProgress(currentEpisode)
         }
@@ -9238,6 +9633,14 @@ class PlayerViewModel(
         val gestureSeekAmount: Pair<Int, Int>? = null,
         val remainingTime: Int = 0,
         val netflixTimeout: Int? = null,
+        // AM (PLAYING_IS_POSITION_ADVANCING) -->
+        /**
+         * True while this session wants to be playing and is not getting
+         * anywhere - see the watcher that sets it. The one thing the loading
+         * indicator reads.
+         */
+        val stalled: Boolean = false,
+        // <-- AM (PLAYING_IS_POSITION_ADVANCING)
     )
 
     sealed interface PlayerEvent {
@@ -9284,6 +9687,21 @@ class PlayerViewModel(
 
         // AM (PERSIST_ON_CADENCE) -->
         /** Backstop write interval between the event-driven saves. */
+        // AM (PLAYING_IS_POSITION_ADVANCING) -->
+        /** How often the position is checked for movement. */
+        private const val STALL_TICK_MS = 250L
+
+        /**
+         * How long it may stand still before that counts as loading.
+         *
+         * Longer than a frame interval and longer than a seek takes to settle,
+         * so an ordinary seek or a loop turning over never raises it; short
+         * enough that a real stall shows an indicator while the user is still
+         * wondering why nothing is happening.
+         */
+        private const val STALL_AFTER_MS = 700L
+        // <-- AM (PLAYING_IS_POSITION_ADVANCING)
+
         private const val PERSIST_INTERVAL_SECONDS = 5
         // <-- AM (PERSIST_ON_CADENCE)
 

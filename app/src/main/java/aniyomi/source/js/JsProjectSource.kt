@@ -182,13 +182,14 @@ class JsProjectSource(
      * active state. Keeping the mutation in the project means the host does not
      * need to know a site's authentication or API conventions.
      */
-    suspend fun performFeedAction(url: String, action: String, active: Boolean): Boolean {
+    suspend fun performFeedAction(url: String, action: String, active: Boolean, target: String?): Boolean {
         val payload = call(
             FEED_ACTION,
             args {
                 put("url", url)
                 put("action", action)
                 put("active", active)
+                target?.let { put("target", it) }
             },
         )
         return payload.trim().toBooleanStrict()

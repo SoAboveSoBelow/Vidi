@@ -1,5 +1,8 @@
 package aniyomi.ui.browse.scroller
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -34,6 +37,27 @@ object ScrollerSession {
 
     internal fun playback(sourceId: Long, create: () -> ScrollerPlaybackState): ScrollerPlaybackState =
         playbackStates.getOrPut(sourceId, create)
+
+    // AM (BROWSE_SCROLLER_SESSION_INVALIDATION) -->
+    /**
+     * Bumped every time [clear] throws the playback away.
+     *
+     * [clear] runs on process background, which does NOT take the browse
+     * screen's composition with it: the activity is stopped, not destroyed, so
+     * a feed left on screen comes back holding the ScrollerPlaybackState it
+     * remembered before - whose scope is cancelled, whose jobs are gone and
+     * whose mpv instances have been destroyed. Every card then draws a surface
+     * for a released player and nothing ever loads again, which is what
+     * leaving and re-entering the app on the feed looked like.
+     *
+     * Compose-observable and read by [rememberScrollerPlayback], so the
+     * invalidation reaches the compositions holding the thing being
+     * invalidated instead of leaving them pointed at it. That is the fix:
+     * nothing here tries to detect a dead state after the fact.
+     */
+    var revision by mutableIntStateOf(0)
+        private set
+    // <-- AM (BROWSE_SCROLLER_SESSION_INVALIDATION)
 
     /** Learned media aspect ratios by entry id - see [ScrollerPlaybackState.aspectRatios]. */
     val aspectRatios = mutableMapOf<Long, Float>()
@@ -92,9 +116,17 @@ object ScrollerSession {
         playbackStates.values.forEach { it.releaseAll() }
         playbackStates.clear()
         isMuted = true
-        aspectRatios.clear()
-        positions.clear()
+        // AM (BROWSE_SCROLLER_SESSION_INVALIDATION) -->
+        // Decoders and bitmaps go, measurements stay. What makes holding a
+        // backgrounded feed expensive is the mpv instances and the captured
+        // frames; a map of floats is not, and dropping it meant every card
+        // was its cover's shape again on return - so the feed redrew the
+        // initial-geometry gate and then resized under the user, for nothing.
+        // Positions stay for the same reason: they are doubles, and losing
+        // them restarts every clip the user was part way through.
+        // <-- AM (BROWSE_SCROLLER_SESSION_INVALIDATION)
         firstFrames.clear()
+        revision++
     }
 
 }

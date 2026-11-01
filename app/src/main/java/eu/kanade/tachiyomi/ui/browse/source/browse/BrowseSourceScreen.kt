@@ -57,6 +57,7 @@ import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.ui.browse.extension.details.SourcePreferencesScreen
 import eu.kanade.tachiyomi.ui.browse.migration.season.MigrateSeasonSelectScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceViewModel.Listing
+import eu.kanade.tachiyomi.ui.browse.source.globalsearch.GlobalSearchScreen
 import eu.kanade.tachiyomi.ui.category.CategoryScreen
 import eu.kanade.tachiyomi.ui.webview.WebViewScreen
 import kotlinx.coroutines.channels.Channel
@@ -270,6 +271,12 @@ data class BrowseSourceScreen(
                 // AM (BROWSE_SCROLLER)
                 selectionMode = state.selectionMode,
                 onAnimeFavoriteClick = viewModel::changeAnimeFavorite,
+                // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+                onAnimeFavoriteLongClick = { anime -> viewModel.openChangeCategoryDialog(anime) },
+                onTagSearch = viewModel::searchGenre,
+                onTagGlobalSearch = { navigator.push(GlobalSearchScreen(it)) },
+                onCreatorSearch = { navigator.push(GlobalSearchScreen(it)) },
+                // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
                 snackbarHostState = snackbarHostState,
                 contentPadding = paddingValues,
                 onWebViewClick = onWebViewClick,

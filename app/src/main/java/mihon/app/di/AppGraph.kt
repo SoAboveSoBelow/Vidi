@@ -67,9 +67,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.protobuf.ProtoBuf
 import mihon.core.metro.IsDebugBuild
 import mihon.domain.extension.interactor.GetExtensionStoreCountAsFlow
+import mihon.domain.source.interactor.UpdateAnimeFromRemote
 import tachiyomi.core.common.storage.AndroidStorageFolderProvider
 import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.episode.interactor.GetEpisode
+import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
 import tachiyomi.domain.anime.interactor.GetCustomAnimeInfo
 import tachiyomi.domain.anime.interactor.GetFavorites
 import tachiyomi.domain.anime.interactor.ResetViewerFlags
@@ -209,6 +211,11 @@ interface AppGraph : ViewModelGraph {
     val episodeLoader: EpisodeLoader
     val hosterLoader: HosterLoader
     val updateAnime: UpdateAnime
+    // AM (BROWSE_SCROLLER_OPENS_PLAYER): a card expanded to the real player
+    // needs a persisted episode for it to play, which is the one thing the
+    // feed deliberately never creates while scrolling - see ClipVideoResolver.
+    val updateAnimeFromRemote: UpdateAnimeFromRemote
+    val getEpisodesByAnimeId: GetEpisodesByAnimeId
     // <-- AM (BROWSE_SCROLLER)
     // <-- AM
 

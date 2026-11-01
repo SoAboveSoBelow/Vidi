@@ -243,8 +243,16 @@ class DownloadManager(
         val episodeDir = provider.findEpisodeDir(episode.name, episode.scanlator, episode.url, anime.ogTitle, source)
         // <-- AM (CUSTOM_INFORMATION)
         // AY -->
-        val file = episodeDir?.listFiles().orEmpty()
-            .firstOrNull { "video" in it.type.orEmpty() }
+        val files = episodeDir?.listFiles().orEmpty()
+        // AM (SEPARATE_AUDIO_DOWNLOAD) -->
+        // By name before by type. An entry stored as separate streams has its
+        // video written as the download's scratch file and renamed, and a SAF
+        // provider fixes a document's type when it is CREATED - so that file
+        // can keep application/octet-stream through the rename and never
+        // match a test for "video" in its type at all.
+        val file = files.firstOrNull { it.name.orEmpty().endsWith(Downloader.VIDEO_SUFFIX) }
+            ?: files.firstOrNull { "video" in it.type.orEmpty() }
+        // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
         // <-- AY
 
         if (file == null) {

@@ -436,8 +436,6 @@ fun PlayerScreen(
             )
         } else {
             val mpvVolume by viewModel.propFlow<Int>("volume").collectAsStateWithLifecycle()
-            val pausedForCache by viewModel.propFlow<Boolean>("paused-for-cache").collectAsStateWithLifecycle()
-            val coreIdle by viewModel.propFlow<Boolean>("core-idle").collectAsStateWithLifecycle()
             val readAhead by viewModel.propFlow<Float>("demuxer-cache-time").collectAsStateWithLifecycle()
             val remaining by viewModel.propFlow<Int>("playtime-remaining").collectAsStateWithLifecycle()
             val playbackSpeed by viewModel.propFlow<Float>("speed").collectAsStateWithLifecycle()
@@ -770,8 +768,6 @@ fun PlayerScreen(
                         onBack = handleBackPress,
                         onPlayerEvent = viewModel::handlePlayerEvent,
                         mpvVolume = mpvVolume,
-                        pausedForCache = pausedForCache,
-                        coreIdle = coreIdle,
                         readAhead = readAhead,
                         remaining = remaining,
                         playbackSpeed = playbackSpeed,

@@ -1,6 +1,7 @@
 package aniyomi.ui.browse.scroller
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -47,6 +48,18 @@ data class ScrollerFeedMedia(
     val videoUrl: String,
     val audioUrl: String?,
     val aspectRatio: Float?,
+    // AM (FEED_LOOP_PLAYBACK) -->
+    /**
+     * Whether the clip is meant to repeat rather than end.
+     *
+     * Documented in this file's own schema from the start and filled in by
+     * the sources that loop - it was simply never read. The feed loops
+     * regardless, because every card in it is held on `loop-file=inf` (see
+     * ScrollerPlayer), so nothing noticed until the same entry was opened in
+     * the real player, where a clip ran once and the queue moved on.
+     */
+    val loops: Boolean,
+    // <-- AM (FEED_LOOP_PLAYBACK)
 ) {
     companion object {
         private const val KEY = "feed"
@@ -69,6 +82,8 @@ data class ScrollerFeedMedia(
                 videoUrl = video,
                 audioUrl = feed["audio"]?.stringOrNull()?.takeIf { it.isNotBlank() },
                 aspectRatio = ratio,
+                // AM (FEED_LOOP_PLAYBACK)
+                loops = feed["loop"]?.booleanOrNull() ?: false,
             )
         }
 
@@ -80,6 +95,10 @@ data class ScrollerFeedMedia(
 
         private fun kotlinx.serialization.json.JsonElement.floatOrNull(): Float? =
             runCatching { jsonPrimitive.floatOrNull }.getOrNull()
+
+        // AM (FEED_LOOP_PLAYBACK)
+        private fun kotlinx.serialization.json.JsonElement.booleanOrNull(): Boolean? =
+            runCatching { jsonPrimitive.booleanOrNull }.getOrNull()
     }
 }
 // <-- AM (BROWSE_SCROLLER)

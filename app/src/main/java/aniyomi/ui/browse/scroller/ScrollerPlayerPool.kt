@@ -41,6 +41,15 @@ class ScrollerPlayerPool(
     private class Slot(val player: ScrollerPlayer) {
         var animeId: Long? = null
 
+        /**
+         * AM (BROWSE_SCROLLER_RETENTION): the card gave this instance back but
+         * its file is still loaded, so coming back to the card is a resume
+         * rather than a reload. A retained slot is invisible to [get] - its
+         * card must not draw a surface it no longer owns - and is reclaimed
+         * before any slot a card is actually using.
+         */
+        var retained: Boolean = false
+
         /** Bumped on every assignment, so the least recently used is findable. */
         var lastUsed: Long = 0
     }
@@ -48,15 +57,45 @@ class ScrollerPlayerPool(
     private val slots = mutableListOf<Slot>()
     private var useCounter = 0L
 
-    fun get(animeId: Long): ScrollerPlayer? = slots.firstOrNull { it.animeId == animeId }?.player
+    private fun slotFor(animeId: Long): Slot? = slots.firstOrNull { it.animeId == animeId }
+
+    fun get(animeId: Long): ScrollerPlayer? = slotFor(animeId)?.takeIf { !it.retained }?.player
+
+    // AM (BROWSE_SCROLLER_RETENTION) -->
+    /** The instance behind a retained slot, which [get] deliberately hides. */
+    fun getRetained(animeId: Long): ScrollerPlayer? = slotFor(animeId)?.takeIf { it.retained }?.player
+
+    /**
+     * Keeps [animeId]'s file loaded while no card is drawing it.
+     *
+     * Nothing is stopped: the instance stays open, paused, on the frame it
+     * reached, so the card returning to it resumes rather than reloads. The
+     * slot is still reclaimable - [acquire] takes a retained slot before it
+     * takes one from a card on screen - so a feed being scrolled is never
+     * starved by what it left behind.
+     */
+    fun retain(animeId: Long) {
+        val slot = slotFor(animeId) ?: return
+        slot.retained = true
+        slot.player.pause()
+    }
+    // <-- AM (BROWSE_SCROLLER_RETENTION)
 
     /**
      * Lends [animeId] an instance, creating one only while the pool is still
      * filling up. Beyond that the least recently used slot is reassigned,
      * which means a different file loaded into an instance that stays alive.
+     *
+     * [onEvict] names the card whose slot was taken, so the caller can drop
+     * whatever it was holding for it (its frame state, its retention timer,
+     * its cache registration). A reassignment is that card's instance ending,
+     * and the only place it can be observed.
      */
-    fun acquire(animeId: Long): ScrollerPlayer {
-        slots.firstOrNull { it.animeId == animeId }?.let { slot ->
+    fun acquire(animeId: Long, onEvict: (Long) -> Unit = {}): ScrollerPlayer {
+        slotFor(animeId)?.let { slot ->
+            // AM (BROWSE_SCROLLER_RETENTION): a retained slot is this card's
+            // own, still loaded - taking it back is the whole point.
+            slot.retained = false
             slot.lastUsed = ++useCounter
             return slot.player
         }
@@ -71,9 +110,15 @@ class ScrollerPlayerPool(
             ?: if (slots.size < CAPACITY) {
                 Slot(ScrollerPlayer(factory.create(videoOutput), factory.create(videoOutput))).also { slots += it }
             } else {
-                slots.minByOrNull { it.lastUsed }!!.also { it.player.reset() }
+                // AM (BROWSE_SCROLLER_RETENTION): retained slots first, oldest
+                // of them, and only then one a card is still using.
+                val victim = slots.filter { it.retained }.minByOrNull { it.lastUsed }
+                    ?: slots.minByOrNull { it.lastUsed }!!
+                victim.animeId?.let(onEvict)
+                victim.also { it.player.reset() }
             }
 
+        slot.retained = false
         slot.animeId = animeId
         slot.lastUsed = ++useCounter
         return slot.player
@@ -84,15 +129,24 @@ class ScrollerPlayerPool(
      * the next card that needs one.
      */
     fun release(animeId: Long) {
-        val slot = slots.firstOrNull { it.animeId == animeId } ?: return
+        val slot = slotFor(animeId) ?: return
         slot.animeId = null
+        // AM (BROWSE_SCROLLER_RETENTION)
+        slot.retained = false
         // Oldest, so a freed slot is the first one reused.
         slot.lastUsed = 0
         slot.player.reset()
     }
 
+    /**
+     * Every instance a card is currently drawing.
+     *
+     * AM (BROWSE_SCROLLER_RETENTION): retained slots are left out - they are
+     * paused and belong to no card, so play state and audio focus are not
+     * theirs to be given.
+     */
     fun forEach(action: (Long, ScrollerPlayer) -> Unit) =
-        slots.toList().forEach { slot -> slot.animeId?.let { action(it, slot.player) } }
+        slots.toList().forEach { slot -> if (!slot.retained) slot.animeId?.let { action(it, slot.player) } }
 
     fun ids(): Set<Long> = slots.mapNotNull { it.animeId }.toSet()
 

@@ -2,8 +2,8 @@ package eu.kanade.presentation.browse.components
 
 import android.widget.Toast
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -16,14 +16,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.BookmarkBorder
@@ -49,10 +47,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
@@ -63,15 +62,19 @@ import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import aniyomi.ui.browse.scroller.ScrollerPlaybackState
 import aniyomi.source.js.JsProjectSource
+import aniyomi.ui.browse.scroller.ScrollerCardControls
 import aniyomi.ui.browse.scroller.ScrollerFeedAction
+import aniyomi.ui.browse.scroller.ScrollerFullscreenPlayer
 import aniyomi.ui.browse.scroller.ScrollerPlayer
 import aniyomi.ui.browse.scroller.rememberScrollerPlayback
 import coil3.compose.AsyncImage
+import eu.kanade.presentation.anime.components.TagActionsMenu
 import eu.kanade.presentation.anime.components.TagsChip
 import eu.kanade.presentation.util.rememberResourceBitmapPainter
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
+import eu.kanade.tachiyomi.util.system.copyToClipboard
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -121,6 +124,15 @@ fun BrowseSourceScroller(
     selectionMode: Boolean = false,
     // AM (BROWSE_SCROLLER): the card's own add-to-library button.
     onAnimeFavoriteClick: ((Anime) -> Unit)? = null,
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+    /** Long-pressing that button, which opens the category dialog instead. */
+    onAnimeFavoriteLongClick: ((Anime) -> Unit)? = null,
+    /** A tag's own actions, the entry screen's: search here, or everywhere. */
+    onTagSearch: ((String) -> Unit)? = null,
+    onTagGlobalSearch: ((String) -> Unit)? = null,
+    /** The creator line, which searches the way the entry screen's does. */
+    onCreatorSearch: ((String) -> Unit)? = null,
+    // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
     onActiveIndexChange: (Int) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
@@ -258,6 +270,12 @@ fun BrowseSourceScroller(
                 // the pool reassigning it under pressure, say - the key flips
                 // and the card asks for another, rather than sitting blank
                 // because its effect already ran once and will not run again.
+                //
+                // AM (CLIP_RELOAD_ONCE): this is also the whole of the retry.
+                // A card whose file mpv reports as failed has its instance
+                // released, which flips this key, and the card asks again
+                // through exactly this call - so the retry cannot drift from
+                // the ordinary load.
                 LaunchedEffect(playback, anime.id, shouldLoad, hasPlayer) {
                     if (shouldLoad) playback.acquire(anime, source) else playback.release(anime.id)
                 }
@@ -279,19 +297,15 @@ fun BrowseSourceScroller(
                 // the card is too far away to be loaded and shows its cover.
                 player = playback?.playerFor(anime.id),
                 videoOutput = playback?.videoOutput,
-                // The surface is an opaque black rectangle until its instance
-                // has rendered something, so it stays hidden until then and
-                // the placeholder underneath shows through.
-                hasFrame = playback?.hasFrame(anime.id) == true,
-                firstFrame = playback?.let { state ->
-                    // Reading frameRevision is what subscribes this card to
-                    // new captures; the bitmaps live in a plain map.
-                    val revision = state.frameRevision
-                    state.firstFrame(anime.id).takeIf { revision >= 0 }
-                },
-                isMuted = playback?.isMuted ?: true,
-                onToggleMuted = playback?.let { { it.toggleMuted() } },
-                isActive = playback?.activeAnimeId == anime.id,
+                // AM (BROWSE_SCROLLER_CONTROLS): the card's controls, which are
+                // the player's own - mute included, so nothing sits over the
+                // clip permanently.
+                playback = playback,
+                // AM (BROWSE_SCROLLER_CONTROLS): while this card is expanded,
+                // its surface belongs to the fullscreen host and the card
+                // itself must not draw one - two views cannot hold the same
+                // SurfaceTexture.
+                isFullscreen = playback?.fullscreenAnimeId == anime.id,
                 // Width is fixed at the screen's, so this decides height.
                 aspectRatio = playback?.aspectRatios?.get(anime.id),
                 onCoverAspectRatio = { ratio -> playback?.onCoverAspectRatio(anime.id, ratio) },
@@ -300,13 +314,20 @@ fun BrowseSourceScroller(
                 // now drives the player.
                 onTitleDoubleClick = onAnimeDoubleClick?.let { handler -> { handler(anime) } },
                 onFavoriteClick = onAnimeFavoriteClick?.let { handler -> { handler(anime) } },
+                // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+                onFavoriteLongClick = onAnimeFavoriteLongClick?.let { handler -> { handler(anime) } },
+                onTagSearch = onTagSearch,
+                onTagGlobalSearch = onTagGlobalSearch,
+                onCreatorSearch = onCreatorSearch,
+                // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
                 feedActionSource = source as? JsProjectSource,
                 // In selection mode a clip tap selects, as in every other
-                // browse layout. Otherwise it pauses or resumes this card.
-                onClipClick = {
+                // browse layout - wherever it lands. Otherwise where it landed
+                // decides: see ScrollerPlaybackState.onTap.
+                onClipTap = { onPlayPauseSpot ->
                     when {
                         selectionMode -> onAnimeClick(anime)
-                        playback != null -> playback.onTap(anime.id)
+                        playback != null -> playback.onTap(anime.id, onPlayPauseSpot)
                     }
                 },
                 onClipLongClick = { onAnimeLongClick(anime) },
@@ -320,6 +341,35 @@ fun BrowseSourceScroller(
             item { BrowseSourceLoadingItem() }
         }
     }
+
+    // AM (BROWSE_SCROLLER_CONTROLS) -->
+    // Hosted by the feed rather than by the card: a card is an item in a lazy
+    // list and can be scrolled out of composition, which would take the
+    // fullscreen view down with it. The instance it draws is the card's own.
+    val fullscreenId = playback?.fullscreenAnimeId
+    if (playback != null && fullscreenId != null) {
+        val fullscreenPlayer = playback.playerFor(fullscreenId)
+        val fullscreenTitle = remember(fullscreenId, animeList.itemCount) {
+            (0 until animeList.itemCount)
+                .firstNotNullOfOrNull { animeList.peek(it)?.value?.takeIf { a -> a.id == fullscreenId } }
+                ?.title
+                .orEmpty()
+        }
+        if (fullscreenPlayer == null) {
+            // Its instance went away underneath it - there is nothing left to
+            // show at full size.
+            LaunchedEffect(fullscreenId) { playback.exitFullscreen() }
+        } else {
+            ScrollerFullscreenPlayer(
+                playback = playback,
+                player = fullscreenPlayer,
+                animeId = fullscreenId,
+                title = fullscreenTitle,
+                videoOutput = playback.videoOutput,
+            )
+        }
+    }
+    // <-- AM (BROWSE_SCROLLER_CONTROLS)
 }
 
 /**
@@ -342,19 +392,23 @@ private fun ScrollerCard(
     isSelected: Boolean,
     player: ScrollerPlayer?,
     videoOutput: String?,
-    hasFrame: Boolean,
-    /** This card's own first frame, once it has rendered one. */
-    firstFrame: ImageBitmap?,
-    isMuted: Boolean,
-    onToggleMuted: (() -> Unit)?,
-    isActive: Boolean,
+    // AM (BROWSE_SCROLLER_CONTROLS)
+    playback: ScrollerPlaybackState?,
+    isFullscreen: Boolean,
     aspectRatio: Float?,
     onCoverAspectRatio: (Float) -> Unit,
     onTitleClick: () -> Unit,
     onTitleDoubleClick: (() -> Unit)?,
     onFavoriteClick: (() -> Unit)?,
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+    onFavoriteLongClick: (() -> Unit)?,
+    onTagSearch: ((String) -> Unit)?,
+    onTagGlobalSearch: ((String) -> Unit)?,
+    onCreatorSearch: ((String) -> Unit)?,
+    // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
     feedActionSource: JsProjectSource?,
-    onClipClick: () -> Unit,
+    /** True when the tap landed where the play/pause button sits. */
+    onClipTap: (Boolean) -> Unit,
     onClipLongClick: () -> Unit,
     onClipDoubleTap: ((ScrollerPlaybackState.TapZone) -> Unit)?,
 ) {
@@ -366,6 +420,9 @@ private fun ScrollerCard(
             onTitleClick = onTitleClick,
             onTitleDoubleClick = onTitleDoubleClick,
             onFavoriteClick = onFavoriteClick,
+            // AM (BROWSE_SCROLLER_CARD_ACTIONS)
+            onFavoriteLongClick = onFavoriteLongClick,
+            onCreatorSearch = onCreatorSearch,
         )
 
         Box(
@@ -388,28 +445,27 @@ private fun ScrollerCard(
                 )
                 .clip(RoundedCornerShape(ScrollerClipCorner))
                 .background(ScrollerDeadSpaceColor)
-                // Not combinedClickable: a double tap here has to know WHERE
-                // it landed, which that gives no way to see. Thirds, the same
-                // zones the real player's double-tap gestures use.
-                .pointerInput(onClipDoubleTap, onClipClick, onClipLongClick) {
+                // Not combinedClickable: a tap here has to know WHERE it
+                // landed, which that gives no way to see. A double tap is
+                // dispatched by thirds, the same zones the real player's own
+                // double-tap gestures use; a single tap only asks whether it
+                // landed on the play/pause button's own spot.
+                .pointerInput(onClipDoubleTap, onClipTap, onClipLongClick) {
                     detectTapGestures(
-                        onTap = { onClipClick() },
+                        onTap = { offset ->
+                            onClipTap(isOnPlayPauseSpot(offset, size.width, size.height))
+                        },
                         onLongPress = { onClipLongClick() },
                         onDoubleTap = { offset ->
                             val handler = onClipDoubleTap ?: return@detectTapGestures
-                            val third = size.width / 3f
-                            handler(
-                                when {
-                                    offset.x < third -> ScrollerPlaybackState.TapZone.Left
-                                    offset.x > third * 2f -> ScrollerPlaybackState.TapZone.Right
-                                    else -> ScrollerPlaybackState.TapZone.Center
-                                },
-                            )
+                            handler(tapZoneAt(offset.x, size.width))
                         },
                     )
                 },
         ) {
-            if (player != null && videoOutput != null) {
+            // AM (BROWSE_SCROLLER_CONTROLS): not while this card is expanded -
+            // the fullscreen host is drawing this instance.
+            if (player != null && videoOutput != null && !isFullscreen) {
                 MpvSurface(
                     player = player.player,
                     videoOutput = videoOutput,
@@ -432,70 +488,61 @@ private fun ScrollerCard(
             // and stayed there for as long as the card was playing. Over the
             // surface, and simply not emitted once there is a frame, there is
             // nothing left to show through.
+            // AM (BROWSE_SCROLLER_NO_FLASH) -->
+            // Only for a card too far away to be loaded at all. A card in the
+            // load window shows black until its own video is there.
             //
-            // A card's own first frame where it has one, because that is where
-            // its video begins and makes arriving at it seamless; its cover
-            // otherwise.
-            if (!hasFrame) {
-                if (firstFrame != null) {
-                    Image(
-                        bitmap = firstFrame,
-                        contentDescription = anime.title,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .alpha(if (isSelected) SelectedItemAlpha else 1f),
-                    )
-                } else {
-                    AsyncImage(
-                        model = AnimeCover(
-                            animeId = anime.id,
-                            sourceId = anime.source,
-                            isAnimeFavorite = anime.favorite,
-                            url = anime.thumbnailUrl,
-                            lastModified = anime.coverLastModified,
-                        ),
-                        placeholder = ColorPainter(ScrollerPlaceholderColor),
-                        error = rememberResourceBitmapPainter(id = R.drawable.cover_error),
-                        contentDescription = anime.title,
-                        // Fit, not Crop: the dead space inside the box is the honest
-                        // result for content that is not this shape, and cropping a
-                        // portrait cover into a landscape box throws most of it away.
-                        contentScale = ContentScale.Fit,
-                        onSuccess = { state ->
-                            val image = state.result.image
-                            if (image.height > 0) {
-                                onCoverAspectRatio(image.width.toFloat() / image.height.toFloat())
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .alpha(if (isSelected) SelectedItemAlpha else 1f),
-                    )
-                }
-            }
-            if (onToggleMuted != null && isActive) {
-                IconButton(
-                    onClick = onToggleMuted,
+            // It used to show its cover, then its captured first frame, then
+            // the video - which on a fast scroll is three different images in
+            // quick succession per card, the grey placeholder behind a cover
+            // still loading among them. Black and then the video is one
+            // change instead of four.
+            if (player == null) {
+            // <-- AM (BROWSE_SCROLLER_NO_FLASH)
+                AsyncImage(
+                    model = AnimeCover(
+                        animeId = anime.id,
+                        sourceId = anime.source,
+                        isAnimeFavorite = anime.favorite,
+                        url = anime.thumbnailUrl,
+                        lastModified = anime.coverLastModified,
+                    ),
+                    placeholder = ColorPainter(ScrollerPlaceholderColor),
+                    error = rememberResourceBitmapPainter(id = R.drawable.cover_error),
+                    contentDescription = anime.title,
+                    // Fit, not Crop: the dead space inside the box is the honest
+                    // result for content that is not this shape, and cropping a
+                    // portrait cover into a landscape box throws most of it away.
+                    contentScale = ContentScale.Fit,
+                    onSuccess = { state ->
+                        val image = state.result.image
+                        if (image.height > 0) {
+                            onCoverAspectRatio(image.width.toFloat() / image.height.toFloat())
+                        }
+                    },
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(ScrollerSoundButtonPadding),
-                ) {
-                    Icon(
-                        imageVector = if (isMuted) {
-                            Icons.AutoMirrored.Filled.VolumeOff
-                        } else {
-                            Icons.AutoMirrored.Filled.VolumeUp
-                        },
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(ScrollerSoundIconSize),
-                    )
-                }
+                        .fillMaxSize()
+                        .alpha(if (isSelected) SelectedItemAlpha else 1f),
+                )
+            }
+            // AM (BROWSE_SCROLLER_CONTROLS): raised by a tap on the clip, and
+            // only on a card that has an instance to control.
+            if (playback != null && player != null && !isFullscreen) {
+                ScrollerCardControls(
+                    playback = playback,
+                    animeId = anime.id,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
 
-        ScrollerCardFooter(anime = anime, feedActionSource = feedActionSource)
+        ScrollerCardFooter(
+            anime = anime,
+            feedActionSource = feedActionSource,
+            // AM (BROWSE_SCROLLER_CARD_ACTIONS)
+            onTagSearch = onTagSearch,
+            onTagGlobalSearch = onTagGlobalSearch,
+        )
     }
 }
 
@@ -512,7 +559,11 @@ private fun ScrollerCardHeader(
     onTitleClick: () -> Unit,
     onTitleDoubleClick: (() -> Unit)?,
     onFavoriteClick: (() -> Unit)?,
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS)
+    onFavoriteLongClick: (() -> Unit)?,
+    onCreatorSearch: ((String) -> Unit)?,
 ) {
+    val context = LocalContext.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(ScrollerHeaderGap),
@@ -538,6 +589,17 @@ private fun ScrollerCardHeader(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    // AM (BROWSE_SCROLLER_CARD_ACTIONS): the entry screen's
+                    // own author behaviour - a tap searches everywhere for
+                    // them, a long press copies the name.
+                    modifier = if (onCreatorSearch == null) {
+                        Modifier
+                    } else {
+                        Modifier.combinedClickable(
+                            onClick = { onCreatorSearch(creator) },
+                            onLongClick = { context.copyToClipboard(creator, creator) },
+                        )
+                    },
                 )
             }
 
@@ -564,7 +626,18 @@ private fun ScrollerCardHeader(
         InMergeBadge(enabled = !anime.favorite && inMerge)
 
         if (onFavoriteClick != null) {
-            IconButton(onClick = onFavoriteClick) {
+            // AM (BROWSE_SCROLLER_CARD_ACTIONS): long press opens the category
+            // dialog, the same one the selection bar's action opens - a tap
+            // still adds or removes outright.
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .combinedClickable(
+                        onClick = onFavoriteClick,
+                        onLongClick = onFavoriteLongClick ?: onFavoriteClick,
+                    )
+                    .padding(ScrollerFavoriteButtonPadding),
+            ) {
                 Icon(
                     imageVector = if (anime.favorite) {
                         Icons.Filled.Favorite
@@ -592,6 +665,9 @@ private fun ScrollerCardHeader(
 private fun ScrollerCardFooter(
     anime: Anime,
     feedActionSource: JsProjectSource?,
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS)
+    onTagSearch: ((String) -> Unit)?,
+    onTagGlobalSearch: ((String) -> Unit)?,
 ) {
     val actions = remember(anime.memo) { ScrollerFeedAction.from(anime) }
     val like = actions.firstOrNull { it.icon == "favorite" }
@@ -603,19 +679,53 @@ private fun ScrollerCardFooter(
             .padding(vertical = ScrollerTagsVerticalPadding),
     ) {
         val tags = anime.genre?.filter { it.isNotBlank() }.orEmpty()
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(ScrollerTagGap),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(32.dp)
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = ScrollerCardPadding),
-        ) {
-            tags.forEach { tag ->
-                TagsChip(text = tag, onClick = {})
+        // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+        // The entry screen's own tag menu, not a feed copy of it: tapping a
+        // tag here offers exactly what tapping it in the entry offers, minus
+        // the playlist search, which needs an episode list a feed card has
+        // not got.
+        val context = LocalContext.current
+        var tagMenuShown by remember { mutableStateOf(false) }
+        var tagSelected by remember { mutableStateOf("") }
+        val tagsActionable = onTagSearch != null || onTagGlobalSearch != null
+        // Boxed with the chips, as the entry screen boxes it with its own:
+        // a DropdownMenu anchors to its parent, and anchored to the whole
+        // footer it would open away from the tag that was tapped.
+        Box {
+            if (tagsActionable) {
+                TagActionsMenu(
+                    expanded = tagMenuShown,
+                    canSearchPlaylist = false,
+                    onDismissRequest = { tagMenuShown = false },
+                    onSearch = { onTagSearch?.invoke(tagSelected) },
+                    onGlobalSearch = { onTagGlobalSearch?.invoke(tagSelected) },
+                    onEpisodeSearch = {},
+                    onCopyToClipboard = { context.copyToClipboard(tagSelected, tagSelected) },
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(ScrollerTagGap),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(32.dp)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = ScrollerCardPadding),
+            ) {
+                tags.forEach { tag ->
+                    TagsChip(
+                        text = tag,
+                        onClick = {
+                            if (tagsActionable) {
+                                tagSelected = tag
+                                tagMenuShown = true
+                            }
+                        },
+                    )
+                }
             }
         }
+        // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
 
         Row(
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -662,6 +772,7 @@ private fun ScrollerFeedActionButton(
                         url = anime.url,
                         action = action.id,
                         active = active,
+                        target = action.target,
                     )
                 } catch (e: CancellationException) {
                     throw e
@@ -689,6 +800,39 @@ private fun ScrollerFeedActionButton(
                 MaterialTheme.colorScheme.onSurfaceVariant
             },
         )
+    }
+}
+
+/**
+ * Whether [offset] landed on the play/pause button's own spot - the middle of
+ * the clip, within [ScrollerPlayPauseSpotRadius] of it.
+ *
+ * AM (BROWSE_SCROLLER_CONTROLS): the single tap used to pause anywhere in the
+ * middle third, which took the whole band across the card with it - including
+ * the seekbar's own height, where a tap is someone wanting to see where they
+ * are rather than to stop the clip. A radius around where the button actually
+ * sits is the smallest region that still makes pausing a one-tap gesture.
+ *
+ * In pixels against the card's own size, because this is answering a question
+ * about a touch on that card rather than laying anything out.
+ */
+private fun PointerInputScope.isOnPlayPauseSpot(offset: Offset, width: Int, height: Int): Boolean {
+    val radius = ScrollerPlayPauseSpotRadius.toPx()
+    val dx = offset.x - width / 2f
+    val dy = offset.y - height / 2f
+    return dx * dx + dy * dy <= radius * radius
+}
+
+/**
+ * Which third of a card's clip [x] fell in, the same split the real player's
+ * double-tap gestures use.
+ */
+private fun tapZoneAt(x: Float, width: Int): ScrollerPlaybackState.TapZone {
+    val third = width / 3f
+    return when {
+        x < third -> ScrollerPlaybackState.TapZone.Left
+        x > third * 2f -> ScrollerPlaybackState.TapZone.Right
+        else -> ScrollerPlaybackState.TapZone.Center
     }
 }
 
@@ -733,6 +877,16 @@ private const val INITIAL_GEOMETRY_POLL_MS = 50L
  */
 private const val INITIAL_GEOMETRY_TIMEOUT_MS = 2_500L
 
+/**
+ * How far from the middle of a card a tap still counts as the play/pause
+ * button's.
+ *
+ * Comfortably larger than the 96.dp button the controls draw there, so the
+ * gesture does not demand precision, and far short of the seekbar along the
+ * bottom or the sound button in the corner.
+ */
+private val ScrollerPlayPauseSpotRadius = 72.dp
+
 /** The dead space between cards. */
 private val ScrollerCardSpacing = 24.dp
 
@@ -742,8 +896,10 @@ private val ScrollerHeaderBottomPadding = 12.dp
 private val ScrollerHeaderGap = 12.dp
 private val ScrollerCreatorGap = 2.dp
 private val ScrollerClipCorner = 12.dp
-private val ScrollerSoundButtonPadding = 6.dp
-private val ScrollerSoundIconSize = 22.dp
+// AM (BROWSE_SCROLLER_CARD_ACTIONS): the add-to-library button is a Box with
+// its own clickable now rather than an IconButton, so its touch target is
+// padded here instead of by IconButton's own minimum size.
+private val ScrollerFavoriteButtonPadding = 12.dp
 private val ScrollerTagsVerticalPadding = 12.dp
 private val ScrollerTagGap = 8.dp
 

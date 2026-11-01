@@ -74,6 +74,15 @@ fun BrowseSourceContent(
     // AM (BROWSE_SCROLLER): used only by the scroller, whose cards carry their
     // own add-to-library button.
     onAnimeFavoriteClick: ((Anime) -> Unit)? = null,
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS): the scroller's card actions - the
+    // category dialog behind a long press on its add-to-library button, and
+    // the entry screen's tag and creator searches on its header and footer.
+    // Used by no other layout, and null on the screens that pick a migration
+    // target, where none of the three has anywhere to go.
+    onAnimeFavoriteLongClick: ((Anime) -> Unit)? = null,
+    onTagSearch: ((String) -> Unit)? = null,
+    onTagGlobalSearch: ((String) -> Unit)? = null,
+    onCreatorSearch: ((String) -> Unit)? = null,
     // AM (BROWSE_SCROLLER): the settled item in the scroller layout, for
     // whoever wants to act on it. Ignored by every other layout.
     onActiveIndexChange: (Int) -> Unit = {},
@@ -170,6 +179,12 @@ fun BrowseSourceContent(
             selection = selection,
             selectionMode = selectionMode,
             onAnimeFavoriteClick = onAnimeFavoriteClick,
+            // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+            onAnimeFavoriteLongClick = onAnimeFavoriteLongClick,
+            onTagSearch = onTagSearch,
+            onTagGlobalSearch = onTagGlobalSearch,
+            onCreatorSearch = onCreatorSearch,
+            // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
             onActiveIndexChange = onActiveIndexChange,
         )
         return

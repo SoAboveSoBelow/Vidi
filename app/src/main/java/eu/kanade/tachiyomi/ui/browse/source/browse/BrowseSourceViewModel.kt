@@ -508,30 +508,48 @@ class BrowseSourceViewModel(
                 clearSelection()
                 return@launchIO
             }
-
-            val single = animeList.singleOrNull()
-            if (single != null && !single.favorite) {
-                val duplicates = getDuplicateLibraryAnime(single)
-                if (duplicates.isNotEmpty()) {
-                    clearSelection()
-                    setDialog(Dialog.AddDuplicateAnime(single, duplicates))
-                    return@launchIO
-                }
-            }
-
-            // No categories to show means no dialog to show them in, so this
-            // falls back to the per-entry add the long-press always used.
-            val categories = getCategories()
-            if (categories.isEmpty()) {
-                clearSelection()
-                animeList.filterNot { it.favorite }.forEach { addFavorite(it) }
-                return@launchIO
-            }
-
-            val preselected = getCategorySelection.await(animeList.map { it.id }, categories)
-            clearSelection()
-            setDialog(Dialog.ChangeAnimeCategory(animeList, preselected))
+            showCategoryDialog(animeList)
         }
+    }
+
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+    /**
+     * The same dialog for one entry that was never selected - the scroller
+     * card's add-to-library button under a long press.
+     *
+     * Shares the selection's own path rather than adding a second one, so the
+     * duplicate check and the empty-categories fallback stay identical
+     * whichever gesture asked for it - including clearing the selection on
+     * the way, which a long press in the feed has nothing to clear.
+     */
+    fun openChangeCategoryDialog(anime: Anime) {
+        viewModelScope.launchIO { showCategoryDialog(listOf(anime)) }
+    }
+    // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
+
+    private suspend fun showCategoryDialog(animeList: List<Anime>) {
+        val single = animeList.singleOrNull()
+        if (single != null && !single.favorite) {
+            val duplicates = getDuplicateLibraryAnime(single)
+            if (duplicates.isNotEmpty()) {
+                clearSelection()
+                setDialog(Dialog.AddDuplicateAnime(single, duplicates))
+                return
+            }
+        }
+
+        // No categories to show means no dialog to show them in, so this
+        // falls back to the per-entry add the long-press always used.
+        val categories = getCategories()
+        if (categories.isEmpty()) {
+            clearSelection()
+            animeList.filterNot { it.favorite }.forEach { addFavorite(it) }
+            return
+        }
+
+        val preselected = getCategorySelection.await(animeList.map { it.id }, categories)
+        clearSelection()
+        setDialog(Dialog.ChangeAnimeCategory(animeList, preselected))
     }
 
     /**
