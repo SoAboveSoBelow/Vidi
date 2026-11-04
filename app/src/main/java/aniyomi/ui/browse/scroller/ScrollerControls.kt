@@ -143,16 +143,16 @@ fun ScrollerCardControls(
                     .fillMaxWidth(),
             ) {
                 AnimatedVisibility(
-                    // Muted: on the card being looked at, as it has always
-                    // been - it is that card's sound the button turns on, and
-                    // one per visible card would be three of them. Unmuted:
-                    // only with the controls.
-                    visible = visible || (playback.isMuted && playback.activeAnimeId == animeId),
+                    // A muted card always offers its sound button. In
+                    // particular, do not depend on activeAnimeId: process
+                    // recreation clears it before the viewport reports again,
+                    // which used to remove the only direct way back to sound.
+                    visible = visible || playback.isMuted,
                     enter = fadeIn(),
                     exit = fadeOut(),
                 ) {
                     IconButton(
-                        onClick = { playback.toggleMuted() },
+                        onClick = { playback.toggleMuted(animeId) },
                         modifier = Modifier.padding(ScrollerSoundButtonPadding),
                     ) {
                         Icon(

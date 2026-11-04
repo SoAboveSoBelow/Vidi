@@ -162,6 +162,11 @@ object MediaProxyServer {
         upstreams.remove(key)
     }
 
+    /** Drops a consumer's live mapping only after its player can no longer reopen it. */
+    @Synchronized
+    fun releaseOwner(owner: String) {
+        owners.remove(owner)?.let { upstreams.remove(it) }
+    }
     /**
      * The shared client with its call timeout removed.
      *

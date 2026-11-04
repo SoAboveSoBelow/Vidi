@@ -629,6 +629,20 @@ fun PlayerScreen(
                             translationY = viewModel.layerPanY * windowHeightPx
                         },
                 ) {
+                    val qualitySwitch by viewModel.qualitySwitch.collectAsStateWithLifecycle()
+                    qualitySwitch?.let { pending ->
+                        key(pending.player) {
+                            MpvSurface(
+                                modifier = Modifier.requiredSize(1.dp),
+                                player = pending.player,
+                                videoOutput = viewModel.videoOutput,
+                                onSurfaceAttachedChanged = { attached ->
+                                    pending.clipPlayback.onSurfaceAttachedChanged(attached)
+                                    pending.surfaceAttached.value = attached
+                                },
+                            )
+                        }
+                    }
                     key(viewModel.mpv) {
                         MpvSurface(
                             modifier = Modifier.fillMaxSize(),

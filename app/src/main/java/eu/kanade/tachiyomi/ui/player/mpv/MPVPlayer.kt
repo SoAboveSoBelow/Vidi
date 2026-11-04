@@ -41,7 +41,7 @@ import logcat.logcat
 class MPVPlayer(
     @Assisted videoOutput: String,
     context: Context,
-    playerPreferences: PlayerPreferences,
+    private val playerPreferences: PlayerPreferences,
     decoderPreferences: DecoderPreferences,
     networkPreferences: NetworkPreferences,
     advancedPreferences: AdvancedPlayerPreferences,
@@ -135,6 +135,37 @@ class MPVPlayer(
     )
     val eventFlow = _eventFlow.asSharedFlow()
 
+    private val optionNameRegex = Regex("""^(?:--)?([\w-]+)(?:=|$)""", RegexOption.MULTILINE)
+    private var mpvOptionNames = emptySet<String>()
+
+    /** Set an option unless the user's mpv.conf explicitly owns it. */
+    private fun setSafeOptionString(name: String, value: String) {
+        if (name in mpvOptionNames) return
+        mpv.setOptionString(name, value)
+    }
+
+    /**
+     * Applies the feed's cache policy to both preload and playback. Cache
+     * duration and byte limits must change together: setting only readahead
+     * leaves mpv's real cache governed by its previous duration limit.
+     */
+    fun setScrollerCache(preloading: Boolean) {
+        setSafeOptionString("cache", "yes")
+        setSafeOptionString("cache-pause", "yes")
+        setSafeOptionString("cache-pause-initial", "yes")
+        if (preloading) {
+            setSafeOptionString("cache-secs", "2")
+            setSafeOptionString("demuxer-max-bytes", "8MiB")
+            setSafeOptionString("demuxer-max-back-bytes", "8MiB")
+            setSafeOptionString("demuxer-readahead-secs", "2")
+        } else {
+            setSafeOptionString("cache-secs", playerPreferences.networkBufferSeconds.get().toString())
+            setSafeOptionString("demuxer-max-bytes", "64MiB")
+            setSafeOptionString("demuxer-max-back-bytes", "64MiB")
+            setSafeOptionString("demuxer-readahead-secs", "20")
+        }
+    }
+
     init {
         val cachePath: String = context.cacheDir.path
 
@@ -153,16 +184,9 @@ class MPVPlayer(
             it.setOptionString("keep-open", "yes")
         }
 
-        val optionNameRegex = Regex("""^(?:--)?([\w-]+)(?:=|$)""", RegexOption.MULTILINE)
-        val mpvOptionNames = optionNameRegex.findAll(advancedPreferences.mpvConf.get()).map {
+        mpvOptionNames = optionNameRegex.findAll(advancedPreferences.mpvConf.get()).map {
             it.groupValues[1].removePrefix("no-")
         }.toSet()
-
-        // Set mpv option unless it's present in mpv.conf
-        fun setSafeOptionString(name: String, value: String) {
-            if (name in mpvOptionNames) return
-            mpv.setOptionString(name, value)
-        }
 
         mpv.setOptionString("vo", videoOutput)
         setSafeOptionString("profile", "fast")
@@ -213,6 +237,14 @@ class MPVPlayer(
         // 17 Mbps, which is the intended trade on a phone - RAM is the scarcer
         // resource, and mpv's cache is in memory unless cache-on-disk is set.
         // <-- AM (NETWORK_BUFFER_SECONDS)
+        // cache=auto is only a heuristic. A proxied stream can miss it, which
+        // silently disables cache-secs and cache-pause as well: the UI then
+        // reports demuxer readahead that is not the configured playback cache.
+        // Enable the real cache explicitly so its duration, underrun handling
+        // and rebuffer threshold all apply to the same playback path.
+        setSafeOptionString("cache", "yes")
+        setSafeOptionString("cache-pause", "yes")
+        setSafeOptionString("cache-pause-initial", "yes")
         val cacheMegs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) 64 else 32
         setSafeOptionString("demuxer-max-bytes", "${cacheMegs * 1024 * 1024}")
         setSafeOptionString("demuxer-max-back-bytes", "${cacheMegs * 1024 * 1024}")
@@ -335,6 +367,10 @@ class MPVPlayer(
         // perceptible added latency on seeks/track switches.
         mpv.setOptionString("audio-buffer", "1.0")
         // <-- AM (AUDIO_UNDERRUN_ON_VO_RECONFIG_FIX)
+        // Keep the audio stream open while a seek drains and refills it. Without
+        // this, Android can close and reopen the output, producing a physical
+        // connect/disconnect click rather than a discontinuity in the content.
+        mpv.setOptionString("audio-stream-silence", "yes")
 
         audioPreferences.audioChannels.get().let {
             mpv.setPropertyString(it.property, it.value)
@@ -364,7 +400,7 @@ class MPVPlayer(
      * already-canonical player from a prior session already holds focus from when
      * it was originally constructed and never needs to re-request it.
      */
-    fun requestAudioFocus() {
+    fun requestAudioFocus(): Boolean {
         val request = AudioFocusRequestCompat.Builder(AudioManagerCompat.AUDIOFOCUS_GAIN).also {
             it.setAudioAttributes(
                 AudioAttributesCompat.Builder().setUsage(AudioAttributesCompat.USAGE_MEDIA)
@@ -372,10 +408,10 @@ class MPVPlayer(
             )
             it.setOnAudioFocusChangeListener(this)
         }.build()
-        AudioManagerCompat.requestAudioFocus(audioManager, request).let {
-            if (it == AudioManager.AUDIOFOCUS_REQUEST_FAILED) return@let
-            audioFocusRequest = request
-        }
+        val result = AudioManagerCompat.requestAudioFocus(audioManager, request)
+        if (result == AudioManager.AUDIOFOCUS_REQUEST_FAILED) return false
+        audioFocusRequest = request
+        return true
     }
     // <-- AM (AUDIO_FOCUS_ORPHAN_FIX)
 

@@ -901,13 +901,6 @@ fun DummyPipContainer(
             return minOf(maxW, maxH)
         }
 
-        // Coerced to the fit so EVERY consumer (settle/stash/toggle dock
-        // math, the layout below) sees a size that can't clip, even in the
-        // frames between a rotation and the sizeScale re-commit in the
-        // rotation effect further down.
-        fun windowWidthPx() = minOf(currentBaseWidth.value * sizeScale, maxWindowWidthPx())
-        fun windowHeightPx() = windowWidthPx() / currentAspect.value
-
         // AOSP PipBoundsAlgorithm.getSizeForAspectRatio(): within the
         // aspect limits the window keeps a constant DIAGONAL (radius =
         // hypot(limit*minEdge, minEdge)); beyond them the SHORT edge is
@@ -932,6 +925,16 @@ fun DummyPipContainer(
 
         fun minWindowWidthPx(): Float = sizeWidthForAspect(currentMinEdge.value)
         // <-- AM (DUMMY_PIP_REVEAL_TARGET_ASPECT_FIX)
+
+        // Coerced to the fit so EVERY consumer (settle/stash/toggle dock
+        // math, the layout below) sees a size that can't clip, even in the
+        // frames between a rotation and the sizeScale re-commit in the
+        // rotation effect further down.
+        fun windowWidthPx() = minOf(
+            maxOf(currentBaseWidth.value * sizeScale, minWindowWidthPx()),
+            maxWindowWidthPx(),
+        )
+        fun windowHeightPx() = windowWidthPx() / currentAspect.value
 
         // AM (DUMMY_PIP_REVEAL_TARGET_SHORT_EDGE_FIX) -->
         // The paint-time multiplier the controls reveal grows the window
@@ -1671,13 +1674,9 @@ fun DummyPipContainer(
         // mechanism existed.
         // <-- AM (DUMMY_PIP_PRESCALED_CORNERS)
 
-        // AM (DUMMY_PIP_CONTROLS_AFTER_GROW_FIX) -->
-        // Real PiP's controls don't slide around mid-growth: they appear
-        // only once the reveal-grow has FULLY expanded the window. Gate
-        // both the visuals and the hit-testing on the animation having
-        // settled at its target.
+        // Controls remain settled-gated: while reveal-grow is running their
+        // hit zones would otherwise move under the finger.
         val controlsSettled = abs(controlsRevealScale - revealScaleTarget) < 0.01f
-        // <-- AM (DUMMY_PIP_CONTROLS_AFTER_GROW_FIX)
 
         // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
         // Publishes the window's resting rect for real PiP's source-rect hint - see

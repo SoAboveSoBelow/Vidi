@@ -170,6 +170,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
@@ -401,6 +402,33 @@ class PlayerViewModel(
     val player get() = _player
     val mpv get() = _player.mpv
 
+    // AM (SEAMLESS_QUALITY_SWITCH) -->
+    inner class QualitySwitch(
+        val player: MPVPlayer,
+        val video: Video,
+        val episodeId: Long?,
+        var syncPosition: Double,
+        val previousQualityIndex: Pair<Int, Int>,
+        val previousVideo: Video?,
+    ) {
+        val surfaceAttached = MutableStateFlow(false)
+        val clipPlayback = ClipPlayback(
+            video = player,
+            audioFactory = { mpvFactory.create(videoOutput) },
+            onEntryEnded = { eofReached(true, combinedTimelineEnded = true) },
+        )
+        var attempts = 0
+        var fileLoaded = false
+    }
+
+    private val _qualitySwitch = MutableStateFlow<QualitySwitch?>(null)
+    val qualitySwitch = _qualitySwitch.asStateFlow()
+    private var qualitySwitchJob: Job? = null
+
+    private fun qualityProxyOwner(player: MPVPlayer): String =
+        "player-${System.identityHashCode(player)}"
+    // <-- AM (SEAMLESS_QUALITY_SWITCH)
+
     // AM (CLIP_PLAYBACK) -->
     /**
      * This session's playback, as the same unit the browse feed plays entries
@@ -421,10 +449,15 @@ class PlayerViewModel(
     private var _clipPlayback: ClipPlayback? = null
     private val clipPlayback: ClipPlayback
         get() = _clipPlayback?.takeIf { it.video === _player }
-            ?: ClipPlayback(_player, audioFactory = { mpvFactory.create(videoOutput) })
+            ?: ClipPlayback(
+                video = _player,
+                audioFactory = { mpvFactory.create(videoOutput) },
+                onEntryEnded = { eofReached(true, combinedTimelineEnded = true) },
+            )
                 .also {
                     _clipPlayback?.releaseCompanion()
                     _clipPlayback = it
+                    mediaHolder?.setClipPlayback(it)
                 }
     // <-- AM (CLIP_PLAYBACK)
 
@@ -644,7 +677,7 @@ class PlayerViewModel(
     // without that, `player`/`mpv` would have stayed pointed at an orphaned, released instance
     // for this ViewModel's entire lifetime whenever a duplicate Activity instance got created
     // (the exact notification-relaunch bug this whole refactor exists to fix).
-    private var _playerFlowsWired = false
+    private var playerFlowsJob: Job? = null
     private val _playerReady = MutableStateFlow(false)
     val playerReady = _playerReady.asStateFlow()
 
@@ -729,6 +762,7 @@ class PlayerViewModel(
             }
             // <-- AM (AUDIO_FOCUS_ORPHAN_FIX)
         }
+        holder.setClipPlayback(clipPlayback)
         wirePlayerFlows()
         syncHolderSessionState()
         _playerReady.value = true
@@ -926,25 +960,24 @@ class PlayerViewModel(
      * once in practice, but a second call would otherwise double-subscribe everything.
      */
     private fun wirePlayerFlows() {
-        if (_playerFlowsWired) return
-        _playerFlowsWired = true
-
-        viewModelScope.launch {
+        playerFlowsJob?.cancel()
+        propFlowCache.clear()
+        playerFlowsJob = viewModelScope.launch {
             player.eventFlow
                 .onEach { handlePlayerFlow(it) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             castManager.castEvent
                 .onEach { handleCastFlow(it) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             playerPreferences.autoplayEnabled.changes()
                 .onEach { v -> updateUiData { it.copy(autoPlayEnabled = v) } }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             playerPreferences.playerSpeed.changes()
                 .onEach { v -> updateUiData { it.copy(playerSpeedPref = v) } }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             combine(
                 propFlow<Double>("video-params/aspect"),
@@ -958,7 +991,7 @@ class PlayerViewModel(
                         }
                     }
                 }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             // AM (DUMMY_PIP_REAL_VIDEO_RECT) -->
             // osd-dimensions is a node map; its sub-properties are observable
@@ -988,32 +1021,32 @@ class PlayerViewModel(
                         marginBottom = values[5] ?: 0,
                     )
                 }
-                .launchIn(viewModelScope)
+                .launchIn(this)
             // <-- AM (DUMMY_PIP_REAL_VIDEO_RECT)
 
             propFlow<Int>("video-params/w")
                 .filterNotNull()
                 .onEach { v -> updateStateData { it.copy(videoWidth = v) } }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<Int>("video-params/h")
                 .filterNotNull()
                 .onEach { v -> updateStateData { it.copy(videoHeight = v) } }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<MPVNode>("track-list")
                 .filterNotNull()
                 .onEach { onTrackListChanged(it) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<MPVNode>("chapter-list")
                 .filterNotNull()
                 .onEach { onChapterListChanged(it) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<Int>("chapter")
                 .onEach { onChapterChanged(it) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<Int>("duration")
                 .filterNotNull()
@@ -1024,19 +1057,19 @@ class PlayerViewModel(
                     // entry is, and the ticker below keeps that published.
                     if (!clipPlayback.isSplit) updatePlaybackData { it.copy(duration = v) }
                 }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<Int>("time-pos")
                 .filterNotNull()
                 .onEach { if (!clipPlayback.isSplit) onSecondReached(it) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             // AM (CLIP_TIMELINE) -->
             // A two-stream entry's position cannot come from a property event
             // on one instance: the stream the timeline follows is whichever is
             // longer, and the other one's clock restarts every repetition. The
             // same once-a-second cadence, read from the pair instead.
-            viewModelScope.launch {
+            launch {
                 while (true) {
                     delay(1.seconds)
                     if (!clipPlayback.isSplit) continue
@@ -1072,7 +1105,7 @@ class PlayerViewModel(
             // moving while nothing is holding it still - not paused by the
             // user, not finished - is what "loading" means, whatever the
             // reason.
-            viewModelScope.launch {
+            launch {
                 var lastPosition = Double.NaN
                 var stillSince = 0L
                 while (true) {
@@ -1113,7 +1146,7 @@ class PlayerViewModel(
             // download should get out of the way completely.
             propFlow<Boolean>("paused-for-cache")
                 .onEach { PlayerMediaHolder.setPlaybackStarved(it == true) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             // AM (MEASURED_BANDWIDTH_SHARE) -->
             // demuxer-cache-time is how many seconds ahead the demuxer has read.
@@ -1132,7 +1165,7 @@ class PlayerViewModel(
                         },
                     )
                 }
-                .launchIn(viewModelScope)
+                .launchIn(this)
             // <-- AM (MEASURED_BANDWIDTH_SHARE)
             // <-- AM (PLAYBACK_STARVED_SIGNAL)
 
@@ -1147,31 +1180,31 @@ class PlayerViewModel(
                     // <-- AM (STREAMING_PLAYBACK_SIGNAL)
                     _eventFlow.emit(Event.UpdateDiscordRPC(v))
                 }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<Int>("volume-max")
                 .filterNotNull()
                 .onEach { v ->
                     updateStateData { it.copy(volumeBoostCap = v) }
                 }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<MPVNode>("sid")
                 .onEach { onSubtitleTrackSelectChange() }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<MPVNode>("secondary-sid")
                 .onEach { onSubtitleTrackSelectChange() }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<MPVNode>("aid")
                 .onEach { onAudioTrackSelectChange() }
-                .launchIn(viewModelScope)
+                .launchIn(this)
 
             propFlow<Long>("user-data/current-anime/intro-length")
                 .filterNotNull()
                 .onEach { setAnimeSkipIntroLength(it) }
-                .launchIn(viewModelScope)
+                .launchIn(this)
         }
     }
     // <-- AM (SERVICE_OWNED_PLAYER)
@@ -2813,7 +2846,17 @@ class PlayerViewModel(
         // url", already used to drive the streaming-only affordances - so this
         // asks the existing question rather than re-deriving it from the
         // scheme here.
-        updateStateData { it.copy(canGrantExternalFolder = canGrantExternalFolder()) }
+        val canGrant = canGrantExternalFolder()
+        updateStateData { it.copy(canGrantExternalFolder = canGrant) }
+
+        // AM (EXTERNAL_FOLDER_GRANT_DISMISS_ON_LEAVE) -->
+        // The dialog belongs to the external file that could use the grant. If
+        // playback has become a library episode (or the folder is now granted),
+        // leaving it open would ask about a source the user is no longer viewing.
+        if (!canGrant && uiData.value.dialogShown == Dialogs.ExternalFolder) {
+            setDialog(Dialogs.None)
+        }
+        // <-- AM (EXTERNAL_FOLDER_GRANT_DISMISS_ON_LEAVE)
     }
 
     /**
@@ -4580,19 +4623,21 @@ class PlayerViewModel(
         hosterIndex: Int,
         videoIndex: Int,
         keepPosition: Boolean = false,
+        seamless: Boolean = false,
     ): Boolean {
         // AM (MERGED_SOURCES) -->
         val source = stateData.value.currentEpisodeSource
             ?: throw Exception("No source loaded")
         // <-- AM (MERGED_SOURCES)
         val currentUi = uiData.value
+        val previousVideo = stateData.value.currentVideo
         val selectedHosterState = (stateData.value.hosterState[hosterIndex] as? HosterState.Ready)
             ?: return false
 
         val oldSelectedIndex = currentUi.selectedHosterVideoIndex
         updateUiData {
             it.copy(
-                isLoadingEpisode = true,
+                isLoadingEpisode = !seamless,
                 selectedHosterVideoIndex = Pair(hosterIndex, videoIndex),
                 previousPauseState = it.previousPauseState ?: playbackData.value.paused,
             )
@@ -4648,9 +4693,14 @@ class PlayerViewModel(
                 hosterIndex,
                 selectedHosterState.getChangedAt(videoIndex, shared, Video.State.READY),
             )
+            val previousQualityIndex = qualityIndex
             qualityIndex = Pair(hosterIndex, videoIndex)
-            if (keepPosition) pauseInternal()
-            setVideo(shared, keepPosition)
+            if (seamless) {
+                startQualitySwitch(shared, oldSelectedIndex, previousQualityIndex, previousVideo)
+            } else {
+                if (keepPosition) pauseInternal()
+                setVideo(shared, keepPosition)
+            }
             return true
         }
         // <-- AM (SHARED_LINK_RESOLUTION)
@@ -4691,6 +4741,7 @@ class PlayerViewModel(
                 }
                 updateUiData {
                     it.copy(
+                        isLoadingEpisode = if (seamless) false else it.isLoadingEpisode,
                         selectedHosterVideoIndex = oldSelectedIndex,
                     )
                 }
@@ -4715,17 +4766,233 @@ class PlayerViewModel(
         // AM (SHARED_LINK_RESOLUTION) -->
         ResolvedVideoCache.put(sharedKey, resolvedVideo)
         // <-- AM (SHARED_LINK_RESOLUTION)
+        val previousQualityIndex = qualityIndex
         qualityIndex = Pair(hosterIndex, videoIndex)
-        // AM (SWITCH_PAUSES_LATE) -->
-        if (keepPosition) pauseInternal()
-        // <-- AM (SWITCH_PAUSES_LATE)
-        // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
-        setVideo(resolvedVideo, keepPosition)
-        // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
+        if (seamless) {
+            startQualitySwitch(resolvedVideo, oldSelectedIndex, previousQualityIndex, previousVideo)
+        } else {
+            // AM (SWITCH_PAUSES_LATE) -->
+            if (keepPosition) pauseInternal()
+            // <-- AM (SWITCH_PAUSES_LATE)
+            // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
+            setVideo(resolvedVideo, keepPosition)
+            // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
+        }
         return true
     }
 
+    // AM (SEAMLESS_QUALITY_SWITCH) -->
+    private fun startQualitySwitch(
+        video: Video,
+        oldSelectedIndex: Pair<Int, Int>,
+        previousQualityIndex: Pair<Int, Int>,
+        previousVideo: Video?,
+    ) {
+        cancelQualitySwitch()
+        val outgoing = player
+        val position = currentPositionSeconds() ?: playbackData.value.position.toDouble()
+        val readAhead = outgoing.mpv.getPropertyDouble("demuxer-cache-time") ?: 0.0
+        val lead = if (readAhead >= 2.0) 1.0 else 2.0
+        val replacement = mpvFactory.create(videoOutput)
+        val pending = QualitySwitch(
+            player = replacement,
+            video = video,
+            episodeId = stateData.value.currentEpisode?.id,
+            syncPosition = position + lead,
+            previousQualityIndex = previousQualityIndex,
+            previousVideo = previousVideo,
+        )
+        pending.player.mpv.setPropertyInt("volume", 0)
+        pending.player.mpv.setPropertyBoolean("pause", true)
+        _qualitySwitch.value = pending
+        qualitySwitchJob = viewModelScope.launchIO {
+            val loadedObserver = launch {
+                pending.player.eventFlow
+                    .filterIsInstance<MPVPlayer.Event.FileLoaded>()
+                    .collect { pending.fileLoaded = true }
+            }
+            val switched = try {
+                withTimeoutOrNull(QUALITY_SWITCH_TIMEOUT_MS) {
+                    pending.surfaceAttached.filter { it }.first()
+                    val anime = stateData.value.currentAnime
+                    val statedMedia = statedStreamsFor(anime, video)
+                    val separateFiles = separateStreamFiles(video)
+                    pending.clipPlayback.prepare(
+                        ClipPlayback.declaredLooping(anime) || statedMedia != null || separateFiles != null,
+                    )
+                    pending.clipPlayback.onSurfaceAttachedChanged(true)
+                    val episodeId = pending.episodeId
+                    if (statedMedia != null && episodeId != null) {
+                        val entryId = stateData.value.currentEpisode?.anime_id ?: anime?.id
+                            ?: throw Exception("Missing quality entry")
+                        pending.clipPlayback.loadPaused(
+                            key = episodeId,
+                            url = ClipVideoResolver.cacheableUrl(
+                                context = context,
+                                retainMaxBytes = playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
+                                animeId = entryId,
+                                playable = statedMedia,
+                                owner = qualityProxyOwner(pending.player),
+                            ),
+                            audioUrl = statedMedia.audioUrl,
+                            httpHeaderFields = statedMedia.httpHeaderFields,
+                            resumeAt = pending.syncPosition,
+                            reload = true,
+                        )
+                    } else if (separateFiles != null && episodeId != null) {
+                        pending.clipPlayback.loadPaused(
+                            key = episodeId,
+                            url = separateFiles.first,
+                            audioUrl = separateFiles.second,
+                            httpHeaderFields = null,
+                            resumeAt = pending.syncPosition,
+                            reload = true,
+                        )
+                    } else {
+                        val playbackUrl = proxiedPlaybackUrl(
+                            video.videoUrl,
+                            video,
+                            pending.player,
+                        ) ?: video.videoUrl
+                        val url = parseVideoUrl(playbackUrl) ?: throw Exception("Invalid quality URL")
+                        httpHeaderFieldsFor(video)?.let {
+                            pending.player.mpv.setOptionString("http-header-fields", it)
+                        }
+                        val options = (video.mpvArgs + listOf(
+                            "sid" to "no",
+                            "aid" to "no",
+                            "vid" to "auto",
+                            "start" to pending.syncPosition.toString(),
+                            "pause" to "yes",
+                        )).joinToString(",") { (name, value) -> "$name=\"$value\"" }
+                        pending.player.mpv.loadFileWithHwdecGuard(url, options, hasAttachedSurface = true)
+                    }
+
+                    while (true) {
+                        if (_qualitySwitch.value !== pending) return@withTimeoutOrNull false
+                        val oldPosition = currentPositionSeconds() ?: pending.syncPosition
+                        val oldStarved = outgoing.mpv.getPropertyBoolean("paused-for-cache") == true ||
+                            playbackData.value.stalled
+                        if (oldStarved) {
+                            return@withTimeoutOrNull completeQualitySwitch(pending, outgoing, takeover = true)
+                        }
+
+                        val buffered = (pending.player.mpv.getPropertyDouble("demuxer-cache-time") ?: 0.0) >= 0.35
+                        val decoded = (pending.player.mpv.getPropertyInt("video-params/w") ?: 0) > 0
+                        val ready = pending.fileLoaded && pending.clipPlayback.isReady && buffered && decoded
+                        val oldPaused = outgoing.mpv.getPropertyBoolean("pause") == true
+                        if (ready && (oldPosition >= pending.syncPosition || oldPaused)) {
+                            return@withTimeoutOrNull completeQualitySwitch(pending, outgoing, takeover = false)
+                        }
+
+                        if (!ready && oldPosition >= pending.syncPosition) {
+                            if (pending.attempts >= QUALITY_SWITCH_MAX_RESCHEDULES) {
+                                return@withTimeoutOrNull false
+                            }
+                            pending.attempts++
+                            val lateness = (oldPosition - pending.syncPosition).coerceAtMost(2.0)
+                            val margin = (2.0 * pending.attempts).coerceAtMost(6.0)
+                            pending.syncPosition = oldPosition + margin + lateness
+                            if (pending.clipPlayback.isSplit) {
+                                pending.clipPlayback.seekTo(pending.syncPosition.toFloat())
+                            } else {
+                                pending.player.mpv.command("seek", pending.syncPosition.toString(), "absolute", "exact")
+                            }
+                        }
+                        delay(QUALITY_SWITCH_POLL_MS)
+                    }
+                } == true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logcat(LogPriority.ERROR, e) { "Quality preparation failed" }
+                false
+            } finally {
+                loadedObserver.cancel()
+            }
+
+            if (!switched && _qualitySwitch.value === pending) {
+                _qualitySwitch.value = null
+                qualitySwitchJob = null
+                MediaProxyServer.releaseOwner(qualityProxyOwner(pending.player))
+                pending.clipPlayback.releaseCompanion()
+                pending.player.release()
+                qualityIndex = pending.previousQualityIndex
+                updateStateData { it.copy(currentVideo = pending.previousVideo) }
+                updateUiData {
+                    it.copy(
+                        isLoadingEpisode = false,
+                        selectedHosterVideoIndex = oldSelectedIndex,
+                    )
+                }
+                _eventFlow.emit(Event.ToastString("Couldn't switch quality; continuing the current quality."))
+            }
+        }
+    }
+
+    private fun completeQualitySwitch(
+        pending: QualitySwitch,
+        outgoing: MPVPlayer,
+        takeover: Boolean,
+    ): Boolean {
+        val holder = mediaHolder ?: return false
+        if (_qualitySwitch.value !== pending || outgoing !== player) return false
+        if (stateData.value.currentEpisode?.id != pending.episodeId) return false
+
+        if (takeover) {
+            val position = currentPositionSeconds() ?: pending.syncPosition
+            pending.syncPosition = position
+            if (pending.clipPlayback.isSplit) {
+                pending.clipPlayback.seekTo(position.toFloat())
+            } else {
+                pending.player.mpv.command("seek", position.toString(), "absolute", "exact")
+            }
+        }
+        pending.player.mpv.setPropertyInt("volume", playbackData.value.currentVolume)
+        pending.player.mpv.setPropertyDouble("speed", uiData.value.playerSpeedPref.toDouble())
+        outgoing.mpv.getPropertyString("aid")?.let { pending.player.mpv.setPropertyString("aid", it) }
+        outgoing.mpv.getPropertyString("sid")?.let { pending.player.mpv.setPropertyString("sid", it) }
+
+        if (!holder.replacePlayer(outgoing, pending.player)) return false
+        val shouldPause = uiData.value.previousPauseState == true
+        outgoing.mpv.setPropertyBoolean("pause", true)
+        _player = pending.player
+        _qualitySwitch.value = null
+        qualitySwitchJob = null
+        pending.player.requestAudioFocus()
+        if (shouldPause) {
+            pending.clipPlayback.pause()
+        } else {
+            pending.clipPlayback.play()
+        }
+
+        _clipPlayback?.releaseCompanion()
+        _clipPlayback = pending.clipPlayback
+        holder.setClipPlayback(pending.clipPlayback)
+        wirePlayerFlows()
+        if (pending.fileLoaded) fileLoaded()
+        updateUiData { it.copy(isLoadingEpisode = false, previousPauseState = null) }
+        publishStreamingPlaybackState()
+        MediaProxyServer.releaseOwner(qualityProxyOwner(outgoing))
+        outgoing.release()
+        return true
+    }
+
+    private fun cancelQualitySwitch() {
+        val pending = _qualitySwitch.value
+        qualitySwitchJob?.cancel()
+        qualitySwitchJob = null
+        _qualitySwitch.value = null
+        if (pending != null) {
+            MediaProxyServer.releaseOwner(qualityProxyOwner(pending.player))
+            pending.clipPlayback.releaseCompanion()
+            pending.player.release()
+        }
+    }
+    // <-- AM (SEAMLESS_QUALITY_SWITCH)
+
     private fun setVideo(video: Video?, keepPosition: Boolean = false) {
+        cancelQualitySwitch()
         if (player.isReleased) return
         if (video == null) return
         stopHttpServer()
@@ -4958,7 +5225,7 @@ class PlayerViewModel(
                         retainMaxBytes = playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
                         animeId = entryId,
                         playable = statedMedia,
-                        owner = "player-clip-$entryId",
+                        owner = qualityProxyOwner(player),
                     ),
                     audioUrl = statedMedia.audioUrl,
                     httpHeaderFields = statedMedia.httpHeaderFields,
@@ -5066,7 +5333,11 @@ class PlayerViewModel(
      * and reconnects, so the mapping has to outlive any single request. The entries
      * are a handful of strings and the session drops them when the process ends.
      */
-    private fun proxiedPlaybackUrl(url: String, video: Video): String? {
+    private fun proxiedPlaybackUrl(
+        url: String,
+        video: Video,
+        ownerPlayer: MPVPlayer = player,
+    ): String? {
         if (!url.startsWith("http")) return null
         if (url.contains("127.0.0.1") || url.contains("localhost")) return null
 
@@ -5097,7 +5368,7 @@ class PlayerViewModel(
             // AM (RELEASE_PREVIOUS_REGISTRATION) -->
             // One registration per session, replaced on each load rather than
             // added alongside the last one.
-            owner = "player-${System.identityHashCode(this)}",
+            owner = qualityProxyOwner(ownerPlayer),
             // <-- AM (RELEASE_PREVIOUS_REGISTRATION)
         )?.second
     }
@@ -5361,7 +5632,15 @@ class PlayerViewModel(
     }
     // <-- AM (COMPLETION_RUNS_ONCE)
 
-    private fun eofReached(eofReached: Boolean) {
+    private fun eofReached(eofReached: Boolean, combinedTimelineEnded: Boolean = false) {
+        // AM (CLIP_PLAYBACK) -->
+        // Only the shorter video repeats. Its EOF is a lap, not completion;
+        // the longer stream's EOF below is the entry's actual ending.
+        if (!combinedTimelineEnded && clipPlayback.videoIsRepeating) {
+            currentFileReachedEof = false
+            return
+        }
+        // <-- AM (CLIP_PLAYBACK)
         // AM (EOF_REPLAY_NO_RELOAD) -->
         currentFileReachedEof = eofReached
         // <-- AM (EOF_REPLAY_NO_RELOAD)
@@ -5376,14 +5655,6 @@ class PlayerViewModel(
             stateData.value.currentEpisode?.let { runEpisodeCompletion(it) }
         }
         // <-- AM (COMPLETION_RUNS_ONCE)
-        // AM (CLIP_PLAYBACK) -->
-        // A looping entry does not end, so nothing here should treat it as
-        // having ended. mpv reports `eof-reached` as a loop turns over - the
-        // property flips before the repetition restarts, and with keep-open=yes
-        // it flips on every cycle - so an entry that was repeating correctly
-        // still handed the session to whatever was next on its first lap.
-        if (clipPlayback.isLooping) return
-        // <-- AM (CLIP_PLAYBACK)
         if (eofReached && uiData.value.autoPlayEnabled) {
             // AM (CUSTOM_EPISODE_ORDER) -->
             seasonBoundaryAhead()?.let { prompt ->
@@ -5557,23 +5828,18 @@ class PlayerViewModel(
         updateUiData { it.copy(previousPauseState = false) }
         // <-- AM (VIDEO_SELECT_PLAYS)
 
-        // AM (LOAD_CLEARS_STALE_PROGRESS) -->
-        // Same rule as loadVideo()'s own reset, for the keepPosition path
-        // that function deliberately skips. An explicit video tap means the
-        // user asked for a DIFFERENT video: from that moment, where the old
-        // file happens to be is no longer what the bar should show while the
-        // new one loads. Cleared here rather than in loadVideo() so
-        // keepPosition's other callers (loadBestVideo()'s failover, a reload)
-        // keep their continuous bar. If the old file is actually still
-        // playing through the resolution, mpv's own time-pos/duration
-        // observers repaint it immediately - this only visibly matters when
-        // playback was frozen/paused, which is exactly the stale-bar case.
-        updatePlaybackData { it.copy(position = 0, duration = 0) }
-        // <-- AM (LOAD_CLEARS_STALE_PROGRESS)
-
         viewModelScope.launchIO {
             // AM (VIDEO_SWITCH_KEEPS_POSITION) -->
-            val success = loadVideo(video, hosterIndex, videoIndex, keepPosition = true)
+            val seamless = !stateData.value.isCasting &&
+                !isTorrent(video) &&
+                !video.usesHttpServer()
+            val success = loadVideo(
+                video,
+                hosterIndex,
+                videoIndex,
+                keepPosition = true,
+                seamless = seamless,
+            )
             // <-- AM (VIDEO_SWITCH_KEEPS_POSITION)
             if (success) {
                 if (uiData.value.sheetShown == Sheets.QualityTracks ||
@@ -5581,6 +5847,8 @@ class PlayerViewModel(
                 ) {
                     dismissSheet()
                 }
+            } else if (seamless) {
+                _eventFlow.emit(Event.ToastString("Couldn't switch quality; continuing the current quality."))
             }
         }
     }
@@ -8101,6 +8369,15 @@ class PlayerViewModel(
 
     fun seekTo(position: Int) {
         if (position !in 0..playbackData.value.duration) return
+        pendingSeekPosition = position
+        pendingSeekStartedAt = SystemClock.elapsedRealtime()
+        updatePlaybackData {
+            it.copy(
+                position = position,
+                seekPosition = position.toFloat(),
+                isSeeking = false,
+            )
+        }
         // AM (CLIP_TIMELINE)
         if (clipPlayback.isSplit) {
             clipPlayback.seekTo(position.toFloat())
@@ -8135,6 +8412,8 @@ class PlayerViewModel(
     // AM (PERSIST_ON_CADENCE) -->
     /** Position, in seconds, at the last database write - see onSecondReached. */
     private var lastPersistedPositionSeconds = 0
+    private var pendingSeekPosition: Int? = null
+    private var pendingSeekStartedAt = 0L
 
     // AM (CONTENT_AGNOSTIC_SESSION) -->
     // historyWrittenForEpisodeId and syncRequestedForEpisodeId moved into
@@ -8263,9 +8542,11 @@ class PlayerViewModel(
     // no longer does. See release()'s own doc comment for why.
     public override fun onCleared() {
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
+        cancelQualitySwitch()
         // AM (CLIP_PLAYBACK) -->
         // Only the companion: the video instance is the service-owned one and
         // deliberately outlives this view model.
+        if (mediaHolder?.viewModel === this) mediaHolder?.setClipPlayback(null)
         _clipPlayback?.releaseCompanion()
         _clipPlayback = null
         // <-- AM (CLIP_PLAYBACK)
@@ -8306,6 +8587,12 @@ class PlayerViewModel(
 
     /** Called each second; marks episode seen, updates tracking, and queues next-episode download. */
     fun onSecondReached(position: Int, isCasting: Boolean = false) {
+        pendingSeekPosition?.let { target ->
+            val confirmed = abs(position - target) <= 1
+            val expired = SystemClock.elapsedRealtime() - pendingSeekStartedAt >= 2_000L
+            if (!confirmed && !expired) return
+            pendingSeekPosition = null
+        }
         updatePlaybackData { it.copy(position = position) }
         if (uiData.value.isLoadingEpisode) return
         val currentEpisode = stateData.value.currentEpisode ?: return
@@ -9680,6 +9967,10 @@ class PlayerViewModel(
 
     // AM (NEXT_EPISODE_PREFETCH) -->
     companion object {
+        private const val QUALITY_SWITCH_TIMEOUT_MS = 30_000L
+        private const val QUALITY_SWITCH_POLL_MS = 100L
+        private const val QUALITY_SWITCH_MAX_RESCHEDULES = 3
+
         // AM (EXTERNAL_FOLDER_GRANT) -->
         private const val EXTERNAL_STORAGE_PROVIDER = "com.android.externalstorage.documents"
         private const val PRIMARY_VOLUME_PATH = "/storage/emulated/0"

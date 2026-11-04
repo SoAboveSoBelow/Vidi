@@ -81,10 +81,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeCover
-import tachiyomi.presentation.core.screens.LoadingScreen
 
 // AM (BROWSE_SCROLLER) -->
 /**
@@ -142,11 +140,13 @@ fun BrowseSourceScroller(
 
     val currentOnActiveIndexChange by rememberUpdatedState(onActiveIndexChange)
 
-    // Keyed on listState alone. Keying on the callback restarted this on every
-    // recomposition, and since the choice of card is settled with a delay, the
-    // restart cancelled that delay every time - so no card was ever chosen and
-    // the first video never loaded.
-    LaunchedEffect(listState) {
+    // Keyed on listState and playback, not the callback. A process-background
+    // rebuild replaces playback while retaining both listState and the current
+    // selection; without restarting this collector, distinctUntilChanged()
+    // suppresses that unchanged selection forever, leaving no active card to
+    // autoplay or own audio. The callback itself remains safely updated through
+    // rememberUpdatedState without restarting the settle timer on recomposition.
+    LaunchedEffect(listState, playback) {
         // Whichever card covers most of the viewport right now, scrolling or
         // not: waiting for the scroll to stop meant the window could not even
         // start loading until then.
@@ -204,36 +204,9 @@ fun BrowseSourceScroller(
         }
     }
 
-    // Nothing is drawn until the first cards' heights are known. Drawing
-    // first and correcting after is what makes the initial load jump: every
-    // card appears at its cover's shape and then resizes. Bounded by a
-    // timeout, so a source whose dimensions cannot be read anywhere still
-    // shows its feed rather than a spinner forever.
-    var geometryReady by remember(playback) { mutableStateOf(playback == null) }
-    // Keyed, not wrapped in `if`: a composable call that appears and
-    // disappears changes this call site's slot layout, and playback going from
-    // null to non-null would then be a crash rather than a late start.
-    LaunchedEffect(playback, animeList.itemCount) {
-        if (playback != null) {
-            if (geometryReady) return@LaunchedEffect
-            withTimeoutOrNull(INITIAL_GEOMETRY_TIMEOUT_MS) {
-                while (true) {
-                    val firstCards = (0 until minOf(INITIAL_GEOMETRY_CARDS, animeList.itemCount))
-                        .mapNotNull { animeList[it]?.value }
-                    if (firstCards.isNotEmpty() && firstCards.all { playback.isMeasured(it.id) }) break
-                    delay(INITIAL_GEOMETRY_POLL_MS)
-                }
-            }
-            // Either the heights are known or the wait is over; both mean draw.
-            geometryReady = true
-        }
-    }
-
-    if (!geometryReady) {
-        LoadingScreen(Modifier.padding(contentPadding))
-        return
-    }
-
+    // Draw immediately. Geometry probing continues above and refines each
+    // card's ratio when it arrives; blocking the whole list on that optional
+    // refinement made media loading freeze the user's ability to scroll.
     LazyColumn(
         state = listState,
         contentPadding = contentPadding,
@@ -866,16 +839,6 @@ private const val WINDOW_AHEAD = 2
  */
 private const val GEOMETRY_BEHIND = 3
 private const val GEOMETRY_AHEAD = 6
-
-/** How many cards' heights must be known before the feed is drawn at all. */
-private const val INITIAL_GEOMETRY_CARDS = 3
-private const val INITIAL_GEOMETRY_POLL_MS = 50L
-
-/**
- * How long the first draw waits. A source whose dimensions cannot be read from
- * a container header or a playlist would otherwise never satisfy the gate.
- */
-private const val INITIAL_GEOMETRY_TIMEOUT_MS = 2_500L
 
 /**
  * How far from the middle of a card a tap still counts as the play/pause

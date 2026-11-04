@@ -48,7 +48,7 @@ class ScrollerPlayer(
     val isPaused: Boolean get() = clip.isPaused
     val positionSeconds: Float get() = clip.positionSeconds
     val durationSeconds: Float get() = clip.durationSeconds
-    val readAheadSeconds: Float get() = clip.readAheadSeconds
+    val bufferedPositionSeconds: Float get() = clip.bufferedPositionSeconds
 
     private var loadedKey: Long? = null
 

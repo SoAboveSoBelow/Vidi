@@ -487,7 +487,12 @@ class ScrollerPlaybackState internal constructor(
 
     suspend fun fetchDetails(anime: Anime, source: AnimeSource) = detailsFetcher.fetch(anime, source)
 
-    fun toggleMuted() {
+    fun toggleMuted(animeId: Long) {
+        // The process-background rebuild has no active id until the viewport
+        // happens to report again. The card whose sound button was pressed is
+        // unambiguously the intended owner; without this every player gets
+        // mayHoldAudioFocus=false and unmute can never produce sound.
+        if (activeAnimeId != animeId) setActive(animeId)
         val muted = !isMuted
         isMuted = muted
         // AM (BROWSE_SCROLLER_MUTE_PERSISTS): written through to the session,
@@ -601,7 +606,9 @@ class ScrollerPlaybackState internal constructor(
                 }
                 if (!isSeeking) controlsPosition = player.positionSeconds
                 controlsDuration = player.durationSeconds
-                controlsReadAhead = player.positionSeconds + player.readAheadSeconds
+                // This is already an absolute, clamped cache endpoint on the
+                // combined timeline - not position plus an estimated duration.
+                controlsReadAhead = player.bufferedPositionSeconds
                 controlsPaused = player.isPaused
                 delay(CONTROLS_TICK_MS)
             }

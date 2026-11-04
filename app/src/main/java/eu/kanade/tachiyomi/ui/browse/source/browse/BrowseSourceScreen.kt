@@ -66,6 +66,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import mihon.feature.migration.dialog.MigrateAnimeDialog
 import mihon.presentation.core.util.collectAsLazyPagingItems
 import tachiyomi.core.common.Constants
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.source.model.StubSource
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
@@ -249,6 +250,7 @@ data class BrowseSourceScreen(
                 BrowseSourceSelectionBottomBar(
                     visible = state.selectionMode,
                     onChangeCategoryClicked = viewModel::openChangeCategoryDialog,
+                    onMergeClicked = viewModel::mergeSelection.takeIf { state.selection.size >= 2 },
                     // AM (PLAYBACK_QUEUE): the worker is started from here
                     // rather than the ViewModel, which has no Context.
                     onAddToQueueClicked = {
@@ -394,11 +396,28 @@ data class BrowseSourceScreen(
                     // screen passes them - exclude is what makes a mixed
                     // category clearable.
                     onConfirm = { include, exclude ->
-                        viewModel.confirmCategorySelection(dialog.animeList, include, exclude)
+                        viewModel.confirmCategorySelection(
+                            dialog.animeList,
+                            include,
+                            exclude,
+                            mergeAfter = dialog.mergeAfter,
+                        )
                     },
                 )
             }
             else -> {}
+        }
+
+        // AM (BROWSE_SELECTION_MERGE)
+        LaunchedEffect(Unit) {
+            viewModel.mergeResultEvent.collect { mergedId ->
+                val message = if (mergedId == null) {
+                    AMMR.strings.am_merge_failed
+                } else {
+                    AMMR.strings.am_merge_entry_merged
+                }
+                snackbarHostState.showSnackbar(context.stringResource(message))
+            }
         }
 
         LaunchedEffect(Unit) {

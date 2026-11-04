@@ -27,6 +27,7 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import eu.kanade.core.preference.asState
+import eu.kanade.domain.anime.interactor.MergeAnimeEntries
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.category.interactor.GetCategorySelection
 import eu.kanade.domain.source.interactor.GetIncognitoState
@@ -35,7 +36,9 @@ import eu.kanade.domain.track.interactor.AddTracks
 import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -88,6 +91,7 @@ class BrowseSourceViewModel(
     private val addTracks: AddTracks,
     // AM (MERGED_SOURCES)
     private val getLibraryMergeChildIds: GetLibraryMergeChildIds,
+    private val mergeAnimeEntries: MergeAnimeEntries,
     getIncognitoState: GetIncognitoState,
 ) : ViewModel() {
 
@@ -493,6 +497,37 @@ class BrowseSourceViewModel(
         return state.value.selection.mapNotNull { getAnime.await(it) }
     }
 
+    // AM (BROWSE_SELECTION_MERGE) -->
+    private val _mergeResultEvent = MutableSharedFlow<Long?>()
+    val mergeResultEvent = _mergeResultEvent.asSharedFlow()
+
+    /** Merges the browse selection, adding it to the library first when needed. */
+    fun mergeSelection() {
+        viewModelScope.launchIO {
+            val animeList = selectedAnime()
+            if (animeList.size < 2) {
+                clearSelection()
+                return@launchIO
+            }
+            if (animeList.all { it.favorite }) {
+                clearSelection()
+                merge(animeList)
+            } else {
+                showCategoryDialog(animeList, mergeAfter = true)
+            }
+        }
+    }
+
+    private suspend fun merge(animeList: List<Anime>) {
+        val current = animeList.mapNotNull { getAnime.await(it.id) }
+        val mergedId = try {
+            mergeAnimeEntries.mergeSelection(current).id
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        _mergeResultEvent.emit(mergedId)
+    }
+
     /**
      * The selection's one library action: the library screen's own
      * multi-select category dialog, over browse's selection.
@@ -527,7 +562,7 @@ class BrowseSourceViewModel(
     }
     // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
 
-    private suspend fun showCategoryDialog(animeList: List<Anime>) {
+    private suspend fun showCategoryDialog(animeList: List<Anime>, mergeAfter: Boolean = false) {
         val single = animeList.singleOrNull()
         if (single != null && !single.favorite) {
             val duplicates = getDuplicateLibraryAnime(single)
@@ -543,13 +578,16 @@ class BrowseSourceViewModel(
         val categories = getCategories()
         if (categories.isEmpty()) {
             clearSelection()
-            animeList.filterNot { it.favorite }.forEach { addFavorite(it) }
+            animeList.filterNot { it.favorite }.forEach {
+                if (mergeAfter) changeAnimeFavorite(it) else addFavorite(it)
+            }
+            if (mergeAfter) merge(animeList)
             return
         }
 
         val preselected = getCategorySelection.await(animeList.map { it.id }, categories)
         clearSelection()
-        setDialog(Dialog.ChangeAnimeCategory(animeList, preselected))
+        setDialog(Dialog.ChangeAnimeCategory(animeList, preselected, mergeAfter))
     }
 
     /**
@@ -566,7 +604,12 @@ class BrowseSourceViewModel(
      * category dialog. It is here because the bar has no separate remove
      * action, so clearing an entry's last category has to be what removes it.
      */
-    fun confirmCategorySelection(animeList: List<Anime>, include: List<Long>, exclude: List<Long>) {
+    fun confirmCategorySelection(
+        animeList: List<Anime>,
+        include: List<Long>,
+        exclude: List<Long>,
+        mergeAfter: Boolean = false,
+    ) {
         viewModelScope.launchIO {
             animeList.forEach { anime ->
                 val categoryIds = getVisibleCategories.await(anime.id)
@@ -580,9 +623,12 @@ class BrowseSourceViewModel(
                 if (anime.favorite == categoryIds.isNotEmpty()) return@forEach
                 updateAnime.awaitUpdateFavorite(anime.id, categoryIds.isNotEmpty())
             }
+            setDialog(null)
+            if (mergeAfter) merge(animeList)
         }
     }
     // <-- AM (BROWSE_SELECTION)
+    // <-- AM (BROWSE_SELECTION_MERGE)
 
     /**
      * Get user categories.
@@ -657,6 +703,7 @@ class BrowseSourceViewModel(
             // subtype, because a selection can leave a category in the mixed
             // TriState the dialog already knows how to render.
             val initialSelection: List<CheckboxState<Category>>,
+            val mergeAfter: Boolean = false,
         ) : Dialog
         data class Migrate(val target: Anime, val current: Anime) : Dialog
     }

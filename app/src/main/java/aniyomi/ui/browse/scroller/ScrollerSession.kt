@@ -115,7 +115,9 @@ object ScrollerSession {
     private fun clear() {
         playbackStates.values.forEach { it.releaseAll() }
         playbackStates.clear()
-        isMuted = true
+        // Mute is a user preference, not decoder state. Rebuild the players
+        // with the same choice instead of forcing a mute/unmute cycle whose
+        // fresh instances may not have selected an audio track yet.
         // AM (BROWSE_SCROLLER_SESSION_INVALIDATION) -->
         // Decoders and bitmaps go, measurements stay. What makes holding a
         // backgrounded feed expensive is the mpv instances and the captured

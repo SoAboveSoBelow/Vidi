@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 // AM (LIBRARY_HEART_ICON)
+import androidx.compose.material.icons.outlined.CallMerge
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -59,38 +60,54 @@ fun BrowseSourceSelectionToolbar(
 fun BrowseSourceSelectionBottomBar(
     visible: Boolean,
     onChangeCategoryClicked: () -> Unit,
+    onMergeClicked: (() -> Unit)? = null,
     // AM (PLAYBACK_QUEUE)
     onAddToQueueClicked: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val actions = listOf(
-        BottomActionItem(
-            key = "move_category",
-            // AM (LIBRARY_HEART_ICON): "Set categories" describes the dialog
-            // rather than the action - which is library membership, removal
-            // included, and is the whole of what this button does here. So it
-            // is labelled for the library, like the heart beside it.
-            title = stringResource(MR.strings.label_library),
-            // AM (LIBRARY_HEART_ICON): this button is library membership, not
-            // tagging - the category dialog it opens is what adds and removes
-            // the entry (see BrowseSourceViewModel.openChangeCategoryDialog). A
-            // label icon said tagging, and said it in the same glyph fillermark
-            // uses, so the one action in browse that puts an entry in the
-            // library looked like neither. The heart is what that means
-            // everywhere else, including the entry screen's own button.
-            icon = Icons.Outlined.FavoriteBorder,
-            onClick = onChangeCategoryClicked,
-            placement = BottomActionPlacement.Auto,
-        ),
+    val actions = buildList {
+        add(
+            BottomActionItem(
+                key = "move_category",
+                // AM (LIBRARY_HEART_ICON): "Set categories" describes the dialog
+                // rather than the action - which is library membership, removal
+                // included, and is the whole of what this button does here. So it
+                // is labelled for the library, like the heart beside it.
+                title = stringResource(MR.strings.label_library),
+                // AM (LIBRARY_HEART_ICON): this button is library membership, not
+                // tagging - the category dialog it opens is what adds and removes
+                // the entry (see BrowseSourceViewModel.openChangeCategoryDialog). A
+                // label icon said tagging, and said it in the same glyph fillermark
+                // uses, so the one action in browse that puts an entry in the
+                // library looked like neither. The heart is what that means
+                // everywhere else, including the entry screen's own button.
+                icon = Icons.Outlined.FavoriteBorder,
+                onClick = onChangeCategoryClicked,
+                placement = BottomActionPlacement.Auto,
+            ),
+        )
         // AM (PLAYBACK_QUEUE)
-        BottomActionItem(
-            key = "add_to_queue",
-            title = stringResource(AMMR.strings.am_action_add_to_queue),
-            icon = ImageVector.vectorResource(R.drawable.ic_playlist_add_24dp),
-            onClick = onAddToQueueClicked,
-            placement = BottomActionPlacement.Auto,
-        ),
-    )
+        add(
+            BottomActionItem(
+                key = "add_to_queue",
+                title = stringResource(AMMR.strings.am_action_add_to_queue),
+                icon = ImageVector.vectorResource(R.drawable.ic_playlist_add_24dp),
+                onClick = onAddToQueueClicked,
+                placement = BottomActionPlacement.Auto,
+            ),
+        )
+        if (onMergeClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "merge",
+                    title = stringResource(AMMR.strings.am_action_merge),
+                    icon = Icons.Outlined.CallMerge,
+                    onClick = onMergeClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+    }
 
     BottomActionBar(
         visible = visible,

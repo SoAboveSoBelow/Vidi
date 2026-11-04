@@ -44,6 +44,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 // AM (BACKGROUND_SKIP_FIX) -->
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.net.toUri
+import aniyomi.player.clip.ClipPlayback
 import animiru.domain.player.service.PlayerPreferences
 import coil3.asDrawable
 import coil3.imageLoader
@@ -507,6 +508,22 @@ class PlayerMediaHolder(
         get() = _player ?: error("PlayerMediaHolder.player accessed before any PlayerViewModel adopted into it")
     val mpv get() = player.mpv
 
+    /**
+     * The session's clip engine, registered by its ViewModel. For a split
+     * audio/video load, mpv's video instance only knows the short repeating
+     * video clock; every holder consumer must read the same combined timeline
+     * as the player controls instead.
+     */
+    @Volatile
+    private var clipPlayback: ClipPlayback? = null
+
+    fun setClipPlayback(playback: ClipPlayback?) {
+        clipPlayback = playback
+    }
+
+    private fun activeSplitPlayback(): ClipPlayback? =
+        clipPlayback?.takeIf { it.video === _player && it.isSplit }
+
     // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
     /**
      * Must be checked by callers BEFORE calling adopt(), not after - adopt()
@@ -688,8 +705,21 @@ class PlayerMediaHolder(
      * where the old file's position lives - replayed against the new
      * episode's id, it flashes the old timestamp on the new row.
      */
-    fun samplePositionMs(): Long? =
-        runCatching { _player?.mpv?.getPropertyInt("time-pos")?.toLong()?.times(1000L) }.getOrNull()
+    fun samplePositionMs(): Long? = runCatching {
+        activeSplitPlayback()?.positionSeconds?.toLong()?.times(1000L)
+            ?: _player?.mpv?.getPropertyInt("time-pos")?.toLong()?.times(1000L)
+    }.getOrNull()
+
+    /** Position and duration from the timeline the player itself displays. */
+    private fun sampleTimelineSeconds(): Pair<Int, Int>? = runCatching {
+        activeSplitPlayback()?.let { clip ->
+            return@runCatching clip.positionSeconds.toInt() to clip.durationSeconds.toInt()
+        }
+        val currentPlayer = _player ?: return@runCatching null
+        val position = currentPlayer.mpv.getPropertyInt("time-pos") ?: return@runCatching null
+        val duration = currentPlayer.mpv.getPropertyInt("duration") ?: return@runCatching null
+        position to duration
+    }.getOrNull()
     // <-- AM (PLAYLIST_PROGRESS_LOAD_GUARD)
     // <-- AM (PLAYLIST_PROGRESS)
 
@@ -715,6 +745,8 @@ class PlayerMediaHolder(
     // launchIn() in the next adopt() instead of throwing, so a fresh scope each real
     // adoption is what makes that reuse actually work rather than fail invisibly.
     private var holderScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var playerObserverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var pushLiveMediaStateHandler: suspend () -> Unit = {}
     // <-- AM (LIVE_POSITION_TRACKING)
 
     /**
@@ -894,8 +926,9 @@ class PlayerMediaHolder(
             // <-- AM (ARTWORK_WIPE_FIX)
             suspend fun pushLiveMediaState() {
                 val current = state.value
-                val positionMs = (player.mpv.getPropertyInt("time-pos") ?: return) * 1000
-                val durationMs = (player.mpv.getPropertyInt("duration") ?: return) * 1000
+                val (positionSeconds, durationSeconds) = sampleTimelineSeconds() ?: return
+                val positionMs = positionSeconds * 1000
+                val durationMs = durationSeconds * 1000
                 val paused = player.mpv.getPropertyBoolean("pause") ?: false
                 updateState { it.copy(positionMs = positionMs, durationMs = durationMs) }
                 // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
@@ -996,6 +1029,7 @@ class PlayerMediaHolder(
                     )
                 }
             }
+            pushLiveMediaStateHandler = ::pushLiveMediaState
 
             // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
             // Removed: this was a separate, unconditional "push whatever we have right
@@ -1011,6 +1045,9 @@ class PlayerMediaHolder(
             // showing the whole time a switch is in flight, instead of being replaced
             // by an incomplete new one and then patched up later.
             // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+
+            playerObserverScope.cancel()
+            playerObserverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
             existing.eventFlow
                 .filterIsInstance<MPVPlayer.Event.PauseChanged>()
@@ -1052,17 +1089,20 @@ class PlayerMediaHolder(
                     // session can be reclaimed while paused, this persisted value is
                     // what the next cold open resumes from, so it is worth being exact.
                     if (event.paused) {
-                        val seconds = runCatching { existing.mpv.getPropertyInt("time-pos") }.getOrNull()
+                        val seconds = runCatching {
+                            activeSplitPlayback()?.positionSeconds?.toInt()
+                                ?: existing.mpv.getPropertyInt("time-pos")
+                        }.getOrNull()
                         if (seconds != null) _viewModel?.persistPositionNow(seconds)
                     }
                     // <-- AM (IDLE_SESSION_COST_FIX)
                 }
-                .launchIn(holderScope)
+                .launchIn(playerObserverScope)
 
             existing.eventFlow
                 .filterIsInstance<MPVPlayer.Event.PlaybackRestart>()
                 .onEach { pushLiveMediaState() }
-                .launchIn(holderScope)
+                .launchIn(playerObserverScope)
 
             // AM (IDLE_SESSION_COST_FIX) -->
             // This tick used to run unconditionally for the life of the holder. While
@@ -1584,6 +1624,36 @@ class PlayerMediaHolder(
         return _player!!
     }
 
+    /** Atomically promotes a prepared quality player and moves player-scoped events to it. */
+    @Synchronized
+    fun replacePlayer(expected: MPVPlayer, replacement: MPVPlayer): Boolean {
+        if (_player !== expected) return false
+        playerObserverScope.cancel()
+        playerObserverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        _player = replacement
+
+        replacement.eventFlow
+            .filterIsInstance<MPVPlayer.Event.PauseChanged>()
+            .onEach { event ->
+                updateState { it.copy(paused = event.paused) }
+                pushLiveMediaStateHandler()
+                if (event.paused) {
+                    val seconds = runCatching {
+                        activeSplitPlayback()?.positionSeconds?.toInt()
+                            ?: replacement.mpv.getPropertyInt("time-pos")
+                    }.getOrNull()
+                    if (seconds != null) _viewModel?.persistPositionNow(seconds)
+                }
+            }
+            .launchIn(playerObserverScope)
+        replacement.eventFlow
+            .filterIsInstance<MPVPlayer.Event.PlaybackRestart>()
+            .onEach { pushLiveMediaStateHandler() }
+            .launchIn(playerObserverScope)
+        playerObserverScope.launch { pushLiveMediaStateHandler() }
+        return true
+    }
+
     /**
      * Creates this holder's MediaSession on first call; on every later call (a new or
      * recreated PlayerActivity instance re-binding), redirects the existing session's
@@ -1685,6 +1755,12 @@ class PlayerMediaHolder(
         // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
         unregisterAudioRouteObserver()
         // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
+        // Stop every callback before native teardown. Swipe dismissal can arrive
+        // while a reattached session is still rebuilding its observers; closing
+        // mpv first lets their final events call back into a released player.
+        holderScope.cancel()
+        playerObserverScope.cancel()
+        mediaSession?.setCallback(null)
         mediaSession?.release()
         mediaSession = null
         // AM (NATIVE_PLAYER_LEAK_FIX) -->
@@ -1699,8 +1775,8 @@ class PlayerMediaHolder(
         // The same leak class resurfaced later through a different door:
         // PlayerViewModel's onPause()-driven foreground toggle used to share
         // this same field, poisoning release()'s guard on every ordinary close
-        // too. See MPVPlayer's ISEXITING_SPLIT_FIX for that one.
-        _player?.release()
+        // too. See MPVPlayer's ISEXITING_SPLIT_FIX for that one. The actual
+        // close is below ViewModel/companion teardown so no stream outlives it.
         // <-- AM (NATIVE_PLAYER_LEAK_FIX)
         // AM (STALE_HOLDER_STATE_FIX) -->
         // Clearing the player reference and session state here (not just marking
@@ -1725,12 +1801,11 @@ class PlayerMediaHolder(
         _viewModel?.onCleared()
         _viewModel = null
         // <-- AM (SERVICE_OWNED_VIEWMODEL)
+        clipPlayback = null
+        _player?.release()
         _player = null
         _state.value = PlayerMediaState()
         // <-- AM (STALE_HOLDER_STATE_FIX)
-        // AM (LIVE_POSITION_TRACKING) -->
-        holderScope.cancel()
-        // <-- AM (LIVE_POSITION_TRACKING)
         // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
         // Guarded: only clear if this is genuinely still the current holder - a
         // stale instance's release() running after a newer holder has already
