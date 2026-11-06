@@ -288,18 +288,32 @@ class MainActivity : BaseActivity() {
         // rather than duplicating it, so tapping the notification behaves
         // exactly like tapping the same episode again from inside the app.
         if (intent.action == "${BuildConfig.APPLICATION_ID}.REOPEN_PLAYER_HOST_SCREEN") {
-            val animeId = intent.getLongExtra("animeId", -1L)
-            val episodeId = intent.getLongExtra("episodeId", -1L)
-            if (animeId != -1L && episodeId != -1L) {
-                lifecycleScope.launch {
+            // AM (EXTERNAL_PLAYBACK_REOPEN_FIX) -->
+            // Was two getLongExtra reads with -1 sentinels. Parsed as a request
+            // now, matching how the Service writes it - which is what lets an
+            // externally-opened video be reopened from its notification at all.
+            when (val request = PlaybackRequest.fromIntent(intent)) {
+                is PlaybackRequest.Library -> lifecycleScope.launch {
                     startPlayerActivity(
                         context = this@MainActivity,
-                        animeId = animeId,
-                        episodeId = episodeId,
+                        animeId = request.animeId,
+                        episodeId = request.episodeId,
                         extPlayer = false,
                     )
                 }
+                is PlaybackRequest.External -> {
+                    // Straight to the overlay host: there is no library entry
+                    // to route through startPlayerActivity for, and its
+                    // already-playing check reads currentAnime, which an
+                    // external session does not have. Submitting the request is
+                    // what the external path does everywhere else (see
+                    // ExternalPlayerActivity), and the host's reconciliation
+                    // effect no-ops when this is already what is playing.
+                    PlayerMediaHolder.requestPlayback(request)
+                }
+                null -> Unit
             }
+            // <-- AM (EXTERNAL_PLAYBACK_REOPEN_FIX)
         }
         // <-- AM (PLAYER_HOST_SCREEN_REOPEN_FIX)
     }
@@ -623,7 +637,12 @@ class MainActivity : BaseActivity() {
             // the same reasoning DUMMY_PIP_FULLSCREEN_RESTORE already relied
             // on, just no longer gated on a flag only the explicit path sets.
             val shouldAutoEnter = autoEnter &&
-                !viewModel.playbackData.value.paused &&
+                // AM (PIP_AUTOENTER_DURING_LOAD_FIX) -->
+                // Same as PlayerActivity.createPipParams(): mid-load the raw
+                // paused flag is the load freeze; register the post-load
+                // intent instead so PiP stays enterable while buffering.
+                !viewModel.pauseStateForPipRegistration() &&
+                // <-- AM (PIP_AUTOENTER_DURING_LOAD_FIX)
                 graph.playerPreferences.pipOnExit.get()
             // <-- AM (DUMMY_PIP_AUTO_ENTER_RESTORED)
             // <-- AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX)
@@ -1248,7 +1267,15 @@ class MainActivity : BaseActivity() {
                         // request, so this is safe to always compose
                         // regardless of what screen the Navigator itself is
                         // currently showing.
-                        PlayerOverlayHost()
+                        PlayerOverlayHost(
+                            // AM (PLAYER_BACK_PRIORITY_FIX) -->
+                            // The visible top screen: changes on every
+                            // background navigation, which is exactly when
+                            // the player's BackHandler must re-register to
+                            // stay ahead of the Navigator's own.
+                            backPressPriorityKey = navigator.lastItem.key,
+                            // <-- AM (PLAYER_BACK_PRIORITY_FIX)
+                        )
                         // <-- AM (PLAYER_OVERLAY_MIGRATION)
 
                         // AM (PLAYER_DIALOG_LAYER) -->
@@ -1652,6 +1679,8 @@ class MainActivity : BaseActivity() {
             // See AnimeScreen.openEpisode()'s forceResume param.
             forceResume: Boolean = false,
             // <-- AM (CONTINUE_BUTTON_RESUME_FIX)
+            // AM (PLAYBACK_QUEUE)
+            continuesQueue: Boolean = false,
         ) {
             if (extPlayer) {
                 val sourceId = sourceId ?: (context.appGraph.getAnime.await(animeId)?.source ?: -1L)
@@ -1713,13 +1742,15 @@ class MainActivity : BaseActivity() {
                     holder.isDummyPipActive = false
                 } else {
                     PlayerMediaHolder.requestPlayback(
-                        PlaybackRequest(
+                        PlaybackRequest.Library(
                             animeId = animeId,
                             episodeId = episodeId,
                             hosterList = hosterList,
                             hosterIndex = hosterIndex,
                             videoIndex = videoIndex,
                             forceResume = forceResume,
+                            // AM (PLAYBACK_QUEUE)
+                            continuesQueue = continuesQueue,
                         ),
                     )
                 }

@@ -24,6 +24,8 @@ internal fun LibraryList(
     selection: Set<Long>,
     onClick: (LibraryAnime) -> Unit,
     onLongClick: (LibraryAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: ((LibraryAnime) -> Unit)?,
     onClickContinueWatching: ((LibraryAnime) -> Unit)?,
     searchQuery: String?,
     onGlobalSearchClicked: () -> Unit,
@@ -67,6 +69,8 @@ internal fun LibraryList(
                 },
                 onLongClick = { onLongClick(libraryItem.libraryAnime) },
                 onClick = { onClick(libraryItem.libraryAnime) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onDoubleClick?.let { handler -> { handler(libraryItem.libraryAnime) } },
                 onClickContinueWatching = if (onClickContinueWatching != null && libraryItem.unseenCount > 0) {
                     { onClickContinueWatching(libraryItem.libraryAnime) }
                 } else {

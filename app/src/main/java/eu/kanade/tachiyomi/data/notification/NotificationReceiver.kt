@@ -13,6 +13,7 @@ import eu.kanade.tachiyomi.data.connection.syncmiru.SyncDataJob
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.library.LibraryUpdateJob
 import eu.kanade.tachiyomi.ui.main.MainActivity
+import eu.kanade.tachiyomi.ui.player.PlaybackRequest
 import eu.kanade.tachiyomi.ui.player.PlayerActivity
 import eu.kanade.tachiyomi.util.system.cancelNotification
 import eu.kanade.tachiyomi.util.system.getParcelableExtraCompat
@@ -129,7 +130,10 @@ class NotificationReceiver : BroadcastReceiver() {
         val anime = runBlocking { getAnime.await(animeId) }
         val episode = runBlocking { getEpisode.await(episodeId) }
         if (anime != null && episode != null) {
-            val intent = PlayerActivity.newIntent(context, anime.id, episode.id).apply {
+            val intent = PlayerActivity.newIntent(
+                context,
+                PlaybackRequest.Library(animeId = anime.id, episodeId = episode.id),
+            ).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
             context.startActivity(intent)
@@ -322,7 +326,10 @@ class NotificationReceiver : BroadcastReceiver() {
         }
 
         internal fun openEpisodePendingActivity(context: Context, anime: Anime, episode: Episode): PendingIntent {
-            val newIntent = PlayerActivity.newIntent(context, anime.id, episode.id)
+            val newIntent = PlayerActivity.newIntent(
+                context,
+                PlaybackRequest.Library(animeId = anime.id, episodeId = episode.id),
+            )
             return PendingIntent.getActivity(
                 context,
                 anime.id.hashCode(),

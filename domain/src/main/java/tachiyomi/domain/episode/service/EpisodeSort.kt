@@ -4,9 +4,21 @@ import tachiyomi.core.common.util.lang.compareToWithCollator
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.episode.model.Episode
 
+/**
+ * [displayNameOf] is the name the list actually shows for an episode, which
+ * alphabetical order has to be computed against - sorting by a string the user
+ * cannot see reads as no sort at all.
+ *
+ * AM (EPISODE_NAMES): the two diverge on a merged entry, where GetEpisodeOrder
+ * substitutes a custom name, or the source's own title for a source
+ * contributing a single episode. Defaults to the episode's own name, so an
+ * entry with no substitutions - and every caller that has no resolved names to
+ * hand - behaves exactly as before.
+ */
 fun getEpisodeSort(
     anime: Anime,
     sortDescending: Boolean = anime.sortDescending(),
+    displayNameOf: (Episode) -> String = { it.name },
 ): (
     Episode,
     Episode,
@@ -25,8 +37,8 @@ fun getEpisodeSort(
             false -> { e1, e2 -> e1.dateUpload.compareTo(e2.dateUpload) }
         }
         Anime.EPISODE_SORTING_ALPHABET -> when (sortDescending) {
-            true -> { e1, e2 -> e2.name.compareToWithCollator(e1.name) }
-            false -> { e1, e2 -> e1.name.compareToWithCollator(e2.name) }
+            true -> { e1, e2 -> displayNameOf(e2).compareToWithCollator(displayNameOf(e1)) }
+            false -> { e1, e2 -> displayNameOf(e1).compareToWithCollator(displayNameOf(e2)) }
         }
         else -> throw NotImplementedError("Invalid episode sorting method: ${anime.sorting}")
     }

@@ -28,6 +28,15 @@ interface AnimeRepository {
 
     fun getFavoritesBySourceId(sourceId: Long): Flow<List<Anime>>
 
+    // AM (MERGED_SOURCES) -->
+    /**
+     * [getFavoritesBySourceId] widened to everything [sourceId] contributes to
+     * the library, including entries that are only in it as children of a
+     * merged entry and so carry favorite = 0 themselves.
+     */
+    fun getLibraryEntriesBySourceId(sourceId: Long): Flow<List<Anime>>
+    // <-- AM (MERGED_SOURCES)
+
     suspend fun getDuplicateLibraryAnime(id: Long, title: String): List<AnimeWithEpisodeCount>
 
     suspend fun getUpcomingAnime(

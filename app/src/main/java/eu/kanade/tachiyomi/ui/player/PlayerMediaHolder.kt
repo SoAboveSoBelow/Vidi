@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadata
+import android.media.MediaMetadataRetriever
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
@@ -14,9 +15,10 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
-import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
+import eu.kanade.tachiyomi.ui.player.mpv.MpvInstancePool
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -43,12 +45,14 @@ import kotlinx.coroutines.withTimeoutOrNull
 // AM (BACKGROUND_SKIP_FIX) -->
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.net.toUri
+import aniyomi.player.clip.ClipPlayback
 import animiru.domain.player.service.PlayerPreferences
 import coil3.asDrawable
 import coil3.imageLoader
 import coil3.request.ImageRequest
 import coil3.size.Size
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
+import eu.kanade.tachiyomi.source.ExternalStreamSource
 import eu.kanade.tachiyomi.ui.player.components.HosterState
 import eu.kanade.tachiyomi.ui.player.loader.EpisodeLoader
 import eu.kanade.tachiyomi.ui.player.loader.HosterLoader
@@ -57,6 +61,7 @@ import logcat.LogPriority
 import mihon.app.di.appGraph
 import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.i18n.animiru.AMMR
@@ -109,16 +114,12 @@ import tachiyomi.source.local.isLocal
  * <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
  */
 // AM (PLAYER_OVERLAY_MIGRATION) -->
-// Top-level, not nested in PlayerMediaHolder's companion object - see
-// requestPlayback()'s own doc comment for why.
-data class PlaybackRequest(
-    val animeId: Long,
-    val episodeId: Long,
-    val hosterList: List<Hoster>? = null,
-    val hosterIndex: Int = -1,
-    val videoIndex: Int = -1,
-    val forceResume: Boolean = false,
-)
+// AM (CONTENT_AGNOSTIC_SESSION) -->
+// PlaybackRequest moved to PlaybackRequest.kt, where it is now a sealed
+// hierarchy rather than one library-shaped data class. Still top-level, for the
+// resolution reason requestPlayback()'s doc comment records - just no longer
+// squatting in this file.
+// <-- AM (CONTENT_AGNOSTIC_SESSION)
 // <-- AM (PLAYER_OVERLAY_MIGRATION)
 
 class PlayerMediaHolder(
@@ -260,6 +261,10 @@ class PlayerMediaHolder(
         private const val LIVE_PUSH_INTERVAL_MS = 15_000L
         // <-- AM (IDLE_SESSION_COST_FIX)
 
+        // AM (EXTERNAL_STREAM_COVER)
+        /** How long artwork resolution waits for a stream entry's captured cover. */
+        private const val EXTERNAL_COVER_WAIT_MS = 30_000L
+
         // AM (NOW_PLAYING_INDICATOR) -->
         // Backing StateFlow so UI (e.g. the episode list) can react to a holder
         // being created/released, not just read the value once. [current] stays
@@ -357,6 +362,127 @@ class PlayerMediaHolder(
         // failed to resolve from MainActivity.kt as PlayerMediaHolder.
         // PlaybackRequest even after a clean build, for reasons not fully
         // pinned down; top-level sidesteps whatever that was entirely.
+        // AM (EXTERNAL_ARTWORK_HANDSHAKE_FIX) -->
+        /** Where the external poster frame is taken from - see resolveExternalArtwork. */
+        private const val POSTER_FRAME_US = 1_000_000L
+        // <-- AM (EXTERNAL_ARTWORK_HANDSHAKE_FIX)
+
+        // AM (EXTERNAL_FD_OWNERSHIP) -->
+        /**
+         * An open file descriptor for an externally-opened video, held at
+         * process scope so a reload can still play the file after the grant
+         * that delivered it is gone.
+         *
+         * An app that hands Vidi a video grants read access to that one URI,
+         * and unless it sets FLAG_GRANT_PERSISTABLE_URI_PERMISSION - which
+         * ACTION_VIEW senders generally do not; ES File Explorer does not -
+         * that grant lives only as long as the receiving TASK. Swiping the app
+         * away destroys the task and revokes it. Confirmed on-device
+         * (2026-10-17): the first play opened `fd://171` happily; after a swipe
+         * the reload could not openFileDescriptor() the same URI at all, so
+         * parseVideoUrl() fell through to the raw content:// string, which mpv
+         * cannot open - audio kept running off the already-open fd while mpv
+         * logged `Missing surface pointer`, failed to reinit the VO and
+         * deselected the video track outright.
+         *
+         * A descriptor does not care about any of that. It is opened once,
+         * while the grant is known-good, and [dupExternalFd] hands out a fresh
+         * dup per load so mpv can close its own copy (it does) without costing
+         * us the original.
+         *
+         * Lives HERE, in the companion, and not on the holder: release() nulls
+         * the holder, and the reload after a swipe-away is exactly the case
+         * this exists to serve - a holder-scoped descriptor would be closed by
+         * the teardown immediately before the load that needs it. The static
+         * playback request next to it has the same lifetime for the same
+         * reason, which is the honest scope for "this process can still play
+         * that file".
+         *
+         * Deliberately NOT a fix to where release() is called from. Tearing the
+         * player down on task removal is what a library session does too, and it
+         * recovers by reloading; the asymmetry was never the teardown, it was
+         * that an external reload had nothing durable to reload FROM.
+         */
+        private var externalFd: ParcelFileDescriptor? = null
+        private var externalFdUri: String? = null
+
+        /**
+         * Claims an owned descriptor for [uri], returning false if it cannot be
+         * opened.
+         *
+         * Idempotent per uri: a reload of the same file reuses the descriptor
+         * already held rather than asking the provider again, which is the
+         * whole point - by then the grant may be gone.
+         *
+         * Claiming a DIFFERENT uri closes the previous one, and that is the only
+         * thing that ever closes it. Closing on session teardown was tried and
+         * is wrong: the teardown runs immediately before the reload that needs
+         * the descriptor. The cost is one descriptor lingering until the next
+         * external open or process death, which is bounded and cheap; the cost
+         * of the alternative is the bug.
+         */
+        fun claimExternalFd(context: Context, uri: String): Boolean {
+            if (externalFdUri == uri && externalFd != null) return true
+            closeExternalFd()
+            return try {
+                externalFd = context.contentResolver.openFileDescriptor(uri.toUri(), "r")
+                externalFdUri = uri.takeIf { externalFd != null }
+                externalFd != null
+            } catch (e: Exception) {
+                // The grant is already gone, or the provider cannot open it.
+                // Nothing to recover; the caller falls back to the URI and lets
+                // the normal resolve path fail with a real message.
+                logcat(LogPriority.WARN, e) { "EXTERNAL_PLAYBACK could not claim fd for $uri" }
+                externalFd = null
+                externalFdUri = null
+                false
+            }
+        }
+
+        /**
+         * A fresh dup of the held descriptor as an `fd://N` path for mpv, or
+         * null when none is held for [uri].
+         *
+         * Dup per call because mpv closes the fd it is handed. Giving it the
+         * original would work exactly once, and the second load - the one after
+         * the grant is gone, which is the one that matters - would get a closed
+         * descriptor.
+         */
+        fun dupExternalFd(uri: String): String? {
+            if (externalFdUri != uri) return null
+            val held = externalFd ?: return null
+            return try {
+                "fd://${held.dup().detachFd()}"
+            } catch (e: Exception) {
+                logcat(LogPriority.WARN, e) { "EXTERNAL_PLAYBACK could not dup fd for $uri" }
+                null
+            }
+        }
+
+        /**
+         * The raw fd of the held descriptor for [uri], or null when none is held.
+         *
+         * For resolving the file's real path after the launching app's grant has
+         * expired - see Uri.realFilePath's heldFd parameter. A bare int, NOT
+         * dup'ed: the caller only readlinks /proc for it and must not close it.
+         * [dupExternalFd] is the one that hands out ownership.
+         */
+        fun heldExternalFd(uri: String): Int? {
+            if (externalFdUri != uri) return null
+            return externalFd?.fd
+        }
+
+        private fun closeExternalFd() {
+            try {
+                externalFd?.close()
+            } catch (e: Exception) {
+                logcat(LogPriority.INFO, e) { "EXTERNAL_PLAYBACK fd close failed" }
+            }
+            externalFd = null
+            externalFdUri = null
+        }
+        // <-- AM (EXTERNAL_FD_OWNERSHIP)
+
         private val _playbackRequest = MutableStateFlow<PlaybackRequest?>(null)
         val playbackRequestFlow = _playbackRequest.asStateFlow()
 
@@ -382,6 +508,22 @@ class PlayerMediaHolder(
     val player: MPVPlayer
         get() = _player ?: error("PlayerMediaHolder.player accessed before any PlayerViewModel adopted into it")
     val mpv get() = player.mpv
+
+    /**
+     * The session's clip engine, registered by its ViewModel. For a split
+     * audio/video load, mpv's video instance only knows the short repeating
+     * video clock; every holder consumer must read the same combined timeline
+     * as the player controls instead.
+     */
+    @Volatile
+    private var clipPlayback: ClipPlayback? = null
+
+    fun setClipPlayback(playback: ClipPlayback?) {
+        clipPlayback = playback
+    }
+
+    private fun activeSplitPlayback(): ClipPlayback? =
+        clipPlayback?.takeIf { it.video === _player && it.isSplit }
 
     // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
     /**
@@ -419,6 +561,7 @@ class PlayerMediaHolder(
         return _viewModel!!
     }
     // <-- AM (SERVICE_OWNED_VIEWMODEL)
+
 
     var mediaSession: MediaSession? = null
         private set
@@ -522,7 +665,7 @@ class PlayerMediaHolder(
     @Volatile
     private var lastArtwork: Bitmap? = null
     @Volatile
-    private var lastArtworkKey: Pair<Long?, Long?>? = null
+    private var lastArtworkKey: SessionKey? = null
     // <-- AM (ARTWORK_WIPE_FIX)
 
     private val _state = MutableStateFlow(PlayerMediaState())
@@ -549,11 +692,36 @@ class PlayerMediaHolder(
      */
     val livePositionMs: Flow<Long> = flow {
         while (true) {
-            val seconds = runCatching { _player?.mpv?.getPropertyInt("time-pos") }.getOrNull()
-            if (seconds != null) emit(seconds.toLong() * 1000L)
+            samplePositionMs()?.let { emit(it) }
             delay(POSITION_SAMPLE_INTERVAL_MS)
         }
     }
+
+    // AM (PLAYLIST_PROGRESS_LOAD_GUARD) -->
+    /**
+     * A single on-demand [livePositionMs] sample. Consumers that attribute a
+     * position to a holder-state emission (the entry screen's now-playing
+     * label) must sample AT that moment: the flow's last emitted value is up
+     * to a second old, and during an episode switch that second is exactly
+     * where the old file's position lives - replayed against the new
+     * episode's id, it flashes the old timestamp on the new row.
+     */
+    fun samplePositionMs(): Long? = runCatching {
+        activeSplitPlayback()?.positionSeconds?.toLong()?.times(1000L)
+            ?: _player?.mpv?.getPropertyInt("time-pos")?.toLong()?.times(1000L)
+    }.getOrNull()
+
+    /** Position and duration from the timeline the player itself displays. */
+    private fun sampleTimelineSeconds(): Pair<Int, Int>? = runCatching {
+        activeSplitPlayback()?.let { clip ->
+            return@runCatching clip.positionSeconds.toInt() to clip.durationSeconds.toInt()
+        }
+        val currentPlayer = _player ?: return@runCatching null
+        val position = currentPlayer.mpv.getPropertyInt("time-pos") ?: return@runCatching null
+        val duration = currentPlayer.mpv.getPropertyInt("duration") ?: return@runCatching null
+        position to duration
+    }.getOrNull()
+    // <-- AM (PLAYLIST_PROGRESS_LOAD_GUARD)
     // <-- AM (PLAYLIST_PROGRESS)
 
     // AM (LIVE_POSITION_TRACKING) -->
@@ -578,6 +746,8 @@ class PlayerMediaHolder(
     // launchIn() in the next adopt() instead of throwing, so a fresh scope each real
     // adoption is what makes that reuse actually work rather than fail invisibly.
     private var holderScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var playerObserverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var pushLiveMediaStateHandler: suspend () -> Unit = {}
     // <-- AM (LIVE_POSITION_TRACKING)
 
     /**
@@ -757,13 +927,14 @@ class PlayerMediaHolder(
             // <-- AM (ARTWORK_WIPE_FIX)
             suspend fun pushLiveMediaState() {
                 val current = state.value
-                val positionMs = (player.mpv.getPropertyInt("time-pos") ?: return) * 1000
-                val durationMs = (player.mpv.getPropertyInt("duration") ?: return) * 1000
+                val (positionSeconds, durationSeconds) = sampleTimelineSeconds() ?: return
+                val positionMs = positionSeconds * 1000
+                val durationMs = durationSeconds * 1000
                 val paused = player.mpv.getPropertyBoolean("pause") ?: false
                 updateState { it.copy(positionMs = positionMs, durationMs = durationMs) }
                 // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
                 // PlaybackState (position/pause) is deliberately NOT gated by
-                // resolvedEpisodeKey - unlike metadata below, showing the live,
+                // resolvedSessionKey - unlike metadata below, showing the live,
                 // correct position/pause for whatever is ACTUALLY playing right now
                 // is always safe regardless of whether title/artwork resolution for
                 // a pending switch has finished. Gating this too (an earlier version
@@ -797,11 +968,19 @@ class PlayerMediaHolder(
                 // pairing (new episode's duration next to the old episode's title,
                 // etc.). Refuses to push anything at all until artwork resolution
                 // has genuinely finished for the CURRENT episode (see
-                // resolvedEpisodeKey's own doc comment) - whatever metadata was
+                // resolvedSessionKey's own doc comment) - whatever metadata was
                 // last fully pushed (the previous episode's complete state) simply
                 // keeps showing, untouched, until this matches.
                 // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
-                if (current.resolvedEpisodeKey != (current.animeId to current.episodeId)) return
+                // AM (CONTENT_AGNOSTIC_SESSION) -->
+                // The explicit null check preserves an implicit guard the old
+                // pair comparison had for free: with no session at all,
+                // resolvedEpisodeKey (null) never equalled (null to null), so
+                // this returned. Two nullable keys DO compare equal when both
+                // are null, which would let a session-less push through.
+                val currentKey = current.sessionKey ?: return
+                if (current.resolvedSessionKey != currentKey) return
+                // <-- AM (CONTENT_AGNOSTIC_SESSION)
                 if (current.animeTitle.isNotEmpty() || current.episodeTitle.isNotEmpty()) {
                     // AM (HIDE_NOTIFICATION_CONTENT) -->
                     // What the system media controls show - the shade's media card,
@@ -815,8 +994,18 @@ class PlayerMediaHolder(
                     val hideContent = securityPreferences.hideNotificationContent.get()
                     // <-- AM (HIDE_NOTIFICATION_CONTENT)
                     val artworkForCurrentEpisode = lastArtwork
-                        .takeIf { lastArtworkKey == (current.animeId to current.episodeId) }
+                        .takeIf { lastArtworkKey == current.sessionKey }
                         .takeUnless { hideContent }
+                    // AM (MEDIA_TITLE_DEDUPE) -->
+                    // Same two strings as the Service's notification text, in the
+                    // opposite order: the media controls lead with the episode in
+                    // their TITLE slot and carry the entry as ARTIST. A single-entry
+                    // video has the same text in both, so the card, the lock screen
+                    // and any head unit print it on both lines. See
+                    // dedupeMediaTitleLines().
+                    val (metadataTitle, metadataArtist) =
+                        dedupeMediaTitleLines(current.episodeTitle, current.animeTitle)
+                    // <-- AM (MEDIA_TITLE_DEDUPE)
                     mediaSession?.setMetadata(
                         MediaMetadata.Builder()
                             .putString(
@@ -824,12 +1013,12 @@ class PlayerMediaHolder(
                                 if (hideContent) {
                                     context.stringResource(AMMR.strings.player_background_playback_channel)
                                 } else {
-                                    current.episodeTitle
+                                    metadataTitle
                                 },
                             )
                             .putString(
                                 MediaMetadata.METADATA_KEY_ARTIST,
-                                if (hideContent) "" else current.animeTitle,
+                                if (hideContent) "" else metadataArtist.orEmpty(),
                             )
                             .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs.toLong())
                             .apply {
@@ -841,6 +1030,7 @@ class PlayerMediaHolder(
                     )
                 }
             }
+            pushLiveMediaStateHandler = ::pushLiveMediaState
 
             // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
             // Removed: this was a separate, unconditional "push whatever we have right
@@ -856,6 +1046,9 @@ class PlayerMediaHolder(
             // showing the whole time a switch is in flight, instead of being replaced
             // by an incomplete new one and then patched up later.
             // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
+
+            playerObserverScope.cancel()
+            playerObserverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
             existing.eventFlow
                 .filterIsInstance<MPVPlayer.Event.PauseChanged>()
@@ -897,17 +1090,20 @@ class PlayerMediaHolder(
                     // session can be reclaimed while paused, this persisted value is
                     // what the next cold open resumes from, so it is worth being exact.
                     if (event.paused) {
-                        val seconds = runCatching { existing.mpv.getPropertyInt("time-pos") }.getOrNull()
+                        val seconds = runCatching {
+                            activeSplitPlayback()?.positionSeconds?.toInt()
+                                ?: existing.mpv.getPropertyInt("time-pos")
+                        }.getOrNull()
                         if (seconds != null) _viewModel?.persistPositionNow(seconds)
                     }
                     // <-- AM (IDLE_SESSION_COST_FIX)
                 }
-                .launchIn(holderScope)
+                .launchIn(playerObserverScope)
 
             existing.eventFlow
                 .filterIsInstance<MPVPlayer.Event.PlaybackRestart>()
                 .onEach { pushLiveMediaState() }
-                .launchIn(holderScope)
+                .launchIn(playerObserverScope)
 
             // AM (IDLE_SESSION_COST_FIX) -->
             // This tick used to run unconditionally for the life of the holder. While
@@ -1016,21 +1212,118 @@ class PlayerMediaHolder(
             // onEach: a newer input cancels the in-flight resolution (including the
             // 2-minute reactive wait) instead of queueing behind it.
             // <-- AM (ARTWORK_FIRST_EPISODE_INPUT_FIX)
+            // AM (EXTERNAL_ARTWORK_HANDSHAKE_FIX) -->
+            /**
+             * Resolves the poster frame for an externally-opened file, then
+             * completes the resolution handshake for it.
+             *
+             * A local function inside init{}, not a class member, for one
+             * reason: [pushLiveMediaState] is itself local to this block
+             * (it closes over `player`), so the handshake can only be
+             * completed from in here. Hoisting that to a class member to make
+             * room for this would have meant touching the single writer of
+             * MediaSession state - see MEDIASESSION_SINGLE_WRITER_FIX - for
+             * the sake of where a new function sits.
+             *
+             * The frame comes from the file itself: embedded cover art first,
+             * since a file that ships one chose that image on purpose, then a
+             * frame a little way in. One second rather than zero because the
+             * very first frame of a video is so often black that a poster
+             * taken from it looks like a failure.
+             *
+             * The handshake runs whatever happens, including on failure.
+             * Artwork is optional; the notification having a title and a
+             * working reopen action is not, and gating those on a thumbnail
+             * that may never resolve is the bug this exists to fix.
+             */
+            suspend fun resolveExternalArtwork(sessionKey: SessionKey.External) {
+                val artwork = withIOContext {
+                    var retriever: MediaMetadataRetriever? = null
+                    try {
+                        retriever = MediaMetadataRetriever().apply {
+                            setDataSource(context, sessionKey.uri.toUri())
+                        }
+                        val embedded = retriever.embeddedPicture
+                            ?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                        embedded ?: retriever.getFrameAtTime(
+                            POSTER_FRAME_US,
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                        )
+                    } catch (e: Exception) {
+                        // Every failure here is uninteresting and non-fatal: a
+                        // codec MediaMetadataRetriever cannot open even though
+                        // mpv can, a revoked permission, a stream with no video
+                        // track at all.
+                        logcat(LogPriority.INFO, e) {
+                            "EXTERNAL_PLAYBACK no poster frame for ${sessionKey.uri}"
+                        }
+                        null
+                    } finally {
+                        try {
+                            retriever?.release()
+                        } catch (e: Exception) {
+                            logcat(LogPriority.INFO, e) { "EXTERNAL_PLAYBACK retriever release failed" }
+                        }
+                    }
+                }
+
+                // Same staleness guard the library path uses below - the
+                // session can have moved on during the decode above.
+                if (state.value.sessionKey != sessionKey) return
+                if (artwork != null) {
+                    lastArtwork = artwork
+                    lastArtworkKey = sessionKey
+                }
+                updateState { it.copy(resolvedSessionKey = sessionKey) }
+                pushLiveMediaState()
+            }
+            // <-- AM (EXTERNAL_ARTWORK_HANDSHAKE_FIX)
+
             holderScope.launch {
                 state
                     .map {
                         ArtworkInputs(
-                            animeId = it.animeId,
-                            episodeId = it.episodeId,
+                            sessionKey = it.sessionKey,
                             animeThumbnailUrl = it.animeThumbnailUrl,
                             episodePreviewUrl = it.episodePreviewUrl,
                         )
                     }
                     .distinctUntilChanged()
                     .collectLatest { inputs ->
-                    val animeId = inputs.animeId
-                    val episodeId = inputs.episodeId
-                    if (animeId == null || episodeId == null) return@collectLatest
+                    // AM (EXTERNAL_ARTWORK_HANDSHAKE_FIX) -->
+                    // A non-library session used to `return@collectLatest` here,
+                    // which was wrong in a way that disabled the notification
+                    // entirely rather than just leaving it art-less.
+                    //
+                    // resolvedSessionKey is a HANDSHAKE, not a cache: this flow
+                    // setting it is what tells pushLiveMediaState() and the
+                    // Service's own notification-text observer that resolution
+                    // has finished for the current session and they may push
+                    // (see WAIT_FOR_COMPLETE_DATA_FIX). Returning early never
+                    // set it, so for an external session it stayed null forever,
+                    // both gates stayed shut, and the notification got no title,
+                    // no metadata and no reopen target - the symptom being a
+                    // blank notification that cannot bring the video back.
+                    //
+                    // An external file has no library row to resolve artwork
+                    // from, so resolution for it is trivially complete the
+                    // moment it starts. Completing the handshake is therefore
+                    // the honest thing to do, not a shortcut: there is nothing
+                    // pending. Artwork comes from the file itself below.
+                    if (inputs.sessionKey is SessionKey.External) {
+                        resolveExternalArtwork(inputs.sessionKey)
+                        return@collectLatest
+                    }
+                    // <-- AM (EXTERNAL_ARTWORK_HANDSHAKE_FIX)
+                    // AM (CONTENT_AGNOSTIC_SESSION) -->
+                    // Everything below this point is a library-row lookup
+                    // (getAnime.await, the per-episode thumbnail file, the
+                    // reactive cover wait), so it runs for a library session and
+                    // nothing else.
+                    val sessionKey = inputs.sessionKey as? SessionKey.Library ?: return@collectLatest
+                    val animeId = sessionKey.animeId
+                    val episodeId = sessionKey.episodeId
+                    // <-- AM (CONTENT_AGNOSTIC_SESSION)
                     val current = state.value
 
                     // AM (RESOLUTION_EXCEPTION_FIX) -->
@@ -1207,6 +1500,38 @@ class PlayerMediaHolder(
                                         .filter { !it.isNullOrBlank() }
                                         .first()
                                 }
+                            } else if (anime.source == ExternalStreamSource.ID) {
+                                // AM (EXTERNAL_STREAM_COVER) -->
+                                // The same reactive wait the local branch makes,
+                                // for the same reason: this entry's artwork is
+                                // produced on this device after playback starts
+                                // (PlayerViewModel.captureExternalStreamArtwork),
+                                // so at the moment this flow runs the row has no
+                                // thumbnail_url yet and never will have one by
+                                // the time a single read returns.
+                                //
+                                // That is why a stream entry's notification stayed
+                                // art-less while a local entry's filled in: this
+                                // branch read `isLocal()`, which is the wrong
+                                // question. What matters is whether the cover is
+                                // coming from a source fetch - in which case there
+                                // is nothing to wait for and null is right - or
+                                // from this app, in which case waiting is the whole
+                                // point. Both kinds of on-device artwork now wait.
+                                //
+                                // A shorter ceiling than the local branch's two
+                                // minutes because the write is scheduled rather
+                                // than open-ended: the capture is one screenshot
+                                // taken a fixed lead-in after the file loads, not
+                                // an ffmpeg extraction whose length follows the
+                                // size of the video.
+                                withTimeoutOrNull(EXTERNAL_COVER_WAIT_MS) {
+                                    getAnime.subscribe(animeId)
+                                        .map { it.thumbnailUrl }
+                                        .filter { !it.isNullOrBlank() }
+                                        .first()
+                                }
+                                // <-- AM (EXTERNAL_STREAM_COVER)
                             } else {
                                 null
                             }
@@ -1260,13 +1585,13 @@ class PlayerMediaHolder(
                     // in-flight work when a new value arrives, only queues it for
                     // after this returns.
                     val latest = state.value
-                    if (latest.animeId != animeId || latest.episodeId != episodeId) return@collectLatest
+                    if (latest.sessionKey != sessionKey) return@collectLatest
                     // AM (ARTWORK_WIPE_FIX) -->
                     // Cache this before pushing - see pushLiveMediaState()'s doc comment
                     // for why other pushes need this to avoid wiping the artwork back out.
                     if (artwork != null) {
                         lastArtwork = artwork
-                        lastArtworkKey = animeId to episodeId
+                        lastArtworkKey = sessionKey
                     }
                     // <-- AM (ARTWORK_WIPE_FIX)
                     // AM (WAIT_FOR_COMPLETE_DATA_FIX) -->
@@ -1279,7 +1604,7 @@ class PlayerMediaHolder(
                     // writer can gate on the same signal - see PlayerMediaState's own
                     // doc comment on this field for why that matters.
                     // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
-                    updateState { it.copy(resolvedEpisodeKey = animeId to episodeId) }
+                    updateState { it.copy(resolvedSessionKey = sessionKey) }
                     pushLiveMediaState()
                     } catch (e: CancellationException) {
                         // AM (ARTWORK_FIRST_EPISODE_INPUT_FIX) -->
@@ -1298,6 +1623,55 @@ class PlayerMediaHolder(
             // <-- AM (BACKGROUND_ARTWORK_FIX)
         }
         return _player!!
+    }
+
+    // AM (POOLED_PLAYER_INSTANCES) -->
+    private var _instancePool: MpvInstancePool? = null
+
+    /**
+     * The session's mpv instance pool, created on first use from [create].
+     *
+     * Held here rather than on PlayerViewModel because the lifetime that
+     * matters is the session's, not the view model's: onCleared() deliberately
+     * leaves the canonical player alone (it is service-owned and outlives the
+     * view model), so a pool owned there would be abandoned with its idle
+     * instances still open on every view model teardown. [release] below is the
+     * one point that genuinely corresponds to "the session is over", which is
+     * also the only point at which closing an instance is safe.
+     */
+    @Synchronized
+    fun instancePool(create: () -> MpvInstancePool): MpvInstancePool =
+        _instancePool ?: create().also { _instancePool = it }
+    // <-- AM (POOLED_PLAYER_INSTANCES)
+
+    /** Atomically promotes a prepared quality player and moves player-scoped events to it. */
+    @Synchronized
+    fun replacePlayer(expected: MPVPlayer, replacement: MPVPlayer): Boolean {
+        if (_player !== expected) return false
+        playerObserverScope.cancel()
+        playerObserverScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        _player = replacement
+
+        replacement.eventFlow
+            .filterIsInstance<MPVPlayer.Event.PauseChanged>()
+            .onEach { event ->
+                updateState { it.copy(paused = event.paused) }
+                pushLiveMediaStateHandler()
+                if (event.paused) {
+                    val seconds = runCatching {
+                        activeSplitPlayback()?.positionSeconds?.toInt()
+                            ?: replacement.mpv.getPropertyInt("time-pos")
+                    }.getOrNull()
+                    if (seconds != null) _viewModel?.persistPositionNow(seconds)
+                }
+            }
+            .launchIn(playerObserverScope)
+        replacement.eventFlow
+            .filterIsInstance<MPVPlayer.Event.PlaybackRestart>()
+            .onEach { pushLiveMediaStateHandler() }
+            .launchIn(playerObserverScope)
+        playerObserverScope.launch { pushLiveMediaStateHandler() }
+        return true
     }
 
     /**
@@ -1364,16 +1738,20 @@ class PlayerMediaHolder(
     // AM (ARTWORK_FIRST_EPISODE_INPUT_FIX) -->
     /** Everything the artwork flow resolves from - a change in any of it re-resolves. */
     private data class ArtworkInputs(
-        val animeId: Long?,
-        val episodeId: Long?,
+        val sessionKey: SessionKey?,
         val animeThumbnailUrl: String?,
         val episodePreviewUrl: String?,
     )
     // <-- AM (ARTWORK_FIRST_EPISODE_INPUT_FIX)
 
     fun syncSessionState(
-        animeId: Long,
-        episodeId: Long,
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // Was (animeId, episodeId). Callers build the key themselves, which is
+        // what makes this the one function an external session also writes
+        // through rather than a second, parallel sync path - the exact drift
+        // SHARED_SESSION_SYNC_FIX above exists to prevent.
+        sessionKey: SessionKey,
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
         animeTitle: String,
         episodeTitle: String,
         animeThumbnailUrl: String?,
@@ -1382,8 +1760,7 @@ class PlayerMediaHolder(
     ) {
         updateState {
             it.copy(
-                animeId = animeId,
-                episodeId = episodeId,
+                sessionKey = sessionKey,
                 animeTitle = animeTitle,
                 episodeTitle = episodeTitle,
                 animeThumbnailUrl = animeThumbnailUrl,
@@ -1398,6 +1775,12 @@ class PlayerMediaHolder(
         // AM (BLUETOOTH_DISCONNECT_PAUSE_FIX) -->
         unregisterAudioRouteObserver()
         // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
+        // Stop every callback before native teardown. Swipe dismissal can arrive
+        // while a reattached session is still rebuilding its observers; closing
+        // mpv first lets their final events call back into a released player.
+        holderScope.cancel()
+        playerObserverScope.cancel()
+        mediaSession?.setCallback(null)
         mediaSession?.release()
         mediaSession = null
         // AM (NATIVE_PLAYER_LEAK_FIX) -->
@@ -1412,8 +1795,8 @@ class PlayerMediaHolder(
         // The same leak class resurfaced later through a different door:
         // PlayerViewModel's onPause()-driven foreground toggle used to share
         // this same field, poisoning release()'s guard on every ordinary close
-        // too. See MPVPlayer's ISEXITING_SPLIT_FIX for that one.
-        _player?.release()
+        // too. See MPVPlayer's ISEXITING_SPLIT_FIX for that one. The actual
+        // close is below ViewModel/companion teardown so no stream outlives it.
         // <-- AM (NATIVE_PLAYER_LEAK_FIX)
         // AM (STALE_HOLDER_STATE_FIX) -->
         // Clearing the player reference and session state here (not just marking
@@ -1438,12 +1821,16 @@ class PlayerMediaHolder(
         _viewModel?.onCleared()
         _viewModel = null
         // <-- AM (SERVICE_OWNED_VIEWMODEL)
+        clipPlayback = null
+        // AM (POOLED_PLAYER_INSTANCES): idle instances go with the session, and
+        // only here - this is the one place a close is not racing something
+        // still rendering.
+        _instancePool?.releaseAll()
+        _instancePool = null
+        _player?.release()
         _player = null
         _state.value = PlayerMediaState()
         // <-- AM (STALE_HOLDER_STATE_FIX)
-        // AM (LIVE_POSITION_TRACKING) -->
-        holderScope.cancel()
-        // <-- AM (LIVE_POSITION_TRACKING)
         // AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX) -->
         // Guarded: only clear if this is genuinely still the current holder - a
         // stale instance's release() running after a newer holder has already
@@ -1470,8 +1857,20 @@ class PlayerMediaHolder(
 
     /** Minimal state a reattaching [PlayerActivity] needs to reconstruct its UI on create/resume. */
     data class PlayerMediaState(
-        val animeId: Long? = null,
-        val episodeId: Long? = null,
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // Was `animeId: Long?` + `episodeId: Long?` stored directly. The pair is
+        // now carried as one opaque [SessionKey] so every consumer that only
+        // compares sessions (needsInit()'s holder fallback, the artwork flow's
+        // re-resolve trigger, the Service's notification observer) compares keys
+        // and stops caring what kind of content is loaded.
+        //
+        // animeId/episodeId survive below as derived reads, deliberately - they
+        // are honest about what they mean now ("the library ids, if this is a
+        // library session") instead of pretending every session has them. The
+        // remaining read sites get migrated onto the key itself as the playback
+        // interfaces land; these accessors are the bridge, not the destination.
+        val sessionKey: SessionKey? = null,
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
         val paused: Boolean = true,
         val positionMs: Int = 0,
         val durationMs: Int = 0,
@@ -1507,7 +1906,17 @@ class PlayerMediaHolder(
         // updating incrementally, which is exactly the behavior this whole fix
         // exists to eliminate everywhere, not just within MediaSession's own fields.
         // <-- AM (WAIT_FOR_COMPLETE_DATA_FIX)
-        val resolvedEpisodeKey: Pair<Long?, Long?>? = null,
-    )
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // Was `Pair<Long?, Long?>` mirroring the animeId/episodeId pair; now the
+        // same [SessionKey] the resolution ran for, compared the same way.
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
+        val resolvedSessionKey: SessionKey? = null,
+    ) {
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        /** The library ids of this session, or null when it isn't a library one. */
+        val animeId: Long? get() = sessionKey.libraryAnimeId
+        val episodeId: Long? get() = sessionKey.libraryEpisodeId
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
+    }
 }
 // <-- AM (SERVICE_OWNED_PLAYER)

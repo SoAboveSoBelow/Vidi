@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.data.download.model.Download
+import eu.kanade.tachiyomi.data.download.model.LocalSourceTarget
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.drop
@@ -30,7 +31,6 @@ import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.source.service.SourceManager
-import tachiyomi.domain.storage.service.StorageManager
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.source.local.io.Format
 import tachiyomi.source.local.io.LocalSourceFileSystem
@@ -45,9 +45,13 @@ import tachiyomi.source.local.isLocal
 @SingleIn(AppScope::class)
 class DownloadManager(
     private val context: Context,
-    // AM (STORAGE_SCREEN) -->
-    private val storageManager: StorageManager,
-    // <-- AM (STORAGE_SCREEN)
+    // AM (EXTRA_LOCAL_FOLDERS) -->
+    // Injected rather than constructed where it is used: LocalSourceFileSystem
+    // now resolves urls across the configured directory and any granted folders,
+    // so it needs its own dependencies and building one by hand would quietly
+    // produce a copy that only knew about the configured one.
+    private val localSourceFileSystem: LocalSourceFileSystem,
+    // <-- AM (EXTRA_LOCAL_FOLDERS)
     private val provider: DownloadProvider,
     private val cache: DownloadCache,
     private val getCategories: GetCategories,
@@ -169,12 +173,48 @@ class DownloadManager(
         alt: Boolean = false,
         video: Video? = null,
         // <-- AY
+        // AM (LOCAL_SOURCE_DOWNLOAD) -->
+        /** Set to save into the local source - see [LocalSourceTarget]. */
+        localSourceTarget: LocalSourceTarget? = null,
+        // <-- AM (LOCAL_SOURCE_DOWNLOAD)
     ) {
         // AY -->
         val filteredEpisodes = getEpisodesToDownload(episodes)
-        downloader.queueEpisodes(anime, filteredEpisodes, autoStart, alt, video)
+        downloader.queueEpisodes(anime, filteredEpisodes, autoStart, alt, video, localSourceTarget)
         // <-- AY
     }
+
+    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+    /**
+     * Enqueues [episodes] to be saved into the local source rather than owned by
+     * the library entry they came from.
+     *
+     * The files land under `<extension>/<site>/`, so everything saved through
+     * one extension collects in one local entry with a season per site - see
+     * [LocalSourceTarget]. Nothing happens for a source with no
+     * http identity (the local source itself, most obviously), which has
+     * nothing to save from and nowhere to name.
+     */
+    fun downloadEpisodesToLocalSource(anime: Anime, episodes: List<Episode>, entryName: String? = null) {
+        val source = sourceManager.get(anime.source) as? AnimeHttpSource ?: return
+        downloadEpisodes(
+            anime = anime,
+            episodes = episodes,
+            localSourceTarget = LocalSourceTarget(
+                // AM (EXTERNAL_APP_LABEL): the app it was opened from, where
+                // that is known, and the extension's own name otherwise.
+                entryName = entryName?.let { LocalSourceTarget.entryNameFor(it) }
+                    ?: LocalSourceTarget.entryNameFor(source),
+                // AM (EXTERNAL_APP_LABEL): a source with no baseUrl of its own -
+                // an externally opened stream - is named by the url of the entry
+                // itself, which IS the address the video came from.
+                seasonName = LocalSourceTarget.seasonNameFor(
+                    source.baseUrl.ifBlank { anime.url },
+                ),
+            ),
+        )
+    }
+    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
 
     /**
      * Tells the downloader to enqueue the given list of downloads at the start of the queue.
@@ -203,8 +243,16 @@ class DownloadManager(
         val episodeDir = provider.findEpisodeDir(episode.name, episode.scanlator, episode.url, anime.ogTitle, source)
         // <-- AM (CUSTOM_INFORMATION)
         // AY -->
-        val file = episodeDir?.listFiles().orEmpty()
-            .firstOrNull { "video" in it.type.orEmpty() }
+        val files = episodeDir?.listFiles().orEmpty()
+        // AM (SEPARATE_AUDIO_DOWNLOAD) -->
+        // By name before by type. An entry stored as separate streams has its
+        // video written as the download's scratch file and renamed, and a SAF
+        // provider fixes a document's type when it is CREATED - so that file
+        // can keep application/octet-stream through the rename and never
+        // match a test for "video" in its type at all.
+        val file = files.firstOrNull { it.name.orEmpty().endsWith(Downloader.VIDEO_SUFFIX) }
+            ?: files.firstOrNull { "video" in it.type.orEmpty() }
+        // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
         // <-- AY
 
         if (file == null) {
@@ -252,10 +300,28 @@ class DownloadManager(
      *
      * @param anime the anime to check.
      */
+    // AM (LOCAL_ENTRIES_HAVE_NO_DOWNLOADS) -->
+    /**
+     * Whether removing [anime] from the library leaves downloads worth offering
+     * to delete.
+     *
+     * Deliberately not `getDownloadCount(anime) > 0`, which is what both removal
+     * offers used to ask: for a local entry that count is the number of video
+     * files in the entry's OWN folder (see getDownloadCount below, and the
+     * storage screen, which is what that branch is for). Those files are the
+     * source, not downloads of it, so the offer appeared for every local entry
+     * and accepting it would have deleted the entry's content. A local entry
+     * never has downloads.
+     */
+    fun hasDeletableDownloads(anime: Anime): Boolean {
+        return !anime.isLocal() && getDownloadCount(anime) > 0
+    }
+    // <-- AM (LOCAL_ENTRIES_HAVE_NO_DOWNLOADS)
+
     fun getDownloadCount(anime: Anime): Int {
         return if (anime.isLocal()) {
             // AM (STORAGE_SCREEN) -->
-            LocalSourceFileSystem(storageManager).getFilesInAnimeDirectory(anime.url)
+            localSourceFileSystem.getFilesInAnimeDirectory(anime.url)
                 .count { Format.isSupported(it) }
             // <-- AM (STORAGE_SCREEN)
         } else {
@@ -523,6 +589,10 @@ class DownloadManager(
         }
     }
     // <-- AY
+
+    // AM (LOCAL_SOURCE_DOWNLOAD)
+    /** Emits each completed save into the local source - see [Downloader.localSourceSaved]. */
+    fun localSourceSaves(): Flow<LocalSourceTarget> = downloader.localSourceSaved
 
     fun statusFlow(): Flow<Download> = queueState
         .flatMapLatest { downloads ->

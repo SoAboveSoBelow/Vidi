@@ -42,6 +42,8 @@ fun LibraryPager(
     getItemsForCategory: (Category) -> List<LibraryItem>,
     onClickAnime: (Category, LibraryAnime) -> Unit,
     onLongClickAnime: (Category, LibraryAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClickAnime: ((LibraryAnime) -> Unit)?,
     onClickContinueWatching: ((LibraryAnime) -> Unit)?,
 ) {
     // AY -->
@@ -94,6 +96,8 @@ fun LibraryPager(
                         selection = selection,
                         onClick = onClickAnime,
                         onLongClick = onLongClickAnime,
+                        // AM (DOUBLE_TAP_QUEUE)
+                        onDoubleClick = onDoubleClickAnime,
                         onClickContinueWatching = onClickContinueWatching,
                         searchQuery = searchQuery,
                         onGlobalSearchClicked = onGlobalSearchClicked,
@@ -108,6 +112,8 @@ fun LibraryPager(
                         selection = selection,
                         onClick = onClickAnime,
                         onLongClick = onLongClickAnime,
+                        // AM (DOUBLE_TAP_QUEUE)
+                        onDoubleClick = onDoubleClickAnime,
                         onClickContinueWatching = onClickContinueWatching,
                         searchQuery = searchQuery,
                         onGlobalSearchClicked = onGlobalSearchClicked,
@@ -121,6 +127,8 @@ fun LibraryPager(
                         selection = selection,
                         onClick = onClickAnime,
                         onLongClick = onLongClickAnime,
+                        // AM (DOUBLE_TAP_QUEUE)
+                        onDoubleClick = onDoubleClickAnime,
                         onClickContinueWatching = onClickContinueWatching,
                         searchQuery = searchQuery,
                         onGlobalSearchClicked = onGlobalSearchClicked,

@@ -1,0 +1,41 @@
+-- AM (HISTORY_ORIGIN) -->
+-- SQLite keeps a view's SELECT as the text it was created with, so adding
+-- history.origin in 170 left every existing database holding a historyView
+-- that does not know the column - and every query filtering on it failing with
+-- "no such column: historyView.origin".
+--
+-- A separate migration rather than a fix to 170, because 170 has already run
+-- on databases that now need this: a migration is applied once, and editing it
+-- afterwards reaches only installs that had not run it yet.
+--
+-- Recreated the same way migration 116 recreated this view.
+DROP VIEW IF EXISTS historyView;
+
+CREATE VIEW historyView AS
+SELECT
+    history._id AS id,
+    animes._id AS animeId,
+    episodes._id AS episodeId,
+    animes.title,
+    animes.thumbnail_url AS thumbnailUrl,
+    animes.source,
+    animes.favorite,
+    animes.cover_last_modified,
+    episodes.episode_number AS episodeNumber,
+    history.last_seen AS seenAt,
+    history.origin AS origin,
+    max_last_seen.last_seen AS maxSeenAt,
+    max_last_seen.episode_id AS maxSeenAtEpisodeId
+FROM animes
+JOIN episodes
+ON animes._id = episodes.anime_id
+JOIN history
+ON episodes._id = history.episode_id
+JOIN (
+    SELECT episodes.anime_id,episodes._id AS episode_id, MAX(history.last_seen) AS last_seen
+    FROM episodes JOIN history
+    ON episodes._id = history.episode_id
+    GROUP BY episodes.anime_id
+) AS max_last_seen
+ON episodes.anime_id = max_last_seen.anime_id;
+-- <-- AM (HISTORY_ORIGIN)

@@ -97,8 +97,6 @@ fun PlayerControls(
     onBack: () -> Unit,
     onPlayerEvent: (PlayerEvent) -> Unit,
     mpvVolume: Int?,
-    pausedForCache: Boolean?,
-    coreIdle: Boolean?,
     readAhead: Float?,
     remaining: Int?,
     playbackSpeed: Float?,
@@ -111,6 +109,21 @@ fun PlayerControls(
     // same tag.
     // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
     systemBarsVisible: Boolean = false,
+    // AM (BROWSE_SCROLLER_CONTROLS) -->
+    /**
+     * False for a host with no track sheets, panels or auto-play to open -
+     * the browse scroller's fullscreen card, which drives these controls over
+     * one standalone mpv instance rather than a player session. The row is
+     * still laid out (the top-left title is constrained against it), it just
+     * has nothing in it.
+     */
+    showTrackControls: Boolean = true,
+    /**
+     * False where there is no previous or next to go to, as in a feed card.
+     * The buttons would otherwise be drawn permanently disabled.
+     */
+    showMediaButtons: Boolean = true,
+    // <-- AM (BROWSE_SCROLLER_CONTROLS)
 ) {
     val transparentOverlay by animateFloatAsState(
         if (uiData.controlsShown && !uiData.isControlsLocked) .8f else 0f,
@@ -138,6 +151,15 @@ fun PlayerControls(
         true
     }
     // <-- AM (MEDIA_CONTROLS)
+
+    // AM (QUEUE_SOURCE_STEP) -->
+    // Offered only when the queue actually holds more than one source. With
+    // one, a double tap has nowhere to go, and a handler that does nothing
+    // would still cost every single tap the double-tap timeout.
+    val hasMultipleSources = remember(stateData.playlistBlockByEpisodeId) {
+        stateData.playlistBlockByEpisodeId.values.distinct().size > 1
+    }
+    // <-- AM (QUEUE_SOURCE_STEP)
 
     // AM (SYSTEM_BAR_CONTROLS_INSET) -->
     // When "show system status bar with controls" is on, PlayerControls' edge-to-edge
@@ -340,11 +362,17 @@ fun PlayerControls(
                 )
             }
 
+            // AM (PLAYING_IS_POSITION_ADVANCING) -->
+            // One signal: the session says whether it is getting anywhere.
+            // See PlayerViewModel's position watcher for why this is not read
+            // off mpv's core-idle and paused-for-cache properties any more.
+            val loading = playbackData.stalled
+            // <-- AM (PLAYING_IS_POSITION_ADVANCING)
             AnimatedVisibility(
                 visible = (
                     uiData.controlsShown && (!uiData.isControlsLocked || playbackData.gestureSeekAmount != null)
                     ) ||
-                    (pausedForCache == true || (coreIdle == true && !playbackData.paused)) ||
+                    loading ||
                     uiData.isLoadingEpisode,
                 enter = fadeIn(playerControlsEnterAnimationSpec()),
                 exit = fadeOut(playerControlsExitAnimationSpec()),
@@ -357,15 +385,27 @@ fun PlayerControls(
             ) {
                 MiddlePlayerControls(
                     // AM (MEDIA_CONTROLS) -->
-                    previousIcon = previousIcon,
+                    // AM (BROWSE_SCROLLER_CONTROLS): a null icon is what
+                    // MiddlePlayerControls already treats as "no button".
+                    previousIcon = previousIcon.takeIf { showMediaButtons },
                     hasPrevious = previousEnabled,
                     onSkipPrevious = { onPlayerEvent(PlayerEvent.NextEpisode(false)) },
-                    nextIcon = nextIcon,
+                    // AM (BROWSE_SCROLLER_CONTROLS)
+                    nextIcon = nextIcon.takeIf { showMediaButtons },
                     hasNext = nextEnabled,
                     onSkipNext = { onPlayerEvent(PlayerEvent.NextEpisode(true)) },
                     // <-- AM (MEDIA_CONTROLS)
+                    // AM (QUEUE_SOURCE_STEP) -->
+                    onSkipPreviousSource = {
+                        onPlayerEvent(PlayerEvent.NextSource(false))
+                    }.takeIf { hasMultipleSources },
+                    onSkipNextSource = {
+                        onPlayerEvent(PlayerEvent.NextSource(true))
+                    }.takeIf { hasMultipleSources },
+                    // <-- AM (QUEUE_SOURCE_STEP)
                     isStopped = stateData.isStopped,
-                    isLoading = pausedForCache == true || (coreIdle == true && !playbackData.paused),
+                    // AM (CLIP_PLAYBACK)
+                    isLoading = loading,
                     isLoadingEpisode = uiData.isLoadingEpisode,
                     controlsShown = uiData.controlsShown,
                     areControlsLocked = uiData.isControlsLocked,
@@ -434,7 +474,16 @@ fun PlayerControls(
                 },
             ) {
                 TopLeftPlayerControls(
-                    animeTitle = uiData.animeTitle,
+                    // AM (PLAYLIST_SOURCE_IDENTITY) -->
+                    // The source the PLAYING episode came from, not the entry
+                    // the session was opened on: a playlist can run across a
+                    // merged entry's children and anything queued, and
+                    // uiData.animeTitle is written once per load, so it named
+                    // whichever entry started the session for the rest of it.
+                    animeTitle = stateData.currentEpisode
+                        ?.let(stateData::sourceTitleOf)
+                        ?: uiData.animeTitle,
+                    // <-- AM (PLAYLIST_SOURCE_IDENTITY)
                     // AM (EPISODE_NAMES) -->
                     // Resolved here rather than stored, so it matches the
                     // episode list and follows a rename made while this
@@ -467,18 +516,21 @@ fun PlayerControls(
                     end.linkTo(parent.end)
                 },
             ) {
-                TopRightPlayerControls(
-                    autoPlayEnabled = uiData.autoPlayEnabled,
-                    onToggleAutoPlay = { onPlayerEvent(PlayerEvent.SetAutoPlay(it)) },
-                    onSubtitlesClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.SubtitleTracks)) },
-                    onSubtitlesLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.SubtitleSettings)) },
-                    onAudioClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.AudioTracks)) },
-                    onAudioLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.AudioDelay)) },
-                    onQualityClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.QualityTracks)) },
-                    isEpisodeOnline = stateData.isEpisodeOnline,
-                    onMoreClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.More)) },
-                    onMoreLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.VideoFilters)) },
-                )
+                // AM (BROWSE_SCROLLER_CONTROLS)
+                if (showTrackControls) {
+                    TopRightPlayerControls(
+                        autoPlayEnabled = uiData.autoPlayEnabled,
+                        onToggleAutoPlay = { onPlayerEvent(PlayerEvent.SetAutoPlay(it)) },
+                        onSubtitlesClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.SubtitleTracks)) },
+                        onSubtitlesLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.SubtitleSettings)) },
+                        onAudioClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.AudioTracks)) },
+                        onAudioLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.AudioDelay)) },
+                        onQualityClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.QualityTracks)) },
+                        isEpisodeOnline = stateData.isEpisodeOnline,
+                        onMoreClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.More)) },
+                        onMoreLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.VideoFilters)) },
+                    )
+                }
             }
 
             AnimatedVisibility(
@@ -546,7 +598,10 @@ fun PlayerControls(
                     onPlaybackSpeedChange = { onPlayerEvent(PlayerEvent.ChangeSpeed(it)) },
                     onOpenSheet = { onPlayerEvent(PlayerEvent.SetSheet(it)) },
                     onPipClick = { onPlayerEvent(PlayerEvent.EnterPip) },
-                    onAspectClick = { onPlayerEvent(PlayerEvent.ChangeAspect) },
+                    // AM (ASPECT_OVERRIDE_PICKER): opens the picker rather than
+                    // cycling blind. ChangeAspect still exists and still toggles
+                    // fit/fill, for gestures and custom buttons bound to it.
+                    onAspectClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.Aspect)) },
                 )
             }
 
@@ -587,8 +642,6 @@ private fun PlayerControlsPreview() {
             onBack = { },
             onPlayerEvent = { },
             mpvVolume = 0,
-            pausedForCache = false,
-            coreIdle = false,
             readAhead = 0f,
             remaining = 0,
             playbackSpeed = 1f,

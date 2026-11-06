@@ -21,10 +21,16 @@ import tachiyomi.presentation.core.util.plus
 @Composable
 fun BrowseSourceCompactGrid(
     animeList: LazyPagingItems<StateFlow<Anime>>,
+    // AM (MERGED_SOURCES)
+    mergeChildIds: Set<Long>,
     columns: GridCells,
     contentPadding: PaddingValues,
     onAnimeClick: (Anime) -> Unit,
     onAnimeLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onAnimeDoubleClick: ((Anime) -> Unit)? = null,
+    // AM (BROWSE_SELECTION)
+    selection: Set<Long> = emptySet(),
 ) {
     LazyVerticalGrid(
         columns = columns,
@@ -42,8 +48,14 @@ fun BrowseSourceCompactGrid(
             val anime by animeList[index]?.collectAsState() ?: return@items
             BrowseSourceCompactGridItem(
                 anime = anime,
+                // AM (MERGED_SOURCES)
+                inMerge = anime.id in mergeChildIds,
                 onClick = { onAnimeClick(anime) },
                 onLongClick = { onAnimeLongClick(anime) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClick = onAnimeDoubleClick?.let { handler -> { handler(anime) } },
+                // AM (BROWSE_SELECTION)
+                isSelected = anime.id in selection,
             )
         }
 
@@ -58,8 +70,14 @@ fun BrowseSourceCompactGrid(
 @Composable
 private fun BrowseSourceCompactGridItem(
     anime: Anime,
+    // AM (MERGED_SOURCES)
+    inMerge: Boolean,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = onClick,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClick: (() -> Unit)? = null,
+    // AM (BROWSE_SELECTION)
+    isSelected: Boolean = false,
 ) {
     AnimeCompactGridItem(
         title = anime.title,
@@ -70,11 +88,24 @@ private fun BrowseSourceCompactGridItem(
             url = anime.thumbnailUrl,
             lastModified = anime.coverLastModified,
         ),
-        coverAlpha = if (anime.favorite) CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha else 1f,
+        // AM (MERGED_SOURCES): dimmed for a merge child too - the cover is
+        // how the eye reads "already have this" while scrolling, and the
+        // badge is what says in which sense.
+        coverAlpha = if (anime.favorite || inMerge) {
+            CommonAnimeItemDefaults.BrowseFavoriteCoverAlpha
+        } else {
+            1f
+        },
         coverBadgeStart = {
             InLibraryBadge(enabled = anime.favorite)
+            // AM (MERGED_SOURCES)
+            InMergeBadge(enabled = !anime.favorite && inMerge)
         },
         onLongClick = onLongClick,
         onClick = onClick,
+        // AM (DOUBLE_TAP_QUEUE)
+        onDoubleClick = onDoubleClick,
+        // AM (BROWSE_SELECTION)
+        isSelected = isSelected,
     )
 }

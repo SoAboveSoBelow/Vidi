@@ -4,6 +4,10 @@ CREATE TABLE history(
     _id INTEGER NOT NULL PRIMARY KEY,
     episode_id INTEGER NOT NULL UNIQUE,
     last_seen INTEGER AS Date,
+    -- AM (HISTORY_ORIGIN): 0 = watched in the player, 1 = seen in the browse
+    -- feed. See HistoryOrigin, and the upsert below for why a feed write may
+    -- not take a row the player owns.
+    origin INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(episode_id) REFERENCES episodes (_id)
     ON DELETE CASCADE
 );
@@ -57,11 +61,16 @@ removeResettedHistory:
 DELETE FROM history
 WHERE last_seen = 0;
 
+-- AM (HISTORY_ORIGIN): a player write always wins and takes the row's origin
+-- with it. A feed write updates only a row the feed already owns, so scrolling
+-- past something you have genuinely watched neither rewrites its record nor
+-- bumps it back to the top of the list.
 upsert:
-INSERT INTO history(episode_id, last_seen)
-VALUES (:episodeId, :seenAt)
+INSERT INTO history(episode_id, last_seen, origin)
+VALUES (:episodeId, :seenAt, :origin)
 ON CONFLICT(episode_id)
 DO UPDATE
 SET
-    last_seen = :seenAt
-WHERE episode_id = :episodeId;
+    last_seen = :seenAt,
+    origin = :origin
+WHERE episode_id = :episodeId AND (:origin = 0 OR history.origin = 1);

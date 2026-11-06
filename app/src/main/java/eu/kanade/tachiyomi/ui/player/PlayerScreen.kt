@@ -1,6 +1,12 @@
 package eu.kanade.tachiyomi.ui.player
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -22,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.graphicsLayer
@@ -29,6 +36,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.core.graphics.toColorInt
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.util.lerp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import animiru.domain.player.model.AudioChannels
 import animiru.domain.player.model.DebandSettings
@@ -98,6 +107,12 @@ fun PlayerScreen(
     // see its own call site for what entering the dummy pip actually does.
     onEnterDummyPip: (() -> Unit)? = null,
     // <-- AM (DUMMY_PIP)
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // See the BackHandler below. Null (the default) means "no re-keying" -
+    // PlayerActivity and the spikes don't share their dispatcher with a
+    // Navigator, so registration order never shifts under them.
+    backPressPriorityKey: Any? = null,
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -105,6 +120,13 @@ fun PlayerScreen(
     val interactionSource = remember { MutableInteractionSource() }
     val uiPreferences = remember { appGraph.uiPreferences }
     val playerPreferences = remember { appGraph.playerPreferences }
+    // AM (PLAYLIST_SWIPE_ACTIONS): the playlist obeys the same swipe settings
+    // the entry's episode list does.
+    val libraryPreferences = remember { appGraph.libraryPreferences }
+    // AM (ASPECT_OVERRIDE_PICKER) -->
+    val aspectState by playerPreferences.aspectState.collectAsState()
+    val aspectOverride by playerPreferences.aspectOverride.collectAsState()
+    // <-- AM (ASPECT_OVERRIDE_PICKER)
     val audioPreferences = remember { appGraph.audioPreferences }
     val subtitlePreferences = remember { appGraph.subtitlePreferences }
     val decoderPreferences = remember { appGraph.decoderPreferences }
@@ -132,6 +154,14 @@ fun PlayerScreen(
     // See PlayerViewModel's comment of the same tag.
     // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
     val showStatusBarWithControls by playerPreferences.showSystemStatusBar.collectAsState()
+    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+    // Crossed, exactly as AnimeViewModel crosses them: the two preference KEYS
+    // are swapped relative to their property names (swipeToStartAction is
+    // stored under pref_episode_swipe_end_action), so reading them straight
+    // through puts each action on the opposite side from the entry list.
+    val swipeStartAction by libraryPreferences.swipeToEndAction.collectAsState()
+    val swipeEndAction by libraryPreferences.swipeToStartAction.collectAsState()
+    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
     val relativeTime by uiPreferences.relativeTime.collectAsState()
     val dateFormat by uiPreferences.dateFormat.collectAsState()
 
@@ -164,6 +194,15 @@ fun PlayerScreen(
         )
         .collectAsStateWithLifecycle()
     // <-- AM (DUMMY_PIP_BACK_PASSTHROUGH_FIX)
+
+    // AM (PINCH_ZOOM) -->
+    // The dummy pip never reaches onPictureInPictureModeChanged, so it needs the
+    // same reset the real one gets: its entry/exit morph scales off the drawn video
+    // rect, and a zoomed rect is not the one it measured.
+    LaunchedEffect(dummyPipActive) {
+        if (dummyPipActive) viewModel.resetVideoZoom()
+    }
+    // <-- AM (PINCH_ZOOM)
 
     // AM (BACK_HANDLER_STALE_GUARD_FIX) -->
     // hasNavigatedBack exists to prevent a rapid double-tap of back from firing
@@ -240,9 +279,24 @@ fun PlayerScreen(
 
     // Disabled while the dummy pip is up - see
     // DUMMY_PIP_BACK_PASSTHROUGH_FIX above.
-    BackHandler(enabled = !dummyPipActive) {
-        handleBackPress()
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // Keyed on the Navigator's current top screen (MainActivity passes
+    // navigator.lastItem.key). OnBackPressedDispatcher runs the MOST
+    // RECENTLY ADDED enabled callback, and every background navigation
+    // re-registers the Navigator's own back handling after this one - so
+    // while any screen below the player could still pop, system back went
+    // to the BACKGROUND page instead of the fullscreen player (only at the
+    // library root, where the Navigator disables its handler, did this one
+    // ever fire - the in-player back button calls handleBackPress()
+    // directly, which is why it always worked). Re-running BackHandler's
+    // DisposableEffect on every stack change re-adds this callback last,
+    // so a visible fullscreen player owns system back again.
+    key(backPressPriorityKey) {
+        BackHandler(enabled = !dummyPipActive) {
+            handleBackPress()
+        }
     }
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
 
     // AM (DUMMY_PIP_BACKGROUND_CORNERS_FIX) -->
     // Inside the dummy pip this root black background is the box-sized
@@ -359,7 +413,7 @@ fun PlayerScreen(
                         playerPreferences.playerSpeed.deleteAndGet().toFixed(2).toDouble(),
                     )
                 },
-                episodeDisplayMode = stateData.currentAnime?.displayMode,
+                episodeDisplayModeOf = stateData::displayModeOf,
                 currentEpisodeIndex = stateData.currentPlaylistIndex,
                 episodeList = stateData.currentPlaylist,
                 dateRelativeTime = relativeTime,
@@ -382,8 +436,6 @@ fun PlayerScreen(
             )
         } else {
             val mpvVolume by viewModel.propFlow<Int>("volume").collectAsStateWithLifecycle()
-            val pausedForCache by viewModel.propFlow<Boolean>("paused-for-cache").collectAsStateWithLifecycle()
-            val coreIdle by viewModel.propFlow<Boolean>("core-idle").collectAsStateWithLifecycle()
             val readAhead by viewModel.propFlow<Float>("demuxer-cache-time").collectAsStateWithLifecycle()
             val remaining by viewModel.propFlow<Int>("playtime-remaining").collectAsStateWithLifecycle()
             val playbackSpeed by viewModel.propFlow<Float>("speed").collectAsStateWithLifecycle()
@@ -445,7 +497,11 @@ fun PlayerScreen(
             // whole point. The window resizing must NOT recompute it.
             val density = LocalDensity.current
             BoxWithConstraints(
-                modifier = Modifier.fillMaxSize(),
+                // AM (PINCH_ZOOM): clipToBounds so a zoomed surface is cropped at the
+                // window edge instead of drawing over the controls around it.
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clipToBounds(),
                 contentAlignment = Alignment.Center,
             ) {
                 val windowWidthPx = with(density) { maxWidth.toPx() }
@@ -513,6 +569,40 @@ fun PlayerScreen(
                     windowWidthPx / fixedWidthPx,
                     windowHeightPx / fixedHeightPx,
                 )
+                // AM (PINCH_ZOOM) -->
+                // The zoom rides on this layer rather than mpv's video-zoom: the
+                // surface is the video's own shape, so the bars are space around it
+                // that only scaling the box itself can cover. See PlayerViewModel's
+                // videoZoom for the full reasoning.
+                // The transform is NOT collected into composition. The player reads
+                // viewModel.layerZoom/layerPanX/layerPanY inside the graphicsLayer
+                // lambda below, where Compose defers the read to the draw phase, so a
+                // pinch frame invalidates the layer and recomposes nothing.
+                //
+                // How much of the window the fitted video covers: the view model
+                // needs it for the pan limits and for the zoom-to-fill detent.
+                LaunchedEffect(fixedWidthPx, fixedHeightPx, fitScale, windowWidthPx, windowHeightPx) {
+                    viewModel.setVideoCoverage(
+                        coverX = fixedWidthPx * fitScale / windowWidthPx,
+                        coverY = fixedHeightPx * fitScale / windowHeightPx,
+                    )
+                }
+                val settleToken by viewModel.settleToken.collectAsStateWithLifecycle()
+                LaunchedEffect(settleToken) {
+                    val target = viewModel.settleTarget ?: return@LaunchedEffect
+                    val fromZoom = viewModel.layerZoom
+                    val fromPanX = viewModel.layerPanX
+                    val fromPanY = viewModel.layerPanY
+                    animate(0f, 1f, animationSpec = tween(ZOOM_SETTLE_MS)) { t, _ ->
+                        viewModel.setLayerTransform(
+                            zoom = lerp(fromZoom, target.first, t),
+                            panX = lerp(fromPanX, target.second, t),
+                            panY = lerp(fromPanY, target.third, t),
+                        )
+                    }
+                    viewModel.onZoomSettled()
+                }
+                // <-- AM (PINCH_ZOOM)
                 Box(
                     modifier = Modifier
                         // requiredSize, NOT size: size is clamped by the parent's
@@ -529,10 +619,30 @@ fun PlayerScreen(
                             height = with(density) { fixedHeightPx.toDp() },
                         )
                         .graphicsLayer {
-                            scaleX = fitScale
-                            scaleY = fitScale
+                            // AM (PINCH_ZOOM): read here, inside the layer block, so
+                            // these are draw-phase reads rather than composition ones.
+                            // Pan is in window-relative units and converts here, where
+                            // the window's px size is known.
+                            scaleX = fitScale * viewModel.layerZoom
+                            scaleY = fitScale * viewModel.layerZoom
+                            translationX = viewModel.layerPanX * windowWidthPx
+                            translationY = viewModel.layerPanY * windowHeightPx
                         },
                 ) {
+                    val qualitySwitch by viewModel.qualitySwitch.collectAsStateWithLifecycle()
+                    qualitySwitch?.let { pending ->
+                        key(pending.player) {
+                            MpvSurface(
+                                modifier = Modifier.requiredSize(1.dp),
+                                player = pending.player,
+                                videoOutput = viewModel.videoOutput,
+                                onSurfaceAttachedChanged = { attached ->
+                                    pending.clipPlayback.onSurfaceAttachedChanged(attached)
+                                    pending.surfaceAttached.value = attached
+                                },
+                            )
+                        }
+                    }
                     key(viewModel.mpv) {
                         MpvSurface(
                             modifier = Modifier.fillMaxSize(),
@@ -553,6 +663,28 @@ fun PlayerScreen(
                 viewModel = viewModel,
                 interactionSource = interactionSource,
             )
+
+            // AM (PINCH_ZOOM) -->
+            // While a release would be pulled onto a detent, the edge of the screen
+            // picks up a faint white border - the hint is "let go here and you land
+            // on it", so it belongs on the frame rather than in the text readout.
+            val pendingDetent by viewModel.pendingZoomDetent.collectAsStateWithLifecycle()
+            val detentBorderAlpha by animateFloatAsState(
+                targetValue = if (pendingDetent != null) ZOOM_DETENT_BORDER_ALPHA else 0f,
+                animationSpec = tween(ZOOM_SETTLE_MS),
+                label = "zoom_detent_border",
+            )
+            if (detentBorderAlpha > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .border(
+                            width = ZOOM_DETENT_BORDER_WIDTH.dp,
+                            color = Color.White.copy(alpha = detentBorderAlpha),
+                        ),
+                )
+            }
+            // <-- AM (PINCH_ZOOM)
 
             DoubleTapToSeekOvals(
                 amount = playbackData.doubleTapSeekAmount,
@@ -650,8 +782,6 @@ fun PlayerScreen(
                         onBack = handleBackPress,
                         onPlayerEvent = viewModel::handlePlayerEvent,
                         mpvVolume = mpvVolume,
-                        pausedForCache = pausedForCache,
-                        coreIdle = coreIdle,
                         readAhead = readAhead,
                         remaining = remaining,
                         playbackSpeed = playbackSpeed,
@@ -680,12 +810,21 @@ fun PlayerScreen(
 
                 PlayerSheets(
                     sheetShown = uiData.sheetShown,
+                    // AM (ASPECT_OVERRIDE_PICKER) -->
+                    selectedAspect = aspectState,
+                    onSelectAspect = { viewModel.setAspectRatio(it) },
+                    selectedAspectOverride = aspectOverride,
+                    onSelectAspectOverride = { viewModel.setAspectOverride(it) },
+                    // <-- AM (ASPECT_OVERRIDE_PICKER)
                     subtitles = subtitles,
                     onAddSubtitle = viewModel::addSubtitle,
                     onSelectSubtitle = viewModel::selectSub,
                     audioTracks = audioTracks,
                     onAddAudio = viewModel::addAudio,
-                    onSelectAudio = viewModel::selectAudio,
+                    // AM (AUDIO_DESELECT_IS_EXPLICIT): the sheet is the only place
+                    // a deselect can be intended, so it is the only place that
+                    // decides one.
+                    onSelectAudio = viewModel::toggleAudio,
                     isLoadingHosters = uiData.isLoadingHosters,
                     hosterState = stateData.hosterState,
                     expandedState = uiData.hosterExpandedList,
@@ -988,7 +1127,7 @@ fun PlayerScreen(
 
                 // AM (PLAYER_ADD_TO_LIBRARY) -->
                 // Shared exit for the add-to-library dialogs' off-player
-                // actions - same steps as onOpenPlaylistEntry below.
+                // actions - same steps as onOpenSource below.
                 val leavePlayerForEntry: (Long) -> Unit = { animeId ->
                     onEnterDummyPip?.let { enterDummyPip ->
                         viewModel.setDialog(Dialogs.None)
@@ -1000,9 +1139,18 @@ fun PlayerScreen(
                 // <-- AM (PLAYER_ADD_TO_LIBRARY)
 
                 // Dialogs
+                // AM (EXTERNAL_FOLDER_GRANT) -->
+                // The folder picker lives here, beside the dialog that offers it,
+                // because an Activity result needs a launcher registered in the
+                // composition - the ViewModel cannot start one itself. It only
+                // applies the result.
+                val folderPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocumentTree(),
+                ) { uri -> uri?.let { viewModel.applyExternalFolderGrant(it) } }
+                // <-- AM (EXTERNAL_FOLDER_GRANT)
                 PlayerDialogs(
                     dialogShown = uiData.dialogShown,
-                    episodeDisplayMode = stateData.currentAnime?.displayMode,
+                    episodeDisplayModeOf = stateData::displayModeOf,
                     // AM (PLAYLIST_SEARCH_SCOPE) -->
                     // The unscoped list, so the search can widen as well as
                     // narrow, with the playing episode identified by id since a
@@ -1016,62 +1164,104 @@ fun PlayerScreen(
                     onFillermarkClicked = viewModel::fillermarkEpisode,
                     onEpisodeClicked = {
                         viewModel.setDialog(Dialogs.None)
-                        viewModel.changeEpisode(it)
+                        // AM (PLAYER_EPISODE_LIST_SELECTION)
+                        // Picking the episode already playing means "close
+                        // this", not "start it again" - changeEpisode tears the
+                        // session down and reloads, which for the current
+                        // episode is a reload of what is already on screen.
+                        if (it != stateData.currentEpisode?.id) {
+                            viewModel.changeEpisode(it)
+                        }
                     },
                     // AM (EPISODE_NAMES) -->
                     displayNameOf = stateData::displayNameOf,
                     // <-- AM (EPISODE_NAMES)
                     // AM (EPISODE_TAG_SEARCH) -->
                     searchFieldsOf = stateData::searchFieldsOf,
+                    // AM (PLAYLIST_LIBRARY_BADGE)
+                    isFromLibraryEntry = stateData::isFromLibraryEntry,
+                    // AM (QUEUE_GROUPED_PLAYLIST) -->
+                    blockOf = { episode -> episode.id?.let { stateData.playlistBlockByEpisodeId[it] } },
+                    sourceTitleOf = { episode ->
+                        episode.id?.let { stateData.playlistQueuedEntryByEpisodeId[it] }?.title
+                            ?: stateData.currentAnime?.title
+                    },
+                    // AM (QUEUE_SOURCE_TOTALS)
+                    sourceIdOf = { episode ->
+                        episode.id?.let { stateData.playlistQueuedEntryByEpisodeId[it]?.id }
+                            ?: stateData.currentAnime?.id
+                    },
+                    blockSeasons = stateData.playlistBlockSeasons,
+                    blockLastPlayed = stateData.playlistBlockLastPlayed,
+                    // AM (PLAYLIST_SWIPE_ACTIONS) -->
+                    swipeStartAction = swipeStartAction,
+                    swipeEndAction = swipeEndAction,
+                    downloadStates = stateData.playlistDownloadStates,
+                    onSeenClicked = viewModel::setEpisodesSeen,
+                    // AM (PLAYBACK_SEEN_REACHES_PLAYLIST)
+                    playbackSeen = stateData.playlistPlaybackSeen,
+                    // AM (PLAYLIST_ADD_TO_LIBRARY): the dialog it raises is one
+                    // of the player's own, so unlike opening an entry this
+                    // needs no way out of the player and is always offered.
+                    onChangeCategories = viewModel::changePlaylistSelectionCategories,
+                    onDownloadClicked = viewModel::toggleEpisodeDownload,
+                    // <-- AM (PLAYLIST_SWIPE_ACTIONS)
+                    onExpandSource = viewModel::loadBlockSeasons,
+                    // AM (QUEUE_REORDER)
+                    onMoveQueueEpisodes = viewModel::moveQueueEpisodes,
+                    onReorderQueueBlocks = viewModel::reorderQueueBlocks,
+                    // <-- AM (QUEUE_GROUPED_PLAYLIST)
                     // <-- AM (EPISODE_TAG_SEARCH)
                     // AM (PLAYLIST_SEARCH_SCOPE) -->
                     playlistAnimeId = stateData.currentAnime?.id,
                     // <-- AM (PLAYLIST_SEARCH_SCOPE)
                     // AM (PLAYER_EPISODE_LIST_SELECTION) -->
-                    // Only offered where the player can actually get out of
-                    // the way. onEnterDummyPip is null for PlayerActivity and
-                    // the spike screens, and opening an entry behind a
-                    // fullscreen player would look like nothing happened.
-                    // AM (OPEN_ENTRY_MERGED_ONLY) -->
-                    // Also only on a merged entry. playlistOwnerByAnimeId is
-                    // empty for an ordinary one, where every episode already
-                    // belongs to the entry being viewed, so the button would
-                    // open the screen the list was opened from.
-                    onOpenEntryClicked = onEnterDummyPip
-                        ?.takeIf { stateData.playlistOwnerByAnimeId.isNotEmpty() }
-                        ?.let { enterDummyPip ->
-                            { episodeId: Long? ->
-                                val ownerId = stateData.currentPlaylist
-                                    .find { it.id == episodeId }
-                                    ?.anime_id
-                                if (ownerId != null) {
-                                    viewModel.setDialog(Dialogs.None)
-                                    enterDummyPip()
-                                    OpenEntryRequests.open(ownerId)
-                                }
-                            }
-                        },
-                    // <-- AM (OPEN_ENTRY_MERGED_ONLY)
-                    onOpenPlaylistEntry = onEnterDummyPip?.let { enterDummyPip ->
-                        {
-                            // The playlist's own entry, so on a merged entry
-                            // this is the parent rather than the child the
-                            // current episode belongs to.
-                            stateData.currentAnime?.id?.let { animeId ->
+                    // AM (OPEN_ENTRY_ON_DOUBLE_TAP) -->
+                    // Both only where the player can actually get out of the
+                    // way: onEnterDummyPip is null for PlayerActivity and the
+                    // spike screens, and opening an entry behind a fullscreen
+                    // player would look like nothing happened.
+                    //
+                    // A source or season row stands for the entry its block
+                    // was queued AS - the merge parent on a merged entry - so
+                    // it opens that.
+                    //
+                    // AM (PLAYLIST_ROW_ENTRY_RESOLUTION): off the view model's
+                    // own resolution, which the selection bar's library action
+                    // shares - the maps were being read here as well, and two
+                    // readings of what a merge row means is one too many.
+                    onOpenSource = onEnterDummyPip?.let { enterDummyPip ->
+                        { blockId: Long ->
+                            val animeId = viewModel.playlistEntryOfBlock(blockId)?.id
+                            if (animeId != null) {
                                 viewModel.setDialog(Dialogs.None)
                                 enterDummyPip()
                                 OpenEntryRequests.open(animeId)
                             }
-                            Unit
                         }
                     },
+                    // An episode opens the entry it came from, which on a
+                    // merged entry is the child that owns it. Falls back to the
+                    // session's entry, which is the same thing on an ordinary
+                    // one.
+                    // AM (PLAYLIST_ROW_ENTRY_RESOLUTION)
+                    onOpenEpisodeEntry = onEnterDummyPip?.let { enterDummyPip ->
+                        { episodeId: Long ->
+                            val animeId = viewModel.playlistEntryIdOfEpisode(episodeId)
+                            if (animeId != null) {
+                                viewModel.setDialog(Dialogs.None)
+                                enterDummyPip()
+                                OpenEntryRequests.open(animeId)
+                            }
+                        }
+                    },
+                    // <-- AM (OPEN_ENTRY_ON_DOUBLE_TAP)
                     // <-- AM (PLAYER_EPISODE_LIST_SELECTION)
                     // AM (PLAYER_ADD_TO_LIBRARY) -->
-                    isFavorited = stateData.currentAnime?.favorite == true,
-                    onAddToLibrary = { viewModel.toggleCurrentAnimeFavorite() },
-                    onAddToLibraryAnyway = {
+                    // AM (PLAYLIST_ADD_TO_LIBRARY)
+                    onAddToLibraryAnyway = { anime ->
                         viewModel.setDialog(Dialogs.None)
-                        viewModel.toggleCurrentAnimeFavorite(checkDuplicate = false)
+                        viewModel.toggleAnimeFavorite(anime, checkDuplicate = false)
                     },
                     // The three actions that cannot be finished over a player.
                     // Migration needs MigrateAnimeDialog, which is an extension
@@ -1089,13 +1279,36 @@ fun PlayerScreen(
                     onEditCategories = {
                         stateData.currentAnime?.id?.let { leavePlayerForEntry(it) }
                     },
-                    onConfirmCategories = { anime, categoryIds ->
+                    // AM (PLAYLIST_ADD_TO_LIBRARY)
+                    onConfirmCategories = { animeList, include, exclude ->
                         viewModel.setDialog(Dialogs.None)
-                        viewModel.applyFavoriteCategories(anime, categoryIds)
+                        viewModel.applyCategorySelection(animeList, include, exclude)
                     },
                     onDeleteDownloads = viewModel::deleteDownloadsOf,
                     // <-- AM (PLAYER_ADD_TO_LIBRARY)
+                    // AM (LOCAL_SOURCE_DOWNLOAD) -->
+                    // Both null for a playlist with nothing to fetch from - a
+                    // local entry, or no entry at all - so the selection header
+                    // offers neither rather than offering an action that would
+                    // silently do nothing. canDownloadEpisodes answers that one
+                    // question for both.
+                    onDownloadEpisodes = viewModel::downloadEpisodes
+                        .takeIf { stateData.canDownloadEpisodes },
+                    // <-- AM (LOCAL_SOURCE_DOWNLOAD)
                     onDismissRequest = { viewModel.setDialog(Dialogs.None) },
+                    // AM (EXTERNAL_FOLDER_GRANT) -->
+                    // Read from collected state, not a ViewModel getter: a getter
+                    // is evaluated once during composition - before the external
+                    // load has set anything - and never recomposed, so the Grant
+                    // action never appeared and the dialog only ever offered OK.
+                    canGrantExternalFolder = stateData.canGrantExternalFolder,
+                    // The picker's input IS EXTRA_INITIAL_URI, so this opens it
+                    // already showing the video's own folder rather than making
+                    // the user navigate to a place the app already knows.
+                    onRequestExternalFolder = {
+                        folderPicker.launch(viewModel.externalFolderPickerStartUri)
+                    },
+                    // <-- AM (EXTERNAL_FOLDER_GRANT)
                 )
 
                 // AM (CUSTOM_EPISODE_ORDER) -->
@@ -1136,4 +1349,13 @@ private const val MIN_CONTROLS_HEIGHT_DP = 180
 // Shape the surface is pinned to before mpv has reported a real one. Only ever
 // visible for the moment before the first frame's aspect arrives.
 private const val FALLBACK_VIDEO_ASPECT = 16f / 9f
+
+// AM (PINCH_ZOOM) -->
+/** How long the pull onto a detent takes after a release. */
+private const val ZOOM_SETTLE_MS = 180
+
+/** The release hint: a faint white frame at the edge of the screen. */
+private const val ZOOM_DETENT_BORDER_ALPHA = 0.35f
+private const val ZOOM_DETENT_BORDER_WIDTH = 3
+// <-- AM (PINCH_ZOOM)
 // <-- AM (FIXED_SURFACE_SIZE)

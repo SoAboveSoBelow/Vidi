@@ -38,6 +38,8 @@ class AndroidSourceManager(
     // AM (MERGED_SOURCES) -->
     private val mergedSource: MergedSource,
     // <-- AM (MERGED_SOURCES)
+    // AM (EXTERNAL_STREAM_SOURCE)
+    private val externalStreamSource: ExternalStreamSource,
     // AM (JS_PROJECT_SOURCES) -->
     private val jsProjectRepository: JsProjectRepository,
     // <-- AM (JS_PROJECT_SOURCES)
@@ -80,6 +82,8 @@ class AndroidSourceManager(
                             // AM (MERGED_SOURCES) -->
                             MergedSource.ID to mergedSource,
                             // <-- AM (MERGED_SOURCES)
+                            // AM (EXTERNAL_STREAM_SOURCE)
+                            ExternalStreamSource.ID to externalStreamSource,
                         ),
                     )
                     extensions.forEach { extension ->

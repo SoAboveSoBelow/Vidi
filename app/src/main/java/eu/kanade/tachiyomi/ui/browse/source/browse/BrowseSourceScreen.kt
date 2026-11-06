@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.ui.browse.source.browse
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -26,13 +27,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import cafe.adriel.voyager.navigator.LocalNavigator
@@ -42,16 +43,21 @@ import eu.kanade.core.util.ifSourcesLoaded
 import eu.kanade.presentation.anime.DuplicateAnimeDialog
 import eu.kanade.presentation.browse.BrowseSourceContent
 import eu.kanade.presentation.browse.MissingSourceScreen
+import eu.kanade.presentation.browse.components.BrowseSourceSelectionBottomBar
+import eu.kanade.presentation.browse.components.BrowseSourceSelectionToolbar
 import eu.kanade.presentation.browse.components.BrowseSourceToolbar
-import eu.kanade.presentation.browse.components.RemoveAnimeDialog
 import eu.kanade.presentation.category.components.ChangeCategoryDialog
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.util.AssistContentScreen
 import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
+import eu.kanade.tachiyomi.data.queue.QueueFillJob
+import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.ui.browse.extension.details.SourcePreferencesScreen
 import eu.kanade.tachiyomi.ui.browse.migration.season.MigrateSeasonSelectScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceViewModel.Listing
+import eu.kanade.tachiyomi.ui.browse.source.globalsearch.GlobalSearchScreen
 import eu.kanade.tachiyomi.ui.category.CategoryScreen
 import eu.kanade.tachiyomi.ui.webview.WebViewScreen
 import kotlinx.coroutines.channels.Channel
@@ -60,9 +66,10 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import mihon.feature.migration.dialog.MigrateAnimeDialog
 import mihon.presentation.core.util.collectAsLazyPagingItems
 import tachiyomi.core.common.Constants
-import tachiyomi.core.common.util.lang.launchIO
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.source.model.StubSource
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
@@ -93,10 +100,17 @@ data class BrowseSourceScreen(
         val navigator = LocalNavigator.currentOrThrow
         val navigateUp: () -> Unit = {
             when {
+                // AM (BROWSE_SELECTION): the selection goes before the search
+                // query for the same reason the query goes before the pop -
+                // back undoes the most recent thing the user put on screen.
+                state.selectionMode -> viewModel.clearSelection()
                 !state.isUserQuery && state.toolbarQuery != null -> viewModel.setToolbarQuery(null)
                 else -> navigator.pop()
             }
         }
+
+        // AM (BROWSE_SELECTION)
+        BackHandler(enabled = state.selectionMode, onBack = viewModel::clearSelection)
 
         if (viewModel.source is StubSource) {
             MissingSourceScreen(
@@ -106,7 +120,8 @@ data class BrowseSourceScreen(
             return
         }
 
-        val scope = rememberCoroutineScope()
+        // AM (PLAYBACK_QUEUE)
+        val context = LocalContext.current
         val haptic = LocalHapticFeedback.current
         val uriHandler = LocalUriHandler.current
         val snackbarHostState = remember { SnackbarHostState() }
@@ -140,6 +155,17 @@ data class BrowseSourceScreen(
                         .onSizeChanged { topBarHeight = it.height },
                     // <-- AY
                 ) {
+                    // AM (BROWSE_SELECTION): swapped inside the Column rather
+                    // than replacing it, so the measured top bar height the
+                    // list sizes itself against stays one measurement.
+                    if (state.selectionMode) {
+                        BrowseSourceSelectionToolbar(
+                            selectedCount = state.selection.size,
+                            onClickUnselectAll = viewModel::clearSelection,
+                        )
+                        return@Column
+                    }
+
                     BrowseSourceToolbar(
                         searchQuery = state.toolbarQuery,
                         onSearchQueryChange = viewModel::setToolbarQuery,
@@ -219,6 +245,20 @@ data class BrowseSourceScreen(
                     HorizontalDivider()
                 }
             },
+            // AM (BROWSE_SELECTION) -->
+            bottomBar = {
+                BrowseSourceSelectionBottomBar(
+                    visible = state.selectionMode,
+                    onChangeCategoryClicked = viewModel::openChangeCategoryDialog,
+                    onMergeClicked = viewModel::mergeSelection.takeIf { state.selection.size >= 2 },
+                    // AM (PLAYBACK_QUEUE): the worker is started from here
+                    // rather than the ViewModel, which has no Context.
+                    onAddToQueueClicked = {
+                        viewModel.addSelectionToQueue { QueueFillJob.start(context) }
+                    },
+                )
+            },
+            // <-- AM (BROWSE_SELECTION)
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         ) { paddingValues ->
             BrowseSourceContent(
@@ -230,25 +270,66 @@ data class BrowseSourceScreen(
                 topBarHeight = topBarHeight,
                 // <-- AY
                 displayMode = viewModel.displayMode,
+                // AM (BROWSE_SCROLLER)
+                selectionMode = state.selectionMode,
+                onAnimeFavoriteClick = viewModel::changeAnimeFavorite,
+                // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+                onAnimeFavoriteLongClick = { anime -> viewModel.openChangeCategoryDialog(anime) },
+                onTagSearch = viewModel::searchGenre,
+                onTagGlobalSearch = { navigator.push(GlobalSearchScreen(it)) },
+                onCreatorSearch = { navigator.push(GlobalSearchScreen(it)) },
+                // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
                 snackbarHostState = snackbarHostState,
                 contentPadding = paddingValues,
                 onWebViewClick = onWebViewClick,
                 onHelpClick = { uriHandler.openUri(Constants.URL_HELP) },
                 onLocalSourceHelpClick = onHelpClick,
-                onAnimeClick = { navigator.push((AnimeScreen(it.id, true))) },
-                onAnimeLongClick = { anime ->
-                    scope.launchIO {
-                        val duplicates = viewModel.getDuplicateLibraryAnime(anime)
-                        when {
-                            anime.favorite -> viewModel.setDialog(BrowseSourceViewModel.Dialog.RemoveAnime(anime))
-                            duplicates.isNotEmpty() -> viewModel.setDialog(
-                                BrowseSourceViewModel.Dialog.AddDuplicateAnime(anime, duplicates),
-                            )
-                            else -> viewModel.addFavorite(anime)
-                        }
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                // AM (BROWSE_SELECTION) -->
+                // Long press selects instead of adding to the library; the
+                // library actions moved to the selection's own bottom bar, so
+                // they apply to one entry or twenty through one path.
+                onAnimeClick = { anime ->
+                    if (state.selectionMode) {
+                        viewModel.toggleSelection(anime)
+                    } else {
+                        navigator.push(AnimeScreen(anime.id, true))
                     }
                 },
+                onAnimeLongClick = { anime ->
+                    viewModel.toggleSelection(anime)
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                },
+                // AM (DOUBLE_TAP_QUEUE) -->
+                // Queues the result outright.
+                //
+                // AM (BROWSE_SELECTION_TAP_LAG_FIX): null while a selection is
+                // running, rather than a handler that checks the mode and does
+                // nothing. combinedClickable cannot know a second tap is not
+                // coming, so ANY non-null handler makes every single tap wait
+                // out the double-tap timeout before it commits - and in
+                // selection mode that tap is a checkbox, which is the gesture
+                // being repeated the most. Dropping the handler drops the wait
+                // with it; the bottom bar's own queue action is what acts on a
+                // selection. The library's grids are wired the same way, which
+                // is why they never had the lag (see LibraryContent).
+                onAnimeDoubleClick = if (state.selectionMode) {
+                    null
+                } else {
+                    { anime ->
+                        viewModel.addAnimeToQueue(
+                            anime = anime,
+                            onRequestFill = {
+                                QueueFillJob.start(context)
+                                context.toast(AMMR.strings.am_action_added_to_queue)
+                            },
+                        )
+                    }
+                },
+                // <-- AM (DOUBLE_TAP_QUEUE)
+                selection = state.selection,
+                // <-- AM (BROWSE_SELECTION)
+                // AM (MERGED_SOURCES)
+                mergeChildIds = state.mergeChildIds,
             )
         }
 
@@ -263,6 +344,27 @@ data class BrowseSourceScreen(
                     onUpdate = viewModel::setFilters,
                 )
             }
+            // AM (QUEUE_WATCH_FILTER) -->
+            is BrowseSourceViewModel.Dialog.AddToQueue -> {
+                // AM (QUEUE_RESOLVE_ONCE)
+                val mixed = dialog.sources.filter { it.hasMixedWatchState }
+                AddToQueueDialog(
+                    mixedCount = mixed.size,
+                    mixedTitle = mixed.singleOrNull()?.anime?.title,
+                    onAddUnwatched = {
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = true) {
+                            QueueFillJob.start(context)
+                        }
+                    },
+                    onAddAll = {
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = false) {
+                            QueueFillJob.start(context)
+                        }
+                    },
+                    onDismissRequest = onDismissRequest,
+                )
+            }
+            // <-- AM (QUEUE_WATCH_FILTER)
             is BrowseSourceViewModel.Dialog.AddDuplicateAnime -> {
                 DuplicateAnimeDialog(
                     duplicates = dialog.duplicates,
@@ -285,27 +387,37 @@ data class BrowseSourceScreen(
                     onDismissRequest = onDismissRequest,
                 )
             }
-            is BrowseSourceViewModel.Dialog.RemoveAnime -> {
-                RemoveAnimeDialog(
-                    onDismissRequest = onDismissRequest,
-                    onConfirm = {
-                        viewModel.changeAnimeFavorite(dialog.anime)
-                    },
-                    animeToRemove = dialog.anime,
-                )
-            }
             is BrowseSourceViewModel.Dialog.ChangeAnimeCategory -> {
                 ChangeCategoryDialog(
                     initialSelection = dialog.initialSelection,
                     onDismissRequest = onDismissRequest,
                     onEditCategories = { navigator.push(CategoryScreen()) },
-                    onConfirm = { include, _ ->
-                        viewModel.changeAnimeFavorite(dialog.anime)
-                        viewModel.moveAnimeToCategories(dialog.anime, include)
+                    // AM (BROWSE_SELECTION): both lists, like the library
+                    // screen passes them - exclude is what makes a mixed
+                    // category clearable.
+                    onConfirm = { include, exclude ->
+                        viewModel.confirmCategorySelection(
+                            dialog.animeList,
+                            include,
+                            exclude,
+                            mergeAfter = dialog.mergeAfter,
+                        )
                     },
                 )
             }
             else -> {}
+        }
+
+        // AM (BROWSE_SELECTION_MERGE)
+        LaunchedEffect(Unit) {
+            viewModel.mergeResultEvent.collect { mergedId ->
+                val message = if (mergedId == null) {
+                    AMMR.strings.am_merge_failed
+                } else {
+                    AMMR.strings.am_merge_entry_merged
+                }
+                snackbarHostState.showSnackbar(context.stringResource(message))
+            }
         }
 
         LaunchedEffect(Unit) {

@@ -81,6 +81,11 @@ class AnimeRepositoryImpl(
         return database.animesQueries.getFavoriteBySourceId(sourceId, AnimeMapper::mapAnime).subscribeToList()
     }
 
+    // AM (MERGED_SOURCES)
+    override fun getLibraryEntriesBySourceId(sourceId: Long): Flow<List<Anime>> {
+        return database.animesQueries.getLibraryEntriesBySourceId(sourceId, AnimeMapper::mapAnime).subscribeToList()
+    }
+
     override suspend fun getDuplicateLibraryAnime(id: Long, title: String): List<AnimeWithEpisodeCount> {
         return database.animesQueries.getDuplicateLibraryAnime(
             id,

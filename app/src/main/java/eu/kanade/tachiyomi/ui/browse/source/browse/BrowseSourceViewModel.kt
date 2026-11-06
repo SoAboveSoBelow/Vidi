@@ -8,6 +8,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
+import aniyomi.source.js.JsProjectSource
+import aniyomi.domain.queue.interactor.AddToQueue
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
+import aniyomi.domain.source.model.BrowseDisplayMode
+import aniyomi.ui.browse.BrowseDisplayModeDefaults
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
@@ -21,12 +27,18 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import eu.kanade.core.preference.asState
+import eu.kanade.domain.anime.interactor.MergeAnimeEntries
 import eu.kanade.domain.anime.interactor.UpdateAnime
+import eu.kanade.domain.category.interactor.GetCategorySelection
 import eu.kanade.domain.source.interactor.GetIncognitoState
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.interactor.AddTracks
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -36,6 +48,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.preference.mapAsCheckboxState
 import tachiyomi.core.common.util.lang.launchIO
@@ -45,6 +58,7 @@ import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeWithEpisodeCount
 import tachiyomi.domain.anime.model.toAnimeUpdate
 import tachiyomi.domain.category.interactor.GetCategories
+import tachiyomi.domain.category.interactor.GetVisibleCategories
 import tachiyomi.domain.category.interactor.SetAnimeCategories
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.episode.interactor.SetAnimeDefaultEpisodeFlags
@@ -64,11 +78,20 @@ class BrowseSourceViewModel(
     private val getRemoteAnime: GetRemoteAnime,
     private val getDuplicateLibraryAnime: GetDuplicateLibraryAnime,
     private val getCategories: GetCategories,
+    // AM (BROWSE_SELECTION) -->
+    private val getVisibleCategories: GetVisibleCategories,
+    private val getCategorySelection: GetCategorySelection,
+    // <-- AM (BROWSE_SELECTION)
+    // AM (PLAYBACK_QUEUE)
+    private val addToQueue: AddToQueue,
     private val setAnimeCategories: SetAnimeCategories,
     private val setAnimeDefaultEpisodeFlags: SetAnimeDefaultEpisodeFlags,
     private val getAnime: GetAnime,
     private val updateAnime: UpdateAnime,
     private val addTracks: AddTracks,
+    // AM (MERGED_SOURCES)
+    private val getLibraryMergeChildIds: GetLibraryMergeChildIds,
+    private val mergeAnimeEntries: MergeAnimeEntries,
     getIncognitoState: GetIncognitoState,
 ) : ViewModel() {
 
@@ -82,30 +105,91 @@ class BrowseSourceViewModel(
         fun create(sourceId: Long, listingQuery: String?): BrowseSourceViewModel
     }
 
-    var displayMode by sourcePreferences.sourceDisplayMode.asState(viewModelScope)
-
     val source = sourceManager.getOrStub(sourceId)
 
-    init {
-        state.update {
-            var query: String? = null
-            var listing = it.listing
+    // AM (BROWSE_SCROLLER) -->
+    // Resolution order: a per-source override the user set, then whatever the
+    // source itself declares, then the browse-wide preference. Setting writes
+    // the override, so changing the layout here does not change every other
+    // source's layout with it.
+    private val displayModeGlobal by sourcePreferences.sourceDisplayMode.asState(viewModelScope)
 
-            if (listing is Listing.Search) {
-                query = listing.query
-                listing = Listing.Search(query, source.getFilterList())
-            }
+    private var displayModeOverride by sourcePreferences.sourceDisplayModeOverride(sourceId)
+        .asState(viewModelScope)
 
-            it.copy(
-                listing = listing,
-                filters = source.getFilterList(),
-                toolbarQuery = query,
-            )
+    var displayMode: BrowseDisplayMode
+        get() = displayModeOverride.takeIf { it.isNotEmpty() }?.let(BrowseDisplayMode::deserialize)
+            ?: BrowseDisplayModeDefaults.forSource(source)
+            ?: displayModeGlobal
+        set(value) {
+            displayModeOverride = value.serialize()
         }
+    // <-- AM (BROWSE_SCROLLER)
+
+    init {
+        // AM (LOCAL_SOURCE_FILTER_OFF_MAIN) -->
+        // getFilterList() is synchronous, and for the local source it scans
+        // storage to build the app group filter - which made opening the
+        // local source in browse freeze the UI for the whole scan on the main
+        // thread, twice (this init called getFilterList() once for the listing
+        // and again for the state). Fetch it once, on IO, and let the listing
+        // flow start in the meantime: GetRemoteAnime routes by query, so
+        // Popular/Latest never read filters at all and start immediately;
+        // only an initial Search listing (deep link, global search handoff)
+        // runs its first page against the placeholder filters and reloads
+        // once the real ones land.
+        viewModelScope.launchIO {
+            // A JS project's filters live in its runtime. Registration normally
+            // warms it, but browse can win that race (or follow an edit) and
+            // otherwise cache an empty list for the lifetime of this screen.
+            if (source is JsProjectSource) source.warmUp()
+            val filters = source.getFilterList()
+            state.update {
+                var query: String? = null
+                var listing = it.listing
+
+                if (listing is Listing.Search) {
+                    query = listing.query
+                    // AM (LOCAL_SOURCE_NO_DOUBLE_SCAN) -->
+                    // A null query is the default browse state (Listing.valueOf
+                    // hands out Search(null, emptyFilters) when no query was
+                    // passed), not a real search. Replacing the listing with a
+                    // new Search object would make the listing flow emit twice,
+                    // and for the local source each emission is a full storage
+                    // scan - so opening the source would scan everything twice.
+                    // Only a genuine query needs the filters spliced in up
+                    // front, and search() reads state.filters when the listing
+                    // still carries its placeholder ones.
+                    if (query != null) {
+                        listing = Listing.Search(query, filters)
+                    }
+                    // <-- AM (LOCAL_SOURCE_NO_DOUBLE_SCAN)
+                }
+
+                it.copy(
+                    listing = listing,
+                    filters = filters,
+                    toolbarQuery = query,
+                )
+            }
+        }
+        // <-- AM (LOCAL_SOURCE_FILTER_OFF_MAIN)
 
         if (!getIncognitoState.await(source.id)) {
             sourcePreferences.lastUsedSource.set(source.id)
         }
+
+        // AM (MERGED_SOURCES) -->
+        // Results that are children of a merged entry in the library carry
+        // favorite=0, so the rows themselves cannot say they are already held.
+        // Kept as one set on the state rather than per row: the membership
+        // table is small and this is a single query instead of one per result.
+        viewModelScope.launch {
+            getLibraryMergeChildIds.subscribe().collect { ids ->
+                state.update { it.copy(mergeChildIds = ids) }
+            }
+        }
+        // <-- AM (MERGED_SOURCES)
     }
 
     /**
@@ -151,8 +235,12 @@ class BrowseSourceViewModel(
     }
     // <-- AY
 
+    // AM (LOCAL_SOURCE_FILTER_OFF_MAIN): same off-main-thread fetch as init -
+    // resetting the filter sheet re-scans storage for the local source.
     fun resetFilters() {
-        state.update { it.copy(filters = source.getFilterList()) }
+        viewModelScope.launchIO {
+            state.update { it.copy(filters = source.getFilterList()) }
+        }
     }
 
     fun setListing(listing: Listing) {
@@ -167,61 +255,73 @@ class BrowseSourceViewModel(
         }
     }
 
+    // AM (LOCAL_SOURCE_FILTER_OFF_MAIN): see init - getFilterList() can scan
+    // storage, so it is never called on the main thread.
     fun search(query: String? = null, filters: AnimeFilterList? = null) {
-        val input = state.value.listing as? Listing.Search
-            ?: Listing.Search(query = null, filters = source.getFilterList())
+        viewModelScope.launchIO {
+            // AM (LOCAL_SOURCE_NO_DOUBLE_SCAN): the default browse listing
+            // keeps its placeholder filters (see init), so prefer the loaded
+            // state.filters when the listing has none.
+            val input = (state.value.listing as? Listing.Search)?.let {
+                it.copy(filters = state.value.filters.ifEmpty { it.filters })
+            } ?: Listing.Search(query = null, filters = source.getFilterList())
 
-        state.update {
-            it.copy(
-                listing = input.copy(
-                    query = query ?: input.query,
-                    filters = filters ?: input.filters,
-                ),
-                toolbarQuery = query ?: input.query,
-            )
+            state.update {
+                it.copy(
+                    listing = input.copy(
+                        query = query ?: input.query,
+                        filters = filters ?: input.filters,
+                    ),
+                    toolbarQuery = query ?: input.query,
+                )
+            }
         }
     }
 
+    // AM (LOCAL_SOURCE_FILTER_OFF_MAIN): see init - getFilterList() can scan
+    // storage, so it is never called on the main thread.
     fun searchGenre(genreName: String) {
-        val defaultFilters = source.getFilterList()
-        var genreExists = false
+        viewModelScope.launchIO {
+            val defaultFilters = source.getFilterList()
+            var genreExists = false
 
-        filter@ for (sourceFilter in defaultFilters) {
-            if (sourceFilter is SourceModelFilter.Group<*>) {
-                for (filter in sourceFilter.state) {
-                    if (filter is SourceModelFilter<*> && filter.name.equals(genreName, true)) {
-                        when (filter) {
-                            is SourceModelFilter.TriState -> filter.state = 1
-                            is SourceModelFilter.CheckBox -> filter.state = true
-                            else -> {}
+            filter@ for (sourceFilter in defaultFilters) {
+                if (sourceFilter is SourceModelFilter.Group<*>) {
+                    for (filter in sourceFilter.state) {
+                        if (filter is SourceModelFilter<*> && filter.name.equals(genreName, true)) {
+                            when (filter) {
+                                is SourceModelFilter.TriState -> filter.state = 1
+                                is SourceModelFilter.CheckBox -> filter.state = true
+                                else -> {}
+                            }
+                            genreExists = true
+                            break@filter
                         }
+                    }
+                } else if (sourceFilter is SourceModelFilter.Select<*>) {
+                    val index = sourceFilter.values.filterIsInstance<String>()
+                        .indexOfFirst { it.equals(genreName, true) }
+
+                    if (index != -1) {
+                        sourceFilter.state = index
                         genreExists = true
-                        break@filter
+                        break
                     }
                 }
-            } else if (sourceFilter is SourceModelFilter.Select<*>) {
-                val index = sourceFilter.values.filterIsInstance<String>()
-                    .indexOfFirst { it.equals(genreName, true) }
+            }
 
-                if (index != -1) {
-                    sourceFilter.state = index
-                    genreExists = true
-                    break
+            state.update {
+                val listing = if (genreExists) {
+                    Listing.Search(query = null, filters = defaultFilters)
+                } else {
+                    Listing.Search(query = genreName, filters = defaultFilters)
                 }
+                it.copy(
+                    filters = defaultFilters,
+                    listing = listing,
+                    toolbarQuery = listing.query,
+                )
             }
-        }
-
-        state.update {
-            val listing = if (genreExists) {
-                Listing.Search(query = null, filters = defaultFilters)
-            } else {
-                Listing.Search(query = genreName, filters = defaultFilters)
-            }
-            it.copy(
-                filters = defaultFilters,
-                listing = listing,
-                toolbarQuery = listing.query,
-            )
         }
     }
 
@@ -281,7 +381,7 @@ class BrowseSourceViewModel(
                     val preselectedIds = getCategories.await(anime.id).map { it.id }
                     setDialog(
                         Dialog.ChangeAnimeCategory(
-                            anime,
+                            listOf(anime),
                             categories.mapAsCheckboxState { it.id in preselectedIds },
                         ),
                     )
@@ -289,6 +389,246 @@ class BrowseSourceViewModel(
             }
         }
     }
+
+    // AM (BROWSE_SELECTION) -->
+    fun toggleSelection(anime: Anime) {
+        state.update { current ->
+            current.copy(
+                selection = if (anime.id in current.selection) {
+                    current.selection - anime.id
+                } else {
+                    current.selection + anime.id
+                },
+            )
+        }
+    }
+
+    fun clearSelection() {
+        state.update { it.copy(selection = emptySet()) }
+    }
+
+    /**
+     * Queues one result, without selecting it first - what a double tap does.
+     *
+     * Goes through the same [AddToQueue] call and the same fill request as the
+     * selection action above rather than a path of its own: the only thing a
+     * double tap decides is WHICH entry, and one entry is a selection of one.
+     */
+    fun addAnimeToQueue(
+        anime: Anime,
+        onRequestFill: () -> Unit,
+        unwatchedOnly: Boolean? = null,
+    ) {
+        viewModelScope.launchIO {
+            // AM (QUEUE_WATCH_FILTER) -->
+            // AM (QUEUE_RESOLVE_ONCE): one resolve, shared by the question and
+            // the add.
+            val source = addToQueue.resolve(anime)
+            if (unwatchedOnly == null && source.hasMixedWatchState) {
+                setDialog(Dialog.AddToQueue(listOf(source)))
+                return@launchIO
+            }
+            addToQueue.await(
+                source = source,
+                unwatchedOnly = unwatchedOnly ?: false,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onRequestFill() }
+        }
+    }
+
+    /**
+     * Queues the selection, one block per entry.
+     *
+     * A browse result has no episodes in the database yet, so [AddToQueue]
+     * records each block as pending and [QueueFillJob] fetches them - which is
+     * why this asks for a fill run rather than doing the fetching itself. An
+     * entry that HAS been opened before already has its episodes, and
+     * AddToQueue fills its block outright; the run then finds nothing pending
+     * and stops, so there is no need to work out which case applies here.
+     */
+    fun addSelectionToQueue(onRequestFill: () -> Unit) {
+        viewModelScope.launchIO {
+            val animeList = selectedAnime()
+            clearSelection()
+            if (animeList.isEmpty()) return@launchIO
+            // AM (QUEUE_WATCH_FILTER) -->
+            // One question for the whole selection, before anything is queued:
+            // queueing the unambiguous ones first put them ahead of entries
+            // selected before them, so the queue stopped matching the order
+            // they were picked in.
+            val sources = addToQueue.resolve(animeList)
+            if (sources.any { it.hasMixedWatchState }) {
+                setDialog(Dialog.AddToQueue(sources))
+                return@launchIO
+            }
+            addToQueue.await(sources)
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onRequestFill() }
+        }
+    }
+
+    // AM (QUEUE_WATCH_FILTER) -->
+    /** Applies the one answer to the whole selection, in selection order. */
+    fun addQueueChoice(
+        sources: List<QueueSource>,
+        unwatchedOnly: Boolean,
+        onRequestFill: () -> Unit,
+    ) {
+        viewModelScope.launchIO {
+            addToQueue.await(
+                sources = sources,
+                unwatchedOnly = unwatchedOnly,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            setDialog(null)
+            withContext(Dispatchers.Main) { onRequestFill() }
+        }
+    }
+    // <-- AM (QUEUE_WATCH_FILTER)
+
+    /**
+     * Resolved from the DB by id rather than from the pager: a selected result
+     * can scroll out of the loaded pages, and the row is already local by the
+     * time it renders (see networkToLocalAnime in the paging source).
+     */
+    private suspend fun selectedAnime(): List<Anime> {
+        return state.value.selection.mapNotNull { getAnime.await(it) }
+    }
+
+    // AM (BROWSE_SELECTION_MERGE) -->
+    private val _mergeResultEvent = MutableSharedFlow<Long?>()
+    val mergeResultEvent = _mergeResultEvent.asSharedFlow()
+
+    /** Merges the browse selection, adding it to the library first when needed. */
+    fun mergeSelection() {
+        viewModelScope.launchIO {
+            val animeList = selectedAnime()
+            if (animeList.size < 2) {
+                clearSelection()
+                return@launchIO
+            }
+            if (animeList.all { it.favorite }) {
+                clearSelection()
+                merge(animeList)
+            } else {
+                showCategoryDialog(animeList, mergeAfter = true)
+            }
+        }
+    }
+
+    private suspend fun merge(animeList: List<Anime>) {
+        val current = animeList.mapNotNull { getAnime.await(it.id) }
+        val mergedId = try {
+            mergeAnimeEntries.mergeSelection(current).id
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        _mergeResultEvent.emit(mergedId)
+    }
+
+    /**
+     * The selection's one library action: the library screen's own
+     * multi-select category dialog, over browse's selection.
+     *
+     * A selection of one that is not in the library yet still goes through the
+     * duplicate check first, so the migrate option the old long-press offered
+     * stays reachable.
+     */
+    fun openChangeCategoryDialog() {
+        viewModelScope.launchIO {
+            val animeList = selectedAnime()
+            if (animeList.isEmpty()) {
+                clearSelection()
+                return@launchIO
+            }
+            showCategoryDialog(animeList)
+        }
+    }
+
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+    /**
+     * The same dialog for one entry that was never selected - the scroller
+     * card's add-to-library button under a long press.
+     *
+     * Shares the selection's own path rather than adding a second one, so the
+     * duplicate check and the empty-categories fallback stay identical
+     * whichever gesture asked for it - including clearing the selection on
+     * the way, which a long press in the feed has nothing to clear.
+     */
+    fun openChangeCategoryDialog(anime: Anime) {
+        viewModelScope.launchIO { showCategoryDialog(listOf(anime)) }
+    }
+    // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
+
+    private suspend fun showCategoryDialog(animeList: List<Anime>, mergeAfter: Boolean = false) {
+        val single = animeList.singleOrNull()
+        if (single != null && !single.favorite) {
+            val duplicates = getDuplicateLibraryAnime(single)
+            if (duplicates.isNotEmpty()) {
+                clearSelection()
+                setDialog(Dialog.AddDuplicateAnime(single, duplicates))
+                return
+            }
+        }
+
+        // No categories to show means no dialog to show them in, so this
+        // falls back to the per-entry add the long-press always used.
+        val categories = getCategories()
+        if (categories.isEmpty()) {
+            clearSelection()
+            animeList.filterNot { it.favorite }.forEach {
+                if (mergeAfter) changeAnimeFavorite(it) else addFavorite(it)
+            }
+            if (mergeAfter) merge(animeList)
+            return
+        }
+
+        val preselected = getCategorySelection.await(animeList.map { it.id }, categories)
+        clearSelection()
+        setDialog(Dialog.ChangeAnimeCategory(animeList, preselected, mergeAfter))
+    }
+
+    /**
+     * The dialog's result, per entry, through the same two calls the anime and
+     * history screens use for it (moveAnimeToCategoriesAndAddToLibrary):
+     * categories first, then favorite if it is not already.
+     *
+     * [include] and [exclude] are the dialog's own lists. A category left on
+     * the dash is in neither and keeps whatever each entry had, which is what
+     * [exclude] rather than "everything not included" is for.
+     *
+     * The one thing with no existing counterpart is the last line: nothing
+     * anywhere else in the app takes an entry back OUT of the library from a
+     * category dialog. It is here because the bar has no separate remove
+     * action, so clearing an entry's last category has to be what removes it.
+     */
+    fun confirmCategorySelection(
+        animeList: List<Anime>,
+        include: List<Long>,
+        exclude: List<Long>,
+        mergeAfter: Boolean = false,
+    ) {
+        viewModelScope.launchIO {
+            animeList.forEach { anime ->
+                val categoryIds = getVisibleCategories.await(anime.id)
+                    .map { it.id }
+                    .subtract(exclude.toSet())
+                    .plus(include)
+                    .toList()
+
+                setAnimeCategories.await(anime.id, categoryIds)
+
+                if (anime.favorite == categoryIds.isNotEmpty()) return@forEach
+                updateAnime.awaitUpdateFavorite(anime.id, categoryIds.isNotEmpty())
+            }
+            setDialog(null)
+            if (mergeAfter) merge(animeList)
+        }
+    }
+    // <-- AM (BROWSE_SELECTION)
+    // <-- AM (BROWSE_SELECTION_MERGE)
 
     /**
      * Get user categories.
@@ -352,11 +692,18 @@ class BrowseSourceViewModel(
 
     sealed interface Dialog {
         data object Filter : Dialog
-        data class RemoveAnime(val anime: Anime) : Dialog
+
         data class AddDuplicateAnime(val anime: Anime, val duplicates: List<AnimeWithEpisodeCount>) : Dialog
+        // AM (QUEUE_WATCH_FILTER)
+        // AM (QUEUE_RESOLVE_ONCE)
+        data class AddToQueue(val sources: List<QueueSource>) : Dialog
         data class ChangeAnimeCategory(
-            val anime: Anime,
-            val initialSelection: List<CheckboxState.State<Category>>,
+            val animeList: List<Anime>,
+            // AM (BROWSE_SELECTION): CheckboxState rather than its State
+            // subtype, because a selection can leave a category in the mixed
+            // TriState the dialog already knows how to render.
+            val initialSelection: List<CheckboxState<Category>>,
+            val mergeAfter: Boolean = false,
         ) : Dialog
         data class Migrate(val target: Anime, val current: Anime) : Dialog
     }
@@ -367,7 +714,14 @@ class BrowseSourceViewModel(
         val filters: AnimeFilterList = AnimeFilterList(),
         val toolbarQuery: String? = null,
         val dialog: Dialog? = null,
+        // AM (MERGED_SOURCES)
+        val mergeChildIds: Set<Long> = emptySet(),
+        // AM (BROWSE_SELECTION)
+        val selection: Set<Long> = emptySet(),
     ) {
         val isUserQuery get() = listing is Listing.Search && !listing.query.isNullOrEmpty()
+
+        // AM (BROWSE_SELECTION)
+        val selectionMode get() = selection.isNotEmpty()
     }
 }

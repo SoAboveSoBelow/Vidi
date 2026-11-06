@@ -1,6 +1,9 @@
 package aniyomi.source.js
 
+import aniyomi.domain.source.model.BrowseDisplayMode
+
 import aniyomi.core.common.jsengine.JsSourceRuntime
+import eu.kanade.tachiyomi.animesource.FaultRecoverableSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
@@ -18,13 +21,17 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import logcat.LogPriority
@@ -68,10 +75,11 @@ class JsProjectSource(
     supportsLatest: Boolean,
     script: String,
     baseUrl: String,
+    defaultBrowseDisplayMode: BrowseDisplayMode? = null,
     private val networkHelper: NetworkHelper,
     private val softTimeoutMillis: Long = DEFAULT_SOFT_TIMEOUT,
     private val hardTimeoutMillis: Long = DEFAULT_HARD_TIMEOUT,
-) : AnimeHttpSource(), Closeable {
+) : AnimeHttpSource(), Closeable, FaultRecoverableSource {
 
     /**
      * Mutable because the instance outlives any one version of the project.
@@ -89,6 +97,9 @@ class JsProjectSource(
         private set
 
     override var supportsLatest: Boolean = supportsLatest
+        private set
+
+    var defaultBrowseDisplayMode: BrowseDisplayMode? = defaultBrowseDisplayMode
         private set
 
     private var script: String = script
@@ -164,6 +175,24 @@ class JsProjectSource(
             it.url = anime.url
             it.initialized = true
         }
+    }
+
+    /**
+     * Runs a source-declared action against a feed entry and returns its new
+     * active state. Keeping the mutation in the project means the host does not
+     * need to know a site's authentication or API conventions.
+     */
+    suspend fun performFeedAction(url: String, action: String, active: Boolean, target: String?): Boolean {
+        val payload = call(
+            FEED_ACTION,
+            args {
+                put("url", url)
+                put("action", action)
+                put("active", active)
+                target?.let { put("target", it) }
+            },
+        )
+        return payload.trim().toBooleanStrict()
     }
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
@@ -254,6 +283,28 @@ class JsProjectSource(
             )
             _fault.value = fault
             logcat(LogPriority.WARN, e) { "Project '$name' faulted: ${fault.reason}" }
+            // AM (JS_FAULT_AUTO_RECOVERY) -->
+            // A permanent latch is only right for the case this watchdog
+            // exists for at all: a script spinning in pure compute, which no
+            // OkHttp timeout can reach (extensions never need this path -
+            // their slow calls die in the HTTP layer and the source just
+            // tries again). A slow network ANSWER trips the same wall clock
+            // here, but its thread does finish once the response arrives,
+            // leaving an idle, trustworthy runtime. Latching that case is
+            // what made one 30s stall kill the source until a restart. So
+            // watch the orphaned work: when it settles - abort honored or
+            // late answer in - the fault clears itself and the next call
+            // runs normally. Only a genuinely wedged thread, the one case
+            // the latch was ever for, keeps the source faulted.
+            //
+            // compareAndSet, not plain set: a clearFault()/update() in the
+            // meantime has already swapped in a fresh runtime, and the old
+            // thread finishing must not undo that.
+            callScope.launch {
+                runCatching { work.await() }
+                _fault.compareAndSet(fault, null)
+            }
+            // <-- AM (JS_FAULT_AUTO_RECOVERY)
             throw JsProjectFaultedException(name, fault)
         } catch (e: CancellationException) {
             // The caller went away, so let the script stop at its next crossing
@@ -312,12 +363,14 @@ class JsProjectSource(
         name: String,
         lang: String,
         supportsLatest: Boolean,
+        defaultBrowseDisplayMode: BrowseDisplayMode?,
         script: String,
         baseUrl: String,
     ) {
         this.name = name
         this.lang = lang
         this.supportsLatest = supportsLatest
+        this.defaultBrowseDisplayMode = defaultBrowseDisplayMode
 
         if (script == this.script && baseUrl == this.baseUrl) return
 
@@ -340,7 +393,9 @@ class JsProjectSource(
      * until it finishes - this makes the project usable again, it does not
      * reclaim the core.
      */
-    suspend fun clearFault() {
+    override val isFaulted: Boolean get() = _fault.value != null
+
+    override suspend fun clearFault() {
         loadMutex.withLock {
             runtime.close()
             runtime = JsSourceRuntime(script, baseUrl, networkHelper)
@@ -353,13 +408,55 @@ class JsProjectSource(
         if (!loaded) {
             loadMutex.withLock {
                 if (!loaded) {
-                    runtime.load()
+                    loadRuntime()
+                    val declaration = readDeclaration(runtime)
+                    if (defaultBrowseDisplayMode == null && declaration?.defaultBrowseDisplayMode == "scroller") {
+                        defaultBrowseDisplayMode = BrowseDisplayMode.Scroller
+                    }
+                    val declaredBaseUrl = declaration?.baseUrl
+                        ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                    if (baseUrl.isBlank() && declaredBaseUrl != null) {
+                        baseUrl = declaredBaseUrl
+                        runtime.close()
+                        runtime = JsSourceRuntime(script, baseUrl, networkHelper)
+                        loadRuntime()
+                    }
                     loaded = true
                     filterList = readFilters(runtime)
                 }
             }
         }
         return runtime
+    }
+
+    /**
+     * A failed script evaluation can leave QuickJs initialized even though the
+     * runtime is unusable. Retrying load() on that instance would hide the real
+     * failure behind "Runtime already loaded", so discard it before propagating
+     * the original error and let the next attempt start cleanly.
+     */
+    private suspend fun loadRuntime() {
+        try {
+            runtime.load()
+        } catch (e: Exception) {
+            runtime.close()
+            runtime = JsSourceRuntime(script, baseUrl, networkHelper)
+            loaded = false
+            throw e
+        }
+    }
+
+    /** Optional, source-level settings that do not belong in the editor's manifest form. */
+    private class JsDeclaration(val baseUrl: String?, val defaultBrowseDisplayMode: String?)
+
+    private suspend fun readDeclaration(runtime: JsSourceRuntime): JsDeclaration? = try {
+        val meta = jsJson.decodeFromString<JsonObject>(runtime.call("meta", "{}", softTimeoutMillis))
+        JsDeclaration(
+            baseUrl = meta["baseUrl"]?.jsonPrimitive?.contentOrNull?.trim()?.trimEnd('/'),
+            defaultBrowseDisplayMode = meta["defaultBrowseDisplayMode"]?.jsonPrimitive?.contentOrNull,
+        )
+    } catch (e: Exception) {
+        null
     }
 
     /**
@@ -400,5 +497,6 @@ class JsProjectSource(
         const val EPISODES = "episodes"
         const val VIDEOS = "videos"
         const val FILTERS = "filters"
+        const val FEED_ACTION = "feedAction"
     }
 }

@@ -16,9 +16,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
+import aniyomi.domain.source.model.BrowseDisplayMode
 import eu.kanade.presentation.browse.components.BrowseSourceComfortableGrid
 import eu.kanade.presentation.browse.components.BrowseSourceCompactGrid
 import eu.kanade.presentation.browse.components.BrowseSourceList
+import eu.kanade.presentation.browse.components.BrowseSourceScroller
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.util.formattedMessage
 import eu.kanade.tachiyomi.animesource.AnimeSource
@@ -44,7 +46,8 @@ fun BrowseSourceContent(
     entries: Int = 0,
     topBarHeight: Int = 0,
     // <-- AY
-    displayMode: LibraryDisplayMode,
+    // AM (BROWSE_SCROLLER)
+    displayMode: BrowseDisplayMode,
     snackbarHostState: SnackbarHostState,
     contentPadding: PaddingValues,
     onWebViewClick: () -> Unit,
@@ -52,6 +55,37 @@ fun BrowseSourceContent(
     onLocalSourceHelpClick: () -> Unit,
     onAnimeClick: (Anime) -> Unit,
     onAnimeLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE): null on the screens that pick a migration target,
+    // where queueing a result means nothing - and where a non-null handler
+    // would make every tap wait out the double-tap timeout for nothing.
+    onAnimeDoubleClick: ((Anime) -> Unit)? = null,
+    // AM (MERGED_SOURCES): ids of results that already belong to a merged
+    // entry in the library. Defaulted so the screens that pick a migration
+    // target, where merge membership says nothing useful, need not supply it.
+    mergeChildIds: Set<Long> = emptySet(),
+    // AM (BROWSE_SELECTION): defaulted for the same reason - a migration
+    // target picker has nothing to select across.
+    selection: Set<Long> = emptySet(),
+    // AM (BROWSE_SCROLLER): the scroller needs to know whether a row tap
+    // means "select" or nothing at all - unlike the grids, it does not treat a
+    // row tap as "open". Defaulted for the screens that pick a migration
+    // target, which have no selection mode.
+    selectionMode: Boolean = false,
+    // AM (BROWSE_SCROLLER): used only by the scroller, whose cards carry their
+    // own add-to-library button.
+    onAnimeFavoriteClick: ((Anime) -> Unit)? = null,
+    // AM (BROWSE_SCROLLER_CARD_ACTIONS): the scroller's card actions - the
+    // category dialog behind a long press on its add-to-library button, and
+    // the entry screen's tag and creator searches on its header and footer.
+    // Used by no other layout, and null on the screens that pick a migration
+    // target, where none of the three has anywhere to go.
+    onAnimeFavoriteLongClick: ((Anime) -> Unit)? = null,
+    onTagSearch: ((String) -> Unit)? = null,
+    onTagGlobalSearch: ((String) -> Unit)? = null,
+    onCreatorSearch: ((String) -> Unit)? = null,
+    // AM (BROWSE_SCROLLER): the settled item in the scroller layout, for
+    // whoever wants to act on it. Ignored by every other layout.
+    onActiveIndexChange: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
 
@@ -76,7 +110,16 @@ fun BrowseSourceContent(
         }
     }
 
-    if (animeList.itemCount == 0 && animeList.loadState.refresh is LoadState.Loading) {
+    if (
+        animeList.itemCount == 0 &&
+        (
+            animeList.loadState.refresh is LoadState.Loading ||
+                animeList.loadState.append is LoadState.Loading ||
+                animeList.loadState.prepend is LoadState.Loading
+        )
+    ) {
+        // Paging can expose an empty item snapshot before a successful page
+        // insertion. That is still loading, not an empty source.
         LoadingScreen(Modifier.padding(contentPadding))
         return
     }
@@ -120,19 +163,54 @@ fun BrowseSourceContent(
         return
     }
 
-    when (displayMode) {
+    // AM (BROWSE_SCROLLER) -->
+    if (displayMode == BrowseDisplayMode.Scroller) {
+        BrowseSourceScroller(
+            animeList = animeList,
+            source = source,
+            // AM (MERGED_SOURCES)
+            mergeChildIds = mergeChildIds,
+            contentPadding = contentPadding,
+            onAnimeClick = onAnimeClick,
+            onAnimeLongClick = onAnimeLongClick,
+            // AM (DOUBLE_TAP_QUEUE)
+            onAnimeDoubleClick = onAnimeDoubleClick,
+            // AM (BROWSE_SELECTION)
+            selection = selection,
+            selectionMode = selectionMode,
+            onAnimeFavoriteClick = onAnimeFavoriteClick,
+            // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+            onAnimeFavoriteLongClick = onAnimeFavoriteLongClick,
+            onTagSearch = onTagSearch,
+            onTagGlobalSearch = onTagGlobalSearch,
+            onCreatorSearch = onCreatorSearch,
+            // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
+            onActiveIndexChange = onActiveIndexChange,
+        )
+        return
+    }
+
+    when (displayMode.standard) {
         LibraryDisplayMode.ComfortableGrid -> {
             BrowseSourceComfortableGrid(
                 animeList = animeList,
+                // AM (MERGED_SOURCES)
+                mergeChildIds = mergeChildIds,
                 columns = columns,
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onAnimeDoubleClick = onAnimeDoubleClick,
+                // AM (BROWSE_SELECTION)
+                selection = selection,
             )
         }
         LibraryDisplayMode.List -> {
             BrowseSourceList(
                 animeList = animeList,
+                // AM (MERGED_SOURCES)
+                mergeChildIds = mergeChildIds,
                 // AY -->
                 entries = entries,
                 topBarHeight = topBarHeight,
@@ -140,18 +218,29 @@ fun BrowseSourceContent(
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onAnimeDoubleClick = onAnimeDoubleClick,
+                // AM (BROWSE_SELECTION)
+                selection = selection,
             )
         }
         LibraryDisplayMode.CompactGrid, LibraryDisplayMode.CoverOnlyGrid -> {
             BrowseSourceCompactGrid(
                 animeList = animeList,
+                // AM (MERGED_SOURCES)
+                mergeChildIds = mergeChildIds,
                 columns = columns,
                 contentPadding = contentPadding,
                 onAnimeClick = onAnimeClick,
                 onAnimeLongClick = onAnimeLongClick,
+                // AM (DOUBLE_TAP_QUEUE)
+                onAnimeDoubleClick = onAnimeDoubleClick,
+                // AM (BROWSE_SELECTION)
+                selection = selection,
             )
         }
     }
+    // <-- AM (BROWSE_SCROLLER)
 }
 
 @Composable

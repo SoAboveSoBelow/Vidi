@@ -37,6 +37,7 @@ import eu.kanade.presentation.anime.components.ClearAnimeDialog
 import eu.kanade.presentation.anime.components.ConfirmRemoveFromMergeDialog
 // AM (MERGE_SEASONS) -->
 import eu.kanade.presentation.anime.components.RenameEpisodeDialog
+import eu.kanade.tachiyomi.data.queue.QueueFillJob
 import eu.kanade.tachiyomi.ui.anime.merged.MergeSettingsDialog
 // <-- AM (MERGE_SEASONS)
 import eu.kanade.presentation.anime.components.DeleteEpisodesDialog
@@ -44,6 +45,7 @@ import eu.kanade.presentation.anime.components.EpisodeReorderActions
 import eu.kanade.presentation.anime.components.ScanlatorFilterDialog
 import eu.kanade.presentation.anime.components.SetIntervalDialog
 import eu.kanade.presentation.category.components.ChangeCategoryDialog
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.components.NavigatorAdaptiveSheet
 import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsGesturesScreen.SkipIntroLengthDialog
 import eu.kanade.presentation.util.AssistContentScreen
@@ -64,6 +66,7 @@ import eu.kanade.tachiyomi.ui.anime.notes.AnimeNotesScreen
 import eu.kanade.tachiyomi.ui.anime.season.EntrySeasonsScreen
 import eu.kanade.tachiyomi.ui.anime.track.TrackInfoDialogHomeScreen
 import eu.kanade.tachiyomi.ui.browse.extension.details.SourcePreferencesScreen
+import eu.kanade.tachiyomi.ui.browse.migration.merge.MigrateMergeScreen
 import eu.kanade.tachiyomi.ui.browse.migration.season.MigrateSeasonSelectScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceScreen
 import eu.kanade.tachiyomi.ui.browse.source.globalsearch.GlobalSearchScreen
@@ -71,6 +74,7 @@ import eu.kanade.tachiyomi.ui.category.CategoryScreen
 import eu.kanade.tachiyomi.ui.home.HomeScreen
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
+import eu.kanade.tachiyomi.ui.player.SessionKey
 import eu.kanade.tachiyomi.ui.setting.SettingsScreen
 import eu.kanade.tachiyomi.ui.webview.WebViewScreen
 import eu.kanade.tachiyomi.util.system.copyToClipboard
@@ -85,6 +89,7 @@ import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.episode.model.Episode
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.LoadingScreen
@@ -194,6 +199,35 @@ class AnimeScreen(
                     )
                 }
 
+                // AM (QUEUE_WATCH_FILTER) -->
+                is AnimeViewModel.Dialog.AddToQueue -> {
+                    AddToQueueDialog(
+                        // AM (QUEUE_RESOLVE_ONCE): one entry here, so the title
+                        // is what the question is about.
+                        mixedCount = 1,
+                        mixedTitle = dialog.source.anime.title,
+                        onAddUnwatched = {
+                            onDismissRequest()
+                            viewModel.addAnimeToQueue(
+                                anime = dialog.source.anime,
+                                unwatchedOnly = true,
+                                onRequestFill = { QueueFillJob.start(context) },
+                            )
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                        onAddAll = {
+                            onDismissRequest()
+                            viewModel.addAnimeToQueue(
+                                anime = dialog.source.anime,
+                                unwatchedOnly = false,
+                                onRequestFill = { QueueFillJob.start(context) },
+                            )
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                        onDismissRequest = onDismissRequest,
+                    )
+                }
+                // <-- AM (QUEUE_WATCH_FILTER)
                 is AnimeViewModel.Dialog.DuplicateAnime -> {
                     DuplicateAnimeDialog(
                         duplicates = dialog.duplicates,
@@ -241,6 +275,9 @@ class AnimeScreen(
                     // <-- AY
                     onSetAsDefault = viewModel::setCurrentSettingsAsDefault,
                     onResetToDefault = viewModel::resetToDefaultSettings,
+                    // AM (CUSTOM_EPISODE_ORDER)
+                    onDeleteCustomOrdering = viewModel::deleteCustomOrdering
+                        .takeIf { successState.hasCustomOrdering },
                     scanlatorFilterActive = successState.scanlatorFilterActive,
                     onScanlatorFilterClicked = { showScanlatorsDialog = true },
                 )
@@ -558,7 +595,14 @@ class AnimeScreen(
                 successState.anime.favorite
             },
             onMigrateClicked = {
-                navigator.push(MigrationConfigScreen(successState.anime.id))
+                // AM (MERGED_SOURCES): a merged entry has no catalogue of its
+                // own to search, so migrating one means migrating the sources
+                // inside it - picked first, then handed to the ordinary flow.
+                if (successState.anime.source == MergedSource.ID) {
+                    navigator.push(MigrateMergeScreen(successState.anime.id))
+                } else {
+                    navigator.push(MigrationConfigScreen(successState.anime.id))
+                }
             }.takeIf { successState.anime.favorite },
             // AY -->
             onSettingsClicked = {
@@ -594,6 +638,11 @@ class AnimeScreen(
             onMultiMarkAsSeenClicked = viewModel::markEpisodesSeen,
             onMarkPreviousAsSeenClicked = viewModel::markPreviousEpisodeSeen,
             onMultiDeleteClicked = viewModel::showDeleteEpisodeDialog,
+            // AM (QUEUE_EPISODE_SELECTION)
+            onAddEpisodesToQueue = {
+                viewModel.addEpisodesToQueue(successState.selectedEpisodes)
+                context.toast(AMMR.strings.am_action_added_to_queue)
+            },
             onEpisodeSwipe = viewModel::episodeSwipe,
             onEpisodeSelected = viewModel::toggleSelection,
             onAllEpisodeSelected = viewModel::toggleAllSelection,
@@ -616,14 +665,22 @@ class AnimeScreen(
                     onExit = viewModel::exitReorderMode,
                     onMove = viewModel::moveEpisodes,
                     onChangeSeason = viewModel::showChangeEpisodeSeasonDialog,
-                    onDiscard = viewModel::discardReorderChanges,
-                    onReset = viewModel::resetSelectedEpisodeOrder,
                 )
             },
             // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = {
                 navigator.push(AnimeScreen(it.id))
+            },
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = { seasonAnime ->
+                viewModel.addAnimeToQueue(
+                    anime = seasonAnime.anime,
+                    onRequestFill = {
+                        QueueFillJob.start(context)
+                        context.toast(AMMR.strings.am_action_added_to_queue)
+                    },
+                )
             },
             onContinueWatchingClicked = {
                 scope.launchIO {
@@ -639,6 +696,20 @@ class AnimeScreen(
             onRelatedAnimeLongClicked = { relatedAnime ->
                 navigator.push(GlobalSearchScreen(relatedAnime.title))
             },
+            // AM (DOUBLE_TAP_QUEUE) -->
+            // A related result is a browse result: it may have no episodes in
+            // the database yet, so the fill worker is asked for, exactly as in
+            // Browse.
+            onRelatedAnimeDoubleClicked = { relatedAnime ->
+                viewModel.addAnimeToQueue(
+                    anime = relatedAnime,
+                    onRequestFill = {
+                        QueueFillJob.start(context)
+                        context.toast(AMMR.strings.am_action_added_to_queue)
+                    },
+                )
+            },
+            // <-- AM (DOUBLE_TAP_QUEUE)
             relatedAnimeDisplayMode = viewModel.relatedAnimeDisplayMode,
             // <-- AY
             // AM (TAG_LIMIT) -->
@@ -740,7 +811,7 @@ class AnimeScreen(
                 // episode.animeId -> targetAnimeId: the session's anime is what
                 // we launch with, not necessarily the episode's owning child.
                 // <-- AM (MERGED_SOURCES)
-                liveState?.animeId == targetAnimeId && liveState.episodeId == episode.id
+                liveState?.sessionKey == SessionKey.Library(targetAnimeId, episode.id)
             ) {
                 holder.setPaused(false)
             }

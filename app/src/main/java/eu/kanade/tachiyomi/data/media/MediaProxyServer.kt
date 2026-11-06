@@ -162,6 +162,11 @@ object MediaProxyServer {
         upstreams.remove(key)
     }
 
+    /** Drops a consumer's live mapping only after its player can no longer reopen it. */
+    @Synchronized
+    fun releaseOwner(owner: String) {
+        owners.remove(owner)?.let { upstreams.remove(it) }
+    }
     /**
      * The shared client with its call timeout removed.
      *
@@ -427,6 +432,11 @@ object MediaProxyServer {
                     if (!upstream.throttled) entry.notePlayerFetch(position + read)
                     // <-- AM (PLAYER_LEADS_DOWNLOAD_FOLLOWS)
                     entry.write(position, buffer, read)
+                    // AM (EVICT_ON_WRITE): outside entry.write's own lock on
+                    // purpose - the check takes the cache lock and reads every
+                    // entry's byte count, so calling it while holding an entry
+                    // would invert the two locks against the cache's own sweeps.
+                    mediaCache?.noteBytesWritten(read)
                     output.write(buffer, 0, read)
                     position += read
                     upstreamPosition = position

@@ -15,7 +15,8 @@ class GetHistory(
         return repository.getHistoryByAnimeId(animeId)
     }
 
-    fun subscribe(query: String): Flow<List<HistoryWithRelations>> {
-        return repository.getHistory(query)
+    // AM (HISTORY_ORIGIN): playerOnly hides rows the browse feed wrote.
+    fun subscribe(query: String, playerOnly: Boolean = false): Flow<List<HistoryWithRelations>> {
+        return repository.getHistory(query, playerOnly)
     }
 }

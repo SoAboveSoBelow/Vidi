@@ -10,6 +10,7 @@ SELECT
     animes.cover_last_modified,
     episodes.episode_number AS episodeNumber,
     history.last_seen AS seenAt,
+    history.origin AS origin,
     max_last_seen.last_seen AS maxSeenAt,
     max_last_seen.episode_id AS maxSeenAtEpisodeId
 FROM animes
@@ -25,23 +26,41 @@ JOIN (
 ) AS max_last_seen
 ON episodes.anime_id = max_last_seen.anime_id;
 
+-- AM (HISTORY_ORIGIN) -->
+-- :playerOnly = 1 hides rows the browse feed wrote.
+--
+-- The entry's most recent episode is picked HERE rather than taken from the
+-- view's maxSeenAtEpisodeId, because that one is computed across both origins:
+-- an entry whose newest row is a feed view would match no row at all once the
+-- filter removed it, and would vanish from the list instead of falling back to
+-- the last episode actually watched.
 history:
 SELECT
-id,
-animeId,
-episodeId,
-title,
-thumbnailUrl,
-source,
-favorite,
-cover_last_modified,
-episodeNumber,
-seenAt
-FROM historyView
-WHERE historyView.seenAt > 0
-AND maxSeenAtEpisodeId = historyView.episodeId
-AND lower(historyView.title) LIKE ('%' || :query || '%')
-ORDER BY seenAt DESC;
+H.id,
+H.animeId,
+H.episodeId,
+H.title,
+H.thumbnailUrl,
+H.source,
+H.favorite,
+H.cover_last_modified,
+H.episodeNumber,
+H.seenAt
+FROM historyView H
+WHERE H.seenAt > 0
+AND lower(H.title) LIKE ('%' || :query || '%')
+AND (:playerOnly = 0 OR H.origin = 0)
+AND H.episodeId = (
+    SELECT N.episodeId
+    FROM historyView N
+    WHERE N.animeId = H.animeId
+    AND N.seenAt > 0
+    AND (:playerOnly = 0 OR N.origin = 0)
+    ORDER BY N.seenAt DESC, N.episodeId DESC
+    LIMIT 1
+)
+ORDER BY H.seenAt DESC;
+-- <-- AM (HISTORY_ORIGIN)
 
 getLatestHistory:
 SELECT

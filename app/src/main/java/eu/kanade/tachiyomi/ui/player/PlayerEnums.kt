@@ -18,6 +18,8 @@ enum class Sheets {
     Chapters,
     More,
     Screenshot,
+    // AM (ASPECT_OVERRIDE_PICKER)
+    Aspect,
 }
 
 enum class Panels {
@@ -31,6 +33,14 @@ enum class Panels {
 sealed class Dialogs {
     data object None : Dialogs()
     data object EpisodeList : Dialogs()
+
+    // AM (EXTERNAL_FOLDER_GRANT) -->
+    /**
+     * Shown in place of [EpisodeList] for an externally-opened file, which has
+     * no episode list to show - see PlayerViewModel's ShowEpisodeDialog handler.
+     */
+    data object ExternalFolder : Dialogs()
+    // <-- AM (EXTERNAL_FOLDER_GRANT)
     data class IntegerPicker(
         val defaultValue: Int,
         val minValue: Int,
@@ -51,8 +61,10 @@ sealed class Dialogs {
         val duplicates: List<AnimeWithEpisodeCount>,
     ) : Dialogs()
 
+    // AM (PLAYLIST_ADD_TO_LIBRARY): a list, because the playlist's selection
+    // bar can raise this about several entries at once. The heart passes one.
     data class ChangeCategory(
-        val anime: Anime,
+        val animeList: List<Anime>,
         val initialSelection: List<CheckboxState<Category>>,
     ) : Dialogs()
 

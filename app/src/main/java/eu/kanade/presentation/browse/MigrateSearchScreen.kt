@@ -44,6 +44,8 @@ fun MigrateSearchScreen(
         GlobalSearchContent(
             fromSourceId = fromSourceId,
             items = state.filteredItems,
+            // AM (MERGED_SOURCES)
+            mergeChildIds = state.mergeChildIds,
             contentPadding = paddingValues,
             getAnime = getAnime,
             onClickSource = onClickSource,

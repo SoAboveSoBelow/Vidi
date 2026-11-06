@@ -62,6 +62,14 @@ fun MiddlePlayerControls(
     hasNext: Boolean,
     onSkipNext: () -> Unit,
 
+    // AM (QUEUE_SOURCE_STEP) -->
+    // Double tap skips a whole queued source rather than an episode. Null
+    // where there is no queue to step through - an external video, a folder -
+    // so those buttons keep their immediate single tap.
+    onSkipPreviousSource: (() -> Unit)?,
+    onSkipNextSource: (() -> Unit)?,
+    // <-- AM (QUEUE_SOURCE_STEP)
+
     enter: EnterTransition,
     exit: ExitTransition,
     modifier: Modifier = Modifier,
@@ -80,6 +88,8 @@ fun MiddlePlayerControls(
                 ControlsButton(
                     previousIcon,
                     onClick = onSkipPrevious,
+                    // AM (QUEUE_SOURCE_STEP)
+                    onDoubleClick = onSkipPreviousSource,
                     iconSize = 48.dp,
                     enabled = hasPrevious,
                 )
@@ -141,6 +151,8 @@ fun MiddlePlayerControls(
                 ControlsButton(
                     nextIcon,
                     onClick = onSkipNext,
+                    // AM (QUEUE_SOURCE_STEP)
+                    onDoubleClick = onSkipNextSource,
                     iconSize = 48.dp,
                     enabled = hasNext,
                 )

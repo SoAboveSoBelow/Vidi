@@ -14,7 +14,9 @@ interface SourceRepository {
 
     fun getOnlineSources(): Flow<List<Source>>
 
-    fun getSourcesWithFavoriteCount(): Flow<List<Pair<Source, Long>>>
+    // AM (MERGED_SOURCES): counts everything a source contributes to the
+    // library, merge children included - see animes.sq.
+    fun getSourcesWithLibraryCount(): Flow<List<Pair<Source, Long>>>
 
     fun search(sourceId: Long, query: String, filterList: AnimeFilterList): SourcePagingSource
 

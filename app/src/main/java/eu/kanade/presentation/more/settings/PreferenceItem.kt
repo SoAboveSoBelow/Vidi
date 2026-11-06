@@ -6,6 +6,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.padding
+// AM (NUMBER_PREFERENCE)
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -17,6 +19,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.structuralEqualityPolicy
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+// AM (NUMBER_PREFERENCE)
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import eu.kanade.presentation.more.settings.widget.ConnectionPreferenceWidget
 import eu.kanade.presentation.more.settings.widget.EditTextPreferenceWidget
@@ -31,7 +35,9 @@ import eu.kanade.presentation.more.settings.widget.TitleFontSize
 import eu.kanade.presentation.more.settings.widget.TrackingPreferenceWidget
 import kotlinx.coroutines.launch
 import mihon.app.di.appGraph
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.components.BaseSliderItem
+import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
 
 val LocalPreferenceHighlighted = compositionLocalOf(structuralEqualityPolicy()) { false }
@@ -157,6 +163,42 @@ internal fun PreferenceItem(
                     onPreferenceClick = item.onClick,
                 )
             }
+            // AM (NUMBER_PREFERENCE) -->
+            is Preference.PreferenceItem.NumberPreference -> {
+                val value by item.preference.collectAsState()
+                EditTextPreferenceWidget(
+                    title = item.title,
+                    // Through the same "%s" substitution every other text
+                    // preference uses, so the number reads in the row's own
+                    // description rather than being hidden behind the dialog
+                    // that edits it.
+                    subtitle = item.subtitle,
+                    icon = item.icon,
+                    value = value.toString(),
+                    onConfirm = { text ->
+                        val number = text.toIntOrNull()
+                        if (number == null || !item.range.contains(number)) {
+                            false
+                        } else {
+                            val accepted = item.onValueChanged(number)
+                            if (accepted) item.preference.set(number)
+                            accepted
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    validate = { text ->
+                        text.toIntOrNull()?.let(item.range::contains) == true
+                    },
+                    errorMessage = {
+                        stringResource(
+                            AMMR.strings.am_pref_number_out_of_range,
+                            item.range.start,
+                            item.range.endInclusive,
+                        )
+                    },
+                )
+            }
+            // <-- AM (NUMBER_PREFERENCE)
             is Preference.PreferenceItem.EditTextPreference -> {
                 val values by item.preference.collectAsState()
                 EditTextPreferenceWidget(

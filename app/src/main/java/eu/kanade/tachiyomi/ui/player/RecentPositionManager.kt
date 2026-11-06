@@ -1,6 +1,6 @@
 package eu.kanade.tachiyomi.ui.player
 
-import animiru.domain.player.repository.EpisodeTempPositionRepository
+import animiru.domain.player.repository.SessionTempPositionRepository
 import animiru.domain.player.service.PlayerPreferences
 import eu.kanade.tachiyomi.data.media.MediaCache
 import dev.zacsweers.metro.AppScope
@@ -31,20 +31,28 @@ import java.util.concurrent.ConcurrentHashMap
  * that's enough of a head start, though it's a best-effort ordering, not a guarantee
  * (see consume()'s doc for what happens on the rare miss).
  *
- * Pruning is MRU by [EpisodeTempPositionRepository]/timestamp, not the old
+ * Pruning is MRU by [SessionTempPositionRepository]/timestamp, not the old
  * playlist-index-distance scheme - simpler, and matches what
  * `recentEpisodePositionSlots` describes.
+ *
+ * AM (SESSION_KEYED_TEMP_POSITIONS): keyed by [SessionKey], not by episode id.
+ * It was named for episodes because they were the only thing that could hold a
+ * position, which made this the one storage layer a non-library session could
+ * not use - the reason a feed card's progress had nowhere to go and was lost
+ * the moment the real player asked for it. What a session is stays opaque here;
+ * only [syncRetainedMedia] looks inside a key, and only because the media cache
+ * is genuinely episode-scoped.
  */
 @Inject
 @SingleIn(AppScope::class)
-class RecentEpisodePositionManager(
-    private val repository: EpisodeTempPositionRepository,
+class RecentPositionManager(
+    private val repository: SessionTempPositionRepository,
     private val playerPreferences: PlayerPreferences,
 ) {
 
     private data class Entry(val positionMs: Long, val updatedAt: Long)
 
-    private val cache = ConcurrentHashMap<Long, Entry>()
+    private val cache = ConcurrentHashMap<String, Entry>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val hydrationMutex = Mutex()
 
@@ -72,7 +80,7 @@ class RecentEpisodePositionManager(
                     // Don't clobber a newer in-memory entry with a stale DB row if
                     // something was already written (e.g. two rapid switches) before
                     // hydration finished.
-                    cache.merge(saved.episodeId, Entry(saved.positionMs, saved.updatedAt)) { existing, fromDb ->
+                    cache.merge(saved.sessionKey, Entry(saved.positionMs, saved.updatedAt)) { existing, fromDb ->
                         if (existing.updatedAt >= fromDb.updatedAt) existing else fromDb
                     }
                 }
@@ -83,22 +91,23 @@ class RecentEpisodePositionManager(
 
     // AM (MERGED_SOURCES) -->
     /**
-     * Removes and returns the temp position for [episodeId], if one exists -
+     * Removes and returns the temp position for [key], if one exists -
      * consumed once, on the assumption the caller is about to resume live playback of
      * it, at which point live position-tracking takes over.
      *
-     * Keyed on the episode alone, not (anime, episode): the same episode reached
-     * through two different library entries - a merged entry and one of its children -
-     * is the same episode, and used to keep two positions that reverted to a stale one
-     * on switching back.
+     * A library key still holds both ids, but stores as the episode alone, so the same
+     * episode reached through a merged entry and through one of its children keeps one
+     * position rather than drifting between two - see [SessionKey.storageKey].
      */
-    fun consume(episodeId: Long): Long? {
-        val removed = cache.remove(episodeId)?.positionMs
+    fun consume(key: SessionKey): Long? {
+        val stored = key.storageKey
+        val removed = cache.remove(stored)?.positionMs
         if (removed != null) {
-            scope.launch { repository.delete(episodeId) }
+            scope.launch { repository.delete(stored) }
         }
         return removed
     }
+
 
     // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
     /**
@@ -117,7 +126,7 @@ class RecentEpisodePositionManager(
     // <-- AM (MERGED_SOURCES)
 
     /**
-     * Remembers a temp position for [episodeId] (see [consume] on the key), or clears
+     * Remembers a temp position for [key] (see [consume] on the key), or clears
      * any existing one if
      * [positionMs] is at or past [durationMs] minus a one-second buffer. That buffer is
      * deliberate: the same tick that crosses the true final second is also the one
@@ -125,19 +134,20 @@ class RecentEpisodePositionManager(
      * boundary races the transition. Settling the wipe a second early means it's always
      * done before a transition can even start.
      */
-    fun remember(episodeId: Long, positionMs: Long, durationMs: Long) {
+    fun remember(key: SessionKey, positionMs: Long, durationMs: Long) {
+        val stored = key.storageKey
         if (durationMs > 0L && positionMs >= durationMs - 1000L) {
-            if (cache.remove(episodeId) != null) {
-                scope.launch { repository.delete(episodeId) }
+            if (cache.remove(stored) != null) {
+                scope.launch { repository.delete(stored) }
             }
             return
         }
         if (positionMs <= 0L) return
 
         val updatedAt = System.currentTimeMillis()
-        cache[episodeId] = Entry(positionMs, updatedAt)
+        cache[stored] = Entry(positionMs, updatedAt)
         scope.launch {
-            repository.upsert(episodeId, positionMs, updatedAt)
+            repository.upsert(stored, positionMs, updatedAt)
             pruneToCurrentLimit()
         }
     }
@@ -167,6 +177,11 @@ class RecentEpisodePositionManager(
      *
      * Nothing happens when no media has been proxied yet (no cache exists), and an
      * entry being read right now is never dropped.
+     *
+     * AM (SESSION_KEYED_TEMP_POSITIONS): the media cache is keyed by episode id, so
+     * only library slots can name anything in it. A non-library session holding a slot
+     * therefore retains nothing here - correct rather than incidental: its media was
+     * never proxied under an episode id to begin with.
      */
     private fun syncRetainedMedia() {
         val mediaCache = MediaCache.peek() ?: return
@@ -174,7 +189,7 @@ class RecentEpisodePositionManager(
             mediaCache.retainOnly(emptySet())
             return
         }
-        mediaCache.retainOnly(cache.keys.toSet())
+        mediaCache.retainOnly(cache.keys.mapNotNull(::storageKeyEpisodeId).toSet())
     }
     // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
 

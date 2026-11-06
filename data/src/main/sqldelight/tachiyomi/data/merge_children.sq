@@ -13,8 +13,10 @@
 -- splitting children into separate seasons is a later UI feature. priority
 -- is the merge-order position within a season, which determines the combined
 -- list's watch order (see GetMergedEpisodeList).
--- Children keep favorite=1; removing originals from the library is a separate
--- post-merge choice, so normal library updates keep refreshing them.
+-- A child's own favorite flag is independent of its merge membership. The
+-- post-merge "remove originals from library" action clears it, so a live child
+-- is normally favorite=0: membership recorded here, not the flag, is what makes
+-- the entry reachable from the library. See getLibraryMergeChildAnimeIds.
 CREATE TABLE merge_children(
     merge_parent_id INTEGER NOT NULL,
     anime_id INTEGER NOT NULL,
@@ -97,6 +99,20 @@ WHERE merge_parent_id = :mergeParentId;
 getAllChildAnimeIds:
 SELECT DISTINCT anime_id
 FROM merge_children;
+
+-- Every anime reachable from the library through a merged entry: a child of a
+-- merge parent that is itself favorited. The app's "in library" test elsewhere
+-- is animes.favorite, which a child does not carry once the originals have been
+-- removed, so this is the other half of that test wherever reachability is what
+-- matters rather than the flag - browse badges, migration source counts and the
+-- per-source migration list. Parents that are not favorited are excluded: a
+-- merge the user has already removed from the library does not keep its
+-- children in it.
+getLibraryMergeChildAnimeIds:
+SELECT DISTINCT MC.anime_id
+FROM merge_children MC
+JOIN animes P ON P._id = MC.merge_parent_id
+WHERE P.favorite = 1;
 
 -- AM (NAMED_SEASONS) -->
 -- Moves every child in one season into another - used when a season is

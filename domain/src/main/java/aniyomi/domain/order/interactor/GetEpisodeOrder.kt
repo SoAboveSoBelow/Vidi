@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.episode.repository.EpisodeRepository
@@ -73,27 +74,56 @@ class GetEpisodeOrder(
     // AM (MERGE_EPISODE_EXCLUSION) -->
     private val mergeEpisodeExclusionRepository: MergeEpisodeExclusionRepository,
     // <-- AM (MERGE_EPISODE_EXCLUSION)
+    // AM (PLAYBACK_QUEUE)
+    private val getAnime: GetAnime,
 ) {
 
     /**
      * Whether [host]'s order is already decided here and must not be
      * re-sorted by a caller.
      *
-     * True for a merged entry, whose union order (season, then merge order)
-     * would be destroyed by re-sorting on episode number, and for any entry
-     * the user has given a custom order. False otherwise, which is the normal
-     * case: an ordinary untouched entry keeps whatever display sort it already
-     * had, and nothing about ordering changes for it.
+     * True only while the entry is sorted by source, and then for a merged
+     * entry - whose union order IS that by-source order - or for an entry the
+     * user has given a custom order. False otherwise, which is the normal
+     * case: an entry under any other sort keeps that sort, and nothing about
+     * ordering changes for it.
+     *
+     * AM (CUSTOM_EPISODE_ORDER): the by-source condition is what keeps a custom
+     * order, or a merge's union order, from outranking the sort the user picked
+     * - see the resolve() note on applyOrderOverrides. A stored order under
+     * another sort is dormant, not gone.
      */
     suspend fun isPreordered(host: Anime): Boolean {
-        return host.isMerged() || episodeOrderRepository.getByHostAnimeId(host.id).isNotEmpty()
+        if (host.sorting != Anime.EPISODE_SORTING_SOURCE) return false
+        if (host.isMerged()) return true
+        return episodeOrderRepository.getByHostAnimeId(host.id).isNotEmpty()
     }
 
     suspend fun await(host: Anime, applyScanlatorFilter: Boolean = false): List<Episode> {
         return awaitResolved(host, applyScanlatorFilter).episodes
     }
 
-    suspend fun awaitResolved(host: Anime, applyScanlatorFilter: Boolean = false): ResolvedEpisodeOrder {
+    /**
+     * [extraOwnerIds] are entries that contribute episodes to this order
+     * without being part of the host: what the playback queue holds when it
+     * carries episodes of other entries.
+     *
+     * They are deliberately NOT added to the order itself - the caller decides
+     * where they go, and folding them into [default] would let the host's own
+     * sort interleave them. What they do get is every per-episode fact the
+     * host's own contributors get: the single-episode naming rule against
+     * their own title, their cover, their custom names. That rule is about
+     * what a SOURCE offers, so each extra owner contributes its full episode
+     * list here even when only one of its episodes is queued.
+     */
+    suspend fun awaitResolved(
+        host: Anime,
+        applyScanlatorFilter: Boolean = false,
+        // AM (PLAYBACK_QUEUE)
+        extraOwnerIds: List<Long> = emptyList(),
+    ): ResolvedEpisodeOrder {
+        // AM (PLAYBACK_QUEUE)
+        val extra = extraContributors(host, extraOwnerIds, applyScanlatorFilter)
         if (!host.isMerged()) {
             val episodes = episodeRepository.getEpisodeByAnimeId(host.id, applyScanlatorFilter)
             return resolve(
@@ -103,12 +133,16 @@ class GetEpisodeOrder(
                 childOrdering = emptyList(),
                 seasonRows = entrySeasonRepository.getByHostAnimeId(host.id),
                 // AM (EPISODE_NAMES) -->
-                episodesByChild = mapOf(host.id to episodes),
+                episodesByChild = mapOf(host.id to episodes) + extra.episodesByOwner,
                 // AM (EPISODE_NAMES): its own title, for the single-episode rule
                 // below - an ordinary entry is its own only source.
-                childTitles = mapOf(host.id to host.title),
-                customNames = episodeNameRepository.getByAnimeIds(listOf(host.id)),
+                childTitles = mapOf(host.id to host.title) + extra.titles,
+                customNames = episodeNameRepository.getByAnimeIds(listOf(host.id) + extraOwnerIds),
                 // <-- AM (EPISODE_NAMES)
+                // AM (PLAYBACK_QUEUE) -->
+                childThumbnails = extra.thumbnails,
+                contributors = mapOf(host.id to host) + extra.anime,
+                // <-- AM (PLAYBACK_QUEUE)
             )
         }
 
@@ -142,15 +176,19 @@ class GetEpisodeOrder(
             childOrdering = childOrdering,
             seasonRows = entrySeasonRepository.getByHostAnimeId(host.id),
             // AM (EPISODE_NAMES) -->
-            episodesByChild = episodesByChild,
-            childTitles = children.associate { it.id to it.title },
-            customNames = episodeNameRepository.getByAnimeIds(childOrdering.map { it.animeId }),
+            episodesByChild = episodesByChild + extra.episodesByOwner,
+            childTitles = children.associate { it.id to it.title } + extra.titles,
+            customNames = episodeNameRepository.getByAnimeIds(
+                childOrdering.map { it.animeId } + extraOwnerIds,
+            ),
             // <-- AM (EPISODE_NAMES)
             // AM (SINGLE_EPISODE_THUMBNAIL) -->
             childThumbnails = children.mapNotNull { child ->
                 child.thumbnailUrl?.let { child.id to it }
-            }.toMap(),
+            }.toMap() + extra.thumbnails,
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+            // AM (PLAYBACK_QUEUE)
+            contributors = children.associateBy { it.id } + extra.anime,
         )
     }
 
@@ -189,6 +227,8 @@ class GetEpisodeOrder(
                     // AM (EPISODE_NAMES): as above - its own title.
                     childTitles = mapOf(host.id to host.title),
                     customNames = customNames,
+                    // AM (PLAYBACK_QUEUE)
+                    contributors = mapOf(host.id to host),
                 )
                 // <-- AM (EPISODE_NAMES)
             }
@@ -266,10 +306,62 @@ class GetEpisodeOrder(
                         // AM (SINGLE_EPISODE_THUMBNAIL) -->
                         childThumbnails = childThumbnails,
                         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+                        // AM (PLAYBACK_QUEUE)
+                        contributors = children.associateBy { it.id },
                     )
                 }
             }
     }
+
+    // AM (PLAYBACK_QUEUE) -->
+    /** What an extra contributing entry adds to a resolve - see [awaitResolved]. */
+    private data class ExtraContributors(
+        val anime: Map<Long, Anime> = emptyMap(),
+        val episodesByOwner: Map<Long, List<Episode>> = emptyMap(),
+        val titles: Map<Long, String> = emptyMap(),
+        val thumbnails: Map<Long, String> = emptyMap(),
+    )
+
+    private suspend fun extraContributors(
+        host: Anime,
+        ownerIds: List<Long>,
+        applyScanlatorFilter: Boolean,
+    ): ExtraContributors {
+        if (ownerIds.isEmpty()) return ExtraContributors()
+        // A queued MERGED entry is recorded by its parent, which owns no
+        // episodes of its own - every episode the queue holds for it belongs to
+        // a child. Resolving only the parent left those episodes with no
+        // contributor at all, so everything per-episode (the source's title,
+        // its cover, the single-episode naming rule) fell back to the session's
+        // host. The children are what actually contribute, so they are resolved
+        // alongside the parent; the parent stays because it is the entry the
+        // item was queued AS, which is a different question from which source
+        // an episode came from.
+        val owners = ownerIds.distinct()
+            .filterNot { it == host.id }
+            .mapNotNull { getAnime.await(it) }
+            .flatMap { owner ->
+                if (owner.isMerged()) {
+                    listOf(owner) + mergeChildRepository.getChildrenByMergeParentId(owner.id)
+                } else {
+                    listOf(owner)
+                }
+            }
+            .distinctBy { it.id }
+            .filterNot { it.id == host.id }
+        if (owners.isEmpty()) return ExtraContributors()
+        return ExtraContributors(
+            anime = owners.associateBy { it.id },
+            episodesByOwner = owners.associate {
+                it.id to episodeRepository.getEpisodeByAnimeId(it.id, applyScanlatorFilter)
+            },
+            titles = owners.associate { it.id to it.title },
+            thumbnails = owners.mapNotNull { owner ->
+                owner.thumbnailUrl?.let { owner.id to it }
+            }.toMap(),
+        )
+    }
+    // <-- AM (PLAYBACK_QUEUE)
 
     private suspend fun defaultOrder(host: Anime, applyScanlatorFilter: Boolean): List<Episode> {
         return if (host.isMerged()) {
@@ -295,6 +387,8 @@ class GetEpisodeOrder(
         // AM (SINGLE_EPISODE_THUMBNAIL) -->
         childThumbnails: Map<Long, String> = emptyMap(),
         // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+        // AM (PLAYBACK_QUEUE)
+        contributors: Map<Long, Anime> = emptyMap(),
     ): ResolvedEpisodeOrder {
         val overrideById = overrides.associateBy { it.episodeId }
         val orderingByChildId = childOrdering.associateBy { it.animeId }
@@ -314,8 +408,27 @@ class GetEpisodeOrder(
             .associate { (block, child) -> child.animeId to block }
         val defaultSortKeyById = default.associate { it.id to defaultSortKey(it, blockByChild) }
         val priorityById = default.associate { it.id to (orderingByChildId[it.animeId]?.priority ?: 0L) }
-        val sortKeyById = default.associate {
-            it.id to (overrideById[it.id]?.sortKey ?: defaultSortKeyById.getValue(it.id))
+        // AM (CUSTOM_EPISODE_ORDER): a custom order IS the by-source order, not
+        // a layer that sits on top of whichever sort is selected. Under any
+        // other sort the user asked for that sort, so the stored keys are left
+        // out of the read rather than beating it. They are never deleted here -
+        // switching to by-source brings the order straight back, and only
+        // "delete custom ordering" clears it for good. Season overrides are a
+        // separate question and still apply, since the season switcher groups
+        // by them whatever the sort is.
+        //
+        // This covers merged entries too. Their union order is the by-source
+        // order - season, then merge order, then number - so a merged entry
+        // under another sort hands back the union unsorted and lets the
+        // caller's sort run, exactly as an ordinary one does. The cost is the
+        // one GetMergedEpisodeList warns about: sorting by number interleaves
+        // the children. That is what picking "by number" asks for, and leaving
+        // a merge permanently preordered was what kept the sort options from
+        // doing anything on it at all.
+        val applyOrderOverrides = host.sorting == Anime.EPISODE_SORTING_SOURCE
+        val sortKeyById = default.associate { episode ->
+            val override = overrideById[episode.id]?.sortKey.takeIf { applyOrderOverrides }
+            episode.id to (override ?: defaultSortKeyById.getValue(episode.id))
         }
 
         // AM (NAMED_SEASONS) -->
@@ -327,7 +440,7 @@ class GetEpisodeOrder(
         // its seasons follow their display order, which only this knows. With
         // no season reordering that is the order GetMergedEpisodeList already
         // produced, so the sort changes nothing until the user reorders.
-        val ordered = if (overrides.isEmpty() && !host.isMerged()) {
+        val ordered = if (!applyOrderOverrides || (overrides.isEmpty() && !host.isMerged())) {
             default
         } else {
             // Ties are only reachable through duplicate episode numbers; the
@@ -359,9 +472,19 @@ class GetEpisodeOrder(
         val singleEpisodeChildTitles = episodesByChild.filterValues { it.size == 1 }
             .mapNotNull { (childId, episodes) -> childTitles[childId]?.let { episodes.single().id to it } }
             .toMap()
-        val displayNames = ordered.associate {
-            it.id to (customNames[it.id] ?: singleEpisodeChildTitles[it.id] ?: it.name)
-        }
+        // AM (PLAYBACK_QUEUE): keyed over every episode this resolve KNOWS
+        // about, not just the ones in the order. An extra contributor's
+        // episodes are deliberately absent from `ordered` (see awaitResolved's
+        // extraOwnerIds - folding them in would let the host's sort interleave
+        // them), so keying on `ordered` alone left them with no resolved name
+        // at all and callers fell through to the raw episode name. For a
+        // merged host episodesByChild already covers `ordered`, so nothing
+        // changes there; distinctBy keeps the ordered copy of a shared id.
+        val displayNames = (ordered + episodesByChild.values.flatten())
+            .distinctBy { it.id }
+            .associate {
+                it.id to (customNames[it.id] ?: singleEpisodeChildTitles[it.id] ?: it.name)
+            }
         // <-- AM (EPISODE_NAMES)
 
         // AM (SINGLE_EPISODE_THUMBNAIL) -->
@@ -372,6 +495,16 @@ class GetEpisodeOrder(
         // Still merged-only, unlike the title half: a cover says which source an
         // episode came from, which is a question only a merge raises. On an
         // ordinary entry it would repeat the cover at the top of the screen.
+        // AM (SINGLE_EPISODE_THUMBNAIL) -->
+        // Membership, off the same grouping as the name and cover below, so a
+        // source's episode-count rule is computed in exactly one place. Local
+        // and torrent sources land here too - a one-file local entry is a
+        // single-episode source like any other.
+        val singleEpisodeIds = episodesByChild.filterValues { it.size == 1 }
+            .flatMap { (_, episodes) -> episodes }
+            .mapTo(HashSet()) { it.id }
+        // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+
         val singleEpisodeThumbnails = if (host.isMerged()) {
             episodesByChild.filterValues { it.size == 1 }
                 .mapNotNull { (childId, episodes) ->
@@ -394,8 +527,12 @@ class GetEpisodeOrder(
             displayNameByEpisodeId = displayNames,
             // AM (SINGLE_EPISODE_THUMBNAIL) -->
             thumbnailUrlByEpisodeId = singleEpisodeThumbnails,
+            singleEpisodeIds = singleEpisodeIds,
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
-            isPreordered = host.isMerged() || overrides.isNotEmpty(),
+            // AM (PLAYBACK_QUEUE)
+            contributors = contributors,
+            isPreordered = applyOrderOverrides && (host.isMerged() || overrides.isNotEmpty()),
+            hasOverrides = overrides.isNotEmpty(),
         )
     }
 

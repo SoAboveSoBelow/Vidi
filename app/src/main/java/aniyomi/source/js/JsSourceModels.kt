@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import okhttp3.Headers
 
 /**
@@ -54,6 +55,7 @@ class JsAnime(
     val author: String? = null,
     val artist: String? = null,
     val status: String? = null,
+    val memo: JsonObject = JsonObject(emptyMap()),
 )
 
 @Serializable
@@ -140,6 +142,7 @@ fun JsAnime.toSAnime(): SAnime = SAnime.create().also { anime ->
     anime.author = author
     anime.artist = artist
     anime.status = status.toAnimeStatus()
+    anime.memo = memo
 }
 
 fun JsAnimesPage.toAnimesPage(): AnimesPage =

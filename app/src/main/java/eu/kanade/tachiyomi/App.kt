@@ -14,9 +14,12 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import animiru.domain.player.model.QueueCleaning
 import animiru.domain.player.service.PlayerPreferences
+import aniyomi.domain.queue.repository.QueueRepository
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.allowRgb565
@@ -55,6 +58,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import logcat.AndroidLogcatLogger
 import logcat.LogPriority
+import okio.Path.Companion.toOkioPath
 import logcat.LogcatLogger
 import mihon.app.di.AppGraph
 import mihon.app.di.injekt.MetroInteropModule
@@ -64,6 +68,7 @@ import mihon.core.migration.Migrator
 import org.conscrypt.Conscrypt
 import tachiyomi.cast.CastManager
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.util.system.logcat
@@ -88,6 +93,10 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
     @Inject private lateinit var networkPreferences: NetworkPreferences
 
     @Inject private lateinit var uiPreferences: UiPreferences
+
+    // AM (PLAYBACK_QUEUE): playerPreferences is already injected below, for
+    // the cast setup.
+    @Inject private lateinit var queueRepository: QueueRepository
 
     @Inject private lateinit var coverCache: CoverCache
 
@@ -147,6 +156,10 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
 
         val scope = ProcessLifecycleOwner.get().lifecycleScope
 
+        // AM (WEBVIEW_CACHE_TRIM) -->
+        scope.launchIO { trimWebViewCacheIfOversized() }
+        // <-- AM (WEBVIEW_CACHE_TRIM)
+
         // Show notification to disable Incognito Mode when it's enabled
         basePreferences.incognitoMode.changes()
             .onEach { enabled ->
@@ -175,6 +188,17 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
                 }
             }
             .launchIn(scope)
+
+        // AM (PLAYBACK_QUEUE) -->
+        // "Clear on close" means clear on the next fresh start. There is no
+        // close to hook: the process can be killed at any time, so the only
+        // reliable signal that the user has finished with a queue is the app
+        // starting again with no session behind it - which is exactly here,
+        // in a process that has just been created.
+        if (playerPreferences.queueCleaning.get() == QueueCleaning.CLEAR_ON_CLOSE) {
+            scope.launchIO { queueRepository.clear() }
+        }
+        // <-- AM (PLAYBACK_QUEUE)
 
         setAppCompatDelegateThemeMode(uiPreferences.themeMode.get())
 
@@ -227,6 +251,36 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
         )
     }
 
+    // AM (WEBVIEW_CACHE_TRIM) -->
+    /**
+     * Deletes the WebView HTTP cache when it has grown past [WEBVIEW_CACHE_LIMIT_BYTES].
+     *
+     * The Cloudflare bypass drives a real WebView, which keeps its own HTTP cache
+     * in cacheDir/WebView and manages it to its own ideas of size - hundreds of
+     * megabytes in practice. Nothing in the app touched it except the manual
+     * button in Advanced settings, so it only ever grew.
+     *
+     * At startup rather than continuously, and all-or-nothing rather than an LRU
+     * trim: the directory is WebView's own private format and picking files out
+     * of it is not something to do behind its back. Before any WebView exists in
+     * the process is the one moment deleting it is simply a cold cache, so a
+     * session keeps whatever working set it builds and only a later launch pays
+     * for the reset. The threshold means an ordinary session never pays at all.
+     */
+    private fun trimWebViewCacheIfOversized() {
+        try {
+            val dir = cacheDir.resolve(WEBVIEW_CACHE_DIR)
+            if (!dir.isDirectory) return
+            val size = dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+            if (size < WEBVIEW_CACHE_LIMIT_BYTES) return
+            logcat(LogPriority.INFO) { "WEBVIEW_CACHE_TRIM clearing ${size / 1024 / 1024}MB" }
+            dir.deleteRecursively()
+        } catch (e: Exception) {
+            logcat(LogPriority.WARN, e) { "WEBVIEW_CACHE_TRIM failed" }
+        }
+    }
+    // <-- AM (WEBVIEW_CACHE_TRIM)
+
     override fun newImageLoader(context: Context): ImageLoader {
         return ImageLoader.Builder(this).apply {
             val callFactoryLazy = lazy { networkHelper.client }
@@ -247,6 +301,27 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
                     .maxSizePercent(context)
                     .build(),
             )
+
+            // AM (COIL_DISK_CACHE_BOUNDED) -->
+            // There was no diskCache() call here at all, so Coil fell back to its
+            // own default singleton cache - cacheDir/image_cache, sized at 2% of
+            // the volume. That is a ceiling of several gigabytes on a large phone,
+            // chosen by Coil with no idea what this app stores, and nothing in the
+            // app was aware the directory existed.
+            //
+            // Library covers are moved out into CoverCache by AnimeImageFetcher,
+            // so what accumulates here is everything else: browse and search
+            // results, episode thumbnails, backgrounds, tracker and Discord
+            // artwork. That is genuinely a cache - re-fetchable, worth keeping,
+            // worth bounding - so it gets a fixed size rather than a share of
+            // whatever free space happens to exist.
+            diskCache(
+                DiskCache.Builder()
+                    .directory(context.cacheDir.resolve(IMAGE_DISK_CACHE_DIR).toOkioPath())
+                    .maxSizeBytes(IMAGE_DISK_CACHE_BYTES)
+                    .build(),
+            )
+            // <-- AM (COIL_DISK_CACHE_BOUNDED)
 
             crossfade((300 * this@App.animatorDurationScale).toInt())
             allowRgb565(DeviceUtil.isLowRamDevice(this@App))
@@ -340,3 +415,23 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
 }
 
 private const val ACTION_DISABLE_INCOGNITO_MODE = "tachi.action.DISABLE_INCOGNITO_MODE"
+
+// AM (COIL_DISK_CACHE_BOUNDED) -->
+/** Coil's on-disk image cache - the directory name Coil itself defaults to. */
+private const val IMAGE_DISK_CACHE_DIR = "image_cache"
+
+/**
+ * Fixed rather than a share of the volume: this holds thumbnails and artwork, and
+ * what makes it useful is covering a browsing session, not scaling with the size
+ * of the phone.
+ */
+private const val IMAGE_DISK_CACHE_BYTES = 192L * 1024 * 1024
+// <-- AM (COIL_DISK_CACHE_BOUNDED)
+
+// AM (WEBVIEW_CACHE_TRIM) -->
+/** WebView's own HTTP cache, named by the platform. */
+private const val WEBVIEW_CACHE_DIR = "WebView"
+
+/** Above this at startup, the WebView cache is discarded rather than trimmed. */
+private const val WEBVIEW_CACHE_LIMIT_BYTES = 64L * 1024 * 1024
+// <-- AM (WEBVIEW_CACHE_TRIM)

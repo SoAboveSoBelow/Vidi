@@ -3,8 +3,11 @@ package eu.kanade.domain.anime.interactor
 
 import aniyomi.domain.merge.interactor.SyncMergedEntryInfo
 import aniyomi.domain.merge.interactor.TransferMergeEpisodeMarks
+import aniyomi.domain.merge.model.DedupeMode
 import aniyomi.domain.merge.model.MERGE_DEFAULT_SEASON_NUMBER
+import aniyomi.domain.merge.model.MergeSettings
 import aniyomi.domain.merge.repository.MergeChildRepository
+import aniyomi.domain.merge.repository.MergeSettingsRepository
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.source.MergedSource
 import java.util.UUID
@@ -13,6 +16,7 @@ import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.repository.AnimeRepository
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.category.interactor.SetAnimeCategories
+import tachiyomi.domain.library.service.LibraryPreferences
 
 /**
  * Creates and grows merged entries: an [Anime] row with `source ==
@@ -40,6 +44,8 @@ class MergeAnimeEntries(
     private val setAnimeCategories: SetAnimeCategories,
     // AM (MERGE_SETTINGS) -->
     private val syncMergedEntryInfo: SyncMergedEntryInfo,
+    private val mergeSettingsRepository: MergeSettingsRepository,
+    private val libraryPreferences: LibraryPreferences,
     // <-- AM (MERGE_SETTINGS)
     // AM (MERGE_MARK_TRANSFER) -->
     private val transferMergeEpisodeMarks: TransferMergeEpisodeMarks,
@@ -164,12 +170,18 @@ class MergeAnimeEntries(
             )
         }
         // AM (MERGE_SETTINGS) -->
+        // Where this merge starts, from the library-wide default. Written
+        // before the mark transfer below, which reads it back.
+        val defaultDedupeMode = libraryPreferences.defaultDedupeMode.get()
+        if (defaultDedupeMode != DedupeMode.OFF) {
+            mergeSettingsRepository.set(parent.id, MergeSettings(dedupeMode = defaultDedupeMode))
+        }
         // Details beyond title and cover, and tags from every source.
         syncMergedEntryInfo.await(parent.id)
         // <-- AM (MERGE_SETTINGS)
-        // AM (MERGE_MARK_TRANSFER): a no-op while dedupe is off, which is the
-        // default for a new merge - it matters once a mode that hides episodes
-        // is chosen, and is cheap enough to not need predicting here.
+        // AM (MERGE_MARK_TRANSFER): a no-op while dedupe is off - it matters
+        // once a mode that hides episodes is in play, whether chosen here by
+        // the library default or later in merge settings.
         transferMergeEpisodeMarks.await(parent.id)
         return parent
     }

@@ -320,6 +320,8 @@ fun ExpandableAnimeDescription(
     relations: List<AnimeRelationGroup>,
     onRelatedClick: (Anime) -> Unit,
     onRelatedLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedDoubleClick: ((Anime) -> Unit)? = null,
     relatedDisplayMode: LibraryDisplayMode,
     // <-- AY
     modifier: Modifier = Modifier,
@@ -348,6 +350,8 @@ fun ExpandableAnimeDescription(
             relations = relations,
             onRelatedClick = onRelatedClick,
             onRelatedLongClick = onRelatedLongClick,
+            // AM (DOUBLE_TAP_QUEUE)
+            onRelatedDoubleClick = onRelatedDoubleClick,
             relatedDisplayMode = relatedDisplayMode,
             // <-- AY
             modifier = Modifier
@@ -728,6 +732,8 @@ private fun AnimeSummary(
     relations: List<AnimeRelationGroup>,
     onRelatedClick: (Anime) -> Unit,
     onRelatedLongClick: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedDoubleClick: ((Anime) -> Unit)? = null,
     relatedDisplayMode: LibraryDisplayMode,
     // <-- AY
     modifier: Modifier = Modifier,
@@ -783,6 +789,8 @@ private fun AnimeSummary(
                             relations = relations,
                             onRelatedClick = onRelatedClick,
                             onRelatedLongClick = onRelatedLongClick,
+                            // AM (DOUBLE_TAP_QUEUE)
+                            onRelatedDoubleClick = onRelatedDoubleClick,
                             displayMode = relatedDisplayMode,
                         )
                     }

@@ -5,6 +5,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.produceState
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import aniyomi.domain.merge.interactor.GetLibraryMergeChildIds
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.extension.ExtensionManager
@@ -38,6 +39,8 @@ abstract class SearchViewModel(
     private val networkToLocalAnime: NetworkToLocalAnime,
     private val getAnime: GetAnime,
     private val preferences: SourcePreferences,
+    // AM (MERGED_SOURCES)
+    private val getLibraryMergeChildIds: GetLibraryMergeChildIds,
 ) : ViewModel() {
 
     val state: StateFlow<State>
@@ -58,6 +61,19 @@ abstract class SearchViewModel(
 
     private var lastQuery: String? = null
     private var lastSourceFilter: SourceFilter? = null
+
+    // AM (MERGED_SOURCES) -->
+    // Results that already belong to a merged entry carry favorite = 0, so
+    // the rows cannot say so themselves. One set for the whole screen rather
+    // than a lookup per result.
+    init {
+        viewModelScope.launch {
+            getLibraryMergeChildIds.subscribe().collect { ids ->
+                state.update { it.copy(mergeChildIds = ids) }
+            }
+        }
+    }
+    // <-- AM (MERGED_SOURCES)
 
     protected var extensionFilter: String? = null
 
@@ -225,6 +241,8 @@ abstract class SearchViewModel(
         val onlyShowHasResults: Boolean = false,
         val items: Map<AnimeSource, SearchItemResult> = mapOf(),
         val dialog: Dialog? = null,
+        // AM (MERGED_SOURCES)
+        val mergeChildIds: Set<Long> = emptySet(),
     ) {
         val progress: Int = items.count { it.value !is SearchItemResult.Loading }
         val total: Int = items.size

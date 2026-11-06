@@ -167,6 +167,15 @@ class DummyPipActions(
     val onTogglePlayPause: () -> Unit,
     val onSkipPrevious: () -> Unit,
     val onSkipNext: () -> Unit,
+    // AM (QUEUE_SOURCE_STEP) -->
+    /**
+     * Double tap on the previous/next button: skip a whole queued source.
+     * Null when the queue holds only one, in which case a double tap on those
+     * buttons keeps its existing meaning - the window's size toggle.
+     */
+    val onSkipPreviousSource: (() -> Unit)?,
+    val onSkipNextSource: (() -> Unit)?,
+    // <-- AM (QUEUE_SOURCE_STEP)
     /** Called AFTER the exit morph has visually completed - flip isDummyPipActive false here. */
     val onExpand: () -> Unit,
     /** Pause + end the session UI (close button / swipe-down dismiss). */
@@ -325,6 +334,31 @@ private const val PINCH_OVERRESIZE_DAMP = 0.25f
 // the paint-time pinchScale (see the release handling).
 private const val PULL_BACK_MS = 300
 private val PIP_CENTER_ROW_SPACING = 28.dp
+// AM (DUMMY_PIP_REVEAL_FITS_CONTROLS) -->
+/**
+ * The width the bottom control row actually needs: its three icons, the two
+ * gaps between them, and the edge inset either side.
+ *
+ * This is AOSP's own `PipMenuView.getEstimatedMinMenuSize()`, whose width is
+ * `max(2, actions.size()) * pip_action_size` - the controls' intrinsic size,
+ * computed from the icons rather than measured off a screenshot. Real PiP
+ * never shrinks an icon to fit a small window: `PipTouchHandler.willResizeMenu()`
+ * is true whenever the current bounds are narrower or shorter than that
+ * estimate, and showing the menu then runs `animateToNormalSize()`, which calls
+ * `adjustNormalBoundsToFitMenu(normalBounds, minMenuSize)` and grows the window
+ * to hold the controls - reverting to the user's own bounds, via
+ * `animateToUnexpandedState()`, when the menu closes.
+ *
+ * Deliberately NOT folded into [CONTROLS_REVEAL_TARGET_EDGE_FRACTION]'s target,
+ * for the same reason AOSP keeps the two separate: that target is also what the
+ * double-tap collapse aims at, i.e. a size the user chose, and the menu's
+ * minimum is a temporary floor applied only while the controls are up.
+ */
+private val PIP_CONTROLS_MIN_WIDTH = PIP_CONTROLS_INSET * 2 +
+    PIP_ICON_SIZE_DP.dp * 2 +
+    PIP_PLAY_ICON_SIZE_DP.dp +
+    PIP_CENTER_ROW_SPACING * 2
+// <-- AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
 // Real PiP spaces its top-corner buttons wide apart (~15dp edge-to-edge
 // measured off screenshots) - they read as distinct targets, not one
 // squished cluster.
@@ -665,6 +699,8 @@ fun DummyPipContainer(
         val elevationPx = with(density) { 8.dp.toPx() }
         val stashPeekPx = with(density) { PIP_STASH_PEEK.toPx() }
         val minEdgePx = with(density) { PIP_MIN_EDGE.toPx() }
+        // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+        val controlsMinWidthPx = with(density) { PIP_CONTROLS_MIN_WIDTH.toPx() }
 
         // Same live video aspect ratio MainActivity's real-PIP builder uses,
         // animated so late-arriving dimensions don't snap the window's shape.
@@ -718,6 +754,8 @@ fun DummyPipContainer(
         val currentStatusBarHeight = rememberUpdatedState(statusBarHeightPx)
         val currentImeBottom = rememberUpdatedState(imeBottomPx)
         val currentMinEdge = rememberUpdatedState(minEdgePx)
+        // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+        val currentControlsMinWidth = rememberUpdatedState(controlsMinWidthPx)
         val currentActions = rememberUpdatedState(actions)
 
         var mode by remember { mutableStateOf(if (isPipRequested) DummyPipMode.Pip else DummyPipMode.Fullscreen) }
@@ -892,13 +930,6 @@ fun DummyPipContainer(
             return minOf(maxW, maxH)
         }
 
-        // Coerced to the fit so EVERY consumer (settle/stash/toggle dock
-        // math, the layout below) sees a size that can't clip, even in the
-        // frames between a rotation and the sizeScale re-commit in the
-        // rotation effect further down.
-        fun windowWidthPx() = minOf(currentBaseWidth.value * sizeScale, maxWindowWidthPx())
-        fun windowHeightPx() = windowWidthPx() / currentAspect.value
-
         // AOSP PipBoundsAlgorithm.getSizeForAspectRatio(): within the
         // aspect limits the window keeps a constant DIAGONAL (radius =
         // hypot(limit*minEdge, minEdge)); beyond them the SHORT edge is
@@ -924,6 +955,16 @@ fun DummyPipContainer(
         fun minWindowWidthPx(): Float = sizeWidthForAspect(currentMinEdge.value)
         // <-- AM (DUMMY_PIP_REVEAL_TARGET_ASPECT_FIX)
 
+        // Coerced to the fit so EVERY consumer (settle/stash/toggle dock
+        // math, the layout below) sees a size that can't clip, even in the
+        // frames between a rotation and the sizeScale re-commit in the
+        // rotation effect further down.
+        fun windowWidthPx() = minOf(
+            maxOf(currentBaseWidth.value * sizeScale, minWindowWidthPx()),
+            maxWindowWidthPx(),
+        )
+        fun windowHeightPx() = windowWidthPx() / currentAspect.value
+
         // AM (DUMMY_PIP_REVEAL_TARGET_SHORT_EDGE_FIX) -->
         // The paint-time multiplier the controls reveal grows the window
         // by (1f = no growth). Target capped at maxWindowWidthPx(): the
@@ -946,8 +987,39 @@ fun DummyPipContainer(
         }
         // <-- AM (DUMMY_PIP_REVEAL_TARGET_EXTRACTED)
 
+        // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS) -->
+        /**
+         * The width the window is grown to while the controls are up: the
+         * measured reveal size, floored at the width the controls themselves
+         * need, and still capped at the fitted maximum.
+         *
+         * The floor is what was missing. [controlsRevealTargetWidthPx] sizes by
+         * apparent area ([sizeWidthForAspect] over the measured 16:9 short
+         * edge), so a portrait clip reveals at roughly that edge - around
+         * 103dp on a 1080px phone - against the [PIP_CONTROLS_MIN_WIDTH] the
+         * bottom row needs. A `Row` hands each child the width left over after
+         * the ones before it, and `Modifier.size` is coerced into the
+         * constraints it is given (that is the difference from `requiredSize`),
+         * so the LAST child measured - SkipNext - took the whole shortfall and
+         * was drawn squashed, or not at all, on exactly the aspect ratios whose
+         * window came out narrow. Pushed narrower still, PlayArrow follows it.
+         *
+         * Fixing the width rather than the row also repairs the hit-testing for
+         * free: `hitRegion` places `nextCx` at `playCx + (iconPx +
+         * centerSpacingPx)` from the constants, which on a window too narrow to
+         * hold them lands off its own right edge. There is no second rule to
+         * keep in step, because both the layout and the hit-test already read
+         * the grown width.
+         */
+        fun controlsFitWidthPx(): Float = minOf(
+            maxOf(controlsRevealTargetWidthPx(), currentControlsMinWidth.value),
+            maxWindowWidthPx(),
+        )
+        // <-- AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+
         fun controlsRevealGrowFactor(): Float {
-            val targetW = controlsRevealTargetWidthPx()
+            // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+            val targetW = controlsFitWidthPx()
             val w = windowWidthPx()
             return if (w > 0f && w < targetW) targetW / w else 1f
         }
@@ -1662,13 +1734,9 @@ fun DummyPipContainer(
         // mechanism existed.
         // <-- AM (DUMMY_PIP_PRESCALED_CORNERS)
 
-        // AM (DUMMY_PIP_CONTROLS_AFTER_GROW_FIX) -->
-        // Real PiP's controls don't slide around mid-growth: they appear
-        // only once the reveal-grow has FULLY expanded the window. Gate
-        // both the visuals and the hit-testing on the animation having
-        // settled at its target.
+        // Controls remain settled-gated: while reveal-grow is running their
+        // hit zones would otherwise move under the finger.
         val controlsSettled = abs(controlsRevealScale - revealScaleTarget) < 0.01f
-        // <-- AM (DUMMY_PIP_CONTROLS_AFTER_GROW_FIX)
 
         // AM (DUMMY_PIP_REPORTS_WINDOW_RECT) -->
         // Publishes the window's resting rect for real PiP's source-rect hint - see
@@ -2614,15 +2682,68 @@ fun DummyPipContainer(
                                         lastTapTime = 0L
                                         lastTapPosition = Offset.Unspecified
                                         lastDoubleTapTime = now
-                                        // Real PiP doesn't keep its buttons
-                                        // up through the resize: the
-                                        // double-tap hides the controls
-                                        // outright (snap, not fade - the
-                                        // reveal-shrink is instant anyway)
-                                        // and they stay hidden afterward
-                                        // until a fresh tap reveals them.
-                                        controlsShown = false
-                                        startToggleSize()
+                                        // AM (QUEUE_SOURCE_STEP) -->
+                                        // A double tap ON the previous/next
+                                        // button skips a source instead of
+                                        // toggling the window size. Guarded
+                                        // the same way the single tap below
+                                        // is - controls up and the reveal
+                                        // settled - because the regions are
+                                        // meaningless otherwise, and it falls
+                                        // through to the size toggle whenever
+                                        // the tap was not on one of those two
+                                        // buttons, which is every double tap
+                                        // that worked before this.
+                                        val sourceStepRegion = if (
+                                            controlsShown &&
+                                            !toggleRunning &&
+                                            abs(
+                                                controlsRevealScaleAnim.value - controlsRevealGrowFactor(),
+                                            ) < 0.01f
+                                        ) {
+                                            hitRegion(downPosition, overlayW, overlayH)
+                                        } else {
+                                            PipHitRegion.None
+                                        }
+                                        // AM (QUEUE_SOURCE_STEP_CONSUMES_TAP) -->
+                                        // The REGION decides whether the window
+                                        // resizes, not whether a source step
+                                        // happens to be available: a double tap
+                                        // on prev/next is aimed at that button,
+                                        // and with no adjacent source to step to
+                                        // it used to fall through and resize the
+                                        // window instead - "the next button
+                                        // resizes the video". So the button
+                                        // always consumes the gesture, and with
+                                        // no source either side of this one it
+                                        // degrades to the button's own single-tap
+                                        // action rather than doing something
+                                        // unrelated or nothing at all.
+                                        val sourceStep = when (sourceStepRegion) {
+                                            PipHitRegion.Previous -> currentActions.value.onSkipPreviousSource
+                                                ?: currentActions.value.onSkipPrevious
+                                            PipHitRegion.Next -> currentActions.value.onSkipNextSource
+                                                ?: currentActions.value.onSkipNext
+                                            else -> null
+                                        }
+                                        // <-- AM (QUEUE_SOURCE_STEP_CONSUMES_TAP)
+                                        if (sourceStep != null) {
+                                            flashRegion = sourceStepRegion
+                                            flashTick++
+                                            sourceStep()
+                                            controlsRevision++
+                                        } else {
+                                            // <-- AM (QUEUE_SOURCE_STEP)
+                                            // Real PiP doesn't keep its buttons
+                                            // up through the resize: the
+                                            // double-tap hides the controls
+                                            // outright (snap, not fade - the
+                                            // reveal-shrink is instant anyway)
+                                            // and they stay hidden afterward
+                                            // until a fresh tap reveals them.
+                                            controlsShown = false
+                                            startToggleSize()
+                                        }
                                     } else if (now - lastDoubleTapTime <= DOUBLE_TAP_EXTRA_TAP_SUPPRESS_MS) {
                                         // Finger-bounce right after a
                                         // double-tap (see lastDoubleTapTime):

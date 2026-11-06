@@ -1,5 +1,7 @@
 package aniyomi.source.js
 
+import aniyomi.domain.source.model.BrowseDisplayMode
+
 import android.content.Context
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
@@ -99,6 +101,9 @@ class JsProjectRepository(
                         name = project.manifest.name,
                         lang = project.manifest.lang,
                         supportsLatest = project.manifest.supportsLatest,
+                        defaultBrowseDisplayMode = project.manifest.defaultBrowseDisplayMode
+                            ?.takeIf { it == "scroller" }
+                            ?.let { BrowseDisplayMode.Scroller },
                         script = project.script,
                         baseUrl = project.manifest.baseUrl,
                     )

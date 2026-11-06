@@ -1,15 +1,15 @@
 package animiru.domain.player.repository
 
-import animiru.domain.player.model.EpisodeTempPosition
+import animiru.domain.player.model.SessionTempPosition
 
 // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
-interface EpisodeTempPositionRepository {
+interface SessionTempPositionRepository {
 
-    suspend fun getAll(): List<EpisodeTempPosition>
+    suspend fun getAll(): List<SessionTempPosition>
 
-    suspend fun upsert(episodeId: Long, positionMs: Long, updatedAt: Long)
+    suspend fun upsert(sessionKey: String, positionMs: Long, updatedAt: Long)
 
-    suspend fun delete(episodeId: Long)
+    suspend fun delete(sessionKey: String)
 
     /** Deletes everything except the [keepCount] most-recently-updated rows. */
     suspend fun pruneToMostRecent(keepCount: Int)

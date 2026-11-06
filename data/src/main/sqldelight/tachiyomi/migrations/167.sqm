@@ -1,0 +1,7 @@
+-- AM (QUEUE_BLOCK_PROGRESS) -->
+-- Whether last_played_episode_id was actually FINISHED, as opposed to left
+-- part way through. Recorded when playback crosses the mark-as-watched
+-- threshold, so resuming the queue can step past an episode the user has
+-- already got to the end of instead of handing it back to them.
+ALTER TABLE queue_blocks ADD COLUMN last_played_completed INTEGER NOT NULL DEFAULT 0;
+-- <-- AM (QUEUE_BLOCK_PROGRESS)

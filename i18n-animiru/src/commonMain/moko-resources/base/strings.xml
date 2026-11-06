@@ -1,5 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="am_action_add_to_queue">Add to queue</string>
+    <string name="am_action_added_to_queue">Added to queue</string>
+    <string name="am_action_add_unwatched">Add unwatched</string>
+    <string name="am_action_add_all">Add all</string>
+    <string name="am_action_expand">Expand</string>
+    <string name="am_action_collapse">Collapse</string>
+    <!-- AM (PLAYLIST_MARK_TRISTATE): announced as the state of a cycling mark button. -->
+    <!-- AM (QUEUE_SOURCE_TOTALS): how much of a split source sits under one header. -->
+    <string name="am_queue_run_of_source">%1$d of %2$d episodes</string>
+    <string name="am_mark_state_all">All</string>
+    <string name="am_mark_state_partial">Mixed</string>
+    <string name="am_mark_state_none">None</string>
+    <string name="am_pref_category_queue">Queue</string>
+    <string name="am_pref_queue_cleaning">Queue cleaning</string>
+    <string name="am_pref_queue_cleaning_on_close">Clear on close</string>
+    <string name="am_pref_queue_cleaning_on_selection">Clear on episode selection</string>
+    <string name="am_pref_queue_cleaning_keep">Keep queue on close</string>
+    <string name="am_pref_queue_tail_length">Queue tail length</string>
+    <string name="am_pref_queue_tail_length_summary">%s stored sources in queue before trimming</string>
+    <string name="am_pref_number_out_of_range">Enter a number from %1$d to %2$d</string>
     <string name="action_filter_fillermarked">Fillermarked</string>
     <string name="action_fillermark_episode">Fillermark episode</string>
     <string name="action_remove_fillermark_episode">Unfillermark episode</string>
@@ -21,6 +41,8 @@
     <string name="am.action_mark_as_seen">Mark as seen</string>
     <string name="am.action_mark_as_unseen">Mark as unseen</string>
     <string name="am.action_merge">Merge</string>
+    <string name="am.action_save_to_local_source">Save to local source</string>
+    <string name="am.download_local_file_missing">Download finished but the file could not be found</string>
     <string name="am.merge_entry_merged">Entry merged!</string>
     <string name="am.merge_remove_originals">Remove original entries from library?</string>
     <string name="am.merge_requires_valid_selection">Select at least 2 entries to merge.</string>
@@ -33,15 +55,16 @@
     <string name="am.season_advance_continue">Continue</string>
     <string name="am.season_advance_stay">Not now</string>
     <string name="am.action_reorder_episodes">Reorder episodes</string>
-    <string name="am.action_change_episode_season">Change season</string>
+    <string name="am.action_change_episode_season">Edit season</string>
     <string name="am.action_discard_order_changes">Discard changes</string>
     <string name="am.action_reset_episode_order">Reset order</string>
+    <string name="am.action_delete_custom_ordering">Delete custom ordering</string>
     <string name="am.episode_drag_handle">Drag to reorder</string>
     <string name="am.action_merge_settings">Merge settings</string>
     <string name="am.action_edit_seasons">Edit seasons</string>
     <string name="am.merge_settings_info_entry">Entry info</string>
-    <string name="am.merge_settings_allow_dedupe">Allow deduplication</string>
     <string name="am.merge_settings_dedupe_mode">Deduplication mode</string>
+    <string name="am.pref_default_dedupe_mode">Default Dedupe Mode</string>
     <string name="am.merge_settings_dedupe_priority">Priority</string>
     <string name="am.merge_settings_dedupe_most">Most episodes</string>
     <string name="am.merge_settings_dedupe_highest">Highest episode number</string>
@@ -58,6 +81,10 @@
     <string name="am.source_removed_from_merge">Last episode from %1$s — source removed from merge</string>
     <string name="am.merge_removed_episodes">Removed episodes</string>
     <string name="am.action_restore_to_merge">Restore</string>
+    <string name="am.migrate_merge_title">Migrate sources</string>
+    <string name="am.migrate_merge_filter_extension">Extension</string>
+    <string name="am.migrate_merge_filter_all">All extensions</string>
+    <string name="am.migrate_merge_empty">This entry has no sources to migrate.</string>
     <string name="am.entry_seasons_title">Seasons</string>
     <string name="am.entry_season_create">Add season</string>
     <string name="am.entry_season_create_number">Add Season %d</string>
@@ -110,6 +137,9 @@
     <string name="am.pref_auto_update_anime_on_mark_seen">Update progress when marked as seen</string>
     <string name="am.tracking_info">One-way sync to update the episode progress in external tracker services. Set up tracking for individual entries from their tracking button.</string>
     <string name="am.pref_storage_location_info">Used for automatic backups, episode downloads, and local source.</string>
+    <string name="am.local_filter_app">App</string>
+    <string name="am.local_filter_app_all">All</string>
+    <string name="am.local_filter_app_local">Local</string>
     <string name="am.pref_invalidate_download_cache_summary">Force app to recheck downloaded episodes</string>
     <string name="am.clear_database_history_warning">Seen episodes and progress of non-library entries will be lost</string>
     <string name="am.clear_db_exclude_seen">Keep entries with seen episodes</string>
@@ -126,7 +156,6 @@
     <string name="am.pref_default_view">Default view</string>
     <string name="am.pref_default_view_simplified">Simplified</string>
     <string name="am.pref_default_view_preview">Preview</string>
-    <string name="am.pref_default_view_minimal">Minimal</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesTitle">Hide entries without newer episodes</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesSubtitle">Only show entry if the match has additional episodes</string>
     <string name="am.migrationConfigScreen.prioritizeByChaptersTitle">Match based on episode number</string>
@@ -316,7 +345,7 @@
     <string name="player_pref_switch_on_failure">Switch video on loading failure</string>
     <string name="player_pref_recent_episode_position_slots">Temporary position memory (episodes)</string>
     <string name="player_pref_network_buffer_seconds">Network buffer</string>
-    <string name="player_pref_retain_recent_episode_media_size">Keep video data for recent episodes</string>
+    <string name="player_pref_retain_recent_episode_media_size">Episode cache limit</string>
     <string name="player_pref_retain_recent_episode_media_off">Don\'t keep</string>
 
     <!-- Player prefs - subtitles -->
@@ -388,4 +417,23 @@
     <string name="release_history">Release history</string>
     <string name="release_history_installed">Installed</string>
     <string name="release_history_hint">Long-press to copy debug info</string>
+
+    <!-- AM (EXTERNAL_FOLDER_GRANT) -->
+    <string name="external_folder_title">Grant Folder Access?</string>
+    <string name="external_folder_request">Allows the sources folder to function as a playlist.</string>
+    <string name="external_folder_granted">Playing through this folder. Use next and previous to move between its videos.</string>
+    <string name="external_folder_action">Grant</string>
+
+    <!-- AM (EXTRA_LOCAL_FOLDERS) -->
+    <string name="am_pref_granted_folders">Granted folders</string>
+    <string name="am_pref_granted_folders_summary">Folders outside your storage location that the local source covers</string>
+    <string name="am_granted_folders_empty">No granted folders</string>
+    <string name="am_granted_folders_in_library">In library</string>
+    <string name="am_granted_folders_not_in_library">Not in library</string>
+    <string name="am_granted_folders_unavailable">Unavailable</string>
+    <string name="am_granted_folders_internal_storage">Internal storage</string>
+    <string name="am_granted_folders_select_unused">Select not in library</string>
+
+    <!-- AM (BROWSE_SCROLLER) -->
+    <string name="action_display_scroller">Scroller</string>
 </resources>

@@ -8,6 +8,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.outlined.FlipToBack
+import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.SmallExtendedFloatingActionButton
 import androidx.compose.material3.Text
@@ -24,6 +26,7 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.presentation.anime.components.BaseAnimeListItem
 import eu.kanade.presentation.components.AppBar
+import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.util.system.toast
@@ -68,12 +71,27 @@ data class MigrateAnimeScreen(
             topBar = { scrollBehavior ->
                 AppBar(
                     title = state.source!!.name,
-                    navigateUp = {
-                        if (state.selectionMode) {
-                            viewModel.clearSelection()
-                        } else {
-                            navigator.pop()
-                        }
+                    navigateUp = navigator::pop,
+                    // AM (MERGED_SOURCES): selecting here turns the bar into the
+                    // library's action mode, with the same count, the same two
+                    // actions and the same X to come back out.
+                    actionModeCounter = state.selection.size,
+                    onCancelActionMode = viewModel::clearSelection,
+                    actionModeActions = {
+                        AppBarActions(
+                            listOf(
+                                AppBar.Action(
+                                    title = stringResource(MR.strings.action_select_all),
+                                    icon = Icons.Outlined.SelectAll,
+                                    onClick = viewModel::selectAll,
+                                ),
+                                AppBar.Action(
+                                    title = stringResource(MR.strings.action_select_inverse),
+                                    icon = Icons.Outlined.FlipToBack,
+                                    onClick = viewModel::invertSelection,
+                                ),
+                            ),
+                        )
                     },
                     scrollBehavior = scrollBehavior,
                 )

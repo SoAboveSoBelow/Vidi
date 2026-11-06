@@ -18,6 +18,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import eu.kanade.tachiyomi.util.system.toast
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.util.fastAll
@@ -35,6 +36,7 @@ import eu.kanade.presentation.library.DeleteLibraryAnimeDialog
 import eu.kanade.presentation.library.LibrarySettingsDialog
 import eu.kanade.presentation.library.components.LibraryContent
 import eu.kanade.presentation.library.components.LibraryToolbar
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.more.onboarding.GETTING_STARTED_URL
 import eu.kanade.presentation.util.Tab
 import eu.kanade.tachiyomi.R
@@ -191,6 +193,8 @@ data object LibraryTab : Tab {
                     onChangeCategoryClicked = viewModel::openChangeCategoryDialog,
                     onMarkAsSeenClicked = { viewModel.markSeenSelection(true) },
                     onMarkAsUnseenClicked = { viewModel.markSeenSelection(false) },
+                    // AM (PLAYBACK_QUEUE)
+                    onAddToQueueClicked = viewModel::addSelectionToQueue,
                     onDownloadClicked = viewModel::performDownloadAction
                         .takeIf { state.selectedAnime.fastAll { !it.isLocal() } },
                     onDeleteClicked = viewModel::openDeleteAnimeDialog,
@@ -244,6 +248,12 @@ data object LibraryTab : Tab {
                             }
                             Unit
                         }.takeIf { state.showAnimeContinueButton },
+                        // AM (DOUBLE_TAP_QUEUE)
+                        onDoubleClickAnime = { libraryAnime ->
+                            viewModel.addAnimeToQueue(libraryAnime.anime) {
+                                context.toast(AMMR.strings.am_action_added_to_queue)
+                            }
+                        },
                         onToggleSelection = viewModel::toggleSelection,
                         onToggleRangeSelection = { category, anime ->
                             viewModel.toggleRangeSelection(category, anime)
@@ -288,6 +298,24 @@ data object LibraryTab : Tab {
                     },
                 )
             }
+            // AM (QUEUE_WATCH_FILTER) -->
+            is LibraryViewModel.Dialog.AddToQueue -> {
+                // AM (QUEUE_RESOLVE_ONCE): only the mixed ones are what the
+                // question is about; the rest ride along with the answer.
+                val mixed = dialog.sources.filter { it.hasMixedWatchState }
+                AddToQueueDialog(
+                    mixedCount = mixed.size,
+                    mixedTitle = mixed.singleOrNull()?.anime?.title,
+                    onAddUnwatched = {
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = true)
+                    },
+                    onAddAll = {
+                        viewModel.addQueueChoice(dialog.sources, unwatchedOnly = false)
+                    },
+                    onDismissRequest = onDismissRequest,
+                )
+            }
+            // <-- AM (QUEUE_WATCH_FILTER)
             is LibraryViewModel.Dialog.DeleteAnime -> {
                 DeleteLibraryAnimeDialog(
                     containsLocalAnime = dialog.anime.any(Anime::isLocal),

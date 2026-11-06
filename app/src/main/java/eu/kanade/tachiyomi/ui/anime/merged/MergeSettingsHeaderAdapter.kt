@@ -15,6 +15,7 @@ import eu.kanade.presentation.components.SpinnerAdapter
 import eu.kanade.presentation.theme.colorscheme.AndroidViewColorScheme
 import eu.kanade.tachiyomi.databinding.MergeSettingsHeaderBinding
 import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 
 class MergeSettingsHeaderAdapter(
@@ -38,18 +39,24 @@ class MergeSettingsHeaderAdapter(
     inner class HeaderViewHolder(val view: View) : RecyclerView.ViewHolder(view) {
         fun bind() {
             val context = view.context
-            binding.dedupeSwitchLabel.text = context.stringResource(AMMR.strings.am_merge_settings_allow_dedupe)
             binding.dedupeModeLabel.text = context.stringResource(AMMR.strings.am_merge_settings_dedupe_mode)
             binding.entryInfoLabel.text = context.stringResource(AMMR.strings.am_merge_settings_info_entry)
-            binding.dedupeSwitchLabel.setTextColor(colorScheme.textColor)
             binding.dedupeModeLabel.setTextColor(colorScheme.textColor)
             binding.entryInfoLabel.setTextColor(colorScheme.textColor)
 
-            val modes = listOf(DedupeMode.PRIORITY, DedupeMode.MOST_EPISODES, DedupeMode.HIGHEST_EPISODE)
+            // AM: no separate on/off switch - OFF is just the first mode, so the
+            // spinner alone carries the whole setting.
+            val modes = listOf(
+                DedupeMode.OFF,
+                DedupeMode.PRIORITY,
+                DedupeMode.MOST_EPISODES,
+                DedupeMode.HIGHEST_EPISODE,
+            )
             val dedupeAdapter = SpinnerAdapter(
                 context,
                 android.R.layout.simple_spinner_dropdown_item,
                 listOf(
+                    context.stringResource(MR.strings.none),
                     context.stringResource(AMMR.strings.am_merge_settings_dedupe_priority),
                     context.stringResource(AMMR.strings.am_merge_settings_dedupe_most),
                     context.stringResource(AMMR.strings.am_merge_settings_dedupe_highest),
@@ -60,9 +67,7 @@ class MergeSettingsHeaderAdapter(
             binding.dedupeModeSpinner.setSelection(modes.indexOf(state.dedupeMode).coerceAtLeast(0))
             binding.dedupeModeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    if (binding.dedupeSwitch.isChecked) {
-                        state.dedupeMode = modes.getOrElse(position) { DedupeMode.PRIORITY }
-                    }
+                    state.dedupeMode = modes.getOrElse(position) { DedupeMode.OFF }
                     // Set the selected item's background to transparent.
                     if (view != null) (view as TextView).setBackgroundColor(Color.TRANSPARENT)
                 }
@@ -70,19 +75,6 @@ class MergeSettingsHeaderAdapter(
                 override fun onNothingSelected(parent: AdapterView<*>?) {
                     state.dedupeMode = DedupeMode.OFF
                 }
-            }
-
-            binding.dedupeSwitch.isChecked = state.dedupeMode != DedupeMode.OFF
-            binding.dedupeSwitch.trackTintList = colorScheme.trackTintList
-            binding.dedupeSwitch.thumbTintList = colorScheme.thumbTintList
-            binding.dedupeModeSpinner.isEnabled = binding.dedupeSwitch.isChecked
-            binding.dedupeSwitch.setOnCheckedChangeListener { _, isChecked ->
-                state.dedupeMode = if (isChecked) {
-                    modes.getOrElse(binding.dedupeModeSpinner.selectedItemPosition) { DedupeMode.PRIORITY }
-                } else {
-                    DedupeMode.OFF
-                }
-                binding.dedupeModeSpinner.isEnabled = isChecked
             }
 
             val sources = state.sources

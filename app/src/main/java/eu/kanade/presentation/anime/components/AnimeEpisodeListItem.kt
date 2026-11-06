@@ -333,8 +333,10 @@ fun AnimeEpisodeListItem(
  * queue and hold a fight with every row under the finger - so the box goes in only
  * when it has something to reveal.
  */
+// AM (PLAYLIST_SWIPE_ACTIONS): internal for the same reason as getSwipeAction -
+// the player's rows swipe through this box, including its no-actions bypass.
 @Composable
-private fun SwipeBox(
+internal fun SwipeBox(
     start: me.saket.swipe.SwipeAction?,
     end: me.saket.swipe.SwipeAction?,
     modifier: Modifier,
@@ -416,7 +418,10 @@ private fun RowScope.SimpleEpisodeListItemImpl(
 // <-- AY
 
 @Composable
-private fun getSwipeAction(
+// AM (PLAYLIST_SWIPE_ACTIONS): internal so the player's playlist rows resolve
+// swipes through this same function rather than growing a second copy that
+// could drift from what the entry list does.
+internal fun getSwipeAction(
     action: LibraryPreferences.EpisodeSwipeAction,
     seen: Boolean,
     bookmark: Boolean,

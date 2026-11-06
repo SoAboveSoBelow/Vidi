@@ -17,10 +17,13 @@ import eu.kanade.core.util.fastFilterNot
 // AM (MERGED_SOURCES) -->
 import aniyomi.domain.order.interactor.GetEpisodeOrder
 import aniyomi.domain.merge.repository.MergeChildRepository
+import aniyomi.domain.queue.interactor.AddToQueue
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import eu.kanade.domain.anime.interactor.MergeAnimeEntries
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.base.BasePreferences
+import eu.kanade.domain.category.interactor.GetCategorySelection
 import eu.kanade.domain.episode.interactor.SetSeenStatus
 import eu.kanade.presentation.anime.DownloadAction
 import eu.kanade.presentation.library.components.LibraryToolbarTitle
@@ -31,6 +34,7 @@ import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.track.TrackStatus
 import eu.kanade.tachiyomi.data.track.TrackerManager
 // AM (MERGED_SOURCES) -->
+import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.source.MergedSource
 // <-- AM (MERGED_SOURCES)
 import eu.kanade.tachiyomi.util.episode.getNextUnseen
@@ -56,6 +60,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import mihon.core.common.utils.mutate
 import mihon.domain.library.model.search.QueryNode
 import mihon.feature.library.matches
@@ -107,6 +112,10 @@ class LibraryViewModel(
     // AY -->
     private val getVisibleCategories: GetVisibleCategories,
     // <-- AY
+    // AM (BROWSE_SELECTION)
+    private val getCategorySelection: GetCategorySelection,
+    // AM (PLAYBACK_QUEUE)
+    private val addToQueue: AddToQueue,
     private val getTracksPerAnime: GetTracksPerAnime,
     private val getNextEpisodes: GetNextEpisodes,
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
@@ -609,36 +618,8 @@ class LibraryViewModel(
         }
     }
 
-    /**
-     * Returns the common categories for the given list of anime.
-     *
-     * @param animes the list of anime.
-     */
-    private suspend fun getCommonCategories(animes: List<Anime>): Collection<Category> {
-        if (animes.isEmpty()) return emptyList()
-        return animes
-            // AY -->
-            .map { getVisibleCategories.await(it.id).toSet() }
-            // <-- AY
-            .reduce { set1, set2 -> set1.intersect(set2) }
-    }
-
     suspend fun getNextUnseenEpisode(anime: Anime): Episode? {
         return getEpisodesByAnimeId.await(anime.id, applyScanlatorFilter = true).getNextUnseen(anime, downloadManager)
-    }
-
-    /**
-     * Returns the mix (non-common) categories for the given list of anime.
-     *
-     * @param animes the list of anime.
-     */
-    private suspend fun getMixCategories(animes: List<Anime>): Collection<Category> {
-        if (animes.isEmpty()) return emptyList()
-        // AY -->
-        val animeCategories = animes.map { getVisibleCategories.await(it.id).toSet() }
-        // <-- AY
-        val common = animeCategories.reduce { set1, set2 -> set1.intersect(set2) }
-        return animeCategories.flatten().distinct().subtract(common)
     }
 
     /**
@@ -807,6 +788,85 @@ class LibraryViewModel(
     /**
      * Marks animes' episodes seen status.
      */
+    // AM (PLAYBACK_QUEUE) -->
+    /**
+     * Queues one entry, without selecting it first - what a double tap does.
+     *
+     * A library entry has its episodes already, so nothing has to be fetched
+     * for it and no fill run is asked for; [AddToQueue] fills the block
+     * outright. Non-cancellable for the same reason as the selection action
+     * below: the write should survive the screen going away.
+     */
+    fun addAnimeToQueue(
+        anime: Anime,
+        unwatchedOnly: Boolean? = null,
+        onAdded: () -> Unit = {},
+    ) {
+        viewModelScope.launchNonCancellable {
+            // AM (QUEUE_WATCH_FILTER) -->
+            // AM (QUEUE_RESOLVE_ONCE): resolved once and carried, so the
+            // prompt and the add work from the same episode list.
+            val source = addToQueue.resolve(anime)
+            if (unwatchedOnly == null && source.hasMixedWatchState) {
+                dialog.update { Dialog.AddToQueue(listOf(source)) }
+                return@launchNonCancellable
+            }
+            addToQueue.await(
+                source = source,
+                unwatchedOnly = unwatchedOnly ?: false,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            // <-- AM (QUEUE_WATCH_FILTER)
+            withContext(Dispatchers.Main) { onAdded() }
+        }
+    }
+
+    /**
+     * Queues the selection, one block per entry, in the order it is selected.
+     *
+     * Shaped like [markSeenSelection]: the selection is read on the caller's
+     * thread, the work runs non-cancellable so it survives the screen, and the
+     * selection clears at once rather than when the work finishes.
+     */
+    fun addSelectionToQueue() {
+        val selection = selectedAnime
+        viewModelScope.launchNonCancellable {
+            // AM (QUEUE_WATCH_FILTER) -->
+            // One question for the whole selection, asked before anything is
+            // queued. Adding the unambiguous entries first and then prompting
+            // for the rest put them in the queue ahead of entries selected
+            // before them, so the order no longer matched the selection.
+            val sources = addToQueue.resolve(selection)
+            if (sources.any { it.hasMixedWatchState }) {
+                dialog.update { Dialog.AddToQueue(sources) }
+                return@launchNonCancellable
+            }
+            addToQueue.await(sources)
+            // <-- AM (QUEUE_WATCH_FILTER)
+        }
+        clearSelection()
+    }
+
+    // AM (QUEUE_WATCH_FILTER) -->
+    /** Applies the one answer to the whole selection, in selection order. */
+    fun addQueueChoice(
+        sources: List<QueueSource>,
+        unwatchedOnly: Boolean,
+        onAdded: () -> Unit = {},
+    ) {
+        viewModelScope.launchNonCancellable {
+            addToQueue.await(
+                sources = sources,
+                unwatchedOnly = unwatchedOnly,
+                currentEpisodeId = PlayerMediaHolder.current?.viewModel?.stateData?.value?.currentEpisode?.id,
+            )
+            dialog.update { null }
+            withContext(Dispatchers.Main) { onAdded() }
+        }
+    }
+    // <-- AM (QUEUE_WATCH_FILTER)
+    // <-- AM (PLAYBACK_QUEUE)
+
     fun markSeenSelection(seen: Boolean) {
         val selection = selectedAnime
         viewModelScope.launchNonCancellable {
@@ -1002,18 +1062,9 @@ class LibraryViewModel(
             // Hide the default category because it has a different behavior than the ones from db.
             val categories = state.value.displayedCategories.filter { it.id != 0L }
 
-            // Get indexes of the common categories to preselect.
-            val common = getCommonCategories(animeList)
-            // Get indexes of the mix categories to preselect.
-            val mix = getMixCategories(animeList)
-            val preselected = categories
-                .map {
-                    when (it) {
-                        in common -> CheckboxState.State.Checked(it)
-                        in mix -> CheckboxState.TriState.Exclude(it)
-                        else -> CheckboxState.State.None(it)
-                    }
-                }
+            // AM (BROWSE_SELECTION): the common/mixed/none decision is shared
+            // with browse's own selection now - see GetCategorySelection.
+            val preselected = getCategorySelection.await(animeList.map { it.id }, categories)
 
             dialog.update { Dialog.ChangeCategory(animeList, preselected) }
         }
@@ -1134,6 +1185,10 @@ class LibraryViewModel(
             val initialSelection: List<CheckboxState<Category>>,
         ) : Dialog
         data class DeleteAnime(val anime: List<Anime>) : Dialog
+        // AM (QUEUE_WATCH_FILTER)
+        // AM (QUEUE_RESOLVE_ONCE): the resolved sources, so answering does not
+        // resolve them again.
+        data class AddToQueue(val sources: List<QueueSource>) : Dialog
     }
 
     // AM (MERGED_SOURCES) -->

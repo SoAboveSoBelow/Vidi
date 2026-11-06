@@ -117,6 +117,9 @@ internal val JS_PRELUDE = """
         post: function (url, body, headers) {
             return new Response(__http.request('POST', url, __headerLines(headers), body || ''));
         },
+        delete: function (url, headers) {
+            return new Response(__http.request('DELETE', url, __headerLines(headers), ''));
+        },
 
         /*
          * Where a link ends up, without downloading what is there. Use this for

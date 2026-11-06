@@ -1,0 +1,7 @@
+-- AM (QUEUE_BLOCK_PROGRESS) -->
+-- Where the user left each queued source, for the step that crosses out of a
+-- block (see queue_blocks.sq). Nullable: a block nothing has played yet has no
+-- answer, and the caller decides what to do with that rather than being handed
+-- a guess.
+ALTER TABLE queue_blocks ADD COLUMN last_played_episode_id INTEGER DEFAULT NULL REFERENCES episodes(_id) ON DELETE SET NULL;
+-- <-- AM (QUEUE_BLOCK_PROGRESS)

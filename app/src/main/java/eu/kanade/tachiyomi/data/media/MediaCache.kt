@@ -276,7 +276,10 @@ class MediaCache(private val cacheDir: File) {
     @Synchronized
     fun retainOnly(episodeIds: Set<Long>) {
         entries.values.toList()
-            .filterNot { it.inUse }
+            // AM (ACTIVE_EPISODE_NEVER_EVICTED): same exemption as evictIfNeeded.
+            // Turning retention off mid-episode must not pull the bytes out from
+            // under the episode being watched.
+            .filterNot { isProtected(it) }
             .filterNot { episodeIdOf(it.key) in episodeIds }
             .forEach { entry ->
                 entries.remove(entry.key)
@@ -298,10 +301,43 @@ class MediaCache(private val cacheDir: File) {
         }
     }
 
+    // AM (ACTIVE_EPISODE_NEVER_EVICTED) -->
+    /**
+     * The episode currently playing, which is never evicted whatever the ceiling.
+     *
+     * Protection used to rest entirely on [Entry.inUse], a refcount taken around
+     * each range transfer in MediaProxyServer. That answers "is a transfer running
+     * right now", which is not the same question: mpv reads in ranges and closes
+     * the connection once it has what it asked for, then sits on a 64MB demuxer
+     * buffer, so the playing episode's refcount is zero for most of its own
+     * playback. It survived mostly by being the most-recently-used entry, which
+     * is luck rather than a guarantee.
+     *
+     * Set by the player when the episode changes, cleared when playback stops.
+     */
+    @Volatile
+    private var activeEpisodeId: Long? = null
+
+    fun setActiveEpisode(episodeId: Long?) {
+        activeEpisodeId = episodeId
+    }
+
+    /** Whether [entry] belongs to the playing episode or to a transfer in flight. */
+    private fun isProtected(entry: Entry): Boolean {
+        if (entry.inUse) return true
+        val active = activeEpisodeId ?: return false
+        return episodeIdOf(entry.key) == active
+    }
+    // <-- AM (ACTIVE_EPISODE_NEVER_EVICTED)
+
     /**
      * Drops least-recently-used entries until the cache is back under its ceiling.
-     * An entry with a live reader is never dropped - taking a cached range out from
-     * under a player mid-read is a stall it has no way to explain.
+     *
+     * AM (ACTIVE_EPISODE_NEVER_EVICTED): the playing episode and any entry with a
+     * transfer in flight are exempt - taking a cached range out from under a
+     * player mid-read is a stall it has no way to explain. The ceiling therefore
+     * bounds the kept remainder, not the active episode on top of it, which is
+     * what the setting has always actually meant.
      */
     @Synchronized
     private fun evictIfNeeded() {
@@ -309,7 +345,7 @@ class MediaCache(private val cacheDir: File) {
         if (total <= maxBytes) return
 
         entries.values
-            .filterNot { it.inUse }
+            .filterNot { isProtected(it) }
             .sortedBy { it.lastUsedAt }
             .forEach { entry ->
                 if (total <= maxBytes) return
@@ -319,6 +355,29 @@ class MediaCache(private val cacheDir: File) {
                 logcat(LogPriority.INFO) { "MEDIA_CACHE evicted ${entry.key}" }
             }
     }
+
+    // AM (EVICT_ON_WRITE) -->
+    /**
+     * Re-checks the ceiling after bytes have landed.
+     *
+     * Eviction used to run only when a new key was created, so nothing enforced
+     * the limit while existing entries grew - the cache drifted past its setting
+     * and stayed there until the next new episode happened to be proxied. A
+     * 500MB setting holding 657MB is that gap, not an unusual case.
+     *
+     * Driven by bytes written rather than by a timer: the only thing that can
+     * push the total over is a write, so that is the moment to look. The counter
+     * keeps it from being a full sum on every chunk.
+     */
+    private val bytesSinceEvictionCheck = java.util.concurrent.atomic.AtomicLong(0L)
+
+    fun noteBytesWritten(count: Int) {
+        if (count <= 0) return
+        if (bytesSinceEvictionCheck.addAndGet(count.toLong()) < EVICTION_CHECK_INTERVAL_BYTES) return
+        bytesSinceEvictionCheck.set(0L)
+        synchronized(this) { evictIfNeeded() }
+    }
+    // <-- AM (EVICT_ON_WRITE)
 
     /** Discards everything. The cache holds no state worth keeping across a restart yet. */
     @Synchronized
@@ -331,6 +390,11 @@ class MediaCache(private val cacheDir: File) {
         private const val DEFAULT_MAX_CACHE_BYTES = 2L * 1024 * 1024 * 1024
         private const val MIN_MAX_CACHE_BYTES = 256L * 1024 * 1024
         private const val INDEX_FILE_NAME = "index.tsv"
+
+        // AM (EVICT_ON_WRITE) -->
+        /** How many bytes may land between ceiling checks. */
+        private const val EVICTION_CHECK_INTERVAL_BYTES = 8L * 1024 * 1024
+        // <-- AM (EVICT_ON_WRITE)
 
         @Volatile
         private var instance: MediaCache? = null

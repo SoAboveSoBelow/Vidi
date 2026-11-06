@@ -73,7 +73,6 @@ import eu.kanade.presentation.anime.components.AnimeSeasonListItem
 import eu.kanade.presentation.anime.components.AnimeToolbar
 // AM (CUSTOM_EPISODE_ORDER) -->
 import eu.kanade.presentation.anime.components.EpisodeReorderActions
-import eu.kanade.presentation.anime.components.EpisodeReorderBottomBar
 import eu.kanade.presentation.anime.components.EpisodeReorderRow
 import eu.kanade.presentation.anime.components.EpisodeSeasonSwitcher
 // <-- AM (CUSTOM_EPISODE_ORDER)
@@ -219,6 +218,8 @@ fun AnimeScreen(
     onMultiMarkAsSeenClicked: (List<Episode>, markAsSeen: Boolean) -> Unit,
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
 
     // For episode swipe
     onEpisodeSwipe: (EpisodeList.Item, LibraryPreferences.EpisodeSwipeAction) -> Unit,
@@ -238,11 +239,15 @@ fun AnimeScreen(
     // AY -->
     // Season clicked
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onContinueWatchingClicked: ((SeasonAnime) -> Unit)?,
 
     // Related anime clicked
     onRelatedAnimeClicked: (Anime) -> Unit,
     onRelatedAnimeLongClicked: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedAnimeDoubleClicked: ((Anime) -> Unit)? = null,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
     // AM (TAG_LIMIT) -->
@@ -334,6 +339,7 @@ fun AnimeScreen(
             onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
             onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
             onMultiDeleteClicked = onMultiDeleteClicked,
+            onAddEpisodesToQueue = onAddEpisodesToQueue,
             onEpisodeSwipe = onEpisodeSwipe,
             onEpisodeSelected = onEpisodeSelected,
             onAllEpisodeSelected = onAllEpisodeSelected,
@@ -347,9 +353,13 @@ fun AnimeScreen(
             // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = onSeasonClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = onSeasonDoubleClicked,
             onClickContinueWatching = onContinueWatchingClicked,
             onRelatedAnimeClicked = onRelatedAnimeClicked,
             onRelatedAnimeLongClicked = onRelatedAnimeLongClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onRelatedAnimeDoubleClicked = onRelatedAnimeDoubleClicked,
             relatedAnimeDisplayMode = relatedAnimeDisplayMode,
             // <-- AY
             // AM (TAG_LIMIT) -->
@@ -434,6 +444,7 @@ fun AnimeScreen(
             onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
             onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
             onMultiDeleteClicked = onMultiDeleteClicked,
+            onAddEpisodesToQueue = onAddEpisodesToQueue,
             onEpisodeSwipe = onEpisodeSwipe,
             onEpisodeSelected = onEpisodeSelected,
             onAllEpisodeSelected = onAllEpisodeSelected,
@@ -447,9 +458,13 @@ fun AnimeScreen(
             // <-- AM (CUSTOM_EPISODE_ORDER)
             // AY -->
             onSeasonClicked = onSeasonClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = onSeasonDoubleClicked,
             onClickContinueWatching = onContinueWatchingClicked,
             onRelatedAnimeClicked = onRelatedAnimeClicked,
             onRelatedAnimeLongClicked = onRelatedAnimeLongClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onRelatedAnimeDoubleClicked = onRelatedAnimeDoubleClicked,
             relatedAnimeDisplayMode = relatedAnimeDisplayMode,
             // <-- AY
             // AM (TAG_LIMIT) -->
@@ -553,6 +568,8 @@ private fun AnimeScreenSmallImpl(
     onMultiMarkAsSeenClicked: (List<Episode>, markAsSeen: Boolean) -> Unit,
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
 
     // For episode swipe
     onEpisodeSwipe: (EpisodeList.Item, LibraryPreferences.EpisodeSwipeAction) -> Unit,
@@ -572,11 +589,15 @@ private fun AnimeScreenSmallImpl(
     // AY -->
     // Season clicked
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onClickContinueWatching: ((SeasonAnime) -> Unit)?,
 
     // Related anime clicked
     onRelatedAnimeClicked: (Anime) -> Unit,
     onRelatedAnimeLongClicked: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedAnimeDoubleClicked: ((Anime) -> Unit)? = null,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
     // AM (TAG_LIMIT) -->
@@ -781,7 +802,7 @@ private fun AnimeScreenSmallImpl(
                     isReordering = state.isReordering,
                     onToggleReorder = {
                         if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
-                    }.takeIf { state.anime.fetchType == FetchType.Episodes },
+                    }.takeIf { state.canReorder },
                     // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
@@ -825,40 +846,28 @@ private fun AnimeScreenSmallImpl(
                 // AM (CUSTOM_EPISODE_ORDER) -->
                 val selectedEpisodes = state.selectedEpisodes
                 // <-- AM (CUSTOM_EPISODE_ORDER)
-                // AM (CUSTOM_EPISODE_ORDER) -->
-                if (state.isReordering) {
-                    EpisodeReorderBottomBar(
-                        visible = true,
-                        onChangeSeasonClicked = reorderActions.onChangeSeason
-                            .takeIf { state.selectedEpisodes.isNotEmpty() },
-                        onDiscardClicked = reorderActions.onDiscard
-                            .takeIf { state.reorderSession?.hasChanges == true },
-                        onResetClicked = reorderActions.onReset
-                            .takeIf { state.selectedEpisodes.isNotEmpty() },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    SharedAnimeBottomActionMenu(
-                        selected = selectedEpisodes,
-                        // AY -->
-                        onEpisodeClicked = onEpisodeClicked,
-                        alwaysUseExternalPlayer = alwaysUseExternalPlayer,
-                        // <-- AY
-                        onMultiBookmarkClicked = onMultiBookmarkClicked,
-                        // AY -->
-                        onMultiFillermarkClicked = onMultiFillermarkClicked,
-                        // <-- AY
-                        onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
-                        onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
-                        onDownloadEpisode = onDownloadEpisode,
-                        onMultiDeleteClicked = onMultiDeleteClicked,
-                        // AM (EPISODE_NAMES) -->
-                        onRenameEpisode = onRenameEpisode,
-                        // <-- AM (EPISODE_NAMES)
-                        fillFraction = 1f,
-                    )
-                }
-                // <-- AM (CUSTOM_EPISODE_ORDER)
+                SharedAnimeBottomActionMenu(
+                    selected = selectedEpisodes,
+                    // AY -->
+                    onEpisodeClicked = onEpisodeClicked,
+                    alwaysUseExternalPlayer = alwaysUseExternalPlayer,
+                    // <-- AY
+                    onMultiBookmarkClicked = onMultiBookmarkClicked,
+                    // AY -->
+                    onMultiFillermarkClicked = onMultiFillermarkClicked,
+                    // <-- AY
+                    onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
+                    onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
+                    onDownloadEpisode = onDownloadEpisode,
+                    onMultiDeleteClicked = onMultiDeleteClicked,
+                    onAddEpisodesToQueue = onAddEpisodesToQueue,
+                    // AM (EPISODE_NAMES) -->
+                    onRenameEpisode = onRenameEpisode,
+                    // <-- AM (EPISODE_NAMES)
+                    // AM (CUSTOM_EPISODE_ORDER)
+                    onChangeSeason = reorderActions.onChangeSeason,
+                    fillFraction = 1f,
+                )
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             floatingActionButton = {
@@ -987,6 +996,8 @@ private fun AnimeScreenSmallImpl(
                             relations = state.relatedAnime,
                             onRelatedClick = onRelatedAnimeClicked,
                             onRelatedLongClick = onRelatedAnimeLongClicked,
+                            // AM (DOUBLE_TAP_QUEUE)
+                            onRelatedDoubleClick = onRelatedAnimeDoubleClicked,
                             relatedDisplayMode = relatedAnimeDisplayMode,
                             // <-- AY
                             // AY -->
@@ -1047,6 +1058,8 @@ private fun AnimeScreenSmallImpl(
                                 seasons = seasons,
                                 containerHeight = containerHeightPx - toolbarHeight,
                                 onSeasonClicked = onSeasonClicked,
+                                // AM (DOUBLE_TAP_QUEUE)
+                                onSeasonDoubleClicked = onSeasonDoubleClicked,
                                 onClickContinueWatching = onClickContinueWatching,
                                 listItemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
                             )
@@ -1245,6 +1258,8 @@ fun AnimeScreenLargeImpl(
     onMultiMarkAsSeenClicked: (List<Episode>, markAsSeen: Boolean) -> Unit,
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
 
     // For swipe actions
     onEpisodeSwipe: (EpisodeList.Item, LibraryPreferences.EpisodeSwipeAction) -> Unit,
@@ -1264,11 +1279,15 @@ fun AnimeScreenLargeImpl(
     // AY -->
     // Season clicked
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onClickContinueWatching: ((SeasonAnime) -> Unit)?,
 
     // Related anime clicked
     onRelatedAnimeClicked: (Anime) -> Unit,
     onRelatedAnimeLongClicked: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onRelatedAnimeDoubleClicked: ((Anime) -> Unit)? = null,
     relatedAnimeDisplayMode: LibraryDisplayMode,
     // <-- AY
     // AM (TAG_LIMIT) -->
@@ -1463,7 +1482,7 @@ fun AnimeScreenLargeImpl(
                     isReordering = state.isReordering,
                     onToggleReorder = {
                         if (state.isReordering) reorderActions.onLeave() else reorderActions.onEnter()
-                    }.takeIf { state.anime.fetchType == FetchType.Episodes },
+                    }.takeIf { state.canReorder },
                     // <-- AM (CUSTOM_EPISODE_ORDER)
                     // AM (EPISODE_SEARCH) -->
                     episodeSearchQuery = episodeSearchQuery,
@@ -1508,40 +1527,28 @@ fun AnimeScreenLargeImpl(
                     // AM (CUSTOM_EPISODE_ORDER) -->
                     val selectedEpisodes = state.selectedEpisodes
                     // <-- AM (CUSTOM_EPISODE_ORDER)
-                    // AM (CUSTOM_EPISODE_ORDER) -->
-                    if (state.isReordering) {
-                        EpisodeReorderBottomBar(
-                            visible = true,
-                            onChangeSeasonClicked = reorderActions.onChangeSeason
-                                .takeIf { state.selectedEpisodes.isNotEmpty() },
-                            onDiscardClicked = reorderActions.onDiscard
-                                .takeIf { state.reorderSession?.hasChanges == true },
-                            onResetClicked = reorderActions.onReset
-                                .takeIf { state.selectedEpisodes.isNotEmpty() },
-                            modifier = Modifier.fillMaxWidth(0.5f),
-                        )
-                    } else {
-                        SharedAnimeBottomActionMenu(
-                            selected = selectedEpisodes,
-                            // AY -->
-                            onEpisodeClicked = onEpisodeClicked,
-                            alwaysUseExternalPlayer = alwaysUseExternalPlayer,
-                            // <-- AY
-                            onMultiBookmarkClicked = onMultiBookmarkClicked,
-                            // AY -->
-                            onMultiFillermarkClicked = onMultiFillermarkClicked,
-                            // <-- AY
-                            onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
-                            onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
-                            onDownloadEpisode = onDownloadEpisode,
-                            onMultiDeleteClicked = onMultiDeleteClicked,
-                            // AM (EPISODE_NAMES) -->
-                            onRenameEpisode = onRenameEpisode,
-                            // <-- AM (EPISODE_NAMES)
-                            fillFraction = 0.5f,
-                        )
-                    }
-                    // <-- AM (CUSTOM_EPISODE_ORDER)
+                    SharedAnimeBottomActionMenu(
+                        selected = selectedEpisodes,
+                        // AY -->
+                        onEpisodeClicked = onEpisodeClicked,
+                        alwaysUseExternalPlayer = alwaysUseExternalPlayer,
+                        // <-- AY
+                        onMultiBookmarkClicked = onMultiBookmarkClicked,
+                        // AY -->
+                        onMultiFillermarkClicked = onMultiFillermarkClicked,
+                        // <-- AY
+                        onMultiMarkAsSeenClicked = onMultiMarkAsSeenClicked,
+                        onMarkPreviousAsSeenClicked = onMarkPreviousAsSeenClicked,
+                        onDownloadEpisode = onDownloadEpisode,
+                        onMultiDeleteClicked = onMultiDeleteClicked,
+                        onAddEpisodesToQueue = onAddEpisodesToQueue,
+                        // AM (EPISODE_NAMES) -->
+                        onRenameEpisode = onRenameEpisode,
+                        // <-- AM (EPISODE_NAMES)
+                        // AM (CUSTOM_EPISODE_ORDER)
+                        onChangeSeason = reorderActions.onChangeSeason,
+                        fillFraction = 0.5f,
+                    )
                 }
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -1639,6 +1646,8 @@ fun AnimeScreenLargeImpl(
                                 relations = state.relatedAnime,
                                 onRelatedClick = onRelatedAnimeClicked,
                                 onRelatedLongClick = onRelatedAnimeLongClicked,
+                                // AM (DOUBLE_TAP_QUEUE)
+                                onRelatedDoubleClick = onRelatedAnimeDoubleClicked,
                                 relatedDisplayMode = relatedAnimeDisplayMode,
                                 // <-- AY
                             )
@@ -1707,6 +1716,8 @@ fun AnimeScreenLargeImpl(
                                         seasons = seasons,
                                         containerHeight = containerHeightPx - topBarHeight,
                                         onSeasonClicked = onSeasonClicked,
+                                        // AM (DOUBLE_TAP_QUEUE)
+                                        onSeasonDoubleClicked = onSeasonDoubleClicked,
                                         onClickContinueWatching = onClickContinueWatching,
                                         listItemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
                                     )
@@ -1839,9 +1850,14 @@ private fun SharedAnimeBottomActionMenu(
     onMarkPreviousAsSeenClicked: (Episode) -> Unit,
     onDownloadEpisode: ((List<EpisodeList.Item>, EpisodeDownloadAction) -> Unit)?,
     onMultiDeleteClicked: (List<Episode>) -> Unit,
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddEpisodesToQueue: () -> Unit,
     // AM (EPISODE_NAMES) -->
     onRenameEpisode: () -> Unit,
     // <-- AM (EPISODE_NAMES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    onChangeSeason: () -> Unit,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
     fillFraction: Float,
     modifier: Modifier = Modifier,
 ) {
@@ -1894,6 +1910,10 @@ private fun SharedAnimeBottomActionMenu(
         // selection size, so don't offer it.
         onRenameClicked = onRenameEpisode.takeIf { selected.size == 1 },
         // <-- AM (EPISODE_NAMES)
+        // AM (CUSTOM_EPISODE_ORDER)
+        onChangeSeasonClicked = onChangeSeason.takeIf { selected.isNotEmpty() },
+        // AM (QUEUE_EPISODE_SELECTION)
+        onAddToQueueClicked = onAddEpisodesToQueue,
     )
 }
 
@@ -1953,10 +1973,33 @@ private fun rememberNowPlaying(animeId: Long): NowPlayingEpisode? {
                         // would make a mm:ss label jump in 15s steps. Collected
                         // only while this screen is composed.
                         holder.livePositionMs,
-                    ) { mediaState, hasScreenConsumer, positionMs ->
+                    ) { mediaState, hasScreenConsumer, _ ->
                         if (!hasScreenConsumer && mediaState.paused) {
                             null
                         } else {
+                            // AM (PLAYLIST_PROGRESS_LOAD_GUARD) -->
+                            // state.episodeId moves to the new episode the
+                            // moment a switch is requested, but the player is
+                            // still on - often still displaying - the OLD file
+                            // until the load finishes. Two stale reads made
+                            // the new row flash the old timestamp: the
+                            // position (livePositionMs's cached value is up to
+                            // a second old, and this lambda re-runs on state
+                            // emissions mid-load, replaying it) and the
+                            // loading flag itself. Both are now read FRESH at
+                            // attribution time: 0 while a load is in flight
+                            // (the consumer's >0 filter then falls back to the
+                            // episode's own stored progress), otherwise a
+                            // just-taken mpv sample. livePositionMs is still
+                            // collected above purely as the 1s recomposition
+                            // trigger for this label.
+                            val loading = holder.viewModel?.uiData?.value?.isLoadingEpisode == true
+                            val positionMs = if (loading) {
+                                0L
+                            } else {
+                                holder.samplePositionMs() ?: 0L
+                            }
+                            // <-- AM (PLAYLIST_PROGRESS_LOAD_GUARD)
                             NowPlayingEpisode(
                                 animeId = mediaState.animeId,
                                 episodeId = mediaState.episodeId,
@@ -2000,6 +2043,8 @@ private fun LazyGridScope.sharedSeasons(
     seasons: List<AnimeSeasonItem>,
     containerHeight: Int,
     onSeasonClicked: (SeasonAnime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onSeasonDoubleClicked: ((SeasonAnime) -> Unit)? = null,
     onClickContinueWatching: ((SeasonAnime) -> Unit)?,
     listItemModifier: Modifier = Modifier,
 ) {
@@ -2013,6 +2058,8 @@ private fun LazyGridScope.sharedSeasons(
             item = item,
             containerHeight = containerHeight,
             onSeasonClicked = onSeasonClicked,
+            // AM (DOUBLE_TAP_QUEUE)
+            onSeasonDoubleClicked = onSeasonDoubleClicked,
             onClickContinueWatching = onClickContinueWatching,
             listItemModifier = listItemModifier,
         )
@@ -2164,7 +2211,19 @@ private fun LazyGridScope.sharedEpisodeItems(
                     // The source's cover first: for a single-episode source it IS
                     // this episode's thumbnail, and it is set for nothing else.
                     // <-- AM (SINGLE_EPISODE_THUMBNAIL)
-                    previewUrl = (item.thumbnailUrl ?: item.episode.previewUrl)
+                    // A single-episode source follows the single-episode rule
+                    // for every source type alike: its thumbnail is the rule's
+                    // own (the source's cover on a merged entry) or nothing.
+                    // Falling through to the episode's previewUrl there is what
+                    // let local/torrent one-file entries show a row thumbnail
+                    // where extension entries correctly show none.
+                    previewUrl = (
+                        if (item.singleEpisodeSource) {
+                            item.thumbnailUrl
+                        } else {
+                            item.thumbnailUrl ?: item.episode.previewUrl
+                        }
+                        )
                         .takeIf { !it.isNullOrBlank() && showPreviews },
                     // <-- AY
                     seen = item.episode.seen,
@@ -2249,7 +2308,7 @@ private fun LazyGridScope.sharedEpisodeItems(
                     // <-- AM (FILE_SIZE)
                     // AM (MINIMAL_EPISODE_LIST) -->
                     // AM (EPISODE_VIEW_MODE) -->
-                    minimalView = anime.hideEpisodeMetadata(),
+                    minimalView = anime.showPreviews(),
                     // <-- AM (EPISODE_VIEW_MODE)
                     // <-- AM (MINIMAL_EPISODE_LIST)
                     // AM (NOW_PLAYING_INDICATOR) -->

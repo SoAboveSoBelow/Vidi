@@ -23,8 +23,11 @@ class HistoryRepositoryImpl(
     private val database: Database,
 ) : HistoryRepository {
 
-    override fun getHistory(query: String): Flow<List<HistoryWithRelations>> {
-        return database.historyViewQueries.history(query, HistoryMapper::mapHistoryWithRelations).subscribeToList()
+    override fun getHistory(query: String, playerOnly: Boolean): Flow<List<HistoryWithRelations>> {
+        // AM (HISTORY_ORIGIN)
+        return database.historyViewQueries
+            .history(query, if (playerOnly) 1L else 0L, HistoryMapper::mapHistoryWithRelations)
+            .subscribeToList()
     }
 
     override suspend fun getLastHistory(): HistoryWithRelations? {
@@ -67,6 +70,8 @@ class HistoryRepositoryImpl(
             database.historyQueries.upsert(
                 historyUpdate.episodeId,
                 historyUpdate.seenAt,
+                // AM (HISTORY_ORIGIN)
+                historyUpdate.origin.value,
             )
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, throwable = e)

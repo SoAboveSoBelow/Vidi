@@ -100,6 +100,9 @@ internal class JsHttpBridge(
         when (normalizedMethod) {
             "GET" -> builder.get()
             "POST" -> builder.post(body.toRequestBody(null))
+            "DELETE" -> builder.delete(
+                body.takeIf { it.isNotEmpty() }?.toRequestBody(null),
+            )
             else -> throw IllegalArgumentException("Unsupported method $method")
         }
 

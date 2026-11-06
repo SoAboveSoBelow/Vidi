@@ -1,5 +1,7 @@
 package aniyomi.source.js
 
+import aniyomi.domain.source.model.BrowseDisplayMode
+
 import android.content.Context
 import eu.kanade.tachiyomi.network.NetworkHelper
 import kotlinx.serialization.Serializable
@@ -19,6 +21,7 @@ class JsProjectManifest(
     val lang: String = "en",
     val baseUrl: String = "",
     val supportsLatest: Boolean = false,
+    val defaultBrowseDisplayMode: String? = null,
     val nsfw: Boolean = false,
     val apiVersion: Int = 1,
     /**
@@ -117,6 +120,9 @@ class JsProjectStore(context: Context) {
         supportsLatest = project.manifest.supportsLatest,
         script = project.script,
         baseUrl = project.manifest.baseUrl,
+        defaultBrowseDisplayMode = project.manifest.defaultBrowseDisplayMode
+            ?.takeIf { it == "scroller" }
+            ?.let { BrowseDisplayMode.Scroller },
         networkHelper = network,
     )
 

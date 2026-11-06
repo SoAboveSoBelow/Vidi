@@ -7,7 +7,8 @@ import tachiyomi.domain.history.model.HistoryWithRelations
 
 interface HistoryRepository {
 
-    fun getHistory(query: String): Flow<List<HistoryWithRelations>>
+    // AM (HISTORY_ORIGIN): playerOnly hides rows the browse feed wrote.
+    fun getHistory(query: String, playerOnly: Boolean): Flow<List<HistoryWithRelations>>
 
     suspend fun getLastHistory(): HistoryWithRelations?
 

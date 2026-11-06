@@ -27,12 +27,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.automirrored.outlined.Input
-import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.BookmarkRemove
 import androidx.compose.material.icons.outlined.CallMerge
@@ -40,7 +38,8 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.History
+// AM (LIBRARY_HEART_ICON)
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NewLabel
 import androidx.compose.material.icons.outlined.RemoveDone
@@ -286,6 +285,11 @@ fun AnimeBottomActionMenu(
     // AM (EPISODE_NAMES) -->
     onRenameClicked: (() -> Unit)? = null,
     // <-- AM (EPISODE_NAMES)
+    // AM (CUSTOM_EPISODE_ORDER) -->
+    onChangeSeasonClicked: (() -> Unit)? = null,
+    // <-- AM (CUSTOM_EPISODE_ORDER)
+    // AM (QUEUE_EPISODE_SELECTION)
+    onAddToQueueClicked: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     // AY -->
@@ -428,35 +432,23 @@ fun AnimeBottomActionMenu(
             )
         }
         // <-- AY
-    }
-
-    BottomActionBar(
-        visible = visible,
-        actions = actions,
-        modifier = modifier,
-    )
-}
-
-// AM (CUSTOM_EPISODE_ORDER) -->
-/**
- * Replaces AnimeBottomActionMenu while reordering. None of the normal bulk
- * actions belong here: each clears the selection when it finishes, which would
- * end the mode mid-edit. Shares the bar above, so it looks and behaves
- * (long-press labels) exactly like the menu it replaces.
- *
- * A null action is omitted, matching the menu's own convention: Change season
- * and Reset order act on the selection so need one, and Discard only appears
- * once something has changed.
- */
-@Composable
-fun EpisodeReorderBottomBar(
-    visible: Boolean,
-    onChangeSeasonClicked: (() -> Unit)?,
-    onDiscardClicked: (() -> Unit)?,
-    onResetClicked: (() -> Unit)?,
-    modifier: Modifier = Modifier,
-) {
-    val actions = buildList {
+        // AM (QUEUE_EPISODE_SELECTION) -->
+        if (onAddToQueueClicked != null) {
+            add(
+                BottomActionItem(
+                    key = "add_to_queue",
+                    title = stringResource(AMMR.strings.am_action_add_to_queue),
+                    icon = ImageVector.vectorResource(R.drawable.ic_playlist_add_24dp),
+                    onClick = onAddToQueueClicked,
+                    placement = BottomActionPlacement.Overflow,
+                ),
+            )
+        }
+        // <-- AM (QUEUE_EPISODE_SELECTION)
+        // AM (CUSTOM_EPISODE_ORDER) -->
+        // Moving the selection between seasons is an ordinary bulk action on
+        // the selection, not something reorder mode owns, so it sits in this
+        // bar's own overflow with the rest of them.
         if (onChangeSeasonClicked != null) {
             add(
                 BottomActionItem(
@@ -464,29 +456,11 @@ fun EpisodeReorderBottomBar(
                     title = stringResource(AMMR.strings.am_action_change_episode_season),
                     icon = Icons.Default.Layers,
                     onClick = onChangeSeasonClicked,
+                    placement = BottomActionPlacement.Overflow,
                 ),
             )
         }
-        if (onDiscardClicked != null) {
-            add(
-                BottomActionItem(
-                    key = "discard_order",
-                    title = stringResource(AMMR.strings.am_action_discard_order_changes),
-                    icon = Icons.Outlined.History,
-                    onClick = onDiscardClicked,
-                ),
-            )
-        }
-        if (onResetClicked != null) {
-            add(
-                BottomActionItem(
-                    key = "reset_order",
-                    title = stringResource(AMMR.strings.am_action_reset_episode_order),
-                    icon = Icons.Default.RestartAlt,
-                    onClick = onResetClicked,
-                ),
-            )
-        }
+        // <-- AM (CUSTOM_EPISODE_ORDER)
     }
 
     BottomActionBar(
@@ -495,7 +469,7 @@ fun EpisodeReorderBottomBar(
         modifier = modifier,
     )
 }
-// <-- AM (CUSTOM_EPISODE_ORDER)
+
 
 @Composable
 private fun RowScope.Button(
@@ -554,6 +528,8 @@ fun LibraryBottomActionMenu(
     onChangeCategoryClicked: () -> Unit,
     onMarkAsSeenClicked: () -> Unit,
     onMarkAsUnseenClicked: () -> Unit,
+    // AM (PLAYBACK_QUEUE)
+    onAddToQueueClicked: () -> Unit,
     onDownloadClicked: ((DownloadAction) -> Unit)?,
     onDeleteClicked: () -> Unit,
     onMigrateClicked: () -> Unit,
@@ -574,8 +550,14 @@ fun LibraryBottomActionMenu(
         add(
             BottomActionItem(
                 key = "move_category",
-                title = stringResource(MR.strings.action_move_category),
-                icon = Icons.AutoMirrored.Outlined.Label,
+                // AM (LIBRARY_HEART_ICON): the same heart and the same label
+                // browse's selection bar carries, because it is the same
+                // action - the dialog it opens decides library membership,
+                // removal included, and a label icon said tagging in the glyph
+                // fillermark already uses. "Set categories" named the dialog
+                // rather than what the button does.
+                title = stringResource(MR.strings.label_library),
+                icon = Icons.Outlined.FavoriteBorder,
                 onClick = onChangeCategoryClicked,
             ),
         )
@@ -593,6 +575,18 @@ fun LibraryBottomActionMenu(
                 title = stringResource(AMMR.strings.am_action_mark_as_unseen),
                 icon = Icons.Outlined.RemoveDone,
                 onClick = onMarkAsUnseenClicked,
+            ),
+        )
+        // AM (PLAYBACK_QUEUE): into the overflow - this bar is already full,
+        // and queueing is not one of the actions a library selection is
+        // usually made for.
+        add(
+            BottomActionItem(
+                key = "add_to_queue",
+                title = stringResource(AMMR.strings.am_action_add_to_queue),
+                icon = ImageVector.vectorResource(R.drawable.ic_playlist_add_24dp),
+                onClick = onAddToQueueClicked,
+                placement = BottomActionPlacement.Overflow,
             ),
         )
         if (onDownloadClicked != null) {

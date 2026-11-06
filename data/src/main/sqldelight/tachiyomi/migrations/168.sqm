@@ -1,0 +1,21 @@
+-- AM (QUEUE_REORDER) -->
+-- Item positions used to be local to a block, with block position supplying
+-- the first half of the play-order key. Flatten the existing order without
+-- changing it. From here on block_id is stable source membership while the
+-- item position alone permits arbitrary, cross-source episode ordering.
+UPDATE queue_items
+SET position = (
+    SELECT (ordered.row_number - 1) * 1024
+    FROM (
+        SELECT
+            QI._id AS item_id,
+            ROW_NUMBER() OVER (
+                ORDER BY QB.position ASC, QI.position ASC, QI._id ASC
+            ) AS row_number
+        FROM queue_items QI
+        JOIN queue_blocks QB ON QB._id = QI.block_id
+    ) AS ordered
+    WHERE ordered.item_id = queue_items._id
+);
+CREATE INDEX queue_items_position_index ON queue_items(position);
+-- <-- AM (QUEUE_REORDER)

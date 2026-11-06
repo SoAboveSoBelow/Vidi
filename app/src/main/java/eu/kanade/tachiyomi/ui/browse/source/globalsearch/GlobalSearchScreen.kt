@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.ui.browse.source.globalsearch
 
+import aniyomi.domain.queue.interactor.AddToQueue.QueueSource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -7,14 +8,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.core.util.ifSourcesLoaded
 import eu.kanade.presentation.browse.GlobalSearchScreen
+import eu.kanade.presentation.queue.AddToQueueDialog
 import eu.kanade.presentation.util.Screen
+import eu.kanade.tachiyomi.data.queue.QueueFillJob
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceScreen
+import eu.kanade.tachiyomi.util.system.toast
+import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.presentation.core.screens.LoadingScreen
 
 class GlobalSearchScreen(
@@ -30,6 +36,10 @@ class GlobalSearchScreen(
         }
 
         val navigator = LocalNavigator.currentOrThrow
+        // AM (DOUBLE_TAP_QUEUE)
+        val context = LocalContext.current
+        // AM (QUEUE_RESOLVE_ONCE)
+        var queuePrompt by remember { mutableStateOf<QueueSource?>(null) }
 
         val viewModel =
             assistedMetroViewModel<GlobalSearchViewModel, GlobalSearchViewModel.Factory> {
@@ -72,7 +82,51 @@ class GlobalSearchScreen(
                 },
                 onClickItem = { navigator.push(AnimeScreen(it.id, true)) },
                 onLongClickItem = { navigator.push(AnimeScreen(it.id, true)) },
+                // AM (DOUBLE_TAP_QUEUE)
+                onDoubleClickItem = { anime ->
+                    viewModel.addAnimeToQueue(
+                        anime = anime,
+                        onRequestFill = {
+                            QueueFillJob.start(context)
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                        onChoiceNeeded = { queuePrompt = it },
+                    )
+                },
             )
         }
+
+        // AM (QUEUE_WATCH_FILTER) -->
+        queuePrompt?.let { source ->
+            AddToQueueDialog(
+                // AM (QUEUE_RESOLVE_ONCE)
+                mixedCount = 1,
+                mixedTitle = source.anime.title,
+                onAddUnwatched = {
+                    queuePrompt = null
+                    viewModel.addAnimeToQueue(
+                        anime = source.anime,
+                        unwatchedOnly = true,
+                        onRequestFill = {
+                            QueueFillJob.start(context)
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                    )
+                },
+                onAddAll = {
+                    queuePrompt = null
+                    viewModel.addAnimeToQueue(
+                        anime = source.anime,
+                        unwatchedOnly = false,
+                        onRequestFill = {
+                            QueueFillJob.start(context)
+                            context.toast(AMMR.strings.am_action_added_to_queue)
+                        },
+                    )
+                },
+                onDismissRequest = { queuePrompt = null },
+            )
+        }
+        // <-- AM (QUEUE_WATCH_FILTER)
     }
 }

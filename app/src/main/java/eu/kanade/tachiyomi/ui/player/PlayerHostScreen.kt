@@ -75,7 +75,6 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.kanade.presentation.components.LocalAppDialogLayer
 import eu.kanade.presentation.components.LocalPlayerDialogLayer
-import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SerializableHoster.Companion.serialize
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,7 +90,14 @@ import tachiyomi.presentation.core.screens.LoadingScreen
  * currently holds, or nothing at all if there's no live request.
  */
 @Composable
-fun PlayerOverlayHost() {
+fun PlayerOverlayHost(
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // The Navigator's current top screen key, forwarded to PlayerScreen's
+    // BackHandler - see that fix tag for why the player's system-back
+    // handler must re-register after every background navigation.
+    backPressPriorityKey: Any? = null,
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
+) {
     val request by PlayerMediaHolder.playbackRequestFlow.collectAsStateWithLifecycle()
     val currentRequest = request
     if (currentRequest == null) {
@@ -128,14 +134,17 @@ fun PlayerOverlayHost() {
     // the same job. See AppDialogLayer.kt.
     CompositionLocalProvider(LocalAppDialogLayer provides LocalPlayerDialogLayer.current) {
         // <-- AM (PLAYER_DIALOG_LAYER)
-        PlayerHostScreen(
-            animeId = currentRequest.animeId,
-            episodeId = currentRequest.episodeId,
-            hosterList = currentRequest.hosterList,
-            hosterIndex = currentRequest.hosterIndex,
-            videoIndex = currentRequest.videoIndex,
-            forceResume = currentRequest.forceResume,
-        )
+        // AM (CONTENT_AGNOSTIC_SESSION) -->
+        // AM (EXTERNAL_PLAYBACK) -->
+        // One host for both kinds, taking the request itself. A separate
+        // ExternalPlayerHostScreen would have had to duplicate everything below
+        // this composable's reconciliation effect - service binding, PiP
+        // availability, the dummy-pip window, the PlayerScreen render - none of
+        // which cares what is playing. The request type is only consulted where
+        // it genuinely matters: the one effect that decides what to load.
+        PlayerHostScreen(request = currentRequest, backPressPriorityKey = backPressPriorityKey)
+        // <-- AM (EXTERNAL_PLAYBACK)
+        // <-- AM (CONTENT_AGNOSTIC_SESSION)
     }
 }
 
@@ -148,12 +157,16 @@ fun PlayerOverlayHost() {
 
 @Composable
 fun PlayerHostScreen(
-    animeId: Long,
-    episodeId: Long,
-    hosterList: List<Hoster>? = null,
-    hosterIndex: Int = -1,
-    videoIndex: Int = -1,
-    forceResume: Boolean = false,
+    // AM (EXTERNAL_PLAYBACK) -->
+    // Was six loose library parameters. The request carries them, and carries
+    // which kind of request it is - which the reconciliation effect below needs
+    // and six longs could not express.
+    request: PlaybackRequest,
+    // <-- AM (EXTERNAL_PLAYBACK)
+    // AM (PLAYER_BACK_PRIORITY_FIX) -->
+    // Forwarded to PlayerScreen unchanged - see PlayerOverlayHost.
+    backPressPriorityKey: Any? = null,
+    // <-- AM (PLAYER_BACK_PRIORITY_FIX)
 ) {
     val context = LocalContext.current
     val graph = remember { context.appGraph }
@@ -181,7 +194,7 @@ fun PlayerHostScreen(
         if (existingViewModel != null) {
             logcat(LogPriority.INFO) {
                 "PLAYER_HOST_SCREEN reusing existing viewModel=${System.identityHashCode(existingViewModel)} " +
-                    "for animeId=$animeId episodeId=$episodeId"
+                    "for ${request.sessionKey}"
             }
             existingHolder.hasExternalScreenConsumer = true
             // AM (DUMMY_PIP_REOPEN_STAYS_PIP_FIX) -->
@@ -219,7 +232,7 @@ fun PlayerHostScreen(
             val vm = graph.playerViewModelFactory.create(SavedStateHandle())
             logcat(LogPriority.INFO) {
                 "PLAYER_HOST_SCREEN constructed fresh viewModel=${System.identityHashCode(vm)} " +
-                    "animeId=$animeId episodeId=$episodeId"
+                    "${request.sessionKey}"
             }
 
             val connection = object : android.content.ServiceConnection {
@@ -291,16 +304,21 @@ fun PlayerHostScreen(
     // tapped now - the old PLAYER_HOST_SCREEN_EPISODE_SWITCH_FIX case) is
     // still corrected on this effect's first run, while a fresh ViewModel
     // seeds null so its initial load always fires exactly once.
+    // AM (EXTERNAL_PLAYBACK) -->
+    // lastReconciled is a SessionKey now, not a (animeId, episodeId) pair, and
+    // is seeded from the ViewModel's own settledSessionKey - which answers for
+    // an external session too, where currentAnime/currentEpisode are both
+    // legitimately null and the old pair read as (null, null): indistinguishable
+    // from a fresh ViewModel, so the effect would have reloaded the external
+    // file on every recomposition.
     val reconcilingViewModel = viewModel
     var lastReconciled by remember(reconcilingViewModel) {
-        mutableStateOf(
-            reconcilingViewModel?.stateData?.value?.let { it.currentAnime?.id to it.currentEpisode?.id },
-        )
+        mutableStateOf(reconcilingViewModel?.settledSessionKey)
     }
-    LaunchedEffect(reconcilingViewModel, animeId, episodeId) {
+    LaunchedEffect(reconcilingViewModel, request) {
         val vm = reconcilingViewModel ?: return@LaunchedEffect
         val last = lastReconciled
-        if (last != null && last.first == animeId && last.second == episodeId) return@LaunchedEffect
+        if (last != null && last == request.sessionKey) return@LaunchedEffect
 
         // AM (LOAD_FAILURE_NOT_FATAL) -->
         // Records what the session ACTUALLY ended up on, not what was asked
@@ -311,44 +329,76 @@ fun PlayerHostScreen(
         // reconcile against that wrong baseline.
         suspend fun recordSettledTarget() {
             vm.awaitEpisodeChange()
-            lastReconciled = vm.stateData.value.let { it.currentAnime?.id to it.currentEpisode?.id }
+            lastReconciled = vm.settledSessionKey
         }
         // <-- AM (LOAD_FAILURE_NOT_FATAL)
 
-        when (last?.first) {
-            null -> {
-                // Fresh ViewModel, nothing loaded - initial load. Guarded by
-                // currentAnime so an adopted-VM race (state not yet read)
-                // can't double-load.
-                if (vm.stateData.value.currentAnime == null) {
-                    vm.changeAnime(
-                        animeId = animeId,
-                        episodeId = episodeId,
-                        hostList = hosterList?.let { it.serialize() } ?: "",
-                        hostIndex = hosterIndex,
-                        vidIndex = videoIndex,
-                    )
-                    recordSettledTarget()
-                }
-            }
-            animeId -> {
+        when (request) {
+            is PlaybackRequest.External -> {
+                // No same-anime/cross-anime distinction to make: an external
+                // file has no entry to stay within, so every external request
+                // that is not already settled is a full load. changeToExternal
+                // runs on the same episodeChangeJob as every other load, so a
+                // rapid A->B still cancels cleanly.
                 PlayerMediaHolder.current?.isDummyPipActive = false
-                vm.changeEpisode(episodeId)
-                recordSettledTarget()
-            }
-            else -> {
-                PlayerMediaHolder.current?.isDummyPipActive = false
-                vm.changeAnime(
-                    animeId = animeId,
-                    episodeId = episodeId,
-                    hostList = hosterList?.let { it.serialize() } ?: "",
-                    hostIndex = hosterIndex,
-                    vidIndex = videoIndex,
+                vm.changeToExternal(
+                    uri = request.uri,
+                    title = request.title,
+                    // AM (EXTERNAL_RESUME_POSITION)
+                    positionMs = request.positionMs,
+                    // AM (EXTERNAL_APP_LABEL)
+                    appLabel = request.appLabel,
                 )
                 recordSettledTarget()
             }
+            is PlaybackRequest.Library -> {
+                val hostList = request.hosterList?.let { it.serialize() } ?: ""
+                when {
+                    // Fresh ViewModel, nothing loaded - initial load. Guarded by
+                    // currentAnime so an adopted-VM race (state not yet read)
+                    // can't double-load.
+                    last == null -> {
+                        if (vm.stateData.value.currentAnime == null) {
+                            vm.changeAnime(
+                                animeId = request.animeId,
+                                episodeId = request.episodeId,
+                                hostList = hostList,
+                                hostIndex = request.hosterIndex,
+                                vidIndex = request.videoIndex,
+                                // AM (PLAYBACK_QUEUE)
+                                continuesQueue = request.continuesQueue,
+                            )
+                            recordSettledTarget()
+                        }
+                    }
+                    // Same entry, different episode. Was `animeId ->` on the
+                    // pair's first component; the added Library check is what
+                    // that comparison did implicitly when the only possible
+                    // session was a library one - an external session must not
+                    // fall into the same-anime branch on a null animeId.
+                    last is SessionKey.Library && last.animeId == request.animeId -> {
+                        PlayerMediaHolder.current?.isDummyPipActive = false
+                        vm.changeEpisode(request.episodeId)
+                        recordSettledTarget()
+                    }
+                    else -> {
+                        PlayerMediaHolder.current?.isDummyPipActive = false
+                        vm.changeAnime(
+                            animeId = request.animeId,
+                            episodeId = request.episodeId,
+                            hostList = hostList,
+                            hostIndex = request.hosterIndex,
+                            vidIndex = request.videoIndex,
+                            // AM (PLAYBACK_QUEUE)
+                            continuesQueue = request.continuesQueue,
+                        )
+                        recordSettledTarget()
+                    }
+                }
+            }
         }
     }
+    // <-- AM (EXTERNAL_PLAYBACK)
     // <-- AM (CROSS_ANIME_IN_PLACE_SWITCH)
 
     val currentViewModel = viewModel
@@ -441,7 +491,17 @@ fun PlayerHostScreen(
     val playbackData by currentViewModel.playbackData.collectAsStateWithLifecycle()
     val dummyPipController = rememberDummyPipController()
 
-    val dummyPipActions = remember(currentViewModel) {
+    // AM (QUEUE_SOURCE_STEP) -->
+    // A key rather than a check inside the callbacks: whether the double tap
+    // is wired at all decides whether it steals the window's size-toggle
+    // gesture, so a queue of one source has to leave that gesture alone
+    // rather than consume it and do nothing.
+    val hasMultipleQueuedSources = remember(videoState.playlistBlockByEpisodeId) {
+        videoState.playlistBlockByEpisodeId.values.distinct().size > 1
+    }
+    // <-- AM (QUEUE_SOURCE_STEP)
+
+    val dummyPipActions = remember(currentViewModel, hasMultipleQueuedSources) {
         DummyPipActions(
             onTogglePlayPause = {
                 if (currentViewModel.playbackData.value.paused) {
@@ -452,6 +512,14 @@ fun PlayerHostScreen(
             },
             onSkipPrevious = { currentViewModel.nextEpisode(next = false) },
             onSkipNext = { currentViewModel.nextEpisode(next = true) },
+            // AM (QUEUE_SOURCE_STEP) -->
+            onSkipPreviousSource = {
+                currentViewModel.nextSource(next = false)
+            }.takeIf { hasMultipleQueuedSources },
+            onSkipNextSource = {
+                currentViewModel.nextSource(next = true)
+            }.takeIf { hasMultipleQueuedSources },
+            // <-- AM (QUEUE_SOURCE_STEP)
             // Called by DummyPipContainer only AFTER its exit morph has
             // visually completed - flipping this any earlier would swap the
             // video Box back to fillMaxSize mid-animation.
@@ -501,6 +569,7 @@ fun PlayerHostScreen(
         PlayerScreen(
             viewModel = currentViewModel,
             onBack = { PlayerMediaHolder.clearPlaybackRequest() },
+            backPressPriorityKey = backPressPriorityKey,
             onEnterDummyPip = {
                 if (holder?.isDummyPipActive == true) {
                     // Effectively unreachable: PlayerScreen's BackHandler

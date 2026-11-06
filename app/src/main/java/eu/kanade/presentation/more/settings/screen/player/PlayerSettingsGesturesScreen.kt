@@ -59,6 +59,9 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
         // AM (SWIPE_SWITCH) -->
         val verticalSwipeSwitch = gesturePreferences.gestureVerticalSwipeSwitch
         // <-- AM (SWIPE_SWITCH)
+        // AM (PINCH_ZOOM) -->
+        val pinchZoom = gesturePreferences.gesturePinchZoom
+        // <-- AM (PINCH_ZOOM)
 
         return Preference.PreferenceGroup(
             title = stringResource(AYMR.strings.pref_category_player_sliders),
@@ -78,6 +81,13 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
                     subtitle = stringResource(AYMR.strings.pref_vertical_swipe_switch_summary),
                 ),
                 // <-- AM (SWIPE_SWITCH)
+                // AM (PINCH_ZOOM) -->
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = pinchZoom,
+                    title = stringResource(AYMR.strings.pref_pinch_zoom),
+                    subtitle = stringResource(AYMR.strings.pref_pinch_zoom_summary),
+                ),
+                // <-- AM (PINCH_ZOOM)
             ),
         )
     }

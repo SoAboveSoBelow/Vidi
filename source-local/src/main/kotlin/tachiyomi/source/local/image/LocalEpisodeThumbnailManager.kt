@@ -59,7 +59,9 @@ class LocalEpisodeThumbnailManager(
     private fun migrateLegacyThumbnails(animeDir: UniFile, thumbnailsDir: UniFile) {
         animeDir.listFiles().orEmpty()
             .filter {
-                it.isFile &&
+                // AM (LOCAL_SOURCE_NO_ISFILE_STAT): !isDirectory instead of
+                // isFile - see LocalCoverManager.find.
+                !it.isDirectory &&
                     it.nameWithoutExtension.orEmpty().endsWith("-$DEFAULT_THUMBNAIL_SUFFIX", ignoreCase = true) &&
                     ImageUtil.isImage(it.name) { it.openInputStream() }
             }
@@ -88,7 +90,7 @@ class LocalEpisodeThumbnailManager(
     private fun findIn(directory: UniFile?, fileName: String): UniFile? {
         return directory?.listFiles().orEmpty()
             // Get all file whose names contain the episode name and the word 'thumbnail'
-            .filter { it.isFile && it.nameWithoutExtension.equals(fileName, ignoreCase = true) }
+            .filter { !it.isDirectory && it.nameWithoutExtension.equals(fileName, ignoreCase = true) }
             // Get the first actual image
             .firstOrNull { ImageUtil.isImage(it.name) { it.openInputStream() } }
     }
@@ -131,7 +133,9 @@ class LocalEpisodeThumbnailManager(
 
         fun keyOf(file: UniFile) = file.nameWithoutExtension.orEmpty().lowercase()
         fun isThumbnailFile(file: UniFile): Boolean {
-            return file.isFile &&
+            // AM (LOCAL_SOURCE_NO_ISFILE_STAT): !isDirectory instead of isFile
+            // - see LocalCoverManager.find.
+            return !file.isDirectory &&
                 keyOf(file).endsWith("-$DEFAULT_THUMBNAIL_SUFFIX") &&
                 ImageUtil.isImage(file.name) { file.openInputStream() }
         }

@@ -1,0 +1,9 @@
+-- AM (HISTORY_ORIGIN) -->
+-- Every existing row was written by the player, which is what the default
+-- records: nothing else could write history before this.
+--
+-- The view that reads this column is recreated in 171, NOT here: this
+-- migration has already run on databases in the wild, and a migration that has
+-- run is never run again however it is later edited.
+ALTER TABLE history ADD COLUMN origin INTEGER NOT NULL DEFAULT 0;
+-- <-- AM (HISTORY_ORIGIN)

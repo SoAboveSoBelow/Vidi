@@ -51,6 +51,14 @@ fun ControlsButton(
     icon: ImageVector,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
+    // AM (QUEUE_SOURCE_STEP) -->
+    /**
+     * Null where the button has no double-tap action, and it matters: a
+     * non-null handler makes every single tap wait out the double-tap timeout
+     * before it fires, which on a transport control is felt immediately.
+     */
+    onDoubleClick: (() -> Unit)? = null,
+    // <-- AM (QUEUE_SOURCE_STEP)
     title: String? = null,
     color: Color = Color.White,
     horizontalSpacing: Dp = MaterialTheme.padding.medium,
@@ -72,6 +80,13 @@ fun ControlsButton(
                     onClick()
                 },
                 onLongClick = onLongClick,
+                // AM (QUEUE_SOURCE_STEP)
+                onDoubleClick = onDoubleClick?.let { handler ->
+                    {
+                        clickEvent()
+                        handler()
+                    }
+                },
                 interactionSource = interactionSource,
                 indication = null,
             )

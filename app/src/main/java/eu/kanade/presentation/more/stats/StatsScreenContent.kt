@@ -8,7 +8,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CollectionsBookmark
+// AM (LIBRARY_HEART_ICON)
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.LocalLibrary
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.MaterialTheme
@@ -71,7 +72,8 @@ private fun LazyItemScope.OverviewSection(
             StatsOverviewItem(
                 title = data.libraryAnimeCount.toString(),
                 subtitle = stringResource(MR.strings.in_library),
-                icon = Icons.Outlined.CollectionsBookmark,
+                // AM (LIBRARY_HEART_ICON)
+                icon = Icons.Filled.Favorite,
             )
             StatsOverviewItem(
                 title = seenDurationString,

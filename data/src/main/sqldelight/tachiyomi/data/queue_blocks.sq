@@ -1,0 +1,132 @@
+-- AM (PLAYBACK_QUEUE) -->
+-- A set of queued items that were added together, its source identity, and
+-- the queue's coarse source order. Fine play order belongs to queue_items:
+-- episode dragging may interleave blocks, but never changes their membership.
+--
+-- Blocks still exist independently of their item rows for three reasons:
+--
+--   * A block holds its place in the order while its items are still being
+--     fetched. Queueing an entry whose episodes are not in the database yet
+--     has no item rows to insert, and appending them later would land them at
+--     the end rather than where the user put the entry. The block is inserted
+--     at once with fill_state PENDING and the items arrive into its slot.
+--   * Shuffle and search scope rewrite one entry's items mid-session (see
+--     PlayerViewModel.observeShuffleSeed) without losing source identity.
+--   * "These twelve came from X" is a fact the queue holds rather than one the
+--     UI has to infer from wherever those episodes currently sit.
+--
+-- anime_id is the entry the block came from, or NULL for a block of items
+-- that have no library entry behind them (a file handed to the app from
+-- outside - see queue_items.uri). It is the block's PROVENANCE, not its
+-- contents: the items carry their own ids, and nothing resolves playback
+-- through this column.
+--
+-- position is a sparse ordering key, not an index: it is never renumbered on
+-- insert, so appending a block does not rewrite every row after it.
+--
+-- AM (QUEUE_BLOCK_PROGRESS): last_played_episode_id is where the user left
+-- this source, which is where a step that crosses INTO the block from a later
+-- one lands. Deliberately the queue's own memory rather than a history lookup:
+-- history answers "what did they last watch of this entry, ever", which for a
+-- source queued today and watched months ago names an episode that is not even
+-- in this block. This answers only "where were they in THIS queued run", so it
+-- is written while playing and dies with the block, and an entry watched long
+-- ago contributes nothing. NULL means nothing in the block has played yet.
+CREATE TABLE queue_blocks(
+    _id INTEGER NOT NULL PRIMARY KEY,
+    position INTEGER NOT NULL,
+    anime_id INTEGER,
+    fill_state INTEGER NOT NULL DEFAULT 0,
+    -- AM (QUEUE_BLOCK_PROGRESS): SET NULL rather than CASCADE - an episode
+    -- dropped by a source refresh should forget the bookmark, not delete the
+    -- block the user queued.
+    last_played_episode_id INTEGER DEFAULT NULL,
+    -- AM (QUEUE_BLOCK_PROGRESS): whether that episode was finished rather than
+    -- left part way through. Cleared whenever last_played_episode_id moves,
+    -- since the new episode has not been finished by having been started.
+    last_played_completed INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(anime_id) REFERENCES animes(_id)
+    ON DELETE CASCADE,
+    FOREIGN KEY(last_played_episode_id) REFERENCES episodes(_id)
+    ON DELETE SET NULL
+);
+
+CREATE INDEX queue_blocks_position_index ON queue_blocks(position);
+CREATE INDEX queue_blocks_anime_id_index ON queue_blocks(anime_id);
+
+getAllBlocks:
+SELECT _id, position, anime_id, fill_state, last_played_episode_id, last_played_completed
+FROM queue_blocks
+ORDER BY position ASC;
+
+getBlockById:
+SELECT _id, position, anime_id, fill_state, last_played_episode_id, last_played_completed
+FROM queue_blocks
+WHERE _id = :blockId;
+
+-- Blocks still waiting on a fetch, oldest first - what a fill worker picks up,
+-- including after process death.
+getBlocksByFillState:
+SELECT _id, position, anime_id, fill_state, last_played_episode_id, last_played_completed
+FROM queue_blocks
+WHERE fill_state = :fillState
+ORDER BY position ASC;
+
+insertReturningId:
+INSERT INTO queue_blocks(position, anime_id, fill_state)
+VALUES (:position, :animeId, :fillState)
+RETURNING _id;
+
+setFillState:
+UPDATE queue_blocks
+SET fill_state = :fillState
+WHERE _id = :blockId;
+
+-- AM (QUEUE_BLOCK_PROGRESS) -->
+setLastPlayedEpisode:
+UPDATE queue_blocks
+SET last_played_episode_id = :episodeId,
+    last_played_completed = 0
+WHERE _id = :blockId;
+
+-- Marks the remembered episode finished. Guarded on it still BEING the
+-- remembered one: a completion landing after the user has moved on must not
+-- claim the episode they moved to was finished.
+setLastPlayedCompleted:
+UPDATE queue_blocks
+SET last_played_completed = 1
+WHERE _id = :blockId
+AND last_played_episode_id = :episodeId;
+-- <-- AM (QUEUE_BLOCK_PROGRESS)
+
+setPosition:
+UPDATE queue_blocks
+SET position = :position
+WHERE _id = :blockId;
+
+-- Items cascade with the block (see queue_items.sq).
+delete:
+DELETE FROM queue_blocks
+WHERE _id = :blockId;
+
+deleteAll:
+DELETE FROM queue_blocks;
+
+-- Blocks left with nothing in them after their items were removed elsewhere.
+--
+-- Pending blocks are spared: holding no items yet is exactly what pending
+-- MEANS (see the fill worker), so pruning on emptiness alone would delete the
+-- blocks waiting to be filled.
+deleteEmptyComplete:
+DELETE FROM queue_blocks
+WHERE fill_state = 0
+AND _id NOT IN (SELECT DISTINCT block_id FROM queue_items);
+
+-- The append anchor. NULL on an empty queue, which the caller reads as "start
+-- at the first position" rather than as an error.
+maxPosition:
+SELECT position
+FROM queue_blocks
+ORDER BY position DESC
+LIMIT 1;
+-- <-- AM (PLAYBACK_QUEUE)

@@ -2,6 +2,7 @@
 package aniyomi.domain.order.model
 
 import aniyomi.domain.season.model.EntrySeason
+import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.episode.model.Episode
 
 /**
@@ -52,8 +53,38 @@ data class ResolvedEpisodeOrder(
      * its rows would say nothing.
      */
     val thumbnailUrlByEpisodeId: Map<Long, String>,
+    /**
+     * Every episode whose source offers only that one episode, merged entry or
+     * not - the membership half of the single-episode rule, without the
+     * merged-only cover requirement [thumbnailUrlByEpisodeId] carries. Display
+     * code uses it to give every single-episode source the same treatment:
+     * the rule's own thumbnail (or none), never the episode's raw preview.
+     */
+    val singleEpisodeIds: Set<Long> = emptySet(),
     // <-- AM (SINGLE_EPISODE_THUMBNAIL)
+    // AM (PLAYBACK_QUEUE) -->
+    /**
+     * Every entry whose episodes this order draws on, by id: the host itself
+     * for an ordinary entry, its children for a merged one, and any extra
+     * contributor the caller asked to include (see
+     * GetEpisodeOrder.awaitResolved's extraOwnerIds).
+     *
+     * Exists so callers stop re-deriving it. The player was querying the merge
+     * children a second time to build the same map, and had no way at all to
+     * learn about a contributor it had not queried for itself - which is what
+     * made a queued episode of another entry fall back to the host for its
+     * name, cover and source.
+     */
+    val contributors: Map<Long, Anime> = emptyMap(),
+    // <-- AM (PLAYBACK_QUEUE)
     val isPreordered: Boolean,
+    /**
+     * Whether the entry has any stored order overrides at all, regardless of
+     * whether the current sort is letting them through. [isPreordered] answers
+     * "is this list already ordered"; this answers "is there a custom order to
+     * delete", which stays true while a non-source sort holds one dormant.
+     */
+    val hasOverrides: Boolean,
 ) {
     /** Display rank of each season number - what episodes are ordered by, rather than the number itself. */
     val seasonRankByNumber: Map<Long, Int> by lazy { seasons.withIndex().associate { (i, s) -> s.number to i } }
@@ -93,6 +124,7 @@ data class ResolvedEpisodeOrder(
             emptyMap(),
             // <-- AM (SINGLE_EPISODE_THUMBNAIL)
             isPreordered = false,
+            hasOverrides = false,
         )
     }
 }

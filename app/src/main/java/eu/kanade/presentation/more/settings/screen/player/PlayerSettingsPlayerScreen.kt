@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import animiru.domain.player.model.PlayerOrientation
+import animiru.domain.player.model.QueueCleaning
 import animiru.domain.player.service.PlayerPreferences
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.presentation.more.settings.Preference
@@ -71,7 +72,7 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 onValueChanged = {
                     // Trim the persisted cache down to the new limit right away, rather
                     // than waiting for the next write to notice it shrank.
-                    context.appGraph.recentEpisodePositionManager.onSlotsPreferenceChanged()
+                    context.appGraph.recentPositionManager.onSlotsPreferenceChanged()
                     true
                 },
             ),
@@ -100,7 +101,7 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 onValueChanged = {
                     // Lowering it - to Off or otherwise - should free the disk now,
                     // not at the next prune.
-                    context.appGraph.recentEpisodePositionManager.onRetainMediaPreferenceChanged()
+                    context.appGraph.recentPositionManager.onRetainMediaPreferenceChanged()
                     true
                 },
             ),
@@ -131,6 +132,8 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 },
                 title = stringResource(AYMR.strings.pref_category_player_orientation),
             ),
+            // AM (PLAYBACK_QUEUE)
+            getQueueGroup(playerPreferences = playerPreferences),
             getControlsGroup(playerPreferences = playerPreferences),
             getHosterGroup(playerPreferences = playerPreferences),
             getDisplayGroup(playerPreferences = playerPreferences),
@@ -145,6 +148,45 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
             ),
         )
     }
+
+    // AM (PLAYBACK_QUEUE) -->
+    @Composable
+    private fun getQueueGroup(playerPreferences: PlayerPreferences): Preference.PreferenceGroup {
+        return Preference.PreferenceGroup(
+            title = stringResource(AMMR.strings.am_pref_category_queue),
+            preferenceItems = listOf(
+                Preference.PreferenceItem.ListPreference(
+                    preference = playerPreferences.queueCleaning,
+                    // Ordered by how much they throw away, most first, so the
+                    // list reads as a scale rather than an arbitrary set.
+                    entries = mapOf(
+                        QueueCleaning.CLEAR_ON_EPISODE_SELECTION to
+                            stringResource(AMMR.strings.am_pref_queue_cleaning_on_selection),
+                        QueueCleaning.CLEAR_ON_CLOSE to
+                            stringResource(AMMR.strings.am_pref_queue_cleaning_on_close),
+                        QueueCleaning.KEEP to
+                            stringResource(AMMR.strings.am_pref_queue_cleaning_keep),
+                    ),
+                    title = stringResource(AMMR.strings.am_pref_queue_cleaning),
+                ),
+                // A number, not a list: this is "how far back to remember",
+                // which is a quantity a user can reason about directly, unlike
+                // the old cap on queue length - and it caps nothing, so there
+                // is no trade to steer them away from.
+                //
+                // AM (NUMBER_PREFERENCE): typed, not dragged. The slider's
+                // range had to stay small to stay aimable, which made the
+                // ceiling the control's limit rather than the feature's.
+                Preference.PreferenceItem.NumberPreference(
+                    preference = playerPreferences.queueAutoTrim,
+                    range = 0..99,
+                    title = stringResource(AMMR.strings.am_pref_queue_tail_length),
+                    subtitle = stringResource(AMMR.strings.am_pref_queue_tail_length_summary),
+                ),
+            ),
+        )
+    }
+    // <-- AM (PLAYBACK_QUEUE)
 
     @Composable
     private fun getControlsGroup(playerPreferences: PlayerPreferences): Preference.PreferenceGroup {

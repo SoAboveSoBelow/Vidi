@@ -4,6 +4,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import aniyomi.domain.queue.interactor.GetQueueResumePoint
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metro.Inject
@@ -63,6 +64,8 @@ class HistoryViewModel(
     private val getHistory: GetHistory,
     private val getAnime: GetAnime,
     private val getNextEpisodes: GetNextEpisodes,
+    // AM (PLAYBACK_QUEUE)
+    private val getQueueResumePoint: GetQueueResumePoint,
     private val libraryPreferences: LibraryPreferences,
     private val removeHistory: RemoveHistory,
     private val setAnimeCategories: SetAnimeCategories,
@@ -79,9 +82,26 @@ class HistoryViewModel(
 
     private val dialog = MutableStateFlow<Dialog?>(null)
 
-    private val history = searchQuery
-        .flatMapLatest { query ->
-            getHistory.subscribe(query ?: "")
+    // AM (HISTORY_ORIGIN) -->
+    /**
+     * Whether the list is narrowed to episodes watched in the player, leaving
+     * out the cards seen in the browse feed. Toggled by tapping the History
+     * chip while it is already showing.
+     *
+     * Not persisted: it is a way of looking at the list for a moment, not a
+     * setting, and coming back to a History tab that silently hides entries
+     * would be worse than re-tapping.
+     */
+    private val playerOnly = MutableStateFlow(false)
+
+    fun togglePlayerOnly() {
+        playerOnly.value = !playerOnly.value
+    }
+    // <-- AM (HISTORY_ORIGIN)
+
+    private val history = combine(searchQuery, playerOnly, ::Pair)
+        .flatMapLatest { (query, playerOnly) ->
+            getHistory.subscribe(query ?: "", playerOnly)
                 .distinctUntilChanged()
                 .catch { error ->
                     logcat(LogPriority.ERROR, error)
@@ -96,8 +116,10 @@ class HistoryViewModel(
         searchQuery,
         history,
         dialog,
-    ) { searchQuery, history, dialog ->
-        State(searchQuery = searchQuery, list = history, dialog = dialog)
+        // AM (HISTORY_ORIGIN)
+        playerOnly,
+    ) { searchQuery, history, dialog, playerOnly ->
+        State(searchQuery = searchQuery, list = history, dialog = dialog, playerOnly = playerOnly)
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5.seconds), State())
 
@@ -114,9 +136,22 @@ class HistoryViewModel(
             }
     }
 
-    suspend fun getNextEpisode(): Episode? {
-        return withIOContext { getNextEpisodes.await(onlyUnseen = false).firstOrNull() }
+    // AM (PLAYBACK_QUEUE) -->
+    /**
+     * Where the resume gesture should go - see RecentsTab.onReselect().
+     *
+     * No GetNextEpisodes fallback behind it: that interactor answers "what
+     * should I watch next in this entry", which is the Continue button's
+     * question, not this gesture's - and it answers it by advancing past
+     * anything already seen, which is exactly what must not happen here (see
+     * GetQueueResumePoint). It can only return nothing in the one case
+     * GetQueueResumePoint already returns null for, nothing ever played, so it
+     * would add no answer either.
+     */
+    suspend fun getResumePoint(): GetQueueResumePoint.ResumePoint? {
+        return withIOContext { getQueueResumePoint.await() }
     }
+    // <-- AM (PLAYBACK_QUEUE)
 
     fun getNextEpisodeForAnime(animeId: Long, episodeId: Long) {
         viewModelScope.launchIO {
@@ -258,6 +293,8 @@ class HistoryViewModel(
         val searchQuery: String? = null,
         val list: List<HistoryUiModel>? = null,
         val dialog: Dialog? = null,
+        // AM (HISTORY_ORIGIN)
+        val playerOnly: Boolean = false,
     )
 
     sealed interface Dialog {

@@ -28,6 +28,10 @@ class GesturePreferences(
     )
     // <-- AM (SWIPE_SWITCH)
 
+    // AM (PINCH_ZOOM) -->
+    val gesturePinchZoom: Preference<Boolean> = preferenceStore.getBoolean("pref_gesture_pinch_zoom", true)
+    // <-- AM (PINCH_ZOOM)
+
     // Seeking
 
     val gestureHorizontalSeek: Preference<Boolean> = preferenceStore.getBoolean("pref_gesture_horizontal_seek", true)

@@ -24,7 +24,6 @@ import tachiyomi.domain.episode.model.NoEpisodesException
 import tachiyomi.domain.episode.model.toEpisodeUpdate
 import tachiyomi.domain.episode.repository.EpisodeRepository
 import tachiyomi.domain.episode.service.EpisodeRecognition
-import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.source.local.isLocal
 import java.lang.Long.max
 import java.util.TreeSet
@@ -40,7 +39,6 @@ class SyncEpisodesWithSource(
     private val updateEpisode: UpdateEpisode,
     private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
     private val getExcludedScanlators: GetExcludedScanlators,
-    private val libraryPreferences: LibraryPreferences,
 ) {
 
     /**
@@ -178,17 +176,11 @@ class SyncEpisodesWithSource(
             return emptyList()
         }
 
-        val changedOrDuplicateSeenUrls = mutableSetOf<String>()
+        val changedEpisodeUrls = mutableSetOf<String>()
 
         val deletedEpisodeNumbers = TreeSet<Double>()
         val deletedSeenEpisodeNumbers = TreeSet<Double>()
         val deletedBookmarkedEpisodeNumbers = TreeSet<Double>()
-
-        val seenEpisodeNumbers = dbEpisodes
-            .asSequence()
-            .filter { it.seen && it.isRecognizedNumber }
-            .map { it.episodeNumber }
-            .toSet()
 
         removedEpisodes.forEach { episode ->
             if (episode.seen) deletedSeenEpisodeNumbers.add(episode.episodeNumber)
@@ -199,19 +191,11 @@ class SyncEpisodesWithSource(
         val deletedEpisodeNumberDateFetchMap = removedEpisodes.sortedByDescending { it.dateFetch }
             .associate { it.episodeNumber to it.dateFetch }
 
-        val markDuplicateAsSeen = libraryPreferences.markDuplicateSeenEpisodeAsSeen.get()
-            .contains(LibraryPreferences.MARK_DUPLICATE_EPISODE_SEEN_NEW)
-
         // Date fetch is set in such a way that the upper ones will have bigger value than the lower ones
         // Sources MUST return the episodes from most to less recent, which is common.
         var itemCount = newEpisodes.size
         var updatedToAdd = newEpisodes.map { toAddItem ->
             var episode = toAddItem.copy(dateFetch = nowMillis + itemCount--)
-
-            if (episode.episodeNumber in seenEpisodeNumbers && markDuplicateAsSeen) {
-                changedOrDuplicateSeenUrls.add(episode.url)
-                episode = episode.copy(seen = true)
-            }
 
             if (!episode.isRecognizedNumber || episode.episodeNumber !in deletedEpisodeNumbers) return@map episode
 
@@ -225,7 +209,7 @@ class SyncEpisodesWithSource(
                 episode = episode.copy(dateFetch = it)
             }
 
-            changedOrDuplicateSeenUrls.add(episode.url)
+            changedEpisodeUrls.add(episode.url)
 
             episode
         }
@@ -251,6 +235,6 @@ class SyncEpisodesWithSource(
 
         val excludedScanlators = getExcludedScanlators.await(anime.id).toHashSet()
 
-        return updatedToAdd.filterNot { it.url in changedOrDuplicateSeenUrls || it.scanlator in excludedScanlators }
+        return updatedToAdd.filterNot { it.url in changedEpisodeUrls || it.scanlator in excludedScanlators }
     }
 }

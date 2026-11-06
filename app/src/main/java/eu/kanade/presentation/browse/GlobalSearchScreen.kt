@@ -30,6 +30,8 @@ fun GlobalSearchScreen(
     onClickSource: (AnimeSource) -> Unit,
     onClickItem: (Anime) -> Unit,
     onLongClickItem: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE)
+    onDoubleClickItem: ((Anime) -> Unit)? = null,
 ) {
     Scaffold(
         topBar = { scrollBehavior ->
@@ -51,11 +53,15 @@ fun GlobalSearchScreen(
     ) { paddingValues ->
         GlobalSearchContent(
             items = state.filteredItems,
+            // AM (MERGED_SOURCES)
+            mergeChildIds = state.mergeChildIds,
             contentPadding = paddingValues,
             getAnime = getAnime,
             onClickSource = onClickSource,
             onClickItem = onClickItem,
             onLongClickItem = onLongClickItem,
+            // AM (DOUBLE_TAP_QUEUE)
+            onDoubleClickItem = onDoubleClickItem,
         )
     }
 }
@@ -64,10 +70,15 @@ fun GlobalSearchScreen(
 internal fun GlobalSearchContent(
     items: Map<AnimeSource, SearchItemResult>,
     contentPadding: PaddingValues,
+    // AM (MERGED_SOURCES)
+    mergeChildIds: Set<Long> = emptySet(),
     getAnime: @Composable (Anime) -> State<Anime>,
     onClickSource: (AnimeSource) -> Unit,
     onClickItem: (Anime) -> Unit,
     onLongClickItem: (Anime) -> Unit,
+    // AM (DOUBLE_TAP_QUEUE): null for the migration picker - see
+    // BrowseSourceContent for why a handler is not simply always supplied.
+    onDoubleClickItem: ((Anime) -> Unit)? = null,
     fromSourceId: Long? = null,
 ) {
     LazyColumn(
@@ -91,8 +102,11 @@ internal fun GlobalSearchContent(
                             GlobalSearchCardRow(
                                 titles = result.result,
                                 getAnime = getAnime,
+                                mergeChildIds = mergeChildIds,
                                 onClick = onClickItem,
                                 onLongClick = onLongClickItem,
+                                // AM (DOUBLE_TAP_QUEUE)
+                                onDoubleClick = onDoubleClickItem,
                             )
                         }
                         is SearchItemResult.Error -> {
