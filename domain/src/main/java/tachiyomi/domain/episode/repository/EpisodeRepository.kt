@@ -17,7 +17,6 @@ interface EpisodeRepository {
     suspend fun getEpisodeByAnimeId(animeId: Long, applyScanlatorFilter: Boolean = false): List<Episode>
 
     // AM (MERGED_SOURCES) -->
-
     /** Every episode belonging to any source of [mergeParentId], in one query. */
     suspend fun getEpisodesByMergeParentId(
         mergeParentId: Long,

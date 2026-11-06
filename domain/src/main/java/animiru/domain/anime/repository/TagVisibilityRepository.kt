@@ -28,7 +28,6 @@ interface TagVisibilityRepository {
     suspend fun deleteByAnimeId(animeId: Long)
 
     // AM (TAG_LOCKS) -->
-
     /**
      * The tags that were showing when the entry was locked, or null while it is
      * not locked - see anime_tag_lock.sq.

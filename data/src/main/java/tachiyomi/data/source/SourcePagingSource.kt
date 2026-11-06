@@ -131,22 +131,22 @@ abstract class BaseSourcePagingSource(
                 runCatching { faultedSource.clearFault() }
                 LoadResult.Error(e)
             } else {
-                // <-- AM (JS_FAULT_MANUAL_RECOVERY)
-                // Parser crash; skip page
-                logcat(LogPriority.ERROR, e) {
-                    "SourcePagingSource: source parser crashed on page=$page, skipping page"
-                }
-                consecutiveSkippedPages++
-                if (consecutiveSkippedPages > MAX_CONSECUTIVE_SKIPPED_PAGES) {
-                    consecutiveSkippedPages = 0
-                    LoadResult.Error(e)
-                } else {
-                    LoadResult.Page(
-                        data = emptyList(),
-                        prevKey = null,
-                        nextKey = page + 1,
-                    )
-                }
+            // <-- AM (JS_FAULT_MANUAL_RECOVERY)
+            // Parser crash; skip page
+            logcat(LogPriority.ERROR, e) {
+                "SourcePagingSource: source parser crashed on page=$page, skipping page"
+            }
+            consecutiveSkippedPages++
+            if (consecutiveSkippedPages > MAX_CONSECUTIVE_SKIPPED_PAGES) {
+                consecutiveSkippedPages = 0
+                LoadResult.Error(e)
+            } else {
+                LoadResult.Page(
+                    data = emptyList(),
+                    prevKey = null,
+                    nextKey = page + 1,
+                )
+            }
             }
         }
         // <-- AY

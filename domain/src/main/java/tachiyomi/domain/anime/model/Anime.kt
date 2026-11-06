@@ -188,7 +188,6 @@ data class Anime(
     }
 
     // AM (EPISODE_VIEW_MODE) -->
-
     /**
      * The two mutually-exclusive episode list display modes, both derived from
      * the single previews bit: SIMPLIFIED is the no-thumbnail row, PREVIEW is

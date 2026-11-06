@@ -23,7 +23,6 @@ interface MergeChildRepository {
     suspend fun getChildSeasonsByMergeParentId(mergeParentId: Long): Map<Long, Long>
 
     // AM (CUSTOM_EPISODE_ORDER) -->
-
     /** Per-child (season, priority) - the stable inputs to the merged default order. */
     suspend fun getChildOrderingByMergeParentId(mergeParentId: Long): List<MergeChildOrdering>
 
@@ -40,7 +39,6 @@ interface MergeChildRepository {
     // <-- AM (MERGE_SEASONS)
 
     // AM (MERGE_SETTINGS) -->
-
     /** Makes [orderedChildIds] the merge's priority order (first = highest), in one transaction. */
     suspend fun setPriorities(mergeParentId: Long, orderedChildIds: List<Long>)
     // <-- AM (MERGE_SETTINGS)

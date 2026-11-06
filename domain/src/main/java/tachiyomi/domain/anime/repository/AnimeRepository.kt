@@ -29,7 +29,6 @@ interface AnimeRepository {
     fun getFavoritesBySourceId(sourceId: Long): Flow<List<Anime>>
 
     // AM (MERGED_SOURCES) -->
-
     /**
      * [getFavoritesBySourceId] widened to everything [sourceId] contributes to
      * the library, including entries that are only in it as children of a

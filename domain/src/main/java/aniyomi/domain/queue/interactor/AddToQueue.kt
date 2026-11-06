@@ -54,7 +54,6 @@ class AddToQueue(
     suspend fun await(anime: Anime): Long = await(resolve(anime))
 
     // AM (QUEUE_RESOLVE_ONCE) -->
-
     /**
      * An entry's episodes in queue order, resolved once.
      *
@@ -117,7 +116,6 @@ class AddToQueue(
     }
 
     // AM (QUEUE_RESOLVE_ONCE) -->
-
     /**
      * Queues pre-resolved sources, in the order given.
      *
@@ -143,7 +141,6 @@ class AddToQueue(
     // <-- AM (QUEUE_RESOLVE_ONCE)
 
     // AM (QUEUE_WATCH_FILTER) -->
-
     /**
      * Queues [anime] as one source block, optionally keeping only unwatched episodes.
      *

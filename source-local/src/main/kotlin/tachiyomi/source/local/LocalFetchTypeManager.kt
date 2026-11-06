@@ -18,7 +18,6 @@ class LocalFetchTypeManager(
     fun find(animeUrl: String): FetchType = find(fileSystem.getFilesInAnimeDirectory(animeUrl))
 
     // AM (LOCAL_SOURCE_SINGLE_LISTING)
-
     /** [find] over an already-listed [files] - see LocalSourceFileSystem.visibleChildren. */
     fun find(files: List<UniFile>): FetchType {
         return when {

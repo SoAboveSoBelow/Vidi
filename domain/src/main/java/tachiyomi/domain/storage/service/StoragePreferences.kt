@@ -20,7 +20,6 @@ class StoragePreferences(
     )
 
     // AM (EXTRA_LOCAL_FOLDERS) -->
-
     /**
      * Folders outside [baseStorageDirectory] whose contents the local source also
      * covers, as persisted SAF tree URIs.
