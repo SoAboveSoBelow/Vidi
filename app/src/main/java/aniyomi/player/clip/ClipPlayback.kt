@@ -157,10 +157,36 @@ class ClipPlayback(
         if (looping) applyPlaybackBuffer(preloading = false)
     }
 
+    // AM (SCROLLER_PRELOAD_TIERS) -->
+    /**
+     * Which cache tier this entry gets while it is NOT the one being watched -
+     * see [MPVPlayer.CacheTier].
+     *
+     * Kept rather than passed per call, because the thing that knows how close
+     * an entry is to being watched (the feed) and the things that re-apply the
+     * cache (a load, a reset, a companion being created) are not the same
+     * callers. Starts at [MPVPlayer.CacheTier.Far], which is what an entry
+     * nobody has placed yet deserves.
+     */
+    private var preloadTier = MPVPlayer.CacheTier.Far
+
     /** Caps what an entry nobody has reached yet may pull. */
     fun applyPreloadBuffer() {
-        video.setScrollerCache(preloading = true)
+        applyPlaybackBuffer(preloading = true)
     }
+
+    /**
+     * Says how close this entry now is to being watched.
+     *
+     * Applied immediately unless the entry is already playing, which is a tier
+     * of its own and outranks any of this.
+     */
+    fun setPreloadTier(tier: MPVPlayer.CacheTier) {
+        if (preloadTier == tier) return
+        preloadTier = tier
+        if (!shouldPlay) applyPlaybackBuffer(preloading = true)
+    }
+    // <-- AM (SCROLLER_PRELOAD_TIERS)
 
     /**
      * Readies the companion instance for use, creating it if this host builds
@@ -172,7 +198,10 @@ class ClipPlayback(
         created.mpv.setOptionString("aid", "auto")
         created.mpv.setOptionString("vid", "no")
         created.mpv.setPropertyBoolean("mute", true)
-        created.setScrollerCache(preloading = !shouldPlay)
+        // AM (SCROLLER_PRELOAD_TIERS): the same tier its video half is on - a
+        // companion left at Far under a Near video is the audio stalling on an
+        // entry whose picture is held whole.
+        created.setScrollerCache(if (shouldPlay) MPVPlayer.CacheTier.Playing else preloadTier)
         audio = created
         return created
     }
@@ -938,6 +967,10 @@ class ClipPlayback(
         shouldPlay = false
         pendingLoad = null
         loadedKey = null
+        // AM (SCROLLER_PRELOAD_TIERS): this instance is about to hold a
+        // different entry, and how close the previous one was to being watched
+        // says nothing about the next.
+        preloadTier = MPVPlayer.CacheTier.Far
         applyPlaybackBuffer(preloading = true)
         runCatching { video.mpv.command("stop") }
         runCatching { audio?.mpv?.command("stop") }
@@ -966,8 +999,10 @@ class ClipPlayback(
     }
 
     private fun applyPlaybackBuffer(preloading: Boolean) {
-        video.setScrollerCache(preloading)
-        audio?.setScrollerCache(preloading)
+        // AM (SCROLLER_PRELOAD_TIERS)
+        val tier = if (preloading) preloadTier else MPVPlayer.CacheTier.Playing
+        video.setScrollerCache(tier)
+        audio?.setScrollerCache(tier)
     }
 
     companion object {

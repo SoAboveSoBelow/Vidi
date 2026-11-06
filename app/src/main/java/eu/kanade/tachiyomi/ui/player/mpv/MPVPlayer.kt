@@ -144,27 +144,75 @@ class MPVPlayer(
         mpv.setOptionString(name, value)
     }
 
+    // AM (SCROLLER_PRELOAD_TIERS) -->
     /**
-     * Applies the feed's cache policy to both preload and playback. Cache
-     * duration and byte limits must change together: setting only readahead
-     * leaves mpv's real cache governed by its previous duration limit.
+     * How much of an entry this instance may pull, by how close it is to being
+     * watched.
+     *
+     * Three tiers rather than the preloading/not-preloading pair this replaces,
+     * following the ladder Media3's own `DefaultPreloadManager` guide sets out
+     * for a short-form feed: the items either side of the playing one get a
+     * real range load, the ones beyond them get only enough to be ready, and
+     * the rest get nothing. The pair meant an entry being approached held two
+     * seconds however long the user had sat on the one before it, so arriving
+     * at a thirty-second clip was still a cold fetch - the whole of which
+     * takes under three seconds on any connection the feed is usable on.
+     *
+     * The budget that actually binds is bytes, not seconds. A duration target
+     * is the honest way to express "enough to play through", but it is
+     * unbounded on a high-bitrate file, so each tier pairs its seconds with the
+     * ceiling that stops the cache turning into an unbounded heap allocation -
+     * the same trade NETWORK_BUFFER_SECONDS records for playback. Worst case
+     * across the feed's five slots is 64 + 16 + 16 + 8 MiB, inside the 128MiB
+     * ceiling Media3's guide puts on all preloading sources together.
      */
-    fun setScrollerCache(preloading: Boolean) {
+    enum class CacheTier {
+        /** The entry being watched: the app's full playback buffer. */
+        Playing,
+
+        /** Either side of it: enough to play through a short clip whole. */
+        Near,
+
+        /** Beyond that: open, tracks known, a moment of content, no more. */
+        Far,
+    }
+
+    /**
+     * Applies the feed's cache policy for [tier]. Cache duration and byte
+     * limits must change together: setting only readahead leaves mpv's real
+     * cache governed by its previous duration limit.
+     */
+    fun setScrollerCache(tier: CacheTier) {
         setSafeOptionString("cache", "yes")
         setSafeOptionString("cache-pause", "yes")
         setSafeOptionString("cache-pause-initial", "yes")
-        if (preloading) {
-            setSafeOptionString("cache-secs", "2")
-            setSafeOptionString("demuxer-max-bytes", "8MiB")
-            setSafeOptionString("demuxer-max-back-bytes", "8MiB")
-            setSafeOptionString("demuxer-readahead-secs", "2")
-        } else {
-            setSafeOptionString("cache-secs", playerPreferences.networkBufferSeconds.get().toString())
-            setSafeOptionString("demuxer-max-bytes", "64MiB")
-            setSafeOptionString("demuxer-max-back-bytes", "64MiB")
-            setSafeOptionString("demuxer-readahead-secs", "20")
+        val bufferSecs = playerPreferences.networkBufferSeconds.get().toString()
+        when (tier) {
+            CacheTier.Playing -> {
+                setSafeOptionString("cache-secs", bufferSecs)
+                setSafeOptionString("demuxer-max-bytes", "64MiB")
+                setSafeOptionString("demuxer-max-back-bytes", "64MiB")
+                setSafeOptionString("demuxer-readahead-secs", "20")
+            }
+            // The same seconds the watched entry gets, against a quarter of the
+            // bytes: a feed clip fits whole, an episode-length entry stops at
+            // the ceiling, and neither needs a second number to be kept in step
+            // with the user's own buffer setting.
+            CacheTier.Near -> {
+                setSafeOptionString("cache-secs", bufferSecs)
+                setSafeOptionString("demuxer-max-bytes", "16MiB")
+                setSafeOptionString("demuxer-max-back-bytes", "16MiB")
+                setSafeOptionString("demuxer-readahead-secs", "20")
+            }
+            CacheTier.Far -> {
+                setSafeOptionString("cache-secs", "2")
+                setSafeOptionString("demuxer-max-bytes", "8MiB")
+                setSafeOptionString("demuxer-max-back-bytes", "8MiB")
+                setSafeOptionString("demuxer-readahead-secs", "2")
+            }
         }
     }
+    // <-- AM (SCROLLER_PRELOAD_TIERS)
 
     init {
         val cachePath: String = context.cacheDir.path

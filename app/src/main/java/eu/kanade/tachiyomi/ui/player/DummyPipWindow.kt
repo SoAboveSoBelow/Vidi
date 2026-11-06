@@ -334,6 +334,31 @@ private const val PINCH_OVERRESIZE_DAMP = 0.25f
 // the paint-time pinchScale (see the release handling).
 private const val PULL_BACK_MS = 300
 private val PIP_CENTER_ROW_SPACING = 28.dp
+// AM (DUMMY_PIP_REVEAL_FITS_CONTROLS) -->
+/**
+ * The width the bottom control row actually needs: its three icons, the two
+ * gaps between them, and the edge inset either side.
+ *
+ * This is AOSP's own `PipMenuView.getEstimatedMinMenuSize()`, whose width is
+ * `max(2, actions.size()) * pip_action_size` - the controls' intrinsic size,
+ * computed from the icons rather than measured off a screenshot. Real PiP
+ * never shrinks an icon to fit a small window: `PipTouchHandler.willResizeMenu()`
+ * is true whenever the current bounds are narrower or shorter than that
+ * estimate, and showing the menu then runs `animateToNormalSize()`, which calls
+ * `adjustNormalBoundsToFitMenu(normalBounds, minMenuSize)` and grows the window
+ * to hold the controls - reverting to the user's own bounds, via
+ * `animateToUnexpandedState()`, when the menu closes.
+ *
+ * Deliberately NOT folded into [CONTROLS_REVEAL_TARGET_EDGE_FRACTION]'s target,
+ * for the same reason AOSP keeps the two separate: that target is also what the
+ * double-tap collapse aims at, i.e. a size the user chose, and the menu's
+ * minimum is a temporary floor applied only while the controls are up.
+ */
+private val PIP_CONTROLS_MIN_WIDTH = PIP_CONTROLS_INSET * 2 +
+    PIP_ICON_SIZE_DP.dp * 2 +
+    PIP_PLAY_ICON_SIZE_DP.dp +
+    PIP_CENTER_ROW_SPACING * 2
+// <-- AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
 // Real PiP spaces its top-corner buttons wide apart (~15dp edge-to-edge
 // measured off screenshots) - they read as distinct targets, not one
 // squished cluster.
@@ -674,6 +699,8 @@ fun DummyPipContainer(
         val elevationPx = with(density) { 8.dp.toPx() }
         val stashPeekPx = with(density) { PIP_STASH_PEEK.toPx() }
         val minEdgePx = with(density) { PIP_MIN_EDGE.toPx() }
+        // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+        val controlsMinWidthPx = with(density) { PIP_CONTROLS_MIN_WIDTH.toPx() }
 
         // Same live video aspect ratio MainActivity's real-PIP builder uses,
         // animated so late-arriving dimensions don't snap the window's shape.
@@ -727,6 +754,8 @@ fun DummyPipContainer(
         val currentStatusBarHeight = rememberUpdatedState(statusBarHeightPx)
         val currentImeBottom = rememberUpdatedState(imeBottomPx)
         val currentMinEdge = rememberUpdatedState(minEdgePx)
+        // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+        val currentControlsMinWidth = rememberUpdatedState(controlsMinWidthPx)
         val currentActions = rememberUpdatedState(actions)
 
         var mode by remember { mutableStateOf(if (isPipRequested) DummyPipMode.Pip else DummyPipMode.Fullscreen) }
@@ -958,8 +987,39 @@ fun DummyPipContainer(
         }
         // <-- AM (DUMMY_PIP_REVEAL_TARGET_EXTRACTED)
 
+        // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS) -->
+        /**
+         * The width the window is grown to while the controls are up: the
+         * measured reveal size, floored at the width the controls themselves
+         * need, and still capped at the fitted maximum.
+         *
+         * The floor is what was missing. [controlsRevealTargetWidthPx] sizes by
+         * apparent area ([sizeWidthForAspect] over the measured 16:9 short
+         * edge), so a portrait clip reveals at roughly that edge - around
+         * 103dp on a 1080px phone - against the [PIP_CONTROLS_MIN_WIDTH] the
+         * bottom row needs. A `Row` hands each child the width left over after
+         * the ones before it, and `Modifier.size` is coerced into the
+         * constraints it is given (that is the difference from `requiredSize`),
+         * so the LAST child measured - SkipNext - took the whole shortfall and
+         * was drawn squashed, or not at all, on exactly the aspect ratios whose
+         * window came out narrow. Pushed narrower still, PlayArrow follows it.
+         *
+         * Fixing the width rather than the row also repairs the hit-testing for
+         * free: `hitRegion` places `nextCx` at `playCx + (iconPx +
+         * centerSpacingPx)` from the constants, which on a window too narrow to
+         * hold them lands off its own right edge. There is no second rule to
+         * keep in step, because both the layout and the hit-test already read
+         * the grown width.
+         */
+        fun controlsFitWidthPx(): Float = minOf(
+            maxOf(controlsRevealTargetWidthPx(), currentControlsMinWidth.value),
+            maxWindowWidthPx(),
+        )
+        // <-- AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+
         fun controlsRevealGrowFactor(): Float {
-            val targetW = controlsRevealTargetWidthPx()
+            // AM (DUMMY_PIP_REVEAL_FITS_CONTROLS)
+            val targetW = controlsFitWidthPx()
             val w = windowWidthPx()
             return if (w > 0f && w < targetW) targetW / w else 1f
         }

@@ -56,7 +56,10 @@ internal const val CALIBRATION_SOURCE = "\n\nvar __probe = {{;\n"
 
 internal const val CALIBRATION_LINE = 3
 
-internal val syntaxJson = Json { ignoreUnknownKeys = true; isLenient = true }
+internal val syntaxJson = Json {
+    ignoreUnknownKeys = true
+    isLenient = true
+}
 
 internal fun parseSyntaxReport(json: String): RawSyntaxReport? =
     runCatching { syntaxJson.decodeFromString<RawSyntaxReport>(json) }.getOrNull()

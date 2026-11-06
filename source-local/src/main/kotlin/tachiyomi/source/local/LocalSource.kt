@@ -403,6 +403,7 @@ class LocalSource(
     // <-- AM (LOCAL_SOURCE_SNAPSHOT)
 
     // AM (LOCAL_SOURCE_SINGLE_LISTING) -->
+
     /**
      * An entry directory together with its children, listed once - see the note
      * in [getSearchAnime]. Only [scanNow] builds these; everything displayed
@@ -569,7 +570,7 @@ class LocalSource(
     // (UpdateAnimeFromRemote) fills them in progressively after the episode list is synced.
     private suspend fun getOldEpisodeList(anime: SAnime): List<SEpisode> = withIOContext {
         val episodes = scanEpisodeFiles(anime)
-    // <-- AM (PARTIAL_EPISODE_SYNC)
+        // <-- AM (PARTIAL_EPISODE_SYNC)
 
         // Generate the cover from the first episode found if not available
         // AY -->
@@ -802,7 +803,7 @@ class LocalSource(
         val tempFile = File.createTempFile("tmp_", tempFileSuffix, tempDir)
         val outFile = tempFile.path
         try {
-        // <-- AM (FRAME_EXTRACT_TEMP_FILE_LEAK)
+            // <-- AM (FRAME_EXTRACT_TEMP_FILE_LEAK)
 
             // AM (LOCAL_NESTED_ENTRY_URLS)
             // The file name is the LAST segment, not everything after the first.
@@ -828,10 +829,10 @@ class LocalSource(
                 "-ss $second -i \"${episodeFilename()}\" -frames:v 1 -update true \"$outFile\" -y",
             )
 
-        // AM (FRAME_EXTRACT_TEMP_FILE_LEAK) -->
-        // The stream was also never closed - updateImage takes an InputStream and
-        // has no contract to close what it is handed, so use() does it here where
-        // ownership actually sits.
+            // AM (FRAME_EXTRACT_TEMP_FILE_LEAK) -->
+            // The stream was also never closed - updateImage takes an InputStream and
+            // has no contract to close what it is handed, so use() does it here where
+            // ownership actually sits.
             if (tempFile.length() > 0L) {
                 tempFile.inputStream().use { updateImage(it) }
             }
@@ -851,6 +852,7 @@ class LocalSource(
         private const val DEFAULT_COVER_NAME = "cover.jpg"
         private const val DEFAULT_BACKGROUND_NAME = "background.jpg"
         // AM (FRAME_EXTRACT_TEMP_FILE_LEAK) -->
+
         /** Scratch directory for ffmpeg frame extraction, emptied per call. */
         private const val FRAME_EXTRACT_DIR = "frame_extract"
         // <-- AM (FRAME_EXTRACT_TEMP_FILE_LEAK)
@@ -865,6 +867,7 @@ class LocalSource(
         private val LATEST_THRESHOLD = 7.days.inWholeMilliseconds
 
         // AM (LOCAL_SOURCE_SNAPSHOT) -->
+
         /** Where the browse snapshot lives - app-private, see [loadSnapshot]. */
         private const val SNAPSHOT_FILE = "local_source_browse_snapshot.json"
 

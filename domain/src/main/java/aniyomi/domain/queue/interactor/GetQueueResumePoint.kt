@@ -89,6 +89,7 @@ class GetQueueResumePoint(
     }
 
     // AM (QUEUE_BLOCK_PROGRESS) -->
+
     /**
      * Whether [item] is the episode its block remembers, finished.
      *

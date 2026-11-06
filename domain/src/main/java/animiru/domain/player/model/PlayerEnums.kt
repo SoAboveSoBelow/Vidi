@@ -67,6 +67,7 @@ enum class VideoAspect(val titleRes: StringResource) {
 }
 
 // AM (ASPECT_OVERRIDE_PICKER) -->
+
 /**
  * A display aspect ratio to impose on the video, for files whose own metadata is
  * wrong - an anamorphic master tagged square, a 16:9 picture stored in a 4:3 frame.
@@ -102,6 +103,7 @@ enum class SingleActionGesture(val stringRes: StringResource) {
     PlayPause(stringRes = AYMR.strings.single_action_playpause),
     Switch(stringRes = AYMR.strings.single_action_switch),
     Custom(stringRes = AYMR.strings.single_action_custom),
+
     // AM (SCREENSHOT_GESTURE) -->
     Screenshot(stringRes = AYMR.strings.single_action_screenshot),
     // <-- AM (SCREENSHOT_GESTURE)
@@ -284,6 +286,7 @@ enum class SubtitlesBorderStyle(
 }
 
 // AM (BOTTOM_PLAYER_BUTTONS) -->
+
 /**
  * Buttons that can be shown in the customizable row along the bottom of the player.
  * Order in [entries] is only the declaration order; the user's chosen order and
@@ -297,6 +300,7 @@ enum class BottomPlayerButton(val stringRes: StringResource) {
     PictureInPicture(AYMR.strings.pref_bottom_button_pip),
     AspectRatio(AYMR.strings.pref_bottom_button_aspect_ratio),
     Screenshot(AYMR.strings.pref_bottom_button_screenshot),
+
     // AM (CAST) -->
     Cast(AMMR.strings.pref_cast),
     // <-- AM (CAST)
@@ -304,6 +308,7 @@ enum class BottomPlayerButton(val stringRes: StringResource) {
 // <-- AM (BOTTOM_PLAYER_BUTTONS)
 
 // AM (PLAYBACK_QUEUE) -->
+
 /** When the playback queue empties itself - see PlayerPreferences.queueCleaning. */
 enum class QueueCleaning {
     /**

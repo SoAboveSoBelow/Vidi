@@ -94,6 +94,7 @@ class GetMergedEpisodeList(
     }
 
     // AM (MERGE_SETTINGS) -->
+
     /**
      * Applies one season's dedupe. Input and output are (priority, episode)
      * pairs so the caller can still order by priority afterwards.
@@ -129,7 +130,10 @@ class GetMergedEpisodeList(
                 listOf(
                     episodesByPriority.maxWith(
                         compareBy(
-                            { (_, episodes) -> episodes.filter { it.isRecognizedNumber }.maxOfOrNull { it.episodeNumber } ?: -1.0 },
+                            { (_, episodes) ->
+                                episodes.filter { it.isRecognizedNumber }.maxOfOrNull { it.episodeNumber }
+                                    ?: -1.0
+                            },
                             { -it.first },
                         ),
                     ),

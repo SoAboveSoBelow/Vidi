@@ -281,6 +281,7 @@ class QueueRepositoryImpl(
     }
 
     // AM (QUEUE_SPARSE_POSITIONS) -->
+
     /**
      * Positions for [count] rows landing at [insertAt] among [rows].
      *

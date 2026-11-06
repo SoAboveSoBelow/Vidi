@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -31,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -50,8 +52,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.ColorPainter
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
@@ -74,15 +80,18 @@ import eu.kanade.presentation.util.rememberResourceBitmapPainter
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
+import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import eu.kanade.tachiyomi.util.system.copyToClipboard
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.AnimeCover
+import kotlin.math.abs
 
 // AM (BROWSE_SCROLLER) -->
 /**
@@ -138,6 +147,10 @@ fun BrowseSourceScroller(
 
     val playback = rememberScrollerPlayback(source = source)
 
+    // AM (SCROLLER_SPEED_GATE): how fast the feed is moving right now, which is
+    // what decides whether anything new may be started - see the tracker.
+    val speed = rememberScrollSpeedTracker(listState)
+
     val currentOnActiveIndexChange by rememberUpdatedState(onActiveIndexChange)
 
     // Keyed on listState and playback, not the callback. A process-background
@@ -178,6 +191,21 @@ fun BrowseSourceScroller(
                 selection ?: return@collectLatest
                 val (index, animeId) = selection
                 delay(ACTIVE_CARD_SETTLE_MS)
+                // AM (SCROLLER_SPEED_GATE) -->
+                // The settle alone was not a statement about speed. A fling
+                // decelerates through card after card, each of which stays
+                // dominant for longer than the settle on the way past, so every
+                // one of them became active in turn: the window moved with it,
+                // four cards were acquired and loaded per step, and a five-slot
+                // pool spent the fling reassigning instances. Waiting for the
+                // feed to be moving slowly enough to be read makes the settle
+                // what it was meant to be.
+                //
+                // snapshotFlow rather than a poll: isFast is snapshot state, so
+                // this resumes on the frame it turns over, and collectLatest
+                // cancels the wait outright if a different card takes over.
+                snapshotFlow { speed.isFast }.first { !it }
+                // <-- AM (SCROLLER_SPEED_GATE)
                 activeIndex = index
                 playback?.setActive(animeId)
                 currentOnActiveIndexChange(index)
@@ -211,6 +239,10 @@ fun BrowseSourceScroller(
         state = listState,
         contentPadding = contentPadding,
         verticalArrangement = Arrangement.spacedBy(ScrollerCardSpacing),
+        // AM (SCROLLER_SPEED_GATE): the scroll deltas the list actually
+        // consumed are the only honest measure of how fast the feed is moving -
+        // item indices are too coarse and cards are not all the same height.
+        modifier = Modifier.nestedScroll(speed),
     ) {
         if (animeList.loadState.prepend is LoadState.Loading) {
             item { BrowseSourceLoadingItem() }
@@ -224,8 +256,23 @@ fun BrowseSourceScroller(
             // range and releases when it goes out of range or leaves
             // composition - so a player can never be released from under a
             // card that is still drawing it.
+            val distance = index - activeIndex
             val shouldLoad = source != null && activeIndex >= 0 &&
-                (index - activeIndex) in -WINDOW_BEHIND..WINDOW_AHEAD
+                distance in -WINDOW_BEHIND..WINDOW_AHEAD
+
+            // AM (SCROLLER_PRELOAD_TIERS) -->
+            // How much this card may pull, by how close it is to the one being
+            // looked at. The ladder is Media3's DefaultPreloadManager guide's:
+            // the cards either side of the playing one get a real range load,
+            // the ones beyond them only enough to be ready. The card behind is
+            // Near as well as the one ahead - it is what a scroll back lands
+            // on, and it had been getting the same two seconds as the card two
+            // ahead despite being one step away.
+            val tier = when (distance) {
+                in -1..1 -> MPVPlayer.CacheTier.Near
+                else -> MPVPlayer.CacheTier.Far
+            }
+            // <-- AM (SCROLLER_PRELOAD_TIERS)
 
             // Geometry is worked out over a far wider range than playback.
             // Every card composed by the list gets measured, which is well
@@ -249,11 +296,26 @@ fun BrowseSourceScroller(
                 // released, which flips this key, and the card asks again
                 // through exactly this call - so the retry cannot drift from
                 // the ordinary load.
-                LaunchedEffect(playback, anime.id, shouldLoad, hasPlayer) {
-                    if (shouldLoad) playback.acquire(anime, source) else playback.release(anime.id)
+                //
+                // AM (SCROLLER_SPEED_GATE): the release is NOT gated on speed.
+                // A card leaving the window gives its instance back whatever
+                // the feed is doing - retention keeps its file open either way,
+                // and holding instances for cards nobody is near is how the
+                // pool runs out of slots for the ones they are.
+                LaunchedEffect(playback, anime.id, shouldLoad, hasPlayer, tier, speed.isFast) {
+                    when {
+                        !shouldLoad -> playback.release(anime.id)
+                        // Nothing new is started mid-fling. This effect re-runs
+                        // when isFast turns over, which is what picks the card
+                        // up again once the feed has slowed down.
+                        speed.isFast -> Unit
+                        else -> playback.acquire(anime, source, tier)
+                    }
                 }
-                LaunchedEffect(playback, anime.id, shouldLoad) {
-                    if (shouldLoad) playback.fetchDetails(anime, source)
+                LaunchedEffect(playback, anime.id, shouldLoad, speed.isFast) {
+                    // AM (SCROLLER_SPEED_GATE): a round trip per card passed is
+                    // the same waste as a load per card passed.
+                    if (shouldLoad && !speed.isFast) playback.fetchDetails(anime, source)
                 }
                 DisposableEffect(playback, anime.id) {
                     onDispose { playback.release(anime.id) }
@@ -279,6 +341,9 @@ fun BrowseSourceScroller(
                 // itself must not draw one - two views cannot hold the same
                 // SurfaceTexture.
                 isFullscreen = playback?.fullscreenAnimeId == anime.id,
+                // AM (BROWSE_SCROLLER_FRAME_WATCH): whether this card's own
+                // instance has rendered anything yet - see ScrollerCard.
+                hasFrame = playback?.hasFrame(anime.id) == true,
                 // Width is fixed at the screen's, so this decides height.
                 aspectRatio = playback?.aspectRatios?.get(anime.id),
                 onCoverAspectRatio = { ratio -> playback?.onCoverAspectRatio(anime.id, ratio) },
@@ -368,6 +433,8 @@ private fun ScrollerCard(
     // AM (BROWSE_SCROLLER_CONTROLS)
     playback: ScrollerPlaybackState?,
     isFullscreen: Boolean,
+    // AM (BROWSE_SCROLLER_FRAME_WATCH)
+    hasFrame: Boolean,
     aspectRatio: Float?,
     onCoverAspectRatio: (Float) -> Unit,
     onTitleClick: () -> Unit,
@@ -498,6 +565,37 @@ private fun ScrollerCard(
                         .alpha(if (isSelected) SelectedItemAlpha else 1f),
                 )
             }
+
+            // AM (BROWSE_SCROLLER_FRAME_WATCH) -->
+            // A card with an instance but no frame of its own yet is covered,
+            // and this is what BROWSE_SCROLLER_NO_FLASH above assumed was
+            // already happening: "a card in the load window shows black until
+            // its own video is there". Nothing made it black. The surface was
+            // composed the moment the card had a player, and a surface with
+            // nothing of this card's decoded into it is not empty - the pool
+            // reassigns instances between cards and MPVPlayer keeps ONE
+            // SurfaceTexture for its whole life (PERSISTENT_SURFACE_ARCHITECTURE,
+            // handed on to each new TextureView by MpvSurface), so what it still
+            // holds is the last frame of whatever card had the instance before
+            // this one. That is the frozen frame: not a stall in this card's
+            // playback, another card's picture sitting in the texture it
+            // inherited.
+            //
+            // The state behind this has existed since FRAME_WATCH - framesReady,
+            // fed by PlaybackRestart with a poll behind it - and nothing outside
+            // ScrollerPlaybackState ever read it. This is the reader.
+            //
+            // Black rather than the cover or the captured first frame, for the
+            // reason NO_FLASH gives: black and then the video is one change
+            // instead of several.
+            if (player != null && !hasFrame) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(ScrollerDeadSpaceColor),
+                )
+            }
+            // <-- AM (BROWSE_SCROLLER_FRAME_WATCH)
             // AM (BROWSE_SCROLLER_CONTROLS): raised by a tap on the clip, and
             // only on a card that has an instance to control.
             if (playback != null && player != null && !isFullscreen) {
@@ -808,6 +906,101 @@ private fun tapZoneAt(x: Float, width: Int): ScrollerPlaybackState.TapZone {
         else -> ScrollerPlaybackState.TapZone.Center
     }
 }
+
+// AM (SCROLLER_SPEED_GATE) -->
+/**
+ * How fast the feed is being scrolled, as a state the composition can read.
+ *
+ * Measured from the deltas the list actually consumed rather than from item
+ * indices: cards are not all the same height - the whole point of the aspect
+ * work above - so an index rate says different things about the same gesture
+ * on a feed of portrait clips and a feed of landscape ones. Pixels per second,
+ * converted from a dp threshold so the answer is the same on every density.
+ *
+ * Two thresholds, not one. A single one chatters around its own value as a
+ * fling decays, and every crossing restarts the effects keyed on it; engaging
+ * high and releasing low means the gate opens once, when the feed has genuinely
+ * slowed, and the smoothing below keeps a single jittery sample from opening it
+ * early.
+ */
+@Stable
+private class ScrollSpeedTracker(
+    private val engagePxPerSecond: Float,
+    private val releasePxPerSecond: Float,
+) : NestedScrollConnection {
+
+    /** True while the feed is moving too fast for anything new to be worth starting. */
+    var isFast by mutableStateOf(false)
+        private set
+
+    private var smoothed = 0f
+    private var lastSampleNanos = 0L
+
+    override fun onPostScroll(
+        consumed: Offset,
+        available: Offset,
+        source: NestedScrollSource,
+    ): Offset {
+        val now = System.nanoTime()
+        val elapsed = (now - lastSampleNanos) / NANOS_PER_SECOND
+        lastSampleNanos = now
+        // A first sample has no interval, and a long gap is two gestures rather
+        // than one slow one - neither says anything about the current speed.
+        if (elapsed > 0f && elapsed <= MAX_SAMPLE_SECONDS) {
+            val instant = abs(consumed.y) / elapsed
+            smoothed += (instant - smoothed) * SPEED_SMOOTHING
+            isFast = smoothed > if (isFast) releasePxPerSecond else engagePxPerSecond
+        }
+        return Offset.Zero
+    }
+
+    /** The feed has come to rest, whatever the last sample happened to read. */
+    fun onScrollStopped() {
+        smoothed = 0f
+        lastSampleNanos = 0L
+        isFast = false
+    }
+}
+
+@Composable
+private fun rememberScrollSpeedTracker(listState: LazyListState): ScrollSpeedTracker {
+    val density = LocalDensity.current
+    val tracker = remember(density) {
+        with(density) {
+            ScrollSpeedTracker(
+                engagePxPerSecond = FastScrollEngageSpeed.toPx(),
+                releasePxPerSecond = FastScrollReleaseSpeed.toPx(),
+            )
+        }
+    }
+    // The deltas stop arriving when the scroll does, so without this the last
+    // sample of a fling would stand as the feed's speed for as long as it sat
+    // still - which is the gate stuck shut.
+    LaunchedEffect(tracker, listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .collectLatest { scrolling -> if (!scrolling) tracker.onScrollStopped() }
+    }
+    return tracker
+}
+
+/**
+ * Above this the feed is being flung past rather than read, so nothing new is
+ * started. Derived rather than felt: a card is around 600dp tall on a phone, and
+ * a card passing in under a quarter of a second is one nobody is looking at.
+ */
+private val FastScrollEngageSpeed = 2_400.dp
+
+/** And below this it is being read again - see ScrollSpeedTracker on the pair. */
+private val FastScrollReleaseSpeed = 800.dp
+
+/** How much of each new sample the running speed takes. */
+private const val SPEED_SMOOTHING = 0.3f
+
+/** Longer than this between samples is a new gesture, not a slow one. */
+private const val MAX_SAMPLE_SECONDS = 0.25f
+
+private const val NANOS_PER_SECOND = 1_000_000_000f
+// <-- AM (SCROLLER_SPEED_GATE)
 
 /** Used only until a card's cover has loaded and can be measured. */
 private const val ScrollerFallbackAspectRatio = 16f / 9f

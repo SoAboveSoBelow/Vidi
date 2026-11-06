@@ -29,7 +29,6 @@ data class DisplayedTags(
     /** Whether anything here is the user's choice rather than the cap's. */
     val isCustomised: Boolean = pinned.isNotEmpty()
 
-
     /** Whether a "more" chip is needed at all. */
     val hasHidden: Boolean = hidden.isNotEmpty()
 

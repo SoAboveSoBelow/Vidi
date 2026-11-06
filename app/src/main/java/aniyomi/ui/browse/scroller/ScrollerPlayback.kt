@@ -295,13 +295,17 @@ class ScrollerPlaybackState internal constructor(
      * Called by the card itself, and safe to call again: a card already
      * holding a loaded player does nothing.
      */
-    suspend fun acquire(anime: Anime, source: AnimeSource) {
+    suspend fun acquire(anime: Anime, source: AnimeSource, tier: MPVPlayer.CacheTier) {
         // AM (BROWSE_SCROLLER_RETENTION): this card is back before its
         // retention ran out, so there is nothing to tear down and nothing to
         // reload - the instance below is still holding its file.
         retainJobs.remove(anime.id)?.cancel()
         val player = pool.acquire(anime.id, onEvict = ::onSlotEvicted)
         poolRevision++
+        // AM (SCROLLER_PRELOAD_TIERS): before the already-loaded return below,
+        // because a card moving from two ahead to one ahead without its file
+        // changing is exactly the case the tier exists to serve.
+        player.setPreloadTier(tier)
         player.setMuted(isMuted, mayHoldAudioFocus = anime.id == activeAnimeId)
 
         // AM (SESSION_KEYED_TEMP_POSITIONS): before the load, which reads the
@@ -745,7 +749,15 @@ class ScrollerPlaybackState internal constructor(
         if (animeId == fullscreenAnimeId) return
         if (retainJobs.containsKey(animeId)) return
 
+        // AM (SCROLLER_PRELOAD_TIERS): a card nobody is drawing any more has no
+        // claim on the feed's bandwidth, however close to the viewport it was
+        // when it last pulled. Retention keeps its file open, not its budget.
+        //
+        // After the retain, not before: retaining is what pauses the card, and
+        // the tier of an entry still playing is Playing whatever this says.
+        val retained = pool.get(animeId)
         pool.retain(animeId)
+        retained?.setPreloadTier(MPVPlayer.CacheTier.Far)
         poolRevision++
         if (animeId == activeAnimeId) progressJob?.cancel()
         if (animeId == controlsForAnimeId) hideControls()

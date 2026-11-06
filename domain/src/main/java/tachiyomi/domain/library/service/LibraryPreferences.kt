@@ -71,6 +71,7 @@ class LibraryPreferences(
     )
 
     // AM (MERGE_SETTINGS) -->
+
     /**
      * The dedupe mode a newly created merge starts on. Per-merge settings still
      * override it; this only decides where a merge begins, so changing it never
@@ -252,6 +253,7 @@ class LibraryPreferences(
     )
 
     // AM (TAG_LIMIT) -->
+
     /**
      * How many of an entry's tags are shown inline by default, merged or not.
      *
@@ -439,6 +441,7 @@ class LibraryPreferences(
         const val ANIME_OUTSIDE_RELEASE_PERIOD = "anime_outside_release_period"
 
         // AM (TAG_LIMIT) -->
+
         /** Lowest [maxTagsShown]: no tags inline but the pinned ones. */
         const val MIN_TAG_LIMIT = 0
 

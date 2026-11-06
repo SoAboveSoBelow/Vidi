@@ -33,6 +33,7 @@ class PlayerPreferences(
     )
 
     // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
+
     /**
      * Disk allowance, in bytes, for keeping the raw stream bytes of episodes that
      * hold a temporary position slot, so returning to one replays from disk instead
@@ -60,6 +61,7 @@ class PlayerPreferences(
     // <-- AM (RECENT_EPISODE_POSITIONS)
 
     // AM (NETWORK_BUFFER_SECONDS) -->
+
     /**
      * How many seconds of a network stream to buffer ahead (mpv's `cache-secs`).
      * Still capped by `demuxer-max-bytes`, which is a memory guard rather than a
@@ -98,6 +100,7 @@ class PlayerPreferences(
      * finds them.
      */
     val queueAutoTrim: Preference<Int> = preferenceStore.getInt("pref_queue_auto_trim", 3)
+
     // <-- AM (PLAYBACK_QUEUE)
     val defaultPlayerOrientationType: Preference<PlayerOrientation> = preferenceStore.getEnum(
         "pref_default_player_orientation_type_key",
@@ -151,6 +154,7 @@ class PlayerPreferences(
     )
 
     // AM (CUSTOM_EPISODE_ORDER) -->
+
     /**
      * When autoplay reaches the end of a season, ask before rolling into the
      * next one instead of continuing automatically. Only meaningful for
@@ -166,11 +170,13 @@ class PlayerPreferences(
 
     val enablePip: Preference<Boolean> = preferenceStore.getBoolean("pref_enable_pip", true)
     val pipEpisodeToasts: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_episode_toasts", true)
+
     // AM (SECURE_LOCK_BACKGROUND_PLAYBACK) -->
     // Default true: exiting via Home/Back should auto-enter PIP rather than silently
     // falling back to audio-only background playback. No settings screen currently
     // exposes this toggle, so the default is effectively the only way to control it.
     val pipOnExit: Preference<Boolean> = preferenceStore.getBoolean("pref_pip_on_exit", true)
+
     // <-- AM (SECURE_LOCK_BACKGROUND_PLAYBACK)
     val pipFirstButtonAction: Preference<Int> = preferenceStore.getInt("pip_first_button_action", 0)
 
