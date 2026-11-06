@@ -44,7 +44,7 @@ android {
         applicationId = "xyz.Quickdev.Vidi.mi"
 
         versionCode = 157
-        versionName = "0.19.16.1"
+        versionName = "0.20.0"
 
         buildConfigField("String", "COMMIT_COUNT", "\"${getLatestCommitCount()}\"")
         buildConfigField("String", "COMMIT_SHA", "\"${getLatestCommitSha()}\"")
