@@ -289,6 +289,11 @@ class ClipPlayback(
             // playing even for a frame before being paused.
             val options = buildList {
                 add("pause=yes")
+                // Samsung's MediaCodec path can consume a whole sub-second
+                // H.264 file without emitting its first frame. Feed cards and
+                // split-stream clips use software decoding; ordinary episodes
+                // retain the user's hardware-decoding preference.
+                if (managesAudio || audioUrl != null) add("hwdec=no")
                 // The same file on both instances: this one takes the video
                 // and the companion takes the audio, so the video can repeat
                 // on its own length while the audio plays through. Without
@@ -506,7 +511,7 @@ class ClipPlayback(
         if (audio == null || audioLength > 0f) latchedAudioLength = audioLength
     }
 
-    /** Regular feed clips repeat; split entries repeat only their shorter stream. */
+    /** The feed repeats both streams; the player repeats only the shorter one. */
     private fun applyStreamLooping() {
         if (!looping) {
             setLooping(video, false)
@@ -527,8 +532,16 @@ class ClipPlayback(
             audio?.let { setLooping(it, false) }
             return
         }
-        setLooping(video, audioLength > videoLength)
-        audio?.let { setLooping(it, videoLength > audioLength) }
+        if (managesAudio) {
+            // The feed loops the whole entry, so neither stream may stop.
+            setLooping(video, true)
+            audio?.let { setLooping(it, true) }
+        } else {
+            // The player runs the longer stream once as the entry timeline;
+            // the shorter stream repeats underneath it until that timeline ends.
+            setLooping(video, audioLength > videoLength)
+            audio?.let { setLooping(it, videoLength > audioLength) }
+        }
     }
     // <-- AM (CLIP_TIMELINE_LENGTHS_ARE_LATCHED)
 
@@ -566,7 +579,6 @@ class ClipPlayback(
             video.mpv.command("seek", seconds.coerceAtLeast(0f).toString(), "absolute")
             return
         }
-
         // AM (CLIP_TIMELINE) -->
         // The longer stream goes to the target; the shorter one goes to where
         // it would be at that point, which is the target folded into its own
