@@ -18,6 +18,7 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 // <-- AM (BLUETOOTH_DISCONNECT_PAUSE_FIX)
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
+import eu.kanade.tachiyomi.ui.player.mpv.MpvInstancePool
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -1624,6 +1625,25 @@ class PlayerMediaHolder(
         return _player!!
     }
 
+    // AM (POOLED_PLAYER_INSTANCES) -->
+    private var _instancePool: MpvInstancePool? = null
+
+    /**
+     * The session's mpv instance pool, created on first use from [create].
+     *
+     * Held here rather than on PlayerViewModel because the lifetime that
+     * matters is the session's, not the view model's: onCleared() deliberately
+     * leaves the canonical player alone (it is service-owned and outlives the
+     * view model), so a pool owned there would be abandoned with its idle
+     * instances still open on every view model teardown. [release] below is the
+     * one point that genuinely corresponds to "the session is over", which is
+     * also the only point at which closing an instance is safe.
+     */
+    @Synchronized
+    fun instancePool(create: () -> MpvInstancePool): MpvInstancePool =
+        _instancePool ?: create().also { _instancePool = it }
+    // <-- AM (POOLED_PLAYER_INSTANCES)
+
     /** Atomically promotes a prepared quality player and moves player-scoped events to it. */
     @Synchronized
     fun replacePlayer(expected: MPVPlayer, replacement: MPVPlayer): Boolean {
@@ -1802,6 +1822,11 @@ class PlayerMediaHolder(
         _viewModel = null
         // <-- AM (SERVICE_OWNED_VIEWMODEL)
         clipPlayback = null
+        // AM (POOLED_PLAYER_INSTANCES): idle instances go with the session, and
+        // only here - this is the one place a close is not racing something
+        // still rendering.
+        _instancePool?.releaseAll()
+        _instancePool = null
         _player?.release()
         _player = null
         _state.value = PlayerMediaState()

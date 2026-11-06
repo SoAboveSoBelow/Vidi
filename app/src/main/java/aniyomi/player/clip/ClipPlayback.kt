@@ -593,16 +593,106 @@ class ClipPlayback(
     val durationSeconds: Float
         get() = maxOf(videoDurationSeconds, audioDurationSeconds)
 
-    /** Current position plus the forward cache reported by this mpv build. */
+    /**
+     * How far the entry is held, as a position on the entry's own timeline.
+     *
+     * AM (SCROLLER_BUFFER_IS_A_CACHED_RANGE): read as a cached range endpoint
+     * rather than built out of the playhead. A duration added to the playhead
+     * cannot reach the cache's end: mpv measures its forward queue from the
+     * decoder's read position, which leads the displayed position by whatever
+     * is sitting in the output and audio queues, so `position + cache-duration`
+     * lands that much short of where the data actually ends - the permanently
+     * missing tail. `seekable-ranges` is the same thing a browser hands a web
+     * player as `HTMLMediaElement.buffered`: absolute start/end pairs, from
+     * which the range holding the playhead is the one to draw to.
+     *
+     * The last packet's timestamp is still a frame shy of the stream's stated
+     * length, so a stream whose demuxer has reached the end of the file - and
+     * whose cached range runs that far - reports the full duration instead.
+     * That is the "fully buffered but never quite full" tail.
+     *
+     * The companion stream is an endpoint on its own clock only while it runs
+     * once alongside the entry. A shorter companion repeating underneath has a
+     * clock that returns to zero, so for that one the forward queue, which is
+     * clock-agnostic, is still the only honest thing to measure.
+     */
     val bufferedPositionSeconds: Float
         get() {
             val position = positionSeconds
-            val videoReadAhead = readAheadSeconds(video)
-            val audioReadAhead = audio?.takeIf { splitLoad }?.let(::readAheadSeconds)
-            val readAhead = audioReadAhead?.let { minOf(videoReadAhead, it) } ?: videoReadAhead
-            return (position + readAhead).coerceAtLeast(position)
-                .let { if (durationSeconds > 0f) it.coerceAtMost(durationSeconds) else it }
+            val duration = durationSeconds
+            val source = if (audioIsLonger) audio ?: video else video
+            val companion = audio?.takeIf { splitLoad && it !== source }
+
+            var buffered = cachedThroughSeconds(source, position, duration, repeats = false)
+            if (companion != null) {
+                val companionBuffered =
+                    cachedThroughSeconds(companion, position, duration, repeats = shorterStreamRepeats)
+                buffered = minOf(buffered, companionBuffered)
+            }
+            return buffered.coerceAtLeast(position)
+                .let { if (duration > 0f) it.coerceAtMost(duration) else it }
         }
+
+    /** True while the entry's shorter stream is looping under its longer one. */
+    private val shorterStreamRepeats: Boolean
+        get() {
+            val videoLength = videoDurationSeconds
+            val audioLength = audioDurationSeconds
+            return looping && videoLength > 0f && audioLength > 0f && videoLength != audioLength
+        }
+
+    /** Where [player]'s cache runs out, on the entry's timeline. */
+    private fun cachedThroughSeconds(
+        player: MPVPlayer,
+        position: Float,
+        duration: Float,
+        repeats: Boolean,
+    ): Float {
+        if (!repeats) {
+            cachedRangeEndSeconds(player, position, duration)?.let { return it }
+        }
+        return position + readAheadSeconds(player)
+    }
+
+    /**
+     * The end of the cached range the playhead sits in, or null where this
+     * build reports no ranges at all.
+     *
+     * A range that runs to the end of a fully demuxed file is reported as the
+     * stream's whole length: its last timestamp is the last packet's, one
+     * frame short of the length every other readout uses, and a seek bar that
+     * stops a frame early for a file held in its entirety is the complaint
+     * this is here to answer. A later range means there is a hole ahead, so
+     * only the one the playhead is in may be drawn to - the same rule a web
+     * player follows over `buffered`.
+     */
+    private fun cachedRangeEndSeconds(player: MPVPlayer, position: Float, duration: Float): Float? {
+        val count = player.mpv.getPropertyInt("demuxer-cache-state/seekable-ranges/count")
+            ?.coerceAtMost(MAX_SEEK_RANGES)
+            ?: return cacheEndSeconds(player)
+        if (count <= 0) return cacheEndSeconds(player)
+
+        var containing: Float? = null
+        var furthest = Float.NEGATIVE_INFINITY
+        for (index in 0 until count) {
+            val path = "demuxer-cache-state/seekable-ranges/$index"
+            val start = player.mpv.getPropertyDouble("$path/start")?.toFloat()?.takeIf { it.isFinite() } ?: continue
+            val end = player.mpv.getPropertyDouble("$path/end")?.toFloat()?.takeIf { it.isFinite() } ?: continue
+            if (end > furthest) furthest = end
+            if (position >= start - RANGE_EDGE_EPSILON && position <= end + RANGE_EDGE_EPSILON) containing = end
+        }
+
+        val end = containing ?: return cacheEndSeconds(player)
+        val atFileEnd = duration > 0f &&
+            end >= furthest - RANGE_EDGE_EPSILON &&
+            player.mpv.getPropertyBoolean("demuxer-cache-state/eof") == true
+        return if (atFileEnd) duration else end
+    }
+
+    /** The absolute end of what the demuxer holds, where ranges are unavailable. */
+    private fun cacheEndSeconds(player: MPVPlayer): Float? =
+        player.mpv.getPropertyDouble("demuxer-cache-state/cache-end")?.toFloat()?.takeIf { it.isFinite() }
+            ?: player.mpv.getPropertyDouble("demuxer-cache-time")?.toFloat()?.takeIf { it.isFinite() }
 
     val isBuffering: Boolean
         get() = video.isCacheStarved() || audio?.takeIf { splitLoad }?.isCacheStarved() == true
@@ -611,20 +701,35 @@ class ClipPlayback(
         mpv.getPropertyBoolean("paused-for-cache") == true ||
             mpv.getPropertyBoolean("demuxer-cache-state/underrun") == true
 
+    /**
+     * How many seconds [player] holds ahead of its own read position.
+     *
+     * AM (SCROLLER_BUFFER_IS_A_CACHED_RANGE): `demuxer-cache-time` is not a
+     * duration - it is the timestamp of the end of the buffered range, on the
+     * file's own clock (demux_ctrl_ts_info.end). Adding it to a position
+     * counted the position twice, which is why the bar ran at roughly double
+     * the playhead and widened as the entry went on. `cache-duration` is
+     * end-minus-reader, which is what a readahead is.
+     *
+     * No starved special case: cache-duration stays correct while the cache is
+     * underrunning - it reports the little that is actually held, which is the
+     * honest answer. The old branch substituted mpv's refill percentage scaled
+     * by cache-pause-wait, so a starved stream drew up to 1.5s of buffer that
+     * did not exist.
+     */
     private fun readAheadSeconds(player: MPVPlayer): Float {
-        if (player.isCacheStarved()) {
-            // While starved, cache-time can describe a disjoint cached range.
-            // mpv's buffering percentage is measured against cache-pause-wait
-            // (1.5s here), so it describes the refill that actually gates resume.
-            val percent = player.mpv.getPropertyInt("cache-buffering-state") ?: return 0f
-            return (percent.coerceIn(0, 100) / 100f) * CACHE_PAUSE_WAIT_SECONDS
-        }
-        // Newer mpv exposes the forward queue directly. Older builds do not;
-        // their cache-time remains the only non-starved readahead estimate.
-        return player.mpv.getPropertyDouble("demuxer-cache-state/cache-duration")?.toFloat()
-            ?.takeIf { it.isFinite() }?.coerceAtLeast(0f)
-            ?: player.mpv.getPropertyDouble("demuxer-cache-time")?.toFloat()
-                ?.takeIf { it.isFinite() }?.coerceAtLeast(0f) ?: 0f
+        val cached = player.mpv.getPropertyDouble("demuxer-cache-state/cache-duration")?.toFloat()
+            ?.takeIf { it.isFinite() }
+            ?: player.mpv.getPropertyDouble("demuxer-cache-duration")?.toFloat()
+                ?.takeIf { it.isFinite() }
+        if (cached != null) return cached.coerceAtLeast(0f)
+
+        val cacheEnd = cacheEndSeconds(player) ?: return 0f
+        val reader = player.mpv.getPropertyDouble("demuxer-cache-state/reader-pts")?.toFloat()
+            ?.takeIf { it.isFinite() }
+            ?: player.mpv.getPropertyDouble("time-pos")?.toFloat()?.takeIf { it.isFinite() }
+            ?: return 0f
+        return (cacheEnd - reader).coerceAtLeast(0f)
     }
 
     /**
@@ -869,7 +974,8 @@ class ClipPlayback(
         private const val LOOP_FOREVER = "inf"
         private const val LOOP_OFF = "no"
         private const val SEEK_POSITION_EPSILON = 0.05f
-        private const val CACHE_PAUSE_WAIT_SECONDS = 1.5f
+        private const val RANGE_EDGE_EPSILON = 0.25f
+        private const val MAX_SEEK_RANGES = 10
 
         /**
          * Whether [anime]'s listing says its clip repeats rather than ends.

@@ -1,5 +1,6 @@
 package aniyomi.ui.browse.scroller
 
+import eu.kanade.tachiyomi.ui.player.RecentPositionManager
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 
 // AM (BROWSE_SCROLLER) -->
@@ -35,6 +36,9 @@ import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 class ScrollerPlayerPool(
     private val factory: MPVPlayer.Factory,
     private val videoOutput: String,
+    // AM (SESSION_KEYED_TEMP_POSITIONS): handed to each instance it builds -
+    // see ScrollerPlayer's own parameter.
+    private val positions: RecentPositionManager,
 ) {
 
     /** A slot holds one instance for the life of the feed. */
@@ -108,7 +112,13 @@ class ScrollerPlayerPool(
         // load again.
         val slot = slots.firstOrNull { it.animeId == null }
             ?: if (slots.size < CAPACITY) {
-                Slot(ScrollerPlayer(factory.create(videoOutput), factory.create(videoOutput))).also { slots += it }
+                Slot(
+                    ScrollerPlayer(
+                        factory.create(videoOutput),
+                        factory.create(videoOutput),
+                        positions,
+                    ),
+                ).also { slots += it }
             } else {
                 // AM (BROWSE_SCROLLER_RETENTION): retained slots first, oldest
                 // of them, and only then one a card is still using.

@@ -18,6 +18,7 @@ import dev.zacsweers.metrox.viewmodel.MetroViewModelFactory
 import dev.zacsweers.metrox.viewmodel.ViewModelGraph
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.base.BasePreferences
+import eu.kanade.domain.track.interactor.TrackEpisode
 import eu.kanade.domain.connection.SyncPreferences
 import eu.kanade.domain.connection.service.ConnectionPreferences
 import eu.kanade.domain.extension.interactor.TrustExtension
@@ -58,7 +59,7 @@ import eu.kanade.tachiyomi.ui.player.PlayerViewModel
 import eu.kanade.tachiyomi.ui.player.loader.EpisodeLoader
 import eu.kanade.tachiyomi.ui.player.loader.HosterLoader
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
-import eu.kanade.tachiyomi.ui.player.RecentEpisodePositionManager
+import eu.kanade.tachiyomi.ui.player.RecentPositionManager
 import eu.kanade.tachiyomi.ui.player.domain.BrightnessManager
 import eu.kanade.tachiyomi.ui.setting.track.BaseOAuthLoginActivity
 import eu.kanade.tachiyomi.ui.webview.WebViewActivity
@@ -72,6 +73,8 @@ import tachiyomi.core.common.storage.AndroidStorageFolderProvider
 import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
+import tachiyomi.domain.episode.interactor.UpdateEpisode
+import tachiyomi.domain.history.interactor.UpsertHistory
 import tachiyomi.domain.anime.interactor.GetCustomAnimeInfo
 import tachiyomi.domain.anime.interactor.GetFavorites
 import tachiyomi.domain.anime.interactor.ResetViewerFlags
@@ -127,6 +130,8 @@ interface AppGraph : ViewModelGraph {
     val libraryPreferences: LibraryPreferences
     val sourcePreferences: SourcePreferences
     val trackPreferences: TrackPreferences
+    // AM (SCROLLER_MARKS_SEEN)
+    val trackEpisode: TrackEpisode
     val backupPreferences: BackupPreferences
     val storagePreferences: StoragePreferences
     val securityPreferences: SecurityPreferences
@@ -187,13 +192,17 @@ interface AppGraph : ViewModelGraph {
     // Exposed for PlayerMediaHolder's constructor defaults - see that class's
     // own AM (BACKGROUND_SKIP_FIX) tag.
     val getEpisode: GetEpisode
+    // AM (SCROLLER_WRITES_WATCH_PROGRESS) -->
+    val updateEpisode: UpdateEpisode
+    val upsertHistory: UpsertHistory
+    // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
     val coverManager: LocalCoverManager
     val episodeThumbnailManager: LocalEpisodeThumbnailManager
     // <-- AM (BACKGROUND_SKIP_FIX)
     val externalIntents: ExternalIntents
     val brightnessManager: BrightnessManager
     val getCustomAnimeInfo: GetCustomAnimeInfo
-    val recentEpisodePositionManager: RecentEpisodePositionManager
+    val recentPositionManager: RecentPositionManager
     // AM (SERVICE_OWNED_VIEWMODEL) -->
     // Exposed directly (not via the standard viewModelFactory multibinding dispatch)
     // so PlayerActivity's PlayerMediaHolder reuse-or-construct logic can call

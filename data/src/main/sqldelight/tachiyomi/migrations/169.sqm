@@ -1,0 +1,23 @@
+-- AM (CONTENT_AGNOSTIC_SESSION) -->
+-- Re-key episode_temp_positions on an opaque session key. See
+-- session_temp_positions.sq: the episode_id key made the table library-only,
+-- so an external video or a feed card - sessions with a position and no
+-- episode row - had nowhere to write one.
+--
+-- A library row keeps the episode as its whole identity, exactly as migration
+-- 148 left it, so every existing row carries over unchanged but for its prefix.
+-- See SessionKey.storageKey for why the anime id stays out of the key.
+CREATE TABLE session_temp_positions(
+    session_key TEXT NOT NULL PRIMARY KEY,
+    position_ms INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+INSERT INTO session_temp_positions(session_key, position_ms, updated_at)
+SELECT 'library:' || episode_id, position_ms, updated_at
+FROM episode_temp_positions;
+
+DROP TABLE episode_temp_positions;
+
+CREATE INDEX session_temp_positions_updated_at_index ON session_temp_positions(updated_at);
+-- <-- AM (CONTENT_AGNOSTIC_SESSION)

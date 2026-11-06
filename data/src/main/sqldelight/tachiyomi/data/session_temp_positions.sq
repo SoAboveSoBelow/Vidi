@@ -1,0 +1,48 @@
+-- AM (CONTENT_AGNOSTIC_SESSION) -->
+-- Keyed by an opaque session key since migration 169. It used to be
+-- episode_id, which made the table library-only: an external video and a feed
+-- card are both sessions with a position to remember, and neither has an
+-- episode row to key one against. The key's encoding belongs to the player
+-- (SessionKey.storageKey); this layer stores whatever string it is handed,
+-- which is what lets a new session kind arrive without another migration.
+-- <-- AM (CONTENT_AGNOSTIC_SESSION)
+CREATE TABLE session_temp_positions(
+    session_key TEXT NOT NULL PRIMARY KEY,
+    position_ms INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX session_temp_positions_updated_at_index ON session_temp_positions(updated_at);
+
+getAll:
+SELECT session_key, position_ms, updated_at
+FROM session_temp_positions
+ORDER BY updated_at DESC;
+
+upsert:
+INSERT INTO session_temp_positions(session_key, position_ms, updated_at)
+VALUES (:sessionKey, :positionMs, :updatedAt)
+ON CONFLICT(session_key)
+DO UPDATE
+SET
+    position_ms = :positionMs,
+    updated_at = :updatedAt;
+
+deleteByKey:
+DELETE FROM session_temp_positions
+WHERE session_key = :sessionKey;
+
+-- Keeps only the :keepCount most-recently-updated rows, by rowid rather than a
+-- row-value tuple comparison so it doesn't depend on the primary key being
+-- usable in a row-value IN (...) subquery.
+pruneToMostRecent:
+DELETE FROM session_temp_positions
+WHERE rowid NOT IN (
+    SELECT rowid
+    FROM session_temp_positions
+    ORDER BY updated_at DESC
+    LIMIT :keepCount
+);
+
+deleteAll:
+DELETE FROM session_temp_positions;

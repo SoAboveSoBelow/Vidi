@@ -5,6 +5,8 @@ import android.view.TextureView
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import aniyomi.player.clip.ClipPlayback
+import eu.kanade.tachiyomi.ui.player.RecentPositionManager
+import eu.kanade.tachiyomi.ui.player.SessionKey
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import kotlin.math.abs
 
@@ -25,12 +27,24 @@ import kotlin.math.abs
  * audio instance, the readiness gate, the loop, the buffer, mute and audio
  * focus - moved to [ClipPlayback], which the real player now plays the same
  * entries with. What is left here is what a card has and a player session does
- * not: a TextureView to read a placeholder frame out of, and the feed's own
- * position store.
+ * not: a TextureView to read a placeholder frame out of.
  */
 class ScrollerPlayer(
     videoPlayer: MPVPlayer,
     audioPlayer: MPVPlayer,
+    // AM (SESSION_KEYED_TEMP_POSITIONS) -->
+    /**
+     * Where a card's position is written: the app's one temp-position store,
+     * the same one the real player resumes from. Written to, never read -
+     * see [loadPaused].
+     *
+     * It used to be a map on [ScrollerSession], which is why a card's progress
+     * went no further than the feed - nothing outside this package could see
+     * it, so opening the entry in the player started from zero however long the
+     * card had been watched.
+     */
+    private val positions: RecentPositionManager,
+    // <-- AM (SESSION_KEYED_TEMP_POSITIONS)
 ) {
 
     private val clip = ClipPlayback(
@@ -74,12 +88,36 @@ class ScrollerPlayer(
 
     fun onSurfaceAttachedChanged(attached: Boolean) = clip.onSurfaceAttachedChanged(attached)
 
+    // AM (SESSION_KEYED_TEMP_POSITIONS) -->
     /**
-     * Loads [url] and holds it on its first frame.
+     * What this card's position is stored under: the episode it plays.
      *
-     * Resumes from where this card left off if it has been played before this
-     * session - the feed's own store, which is the one thing about a load that
-     * is the feed's rather than [ClipPlayback]'s.
+     * Null until the entry's episodes are known - see
+     * [ScrollerPlaybackState.resolveSessionKey], which looks locally at load
+     * and fetches only once a card has actually been watched. A card with no
+     * key holds no position, which is the honest state rather than a gap: the
+     * feed is playing something it cannot yet name, and inventing a feed-local
+     * identity for it is what kept this progress out of the player's reach.
+     */
+    var sessionKey: SessionKey? = null
+        set(value) {
+            // Arriving late: the card has been playing against no key, so what
+            // it has reached would otherwise not be written until the next
+            // pause or eviction.
+            field = value
+            if (value != null) rememberPosition()
+        }
+    // <-- AM (SESSION_KEYED_TEMP_POSITIONS)
+
+    /**
+     * Loads [url] and holds it on its first frame, from the beginning.
+     *
+     * Deliberately does not resume, though this card writes a position the
+     * player does resume from. A card is something you come across, and
+     * meeting it part way through is not what the feed is for; its own way
+     * back to where you were is the pool holding the instance loaded (see
+     * BROWSE_SCROLLER_RETENTION), which lasts exactly as long as a card is
+     * worth keeping.
      */
     fun loadPaused(key: Long, url: String, audioUrl: String?, httpHeaderFields: String?) {
         if (loadedKey == key) return
@@ -90,7 +128,6 @@ class ScrollerPlayer(
             url = url,
             audioUrl = audioUrl,
             httpHeaderFields = httpHeaderFields,
-            resumeAt = ScrollerSession.positions[key],
         )
     }
 
@@ -186,11 +223,34 @@ class ScrollerPlayer(
     /** Called while playing, so progress survives a kill mid-clip. */
     fun notePosition() = rememberPosition()
 
+    // AM (SESSION_KEYED_TEMP_POSITIONS) -->
+    /**
+     * Writes this card's position to the app's temp-position store, under the
+     * episode it plays.
+     *
+     * Nothing is written for a card with no [sessionKey]: that card has not
+     * been watched long enough for its episodes to have been resolved, and the
+     * store is pruned MRU to a slot count sized for episodes a person actually
+     * watched. A feed would otherwise offer it a candidate for every card
+     * dwelt on and evict real resume positions at the rate the user scrolls.
+     *
+     * Duration is handed over so the store can clear the slot on an entry that
+     * ran to its end, exactly as it does for an episode.
+     */
     private fun rememberPosition() {
-        val key = loadedKey ?: return
-        val position = clip.positionSeconds.toDouble()
-        if (position > 0.0) ScrollerSession.positions[key] = position
+        val key = sessionKey ?: return
+        positions.remember(
+            key,
+            positionMs = (clip.positionSeconds * 1000f).toLong(),
+            // Deliberately no duration. The store clears a slot whose position
+            // has reached the end of the entry, which is right for an episode
+            // that finished and wrong for a card: every card loops, so it sits
+            // within a second of its own end for much of every revolution and
+            // the slot was being wiped almost as fast as it was written.
+            durationMs = 0L,
+        )
     }
+    // <-- AM (SESSION_KEYED_TEMP_POSITIONS)
 
     /**
      * Stops this instance and forgets what it was playing, keeping it alive to
@@ -203,6 +263,10 @@ class ScrollerPlayer(
     fun reset() {
         rememberPosition()
         loadedKey = null
+        // AM (SESSION_KEYED_TEMP_POSITIONS): with the file. This instance is
+        // about to be loaded with a different entry, and a key left behind
+        // would write that entry's position against the previous one's episode.
+        sessionKey = null
         clip.reset()
     }
 
@@ -210,6 +274,7 @@ class ScrollerPlayer(
     fun release() {
         rememberPosition()
         loadedKey = null
+        sessionKey = null
         textureView = null
         clip.release()
     }

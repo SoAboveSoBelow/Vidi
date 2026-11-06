@@ -82,9 +82,26 @@ class HistoryViewModel(
 
     private val dialog = MutableStateFlow<Dialog?>(null)
 
-    private val history = searchQuery
-        .flatMapLatest { query ->
-            getHistory.subscribe(query ?: "")
+    // AM (HISTORY_ORIGIN) -->
+    /**
+     * Whether the list is narrowed to episodes watched in the player, leaving
+     * out the cards seen in the browse feed. Toggled by tapping the History
+     * chip while it is already showing.
+     *
+     * Not persisted: it is a way of looking at the list for a moment, not a
+     * setting, and coming back to a History tab that silently hides entries
+     * would be worse than re-tapping.
+     */
+    private val playerOnly = MutableStateFlow(false)
+
+    fun togglePlayerOnly() {
+        playerOnly.value = !playerOnly.value
+    }
+    // <-- AM (HISTORY_ORIGIN)
+
+    private val history = combine(searchQuery, playerOnly, ::Pair)
+        .flatMapLatest { (query, playerOnly) ->
+            getHistory.subscribe(query ?: "", playerOnly)
                 .distinctUntilChanged()
                 .catch { error ->
                     logcat(LogPriority.ERROR, error)
@@ -99,8 +116,10 @@ class HistoryViewModel(
         searchQuery,
         history,
         dialog,
-    ) { searchQuery, history, dialog ->
-        State(searchQuery = searchQuery, list = history, dialog = dialog)
+        // AM (HISTORY_ORIGIN)
+        playerOnly,
+    ) { searchQuery, history, dialog, playerOnly ->
+        State(searchQuery = searchQuery, list = history, dialog = dialog, playerOnly = playerOnly)
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5.seconds), State())
 
@@ -274,6 +293,8 @@ class HistoryViewModel(
         val searchQuery: String? = null,
         val list: List<HistoryUiModel>? = null,
         val dialog: Dialog? = null,
+        // AM (HISTORY_ORIGIN)
+        val playerOnly: Boolean = false,
     )
 
     sealed interface Dialog {

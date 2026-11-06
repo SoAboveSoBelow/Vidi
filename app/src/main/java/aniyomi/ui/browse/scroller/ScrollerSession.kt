@@ -63,15 +63,6 @@ object ScrollerSession {
     val aspectRatios = mutableMapOf<Long, Float>()
 
     /**
-     * Playback positions by entry id.
-     *
-     * By entry, not by url: a url goes through MediaProxyServer and carries a
-     * fresh random registration key every time it is registered, so a position
-     * stored against one would never be found again.
-     */
-    val positions = mutableMapOf<Long, Double>()
-
-    /**
      * The first frame each card rendered, so a card outside the loaded window
      * shows where its video begins rather than its cover.
      *
@@ -124,9 +115,12 @@ object ScrollerSession {
         // frames; a map of floats is not, and dropping it meant every card
         // was its cover's shape again on return - so the feed redrew the
         // initial-geometry gate and then resized under the user, for nothing.
-        // Positions stay for the same reason: they are doubles, and losing
-        // them restarts every clip the user was part way through.
         // <-- AM (BROWSE_SCROLLER_SESSION_INVALIDATION)
+        // AM (SESSION_KEYED_TEMP_POSITIONS): positions are no longer among the
+        // things this has to decide about. They live in the app's temp-position
+        // store (RecentPositionManager), which is DB-backed and outlives the
+        // process entirely, rather than in a map that could only ever be as
+        // durable as this object.
         firstFrames.clear()
         revision++
     }

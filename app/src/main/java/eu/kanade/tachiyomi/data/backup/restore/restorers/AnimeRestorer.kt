@@ -24,6 +24,8 @@ import tachiyomi.domain.anime.model.CustomAnimeInfo
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
 import tachiyomi.domain.episode.model.Episode
+// AM (HISTORY_ORIGIN)
+import tachiyomi.domain.history.model.HistoryOrigin
 import tachiyomi.domain.track.interactor.GetTracks
 import tachiyomi.domain.track.interactor.InsertTrack
 import tachiyomi.domain.track.model.Track
@@ -463,6 +465,11 @@ class AnimeRestorer(
                 database.historyQueries.upsert(
                     it.episodeId,
                     it.seenAt,
+                    // AM (HISTORY_ORIGIN): a backup records episodes watched,
+                    // and a restore of one is restoring exactly that. The
+                    // browse feed's own entries are not backed up, so there is
+                    // no other origin a restored row could have.
+                    HistoryOrigin.Player.value,
                 )
             }
         }

@@ -10,6 +10,7 @@ import tachiyomi.domain.episode.interactor.GetEpisode
 import tachiyomi.domain.episode.interactor.UpdateEpisode
 import tachiyomi.domain.episode.model.EpisodeUpdate
 import tachiyomi.domain.history.interactor.UpsertHistory
+import tachiyomi.domain.history.model.HistoryOrigin
 import tachiyomi.domain.history.model.HistoryUpdate
 import java.util.Date
 
@@ -79,6 +80,14 @@ class LibraryProgressStore(
     /** Read per call, not captured: both can change mid-session. */
     private val isIncognito: () -> Boolean,
     private val hasTrackers: () -> Boolean,
+    // AM (HISTORY_ORIGIN) -->
+    /**
+     * What this store's history rows record as having produced them. The
+     * browse feed writes [HistoryOrigin.Feed] so its rows can be told apart
+     * from episodes genuinely watched - see HistoryOrigin.
+     */
+    private val historyOrigin: HistoryOrigin = HistoryOrigin.Player,
+    // <-- AM (HISTORY_ORIGIN)
 ) : PlaybackProgressStore {
 
     /** Was syncRequestedForEpisodeId - see SYNC_ON_OPEN_RUNS_ONCE. */
@@ -190,7 +199,8 @@ class LibraryProgressStore(
         if (historyWritten) return
         historyWritten = true
         // <-- AM (PERSIST_ON_CADENCE)
-        upsertHistory.await(HistoryUpdate(episode.id!!, Date()))
+        // AM (HISTORY_ORIGIN)
+        upsertHistory.await(HistoryUpdate(episode.id!!, Date(), historyOrigin))
     }
 }
 // <-- AM (CONTENT_AGNOSTIC_SESSION)

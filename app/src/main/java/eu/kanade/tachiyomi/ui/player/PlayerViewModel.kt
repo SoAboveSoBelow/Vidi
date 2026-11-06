@@ -135,6 +135,7 @@ import eu.kanade.tachiyomi.ui.player.loader.EpisodeLoader
 import eu.kanade.tachiyomi.ui.player.loader.HosterLoader
 import eu.kanade.tachiyomi.ui.player.mpv.ChapterNode
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
+import eu.kanade.tachiyomi.ui.player.mpv.MpvInstancePool
 import eu.kanade.tachiyomi.ui.player.mpv.MpvVideoTrack
 import eu.kanade.tachiyomi.ui.player.mpv.TrackNode
 import eu.kanade.tachiyomi.ui.player.mpv.TrackState
@@ -345,7 +346,7 @@ class PlayerViewModel(
     private val videoInformation: VideoInformation,
     // <-- AM (CAST)
     // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
-    private val recentEpisodePositionManager: RecentEpisodePositionManager,
+    private val recentPositionManager: RecentPositionManager,
     // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
     // AM (EXTERNAL_FOLDER_GRANT) -->
     // Registering a granted folder as a local source entry is the whole point of
@@ -446,6 +447,20 @@ class PlayerViewModel(
      * a ClipPlayback holding the previous one would drive an instance nothing
      * else is reading any more.
      */
+    // AM (POOLED_PLAYER_INSTANCES) -->
+    /**
+     * The session's instance pool, once there is a session to hold it.
+     *
+     * Null only before this view model has bound to a holder, which is also
+     * before anything it lends instances to can run - the quality switch below
+     * needs a holder to promote through at all. Callers fall back to building
+     * an instance directly in that window rather than standing up a pool whose
+     * lifetime nothing owns.
+     */
+    private val instancePool: MpvInstancePool?
+        get() = mediaHolder?.instancePool { MpvInstancePool(mpvFactory, videoOutput) }
+    // <-- AM (POOLED_PLAYER_INSTANCES)
+
     private var _clipPlayback: ClipPlayback? = null
     private val clipPlayback: ClipPlayback
         get() = _clipPlayback?.takeIf { it.video === _player }
@@ -771,118 +786,55 @@ class PlayerViewModel(
     // AM (MEDIA_SESSION_UNIFIED_CALLBACK) -->
     /**
      * Was PlayerActivity.setupMediaSessionCallback()'s inner `callback` object,
-     * moved here unchanged in behavior - only the receiver changed, from
-     * PlayerActivity's `viewModel.xxx()` to this ViewModel's own `xxx()`
-     * directly. This is now the ONLY MediaSession.Callback this app ever
-     * installs: PlayerMediaHolder's separate fallbackCallback (and everything
-     * that only existed to swap to/from it - restoreFallbackCallback(),
-     * skipToAdjacentEpisode(), performBackgroundSkipLoad()) is gone. That
-     * fallback existed because the old callback closed over an Activity
-     * instance's own soon-to-be-dead ViewModel; this one closes over `this`,
-     * the same persistent, Service-owned ViewModel regardless of whether any
-     * Activity is currently attached at all - there's no state left where a
-     * live UI is needed for this callback to safely do its job.
+     * then this view model's own buildMediaSessionCallback(). The callback
+     * itself now lives in MediaSessionTarget.kt and this is the half that was
+     * ever specific to the player: which of this session's methods each
+     * transport control reaches.
      *
-     * The one genuinely Activity-only action - Stop needing to visually close
-     * the player screen if one happens to be open - no longer calls finish()
-     * on a held Activity reference at all. It emits the exact same Event.Finish
-     * already used elsewhere for this (see PlayerActivity's existing eventFlow
-     * collector) - a live Activity reacts and closes itself; if none exists,
-     * the emission is simply consumed by nothing, which is correct.
+     * AM (SESSION_OWNS_ITS_CONTROLS): the callback used to be an anonymous
+     * object closing over `this`, which is what made a PlayerViewModel the only
+     * thing able to install one - and the browse feed, which has no view model,
+     * unable to answer a notification's buttons at all. Nothing about the
+     * callback needed a view model; it needed something that owns playback.
+     *
+     * Still the only callback this app installs, and still built over the same
+     * persistent, Service-owned object regardless of whether any Activity is
+     * attached - PlayerMediaHolder's separate fallbackCallback and everything
+     * that existed to swap to it remains gone.
      */
-    fun buildMediaSessionCallback(): MediaSession.Callback {
-        val previousAction = gesturePreferences.mediaPreviousGesture.get()
-        val playAction = gesturePreferences.mediaPlayPauseGesture.get()
-        val nextAction = gesturePreferences.mediaNextGesture.get()
+    private val mediaSessionTarget = object : MediaSessionTarget {
+        override fun play() = unpause()
 
-        return object : MediaSession.Callback() {
-            override fun onPlay() {
-                when (playAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {}
-                    SingleActionGesture.PlayPause -> {
-                        super.onPlay()
-                        unpause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
-                    }
+        override fun pause() = this@PlayerViewModel.pause()
 
-                    SingleActionGesture.Switch -> {}
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
+        override fun togglePause() = pauseUnpause()
 
-            override fun onPause() {
-                when (playAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {}
-                    SingleActionGesture.PlayPause -> {
-                        super.onPause()
-                        pause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
-                    }
+        override fun seekStep(forward: Boolean) = if (forward) rightSeek() else leftSeek()
 
-                    SingleActionGesture.Switch -> {}
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
+        override fun stepItem(next: Boolean) = nextEpisode(next = next)
 
-            override fun onSkipToPrevious() {
-                when (previousAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {
-                        leftSeek()
-                    }
-                    SingleActionGesture.PlayPause -> {
-                        pauseUnpause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        mpvCommand("keypress", CustomKeyCodes.MediaPrevious.keyCode)
-                    }
+        override fun keypress(code: String) {
+            mpvCommand("keypress", code)
+        }
 
-                    SingleActionGesture.Switch -> nextEpisode(next = false)
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
-
-            override fun onSkipToNext() {
-                when (nextAction) {
-                    SingleActionGesture.None -> {}
-                    SingleActionGesture.Seek -> {
-                        rightSeek()
-                    }
-                    SingleActionGesture.PlayPause -> {
-                        pauseUnpause()
-                    }
-                    SingleActionGesture.Custom -> {
-                        mpvCommand("keypress", CustomKeyCodes.MediaNext.keyCode)
-                    }
-
-                    SingleActionGesture.Switch -> nextEpisode(next = true)
-                    SingleActionGesture.Screenshot -> {}
-                }
-            }
-
-            override fun onStop() {
-                super.onStop()
-                // AM (MEDIASESSION_STOP_SAFETY_FIX) -->
-                // An external "stop" transport command (Bluetooth/AVRCP, a system
-                // media widget, etc.) reaching this callback is meant to behave
-                // like the notification's own Stop button - pause, stop the
-                // Service, and end the session for real. context.stopService()
-                // works identically via Application context, no Activity needed.
-                // finish() on a specific Activity instance is replaced by
-                // Event.Finish, per this function's own doc comment above.
-                // <-- AM (MEDIASESSION_STOP_SAFETY_FIX)
-                pause()
-                context.stopService(PlayerBackgroundPlaybackService.newIntent(context))
-                viewModelScope.launch { _eventFlow.emit(Event.Finish) }
-            }
+        override fun stopSession() {
+            // AM (MEDIASESSION_STOP_SAFETY_FIX) -->
+            // An external "stop" transport command (Bluetooth/AVRCP, a system
+            // media widget, etc.) reaching this callback is meant to behave
+            // like the notification's own Stop button - pause, stop the
+            // Service, and end the session for real. context.stopService()
+            // works identically via Application context, no Activity needed.
+            // finish() on a specific Activity instance is replaced by
+            // Event.Finish, per this class's own doc comment.
+            // <-- AM (MEDIASESSION_STOP_SAFETY_FIX)
+            this@PlayerViewModel.pause()
+            context.stopService(PlayerBackgroundPlaybackService.newIntent(context))
+            viewModelScope.launch { _eventFlow.emit(Event.Finish) }
         }
     }
+
+    fun buildMediaSessionCallback(): MediaSession.Callback =
+        mediaSessionCallbackFor(mediaSessionTarget, gesturePreferences)
     // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
 
     // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
@@ -1149,11 +1101,16 @@ class PlayerViewModel(
                 .launchIn(this)
 
             // AM (MEASURED_BANDWIDTH_SHARE) -->
-            // demuxer-cache-time is how many seconds ahead the demuxer has read.
-            // Against the configured target it becomes a fill fraction, which is
-            // what the proxy's rate limiter allocates from. Local playback
-            // publishes null - there is no stream to protect.
-            propFlow<Float>("demuxer-cache-time")
+            // demuxer-cache-duration is how many seconds ahead the demuxer has
+            // read. Against the configured target it becomes a fill fraction,
+            // which is what the proxy's rate limiter allocates from. Local
+            // playback publishes null - there is no stream to protect.
+            //
+            // AM (SCROLLER_BUFFER_IS_A_CACHED_RANGE): this read demuxer-cache-time,
+            // which is the absolute timestamp of the end of the buffered range,
+            // not a duration - so the fraction pinned at 1.0 a few seconds into
+            // any file and the limiter stopped allocating to a starving player.
+            propFlow<Float>("demuxer-cache-duration")
                 .onEach { readAhead ->
                     val target = playerPreferences.networkBufferSeconds.get().toFloat()
                     val streaming = PlayerMediaHolder.streamingPlaybackActive.value
@@ -1559,7 +1516,7 @@ class PlayerViewModel(
      * otherwise don't persist rewatch position for. Doesn't cover the currently-open
      * episode; that's already handled by the normal live-tracking/resume path.
      *
-     * Backed by [RecentEpisodePositionManager] - a single app-process-wide, DB-backed
+     * Backed by [RecentPositionManager] - a single app-process-wide, DB-backed
      * cache shared with PlayerMediaHolder, rather than a ViewModel-local map. See that
      * class's own doc comment for why (persists across process death; no more keeping
      * two independent in-memory copies in sync by hand).
@@ -1571,8 +1528,13 @@ class PlayerViewModel(
         val positionMs = (episodePosition ?: 0L) * 1000L
         val durationMs = playbackData.value.duration.toLong() * 1000L
         // AM (MERGED_SOURCES) -->
-        // Keyed on the episode alone - see RecentEpisodePositionManager.consume.
-        recentEpisodePositionManager.remember(episodeId, positionMs, durationMs)
+        // Keyed on the episode alone - see SessionKey.storageKey.
+        val animeId = stateData.value.currentAnime?.id ?: return
+        recentPositionManager.remember(
+            SessionKey.Library(animeId = animeId, episodeId = episodeId),
+            positionMs,
+            durationMs,
+        )
         // <-- AM (MERGED_SOURCES)
     }
     // <-- AM (RECENT_EPISODE_POSITIONS_PERSISTED)
@@ -3270,7 +3232,7 @@ class PlayerViewModel(
     /**
      * Where an external session should start, in milliseconds, pending its load.
      *
-     * Deliberately the same shape as RecentEpisodePositionManager.consume(): a
+     * Deliberately the same shape as RecentPositionManager.consume(): a
      * one-shot value the resume decision takes if it is there. Clearing on read
      * is what makes it one-shot - without that, a later hoster/quality switch on
      * the same file (which also runs through setVideo) would jump back to the
@@ -4791,9 +4753,15 @@ class PlayerViewModel(
         cancelQualitySwitch()
         val outgoing = player
         val position = currentPositionSeconds() ?: playbackData.value.position.toDouble()
-        val readAhead = outgoing.mpv.getPropertyDouble("demuxer-cache-time") ?: 0.0
+        // AM (SCROLLER_BUFFER_IS_A_CACHED_RANGE): cache-duration, not cache-time -
+        // the latter is the absolute end of the buffered range, so this read as
+        // "two seconds ahead" from two seconds into any file.
+        val readAhead = outgoing.mpv.getPropertyDouble("demuxer-cache-duration") ?: 0.0
         val lead = if (readAhead >= 2.0) 1.0 else 2.0
-        val replacement = mpvFactory.create(videoOutput)
+        // AM (POOLED_PLAYER_INSTANCES): a free instance where there is one. The
+        // switch is the one place this session routinely wants a second live
+        // instance, so it is also the place that keeps producing one to close.
+        val replacement = instancePool?.acquire() ?: mpvFactory.create(videoOutput)
         val pending = QualitySwitch(
             player = replacement,
             video = video,
@@ -4877,7 +4845,13 @@ class PlayerViewModel(
                             return@withTimeoutOrNull completeQualitySwitch(pending, outgoing, takeover = true)
                         }
 
-                        val buffered = (pending.player.mpv.getPropertyDouble("demuxer-cache-time") ?: 0.0) >= 0.35
+                        // AM (SCROLLER_BUFFER_IS_A_CACHED_RANGE): cache-duration. The
+                        // incoming file is loaded with start=syncPosition, so cache-time
+                        // cleared 0.35 the instant it opened anywhere past that mark and
+                        // the switch completed onto an empty cache.
+                        val buffered = (
+                            pending.player.mpv.getPropertyDouble("demuxer-cache-duration") ?: 0.0
+                            ) >= 0.35
                         val decoded = (pending.player.mpv.getPropertyInt("video-params/w") ?: 0) > 0
                         val ready = pending.fileLoaded && pending.clipPlayback.isReady && buffered && decoded
                         val oldPaused = outgoing.mpv.getPropertyBoolean("pause") == true
@@ -4948,35 +4922,85 @@ class PlayerViewModel(
                 pending.player.mpv.command("seek", position.toString(), "absolute", "exact")
             }
         }
-        pending.player.mpv.setPropertyInt("volume", playbackData.value.currentVolume)
-        pending.player.mpv.setPropertyDouble("speed", uiData.value.playerSpeedPref.toDouble())
-        outgoing.mpv.getPropertyString("aid")?.let { pending.player.mpv.setPropertyString("aid", it) }
-        outgoing.mpv.getPropertyString("sid")?.let { pending.player.mpv.setPropertyString("sid", it) }
+        val promoted = promote(
+            outgoing = outgoing,
+            incoming = pending.player,
+            incomingClip = pending.clipPlayback,
+            alreadyLoaded = pending.fileLoaded,
+            holder = holder,
+        )
+        // Only once the swap actually happened: a holder that refused it still
+        // holds the outgoing player, so this switch is still pending and its
+        // prepared instance still belongs to it.
+        if (promoted) {
+            _qualitySwitch.value = null
+            qualitySwitchJob = null
+        }
+        return promoted
+    }
 
-        if (!holder.replacePlayer(outgoing, pending.player)) return false
+    // AM (PROMOTION_IS_THE_SWITCH) -->
+    /**
+     * Makes [incoming] this session's live player, in place of [outgoing].
+     *
+     * Lifted out of completeQualitySwitch unchanged. It is written in terms of
+     * two instances and a holder, and nothing in it is about quality: a
+     * prepared instance holding a different episode - or a different entry
+     * entirely - is promoted by exactly this sequence. That is the point of
+     * pulling it out, because every other way this session changes what is
+     * playing currently mutates the live instance instead, which is where the
+     * flash and the teardown-and-relaunch both come from.
+     *
+     * Track selection is carried across from the outgoing instance rather than
+     * re-derived: it is the user's own choice for this session, and a newly
+     * loaded file has only mpv's defaults.
+     *
+     * Returns false without changing anything when the holder refuses the swap
+     * - which it does when [outgoing] is no longer the player it holds, so a
+     * caller that raced another promotion loses cleanly.
+     */
+    private fun promote(
+        outgoing: MPVPlayer,
+        incoming: MPVPlayer,
+        incomingClip: ClipPlayback,
+        alreadyLoaded: Boolean,
+        holder: PlayerMediaHolder,
+    ): Boolean {
+        incoming.mpv.setPropertyInt("volume", playbackData.value.currentVolume)
+        incoming.mpv.setPropertyDouble("speed", uiData.value.playerSpeedPref.toDouble())
+        outgoing.mpv.getPropertyString("aid")?.let { incoming.mpv.setPropertyString("aid", it) }
+        outgoing.mpv.getPropertyString("sid")?.let { incoming.mpv.setPropertyString("sid", it) }
+
+        if (!holder.replacePlayer(outgoing, incoming)) return false
         val shouldPause = uiData.value.previousPauseState == true
         outgoing.mpv.setPropertyBoolean("pause", true)
-        _player = pending.player
-        _qualitySwitch.value = null
-        qualitySwitchJob = null
-        pending.player.requestAudioFocus()
+        _player = incoming
+        incoming.requestAudioFocus()
         if (shouldPause) {
-            pending.clipPlayback.pause()
+            incomingClip.pause()
         } else {
-            pending.clipPlayback.play()
+            incomingClip.play()
         }
 
         _clipPlayback?.releaseCompanion()
-        _clipPlayback = pending.clipPlayback
-        holder.setClipPlayback(pending.clipPlayback)
+        _clipPlayback = incomingClip
+        holder.setClipPlayback(incomingClip)
         wirePlayerFlows()
-        if (pending.fileLoaded) fileLoaded()
+        if (alreadyLoaded) fileLoaded()
         updateUiData { it.copy(isLoadingEpisode = false, previousPauseState = null) }
         publishStreamingPlaybackState()
         MediaProxyServer.releaseOwner(qualityProxyOwner(outgoing))
-        outgoing.release()
+        // AM (POOLED_PLAYER_INSTANCES): handed back rather than closed. This ran
+        // close() on an instance whose event threads were still unwinding, which
+        // is the teardown the feed's pool exists to avoid; the pool adopts an
+        // instance it did not itself hand out, so the session's original player
+        // returns here on the first switch like any other.
+        instancePool.let { pool ->
+            if (pool != null) pool.release(outgoing) else outgoing.release()
+        }
         return true
     }
+    // <-- AM (PROMOTION_IS_THE_SWITCH)
 
     private fun cancelQualitySwitch() {
         val pending = _qualitySwitch.value
@@ -4986,7 +5010,12 @@ class PlayerViewModel(
         if (pending != null) {
             MediaProxyServer.releaseOwner(qualityProxyOwner(pending.player))
             pending.clipPlayback.releaseCompanion()
-            pending.player.release()
+            // AM (POOLED_PLAYER_INSTANCES): an abandoned switch gives its
+            // instance back too - it was never promoted, so nothing has been
+            // rendering it and it is immediately reusable.
+            instancePool.let { pool ->
+                if (pool != null) pool.release(pending.player) else pending.player.release()
+            }
         }
     }
     // <-- AM (SEAMLESS_QUALITY_SWITCH)
@@ -5055,14 +5084,14 @@ class PlayerViewModel(
                 // cross-series reopen, even with a correct, present cache entry sitting
                 // right there. This matches the original design intent: any live/temp
                 // position wins outright, no matter what else is going on.
-                // AM (MERGED_SOURCES) -->
-                // Keyed on the episode alone - see RecentEpisodePositionManager.consume.
-                val tempFromManager = episode.id?.let { recentEpisodePositionManager.consume(it) }
-                // <-- AM (MERGED_SOURCES)
                 // AM (CONTENT_AGNOSTIC_SESSION) -->
                 val targetSessionKey = stateData.value.currentAnime?.id?.let { animeId ->
                     episode.id?.let { SessionKey.Library(animeId, it) }
                 }
+                // AM (MERGED_SOURCES) -->
+                // Keyed on the episode alone - see SessionKey.storageKey.
+                val tempFromManager = targetSessionKey?.let { recentPositionManager.consume(it) }
+                // <-- AM (MERGED_SOURCES)
                 // <-- AM (CONTENT_AGNOSTIC_SESSION)
                 val tempPositionMs = when {
                     tempFromManager != null -> tempFromManager
@@ -6899,7 +6928,10 @@ class PlayerViewModel(
         val remembered = blockId?.let { stateData.value.playlistBlockLastPlayed[it] }
         if (remembered != null) {
             val rememberedIndex = queue.indexOf(
-                SessionKey.Library(animeId = stateData.value.currentAnime?.id ?: return range.first, episodeId = remembered),
+                SessionKey.Library(
+                    animeId = stateData.value.currentAnime?.id ?: return range.first,
+                    episodeId = remembered,
+                ),
             )
             if (rememberedIndex in range) return rememberedIndex
         }

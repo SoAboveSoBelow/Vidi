@@ -17,6 +17,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.PlayCircleOutline
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -304,18 +305,34 @@ fun RecentsScaffold(
                         label = { Text(text = stringResource(MR.strings.label_recent_updates)) },
                     )
 
+                    // AM (HISTORY_ORIGIN) -->
+                    // Tapping the chip that is already showing toggles the
+                    // browse feed's own entries out of the list, so the two
+                    // kinds of history are a tap apart rather than needing a
+                    // menu. The icon is what says which of the two is showing.
                     FilterChip(
                         selected = showHistoryScreen,
-                        onClick = { shouldShowHistoryScreen(true) },
+                        onClick = {
+                            if (showHistoryScreen) {
+                                historyViewModel.togglePlayerOnly()
+                            } else {
+                                shouldShowHistoryScreen(true)
+                            }
+                        },
                         leadingIcon = {
                             Icon(
-                                imageVector = Icons.Outlined.History,
+                                imageVector = if (showHistoryScreen && historyState.playerOnly) {
+                                    Icons.Outlined.PlayCircleOutline
+                                } else {
+                                    Icons.Outlined.History
+                                },
                                 contentDescription = null,
                                 modifier = Modifier.size(FilterChipDefaults.IconSize),
                             )
                         },
                         label = { Text(text = stringResource(MR.strings.label_recent_manga)) },
                     )
+                    // <-- AM (HISTORY_ORIGIN)
                 }
             }
         },

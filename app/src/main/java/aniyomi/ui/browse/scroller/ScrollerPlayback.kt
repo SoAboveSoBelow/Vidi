@@ -16,6 +16,15 @@ import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.data.media.MediaProxyServer
+import eu.kanade.domain.base.BasePreferences
+import eu.kanade.domain.connection.SyncPreferences
+import eu.kanade.domain.track.interactor.TrackEpisode
+import eu.kanade.domain.track.service.TrackPreferences
+import eu.kanade.domain.episode.model.toDbEpisode
+import eu.kanade.tachiyomi.data.database.models.Episode as DbEpisode
+import eu.kanade.tachiyomi.ui.player.LibraryProgressStore
+import eu.kanade.tachiyomi.ui.player.PlaybackProgressStore
+import eu.kanade.tachiyomi.ui.player.SessionKey
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,7 +36,14 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import mihon.app.di.appGraph
+import mihon.domain.source.interactor.UpdateAnimeFromRemote
 import tachiyomi.domain.anime.model.Anime
+import tachiyomi.domain.episode.interactor.GetEpisode
+import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
+import tachiyomi.domain.episode.interactor.UpdateEpisode
+import tachiyomi.domain.episode.model.Episode
+import tachiyomi.domain.history.interactor.UpsertHistory
+import tachiyomi.domain.history.model.HistoryOrigin
 
 // AM (BROWSE_SCROLLER) -->
 /**
@@ -52,6 +68,33 @@ class ScrollerPlaybackState internal constructor(
     private val pool: ScrollerPlayerPool,
     private val resolver: ClipVideoResolver,
     private val detailsFetcher: ScrollerDetailsFetcher,
+    // AM (SESSION_KEYED_TEMP_POSITIONS) -->
+    /**
+     * The app's own episode fetch and episode read, for naming what a card
+     * plays - see [resolveSessionKey]. The fetch is the same single-flighted
+     * interactor the anime screen and the library job use, so a card and the
+     * screen opened straight after it share one round trip rather than making
+     * two.
+     */
+    private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
+    private val updateAnimeFromRemote: UpdateAnimeFromRemote,
+    // <-- AM (SESSION_KEYED_TEMP_POSITIONS)
+    // AM (SCROLLER_WRITES_WATCH_PROGRESS) -->
+    /** What [LibraryProgressStore] needs to write an episode's progress. */
+    private val getEpisode: GetEpisode,
+    private val updateEpisode: UpdateEpisode,
+    private val upsertHistory: UpsertHistory,
+    private val syncPreferences: SyncPreferences,
+    private val basePreferences: BasePreferences,
+    // AM (SCROLLER_MARKS_SEEN) -->
+    /**
+     * For pushing a finished entry to its trackers, the same way the player
+     * does when an episode completes.
+     */
+    private val trackEpisode: TrackEpisode,
+    private val trackPreferences: TrackPreferences,
+    // <-- AM (SCROLLER_MARKS_SEEN)
+    // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
     private val context: Context,
     private val playerPreferences: PlayerPreferences,
     private val gesturePreferences: GesturePreferences,
@@ -188,11 +231,32 @@ class ScrollerPlaybackState internal constructor(
         }
 
         progressJob?.cancel()
-        val activePlayer = active?.let { pool.get(it) } ?: return
+        val activeId = active ?: return
+        val activePlayer = pool.get(activeId) ?: return
         progressJob = scope.launch {
             while (true) {
                 delay(PROGRESS_TICK_MS)
                 activePlayer.notePosition()
+                // AM (SESSION_KEYED_TEMP_POSITIONS) -->
+                // Time spent watching, counted here, and NOT the clip's own
+                // position: every card loops (see ScrollerPlayer's prepare),
+                // so its position wraps and a clip shorter than the threshold
+                // could never cross it however long it was watched - which is
+                // every clip a feed of short loops is made of.
+                if (activePlayer.isPaused) continue
+                val watched = (watchedSeconds[activeId] ?: 0) + 1
+                watchedSeconds[activeId] = watched
+                // A card watched this long is one worth remembering, and only
+                // now is it worth a round trip to find out what it is playing.
+                // Scrolling past a card never reaches here, so the feed does
+                // not fetch episode lists for entries nobody chose.
+                if (activePlayer.sessionKey == null && watched >= MIN_WATCHED_SECONDS) {
+                    resolveSessionKey(activeId, activePlayer)
+                }
+                // AM (SCROLLER_WRITES_WATCH_PROGRESS): only past the threshold,
+                // which is also the only point at which a store exists.
+                if (watched >= MIN_WATCHED_SECONDS) writeProgress(activeId, activePlayer, watched)
+                // <-- AM (SESSION_KEYED_TEMP_POSITIONS)
             }
         }
     }
@@ -239,6 +303,19 @@ class ScrollerPlaybackState internal constructor(
         val player = pool.acquire(anime.id, onEvict = ::onSlotEvicted)
         poolRevision++
         player.setMuted(isMuted, mayHoldAudioFocus = anime.id == activeAnimeId)
+
+        // AM (SESSION_KEYED_TEMP_POSITIONS): before the load, which reads the
+        // key to resume from. Local only here - an entry whose episodes have
+        // never been fetched has no stored position either, so there is
+        // nothing this could find by going to the network.
+        watchedCards[anime.id] = anime to source
+        storedEpisode(anime.id)?.let { episode ->
+            resolvedCards += anime.id
+            val key = SessionKey.Library(animeId = anime.id, episodeId = episode.id)
+            player.sessionKey = key
+            // AM (SCROLLER_WRITES_WATCH_PROGRESS)
+            if (mayPersist(episode)) progressStoreFor(anime.id, key, episode)
+        }
 
         // AM (BROWSE_SCROLLER_FRAME_WATCH) -->
         // Before the already-loaded check below, not after it.
@@ -287,6 +364,225 @@ class ScrollerPlaybackState internal constructor(
         )
         applyPlayState()
     }
+
+    // AM (SESSION_KEYED_TEMP_POSITIONS) -->
+    /**
+     * The entry and source behind each card holding an instance, so a card
+     * that turns out to be watched can be named without the caller that
+     * started it still being around.
+     */
+    private val watchedCards = mutableMapOf<Long, Pair<Anime, AnimeSource>>()
+
+    /**
+     * Seconds each card has actually been watched for, accumulated across its
+     * loops and across scrolling away and back.
+     */
+    private val watchedSeconds = mutableMapOf<Long, Int>()
+
+    /**
+     * The key [animeId]'s position is stored under, from episodes already in
+     * the database. Null when the entry has none yet.
+     *
+     * The first episode in source order: a feed card plays the entry's media,
+     * and for the entries a feed is built from that is the entry's one
+     * episode. An entry with a real episode list behind it would need the card
+     * to say which of them it is playing, which is what episode selection in
+     * the feed would bring with it.
+     */
+    private suspend fun storedEpisode(animeId: Long): Episode? =
+        getEpisodesByAnimeId.await(animeId).minByOrNull { it.sourceOrder }
+
+    // AM (SCROLLER_WRITES_WATCH_PROGRESS) -->
+    /**
+     * Whether this card's progress may be written to its episode row.
+     *
+     * An episode already watched keeps a PERSISTED position only when the user
+     * asked for that. This governs the episode row alone: the resume store is
+     * temp memory, which the player's own resume takes before it considers
+     * seen state at all (see RESUME_PRIORITY_SYSTEM - a position that recent is
+     * in progress, whatever the row says), and which the player writes without
+     * consulting this setting either. A card writes there unconditionally for
+     * the same reason: the entry you were just watching should open where you
+     * left it.
+     */
+    private fun mayPersist(episode: Episode): Boolean =
+        !episode.seen || playerPreferences.preserveWatchingPosition.get()
+
+    /**
+     * Cards whose episodes have been found, so the lookup runs once.
+     *
+     * Only a card that actually resolved is recorded: a lookup that failed -
+     * no episodes yet, or a fetch that errored - is worth trying again on a
+     * later tick.
+     */
+    private val resolvedCards = mutableSetOf<Long>()
+    // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
+
+    // AM (SCROLLER_WRITES_WATCH_PROGRESS) -->
+    /**
+     * Each watched card's progress writer, keyed by entry.
+     *
+     * The app's own [LibraryProgressStore] rather than a feed-shaped copy: a
+     * card past the watched threshold is watching the episode, so the episode's
+     * progress is written the way watching it anywhere else writes it. The
+     * store mutates the episode object it holds, which is why one is built per
+     * card and kept rather than rebuilt per tick.
+     */
+    private val progressStores = mutableMapOf<Long, Pair<DbEpisode, PlaybackProgressStore>>()
+
+    /**
+     * Builds [animeId]'s progress writer over [episode], once.
+     *
+     * Its history rows are marked [HistoryOrigin.Feed], which is what lets the
+     * history screen separate cards seen here from episodes genuinely watched
+     * - and what stops a card scrolled past from taking the row of one. See
+     * HistoryOrigin, and history.sq's upsert for the rule itself.
+     */
+    private fun progressStoreFor(animeId: Long, key: SessionKey.Library, episode: Episode) {
+        if (progressStores.containsKey(animeId)) return
+        val dbEpisode = episode.toDbEpisode()
+        progressStores[animeId] = dbEpisode to LibraryProgressStore(
+            episode = dbEpisode,
+            sessionKey = key,
+            context = context,
+            getEpisode = getEpisode,
+            updateEpisode = updateEpisode,
+            upsertHistory = upsertHistory,
+            playerPreferences = playerPreferences,
+            syncPreferences = syncPreferences,
+            isIncognito = { basePreferences.incognitoMode.get() },
+            // The feed resolves no trackers of its own, and this only widens
+            // what incognito still saves - so it says no rather than guessing.
+            hasTrackers = { false },
+            // AM (HISTORY_ORIGIN)
+            historyOrigin = HistoryOrigin.Feed,
+        )
+    }
+
+    /**
+     * Writes the watched card's progress to its episode.
+     *
+     * `writeSeenState = false` always: the player owns seen, and marks it when
+     * an episode genuinely finishes. A feed card loops, so it reaches its own
+     * end every few seconds without that meaning anything.
+     */
+    private suspend fun writeProgress(animeId: Long, player: ScrollerPlayer, watched: Int) {
+        val (episode, store) = progressStores[animeId] ?: return
+        // AM (HISTORY_ORIGIN): history records that this was seen at all, which
+        // is true whatever the position rules below decide. Once per card per
+        // session - the store guards the repeat itself.
+        store.recordWatched()
+
+        // AM (SCROLLER_MARKS_SEEN) -->
+        // Position against the entry's length, the same measure the player
+        // marks an episode seen by - a card showing a regular episode has to
+        // reach the same conclusion the player would, including when the
+        // viewer gets there by seeking. This was accumulated watch time, which
+        // for a 24-minute episode in the feed meant twenty minutes of real
+        // time before it counted and nothing at all for a seek: the feed would
+        // never agree with the player about the same episode.
+        //
+        // Furthest position reached, not the current one, because a looping
+        // card's position returns to zero: sampled once a second, the top of a
+        // short clip is a window the poll can step straight over.
+        //
+        // A wrap counts outright: the entry played to its end and started
+        // again, which is the whole of it watched however the samples landed.
+        // Recognised as END to START specifically, not as any backward jump -
+        // the feed has a seekbar, and seeking back would otherwise read as a
+        // completed lap and mark the entry seen for having watched none of it.
+        val length = player.durationSeconds
+        val position = player.positionSeconds
+        val previous = lastSampledPosition[animeId]
+        lastSampledPosition[animeId] = position
+        val wrapped = previous != null &&
+            length > 0f &&
+            position < WRAP_EDGE_SECONDS &&
+            previous >= length - WRAP_EDGE_SECONDS
+        val furthest = maxOf(furthestPosition[animeId] ?: 0f, position)
+        furthestPosition[animeId] = furthest
+
+        val threshold = playerPreferences.progressPreference.get()
+        val completed = wrapped || (length > 0f && furthest >= length * threshold)
+        if (completed && !episode.seen && seenMarked.add(animeId)) {
+            episode.seen = true
+            episode.last_second_seen = 0L
+            store.savePosition(writeSeenState = true)
+            // An entry finished here is finished, so its trackers hear the
+            // same thing they would have heard from the player. TrackEpisode
+            // returns on its own for an entry with no trackers and skips any
+            // tracker already past this episode, so there is nothing to gate
+            // here beyond the two preferences the player also checks.
+            if (!basePreferences.incognitoMode.get() && trackPreferences.autoUpdateTrack.get()) {
+                trackEpisode.await(context, animeId, episode.episode_number.toDouble())
+            }
+            return
+        }
+        // <-- AM (SCROLLER_MARKS_SEEN)
+
+        // Re-checked per write, not only when the store was built: the setting
+        // can be turned off while a card is still being watched. The player
+        // reaches the same answer from the other end - it writes freely and
+        // zeroes on teardown - which a card has no equivalent of, so this is
+        // the gate rather than an exit path.
+        if (episode.seen && !playerPreferences.preserveWatchingPosition.get()) return
+        episode.last_second_seen = player.positionSeconds.toLong() * 1000L
+        length.takeIf { it > 0f }?.let {
+            episode.total_seconds = it.toLong() * 1000L
+        }
+        store.savePosition(writeSeenState = false)
+    }
+
+    // AM (SCROLLER_MARKS_SEEN) -->
+    /** Cards already marked seen, so the threshold fires once per card. */
+    private val seenMarked = mutableSetOf<Long>()
+
+    /** Furthest position each card has reached, which a loop resets. */
+    private val furthestPosition = mutableMapOf<Long, Float>()
+
+    /** Each card's previous sample, for spotting a loop turning over. */
+    private val lastSampledPosition = mutableMapOf<Long, Float>()
+    // <-- AM (SCROLLER_MARKS_SEEN)
+    // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
+
+    /**
+     * Fetches [animeId]'s episodes so its position has somewhere to live, then
+     * hands the key to the card.
+     *
+     * Uses the app's own episode fetch rather than inserting a row of its own:
+     * it is single-flighted, so the anime screen opened straight after this
+     * card joins this same request instead of making a second one, and the
+     * rows it writes are the rows that screen would have written anyway.
+     *
+     * [ScrollerDetailsFetcher] still writes no episodes, and nothing here runs
+     * for a card scrolled past - what changed is that a card actually watched
+     * now produces the same episode rows opening the entry would have.
+     */
+    private fun resolveSessionKey(animeId: Long, player: ScrollerPlayer) {
+        if (animeId in resolvedCards) return
+        if (sessionKeyJobs[animeId]?.isActive == true) return
+        val (anime, source) = watchedCards[animeId] ?: return
+        sessionKeyJobs[animeId] = scope.launch {
+            updateAnimeFromRemote.awaitEpisodesUpdate(
+                source = source,
+                anime = anime,
+                fetchEpisodes = true,
+            )
+            val episode = storedEpisode(animeId) ?: return@launch
+            resolvedCards += animeId
+            val key = SessionKey.Library(animeId = animeId, episodeId = episode.id)
+            // The instance may have been reassigned while that fetched, in
+            // which case this key belongs to a card it is no longer playing.
+            if (pool.get(animeId) !== player) return@launch
+            player.sessionKey = key
+            // AM (SCROLLER_WRITES_WATCH_PROGRESS)
+            if (mayPersist(episode)) progressStoreFor(animeId, key, episode)
+        }
+    }
+
+    /** In-flight key resolutions, so a tick a second does not stack them up. */
+    private val sessionKeyJobs = mutableMapOf<Long, Job>()
+    // <-- AM (SESSION_KEYED_TEMP_POSITIONS)
 
     /**
      * Starts watching for the file to open BEFORE the load is issued.
@@ -478,6 +774,21 @@ class ScrollerPlaybackState internal constructor(
         watchJobs.remove(animeId)?.forEach { it.cancel() }
         // AM (BROWSE_SCROLLER_FRAME_WATCH)
         watchOwners.remove(animeId)
+        // AM (SESSION_KEYED_TEMP_POSITIONS): with the instance. A fetch still
+        // in flight is for a card that is no longer playing, and its own
+        // completion check would drop the key anyway.
+        sessionKeyJobs.remove(animeId)?.cancel()
+        watchedCards.remove(animeId)
+        watchedSeconds.remove(animeId)
+        // AM (SCROLLER_WRITES_WATCH_PROGRESS) -->
+        progressStores.remove(animeId)
+        resolvedCards.remove(animeId)
+        // AM (SCROLLER_MARKS_SEEN) -->
+        seenMarked.remove(animeId)
+        furthestPosition.remove(animeId)
+        lastSampledPosition.remove(animeId)
+        // <-- AM (SCROLLER_MARKS_SEEN)
+        // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
         framesReady.remove(animeId)
         MediaProxyServer.release(proxyOwner(animeId))
         pool.release(animeId)
@@ -742,6 +1053,20 @@ class ScrollerPlaybackState internal constructor(
         // AM (BROWSE_SCROLLER_RETENTION)
         retainJobs.values.forEach { it.cancel() }
         retainJobs.clear()
+        // AM (SESSION_KEYED_TEMP_POSITIONS)
+        sessionKeyJobs.values.forEach { it.cancel() }
+        sessionKeyJobs.clear()
+        watchedCards.clear()
+        watchedSeconds.clear()
+        // AM (SCROLLER_WRITES_WATCH_PROGRESS) -->
+        progressStores.clear()
+        resolvedCards.clear()
+        // AM (SCROLLER_MARKS_SEEN) -->
+        seenMarked.clear()
+        furthestPosition.clear()
+        lastSampledPosition.clear()
+        // <-- AM (SCROLLER_MARKS_SEEN)
+        // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
         progressJob?.cancel()
         // AM (BROWSE_SCROLLER_CONTROLS)
         controlsPollJob?.cancel()
@@ -778,12 +1103,28 @@ fun rememberScrollerPlayback(source: AnimeSource?): ScrollerPlaybackState? {
                 val graph = context.appGraph
                 val videoOutput = if (graph.decoderPreferences.gpuNext.get()) "gpu-next" else "gpu"
                 ScrollerPlaybackState(
-                    pool = ScrollerPlayerPool(graph.mpvPlayerFactory, videoOutput),
+                    pool = ScrollerPlayerPool(
+                        factory = graph.mpvPlayerFactory,
+                        videoOutput = videoOutput,
+                        positions = graph.recentPositionManager,
+                    ),
                     resolver = ClipVideoResolver(
                         episodeLoader = graph.episodeLoader,
                         hosterLoader = graph.hosterLoader,
                     ),
                     detailsFetcher = ScrollerDetailsFetcher(graph.updateAnime),
+                    // AM (SESSION_KEYED_TEMP_POSITIONS)
+                    getEpisodesByAnimeId = graph.getEpisodesByAnimeId,
+                    updateAnimeFromRemote = graph.updateAnimeFromRemote,
+                    // AM (SCROLLER_WRITES_WATCH_PROGRESS)
+                    getEpisode = graph.getEpisode,
+                    updateEpisode = graph.updateEpisode,
+                    upsertHistory = graph.upsertHistory,
+                    syncPreferences = graph.syncPreferences,
+                    basePreferences = graph.basePreferences,
+                    // AM (SCROLLER_MARKS_SEEN)
+                    trackEpisode = graph.trackEpisode,
+                    trackPreferences = graph.trackPreferences,
                     context = context,
                     playerPreferences = graph.playerPreferences,
                     gesturePreferences = graph.gesturePreferences,
@@ -796,6 +1137,14 @@ fun rememberScrollerPlayback(source: AnimeSource?): ScrollerPlaybackState? {
 
 /** How often a playing card's position is written down. */
 private const val PROGRESS_TICK_MS = 1_000L
+
+// AM (SESSION_KEYED_TEMP_POSITIONS)
+/** Below this many seconds watched, a card was scrolled past rather than watched. */
+private const val MIN_WATCHED_SECONDS = 5
+
+// AM (SCROLLER_MARKS_SEEN)
+/** How close to an end a sample counts as at it, when spotting a loop. */
+private const val WRAP_EDGE_SECONDS = 1.5f
 
 // AM (BROWSE_SCROLLER_CONTROLS)
 /** How often the controls' readouts are refreshed while they are up. */

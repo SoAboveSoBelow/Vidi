@@ -1,7 +1,7 @@
 package animiru.data.player
 
-import animiru.domain.player.model.EpisodeTempPosition
-import animiru.domain.player.repository.EpisodeTempPositionRepository
+import animiru.domain.player.model.SessionTempPosition
+import animiru.domain.player.repository.SessionTempPositionRepository
 import app.cash.sqldelight.async.coroutines.awaitAsList
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
@@ -15,27 +15,27 @@ import tachiyomi.data.Database
 @Inject
 @SingleIn(AppScope::class)
 @ContributesBinding(AppScope::class)
-class EpisodeTempPositionRepositoryImpl(
+class SessionTempPositionRepositoryImpl(
     private val database: Database,
-) : EpisodeTempPositionRepository {
+) : SessionTempPositionRepository {
 
-    override suspend fun getAll(): List<EpisodeTempPosition> {
-        return database.episode_temp_positionsQueries.getAll { episodeId, positionMs, updatedAt ->
-            EpisodeTempPosition(episodeId, positionMs, updatedAt)
+    override suspend fun getAll(): List<SessionTempPosition> {
+        return database.session_temp_positionsQueries.getAll { sessionKey, positionMs, updatedAt ->
+            SessionTempPosition(sessionKey, positionMs, updatedAt)
         }.awaitAsList()
     }
 
-    override suspend fun upsert(episodeId: Long, positionMs: Long, updatedAt: Long) {
+    override suspend fun upsert(sessionKey: String, positionMs: Long, updatedAt: Long) {
         try {
-            database.episode_temp_positionsQueries.upsert(episodeId, positionMs, updatedAt)
+            database.session_temp_positionsQueries.upsert(sessionKey, positionMs, updatedAt)
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, throwable = e)
         }
     }
 
-    override suspend fun delete(episodeId: Long) {
+    override suspend fun delete(sessionKey: String) {
         try {
-            database.episode_temp_positionsQueries.deleteByKey(episodeId)
+            database.session_temp_positionsQueries.deleteByKey(sessionKey)
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, throwable = e)
         }
@@ -43,7 +43,7 @@ class EpisodeTempPositionRepositoryImpl(
 
     override suspend fun pruneToMostRecent(keepCount: Int) {
         try {
-            database.episode_temp_positionsQueries.pruneToMostRecent(keepCount.toLong())
+            database.session_temp_positionsQueries.pruneToMostRecent(keepCount.toLong())
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, throwable = e)
         }
@@ -51,7 +51,7 @@ class EpisodeTempPositionRepositoryImpl(
 
     override suspend fun deleteAll() {
         try {
-            database.episode_temp_positionsQueries.deleteAll()
+            database.session_temp_positionsQueries.deleteAll()
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, throwable = e)
         }

@@ -45,6 +45,48 @@ sealed interface SessionKey {
     ) : SessionKey
 }
 
+// AM (SESSION_KEYED_TEMP_POSITIONS) -->
+/**
+ * This key as `session_temp_positions` stores it - and, through that, as
+ * [RecentPositionManager] keys its cache.
+ *
+ * The storage layer holds the string opaquely (see
+ * [animiru.domain.player.model.SessionTempPosition]), so this is the only place
+ * that knows the encoding and a new session kind costs a branch here rather
+ * than a migration.
+ *
+ * A library session encodes the EPISODE ONLY, deliberately, and deserves the
+ * note migration 148 left: episodes._id is globally unique and a playback
+ * position is a property of the episode, not of the entry it was reached
+ * through. A merged entry and one of its children carry different anime ids for
+ * the same episode, so including the anime id would give that episode two
+ * independent positions again and revert to a stale one on switching back.
+ *
+ * External sessions take the URI whole, after a prefix parsed off at the first
+ * separator - a URI brings separators of its own and must not need escaping.
+ */
+val SessionKey.storageKey: String
+    get() = when (this) {
+        is SessionKey.Library -> "$LIBRARY_KIND$KIND_SEPARATOR$episodeId"
+        is SessionKey.External -> "$EXTERNAL_KIND$KIND_SEPARATOR$uri"
+    }
+
+/**
+ * The episode a stored key belongs to, or null when it is not a library one.
+ *
+ * Exists for the media cache, which is genuinely episode-scoped. Nothing else
+ * looks inside a stored key.
+ */
+fun storageKeyEpisodeId(value: String): Long? =
+    value.removePrefix("$LIBRARY_KIND$KIND_SEPARATOR")
+        .takeIf { it.length != value.length }
+        ?.toLongOrNull()
+
+private const val KIND_SEPARATOR = ':'
+private const val LIBRARY_KIND = "library"
+private const val EXTERNAL_KIND = "external"
+// <-- AM (SESSION_KEYED_TEMP_POSITIONS)
+
 /** The library ids of this key, or nulls when the session isn't a library one. */
 val SessionKey?.libraryAnimeId: Long?
     get() = (this as? SessionKey.Library)?.animeId

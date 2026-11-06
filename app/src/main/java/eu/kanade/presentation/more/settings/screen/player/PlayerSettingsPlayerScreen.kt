@@ -72,7 +72,7 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 onValueChanged = {
                     // Trim the persisted cache down to the new limit right away, rather
                     // than waiting for the next write to notice it shrank.
-                    context.appGraph.recentEpisodePositionManager.onSlotsPreferenceChanged()
+                    context.appGraph.recentPositionManager.onSlotsPreferenceChanged()
                     true
                 },
             ),
@@ -101,7 +101,7 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 onValueChanged = {
                     // Lowering it - to Off or otherwise - should free the disk now,
                     // not at the next prune.
-                    context.appGraph.recentEpisodePositionManager.onRetainMediaPreferenceChanged()
+                    context.appGraph.recentPositionManager.onRetainMediaPreferenceChanged()
                     true
                 },
             ),
