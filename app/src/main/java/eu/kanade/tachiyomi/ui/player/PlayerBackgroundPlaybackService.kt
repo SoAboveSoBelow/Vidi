@@ -16,6 +16,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+// AM (DISMISS_ASKS_THE_LIFECYCLE) -->
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
+// <-- AM (DISMISS_ASKS_THE_LIFECYCLE)
 import eu.kanade.tachiyomi.BuildConfig
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.notification.Notifications
@@ -217,11 +221,66 @@ class PlayerBackgroundPlaybackService : Service() {
     private var dismissReceiverRegistered = false
     // AM (NOTIFICATION_DISMISS_KEEPS_ACTIVITY_FIX) -->
     // Doesn't close PlayerActivity
+    // AM (NOTIFICATION_IS_NOT_THE_SESSION) -->
+    // Was an unconditional stopBackgroundPlayback(), which made the swipe the
+    // single end-of-session decision no matter what was on screen. That is only
+    // true of a session the user can ONLY reach through the notification: once
+    // something is actually showing this session, the notification is a remote
+    // control for it, and throwing a remote control away does not end what it
+    // controls. Swiping it then tore down playback under a player the user was
+    // looking at.
+    //
+    // The condition is [PlayerMediaHolder.hasExternalScreenConsumer], the same
+    // input armIdleReclaim() already uses to decide a paused session is
+    // genuinely abandoned rather than merely paused - one definition of "nothing
+    // is showing this session" for both lifetime decisions, rather than a second
+    // notion of foregroundness invented here. It is read at the moment the
+    // broadcast arrives and nothing is remembered about the swipe beyond
+    // [notificationSuppressed] below, so there is no ordering to get wrong.
     private val dismissReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            stopBackgroundPlayback()
+            if (sessionIsOnScreen()) {
+                suppressNotification()
+            } else {
+                stopBackgroundPlayback()
+            }
         }
     }
+
+    // AM (DISMISS_ASKS_THE_LIFECYCLE) -->
+    /**
+     * Whether the user is looking at this app right now.
+     *
+     * This used to read [PlayerMediaHolder.hasExternalScreenConsumer] alone, and
+     * that was wrong in a way that showed up as the swipe killing the session
+     * only SOMETIMES. That flag is a plain Boolean assigned from Compose effect
+     * bodies in five places - PlayerHostScreen sets it true on composition and
+     * false in onDispose, MainActivity and the two screen spikes set it too - so
+     * a recomposition, a configuration change, or a handoff between two
+     * composables each leave a window where it reads false while the player is
+     * plainly on screen. A broadcast arriving inside one of those windows took
+     * the teardown branch. Whether a swipe is destructive should not depend on
+     * which millisecond it lands in.
+     *
+     * [ProcessLifecycleOwner] is the ordering-safe answer and is already how this
+     * codebase decides this kind of thing: SecureActivityDelegate gates on
+     * exactly this state, in a comment that names stopBackgroundPlayback(). STARTED
+     * rather than RESUMED so a session stays alive under a permission dialog or a
+     * partially-obscuring window, which are still "in the app".
+     *
+     * The consumer flag is kept as a second chance, never as a veto: either
+     * signal saying something is showing the session protects it. A false
+     * positive only means the session outlives the notification for a moment,
+     * which armIdleReclaim() already handles; a false negative is the bug above.
+     */
+    private fun sessionIsOnScreen(): Boolean {
+        val foreground = runCatching {
+            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        }.getOrDefault(false)
+        return foreground || PlayerMediaHolder.current?.hasExternalScreenConsumer == true
+    }
+    // <-- AM (DISMISS_ASKS_THE_LIFECYCLE)
+    // <-- AM (NOTIFICATION_IS_NOT_THE_SESSION)
     // <-- AM (NOTIFICATION_DISMISS_KEEPS_ACTIVITY_FIX)
 
     override fun onCreate() {
@@ -275,6 +334,12 @@ class PlayerBackgroundPlaybackService : Service() {
         this.mediaSessionToken = mediaSessionToken
         this.onTogglePlayPause = onTogglePlayPause
         this.onStopRequested = onStopRequested
+        // AM (NOTIFICATION_IS_NOT_THE_SESSION) -->
+        // A fresh session binding is a new video by definition, and the
+        // startForeground() below would re-post regardless - so the state has to
+        // be cleared here rather than left to disagree with what is on screen.
+        clearSuppression()
+        // <-- AM (NOTIFICATION_IS_NOT_THE_SESSION)
         // AM (IDLE_SESSION_COST_FIX) -->
         // Always a real startForeground() first, whatever the pause state. This Service
         // is launched with startForegroundService() (see the companion's start()), which
@@ -364,6 +429,10 @@ class PlayerBackgroundPlaybackService : Service() {
      * branch is still a startForeground() rather than a bare notify().
      */
     private fun postNotification() {
+        // AM (NOTIFICATION_IS_NOT_THE_SESSION) -->
+        // A swiped-away notification stays away - see suppressNotification().
+        if (notificationSuppressed) return
+        // <-- AM (NOTIFICATION_IS_NOT_THE_SESSION)
         val notification = buildNotification()
         if (isPlaying || !foregroundReleased) {
             ServiceCompat.startForeground(
@@ -381,6 +450,55 @@ class PlayerBackgroundPlaybackService : Service() {
         }
     }
     // <-- AM (IDLE_SESSION_COST_FIX)
+
+    // AM (NOTIFICATION_IS_NOT_THE_SESSION) -->
+    /**
+     * True while the user has swiped this session's notification away with the
+     * session still on screen.
+     *
+     * The swipe is a statement about the notification, not about playback: it
+     * stays gone until a video is next PLAYING (see [clearSuppression]'s call
+     * sites). Swiping it while the video runs on leaves it gone for that run -
+     * the swipe is not undone by the thing it was made during - and the resume
+     * edge after any pause puts it back, because a playing video is what this
+     * notification exists for.
+     *
+     * Leaving the foreground state is part of honouring it, not an optimisation.
+     * A foreground service cannot be without a notification - the platform posts
+     * ID_BACKGROUND_PLAYBACK again the moment startForeground() runs - so holding
+     * the obligation and suppressing the post would simply put the notification
+     * back. The obligation is what protects a BACKGROUNDED process, and this
+     * state only exists while something is on screen holding the process up on
+     * its own; the trade is that backgrounding the app between the swipe and the
+     * next video leaves playback unprotected, which is the user's own "I don't
+     * want this notification" taken at its word.
+     */
+    private var notificationSuppressed = false
+
+    /**
+     * Honours a swipe without ending the session: drop the foreground obligation
+     * and the notification with it, leave mpv, the holder and the MediaSession
+     * untouched.
+     */
+    private fun suppressNotification() {
+        if (notificationSuppressed) return
+        notificationSuppressed = true
+        logcat(LogPriority.INFO) { "NOTIFICATION_IS_NOT_THE_SESSION swiped while on screen - session kept" }
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+    }
+
+    /**
+     * Ends suppression so the next [postNotification] posts again.
+     *
+     * Called wherever a video is playing or about to be: [updatePlaybackState]
+     * on the playing edge, [start] for a fresh session, and [updateEpisodeInfo]
+     * when the resolved [SessionKey] changes, since a different video is a
+     * different decision from the one the swipe was about.
+     */
+    private fun clearSuppression() {
+        notificationSuppressed = false
+    }
+    // <-- AM (NOTIFICATION_IS_NOT_THE_SESSION)
 
     // AM (IDLE_RECLAIM_GRACE) -->
     /** Pending orderly teardown of a paused, unwatched session - see [armIdleReclaim]. */
@@ -473,6 +591,15 @@ class PlayerBackgroundPlaybackService : Service() {
         // genuinely guarantees a notification exists whenever content updates,
         // rather than assuming one already does.
         // <-- AM (NOTIFICATION_REPOST_FIX)
+        // AM (NOTIFICATION_IS_NOT_THE_SESSION) -->
+        // Playback running is the condition the notification exists for, so it is
+        // also what creates one that isn't there. A swipe takes it away; the next
+        // time this session goes from not-playing to playing, it is back. That
+        // keeps "a notification exists whenever a video is playing" a property of
+        // the playing state itself rather than of which call site last ran, which
+        // is the same single-writer shape the pause observer above already has.
+        if (isPlaying) clearSuppression()
+        // <-- AM (NOTIFICATION_IS_NOT_THE_SESSION)
         // AM (IDLE_SESSION_COST_FIX) -->
         postNotification()
         // <-- AM (IDLE_SESSION_COST_FIX)
@@ -480,6 +607,14 @@ class PlayerBackgroundPlaybackService : Service() {
 
     /** Keeps notification text and reopen-intent ids in sync when the episode changes mid-session. */
     fun updateEpisodeInfo(title: String, subtitle: String, sessionKey: SessionKey?) {
+        // AM (NOTIFICATION_IS_NOT_THE_SESSION) -->
+        // A genuinely different key is a different video, which is where a
+        // suppressed notification comes back. Compared BEFORE the field is
+        // written, and only on a change: this also runs for same-key metadata
+        // resolution (see the holder's own observer), which must not resurrect
+        // the notification the user just swiped off the video it belongs to.
+        if (sessionKey != null && sessionKey != this.sessionKey) clearSuppression()
+        // <-- AM (NOTIFICATION_IS_NOT_THE_SESSION)
         this.title = title
         this.subtitle = subtitle
         this.sessionKey = sessionKey
@@ -498,6 +633,8 @@ class PlayerBackgroundPlaybackService : Service() {
         onTogglePlayPause = null
         onStopRequested = null
         releaseWakeLock()
+        // AM (NOTIFICATION_IS_NOT_THE_SESSION)
+        clearSuppression()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }

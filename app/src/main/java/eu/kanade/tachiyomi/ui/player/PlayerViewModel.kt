@@ -156,6 +156,7 @@ import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.system.workManager
 import `is`.xyz.mpv.MPVNode
 import `is`.xyz.mpv.Utils
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -179,6 +180,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -596,6 +598,39 @@ class PlayerViewModel(
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>?) = size > 3
         }
 
+    // AM (PREFETCH_FOLLOWS_THE_QUEUE) -->
+    // These four live ABOVE init deliberately. Kotlin runs property
+    // initializers and init blocks in declaration order, and observeNextEpisode()
+    // below starts a collector that reaches prefetchEpisode() as soon as
+    // stateData emits - which happened before the initializers further down the
+    // file had run, so prefetchAttempt was still null and clearPrefetch() threw
+    // NPE on setValue. Declared here, they are initialized before anything in
+    // init can observe them. Anything else the prefetch holds as state belongs
+    // here too, for the same reason.
+
+    /** The most recent completed resolve, subject to [PREFETCH_TTL_MS]. */
+    private var prefetchedEpisode: PrefetchedEpisode? = null
+
+    /** The loop keeping [prefetchEpisodeId] resolved - see observeNextEpisode(). */
+    private var prefetchJob: Job? = null
+
+    /** The episode [prefetchJob] is currently keeping resolved. */
+    private var prefetchEpisodeId: Long? = null
+
+    /**
+     * The resolve currently in flight, so a transition can JOIN it instead of
+     * racing it.
+     *
+     * Without this there was only the finished result: [prefetchedFor] returned
+     * null while the walk was still running, so loadEpisode took the normal path
+     * and started the same three round trips against the same hosters while the
+     * prefetch kept going beside it. A prefetch that was nearly done at the
+     * transition contributed nothing and doubled the requests - and because the
+     * only log line is in resolvePrefetch's catch, that case was silent.
+     */
+    private val prefetchAttempt = MutableStateFlow<Deferred<PrefetchedEpisode?>?>(null)
+    // <-- AM (PREFETCH_FOLLOWS_THE_QUEUE)
+
     init {
         viewModelScope.launchIO {
             getCustomButtons.subscribeAll().collectLatest { buttons ->
@@ -617,6 +652,8 @@ class PlayerViewModel(
         observeQueue()
         // AM (PLAYLIST_SWIPE_ACTIONS)
         observePlaylistDownloads()
+        // AM (PREFETCH_FOLLOWS_THE_QUEUE)
+        observeNextEpisode()
     }
 
     // AM (PLAYLIST_SEARCH_SCOPE) -->
@@ -1057,9 +1094,27 @@ class PlayerViewModel(
             // moving while nothing is holding it still - not paused by the
             // user, not finished - is what "loading" means, whatever the
             // reason.
+            // AM (NO_GRACE_BEFORE_A_FILE_HAS_EVER_PLAYED) -->
+            // STALL_AFTER_MS is a grace period against flicker: a dropped frame
+            // or a momentary hitch should not flash a spinner. That reasoning
+            // only holds for a file that HAS been playing - it is the evidence
+            // that a brief stillness is probably noise. A file that has not
+            // produced a single advancing position yet has no such evidence, and
+            // the delay there is not anti-flicker, it is the cause of flicker:
+            // isLoadingEpisode goes false when the load call completes (:4990,
+            // :7275), which is before any frame exists, and this watcher then
+            // takes STALL_TICK_MS granularity plus STALL_AFTER_MS - up to about
+            // 950ms - to pick the spinner back up. That window is the gap where
+            // the loader vanishes and returns mid-transition.
+            //
+            // Tracked by [pendingLoadGeneration], which every loadfile already
+            // raises, rather than by a timer or a new flag: "has the position
+            // advanced since the file I asked for" has an exact answer, in the
+            // same spirit as the generation gate's own doc comment.
             launch {
                 var lastPosition = Double.NaN
                 var stillSince = 0L
+                var advancedGeneration = -1
                 while (true) {
                     delay(STALL_TICK_MS)
                     val position = currentPositionSeconds()
@@ -1069,25 +1124,41 @@ class PlayerViewModel(
                     val holding = playbackData.value.paused ||
                         stateData.value.isStopped ||
                         currentFileReachedEof
-                    if (position == null || holding) {
+                    // Nothing has advanced under the current load yet.
+                    val neverPlayed = advancedGeneration != pendingLoadGeneration
+                    if (holding) {
                         lastPosition = position ?: Double.NaN
                         stillSince = 0L
                         if (playbackData.value.stalled) updatePlaybackData { it.copy(stalled = false) }
                         continue
                     }
+                    if (position == null) {
+                        // A file that has played before and briefly reports no
+                        // position is the hitch case; one that never has is still
+                        // opening, and that is exactly what the spinner is for.
+                        lastPosition = Double.NaN
+                        stillSince = 0L
+                        if (neverPlayed != playbackData.value.stalled) {
+                            updatePlaybackData { it.copy(stalled = neverPlayed) }
+                        }
+                        continue
+                    }
                     if (position != lastPosition) {
                         lastPosition = position
                         stillSince = 0L
+                        advancedGeneration = pendingLoadGeneration
                         if (playbackData.value.stalled) updatePlaybackData { it.copy(stalled = false) }
                         continue
                     }
                     if (stillSince == 0L) stillSince = SystemClock.elapsedRealtime()
-                    val stalled = SystemClock.elapsedRealtime() - stillSince >= STALL_AFTER_MS
+                    val stalled = neverPlayed ||
+                        SystemClock.elapsedRealtime() - stillSince >= STALL_AFTER_MS
                     if (stalled != playbackData.value.stalled) {
                         updatePlaybackData { it.copy(stalled = stalled) }
                     }
                 }
             }
+            // <-- AM (NO_GRACE_BEFORE_A_FILE_HAS_EVER_PLAYED)
             // <-- AM (PLAYING_IS_POSITION_ADVANCING)
 
             // AM (PLAYBACK_STARVED_SIGNAL) -->
@@ -1310,6 +1381,8 @@ class PlayerViewModel(
             url,
             options,
             hasAttachedSurface = isSurfaceAttached || player.hasAttachedSurfaceBefore,
+            // AM (ADOPTED_SURFACE_KEEPS_HWDEC)
+            hwdec = player.preferredHwdec(),
         )
     }
     // <-- AM (AUDIO_BLIP_FIX)
@@ -4288,10 +4361,6 @@ class PlayerViewModel(
         val fetchedAt: Long,
     )
 
-    private var prefetchedEpisode: PrefetchedEpisode? = null
-    private var prefetchStartedForEpisodeId: Long? = null
-    private var prefetchJob: Job? = null
-
     /** The prefetch for [episodeId], or null if there is none or it has aged out. */
     private fun prefetchedFor(episodeId: Long?): PrefetchedEpisode? {
         val prefetch = prefetchedEpisode ?: return null
@@ -4303,70 +4372,232 @@ class PlayerViewModel(
         return prefetch
     }
 
+    // AM (PREFETCH_FOLLOWS_THE_QUEUE) -->
+    /**
+     * [prefetchedFor], but waits for a resolve that is already running.
+     *
+     * No timeout: the thing being awaited is the identical work the normal path
+     * would start, against the same source, so joining is never slower than not
+     * joining. A source that hangs hangs either way, and the attempt is replaced
+     * on every refresh cycle, so nothing can be waited on indefinitely past its
+     * own usefulness.
+     */
+    private suspend fun awaitPrefetchedFor(episodeId: Long?): PrefetchedEpisode? {
+        prefetchedFor(episodeId)?.let { return it }
+        if (episodeId == null || prefetchEpisodeId != episodeId) return null
+        val attempt = prefetchAttempt.value ?: return null
+        val joined = try {
+            attempt.await()
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            null
+        } ?: return null
+        if (joined.episodeId != episodeId) return null
+        prefetchedEpisode = joined
+        return prefetchedFor(episodeId)
+    }
+    // <-- AM (PREFETCH_FOLLOWS_THE_QUEUE)
+
+    // AM (PREFETCH_FOLLOWS_THE_QUEUE) -->
+    /** Drops a result that has been handed to a load, leaving the loop alone. */
+    private fun consumePrefetch() {
+        prefetchedEpisode = null
+    }
+    // <-- AM (PREFETCH_FOLLOWS_THE_QUEUE)
+
     private fun clearPrefetch() {
         prefetchJob?.cancel()
         prefetchJob = null
         prefetchedEpisode = null
-        prefetchStartedForEpisodeId = null
+        // AM (PREFETCH_FOLLOWS_THE_QUEUE) -->
+        prefetchEpisodeId = null
+        prefetchAttempt.value = null
+        // <-- AM (PREFETCH_FOLLOWS_THE_QUEUE)
+    }
+
+    // AM (PREFETCH_FOLLOWS_THE_QUEUE) -->
+    /**
+     * Keeps the next episode in the play order resolved, for as long as it IS the
+     * next episode.
+     *
+     * The trigger used to be `duration - position <= PREFETCH_LEAD_SECONDS` on the
+     * position tick - one attempt, started 30 seconds before the episode ended.
+     * The lead was there because resolved hoster links are time-limited, but
+     * [PREFETCH_TTL_MS] is the guard for that and it discards a stale result
+     * regardless; the lead was a second, blunter copy of the same rule, and what it
+     * actually bought was a 30-second budget for three sequential network round
+     * trips. A source slower than that budget produced the behaviour this replaces:
+     * the episode ended, the prefetch had not landed, the normal path ran from
+     * scratch, and the viewer watched a loader for however long the resolve took
+     * while the abandoned prefetch finished unused alongside it.
+     *
+     * Being the next episode is the real condition, so that is what drives it. The
+     * loop re-resolves on [PREFETCH_REFRESH_MS], comfortably inside the TTL, which
+     * means the result is fresh AT THE TRANSITION rather than merely young when it
+     * was taken - the property the lead was reaching for. A failed attempt retries
+     * on [PREFETCH_RETRY_MS] instead of latching permanently, which the old
+     * prefetchStartedForEpisodeId guard did: one empty hoster list and the episode
+     * was never prefetched again.
+     *
+     * Cost is a few API calls per episode, not media bytes. Nothing here downloads
+     * video - [resolvePrefetch] stops at the first video that resolves.
+     */
+    private fun observeNextEpisode() {
+        viewModelScope.launchIO {
+            stateData
+                .map { nextQueueKey() }
+                .distinctUntilChanged()
+                .collectLatest { nextKey -> prefetchEpisode(nextKey) }
+        }
     }
 
     /**
-     * Resolves the next episode shortly before this one ends. Deliberately close to
-     * the transition rather than early in the episode: resolved hoster links are
-     * usually time-limited, so a prefetch taken minutes ahead would be stale by the
-     * time it was used (and [PREFETCH_TTL_MS] discards one that sat too long anyway).
+     * What the queue says plays after the current item, or null when nothing
+     * does.
+     *
+     * [playbackQueue] is the one definition of order in a session - it is what
+     * the next button, the queue UI and the end-of-episode advance all step
+     * through, and it answers for an external folder as readily as a library
+     * playlist. Indexing `currentPlaylist[currentPlaylistIndex + 1]` instead,
+     * as this did, was a second implementation of the same question that could
+     * disagree with the first: `currentPlaylistIndex` falls back to -1 for an
+     * episode the queue does not hold (`:3793`), and -1 + 1 is a perfectly
+     * valid index, so the prefetch resolved the FIRST item in the order and
+     * spent the same requests on an episode that was never going to play.
+     *
+     * Guarded on a real position for that reason, rather than reusing
+     * [hasNext], whose documented -1 behaviour ("both a previous and a next")
+     * is right for a next button and wrong for deciding what to resolve.
+     */
+    private fun nextQueueKey(): SessionKey? {
+        val state = stateData.value
+        val animeId = state.currentAnime?.id ?: return null
+        val episodeId = state.currentEpisode?.id ?: return null
+        val queue = playbackQueue ?: return null
+        val index = queue.indexOf(SessionKey.Library(animeId = animeId, episodeId = episodeId))
+        if (index < 0) return null
+        return queue.keyAt(index + 1)
+    }
+
+    /**
+     * Points the prefetch loop at [nextId], or stops it when there is no next
+     * episode. Restarting for an id already being kept resolved would throw away a
+     * good result to fetch it again, so it is a no-op.
+     */
+    private fun prefetchEpisode(nextKey: SessionKey?) {
+        // A library episode is the only thing there is anything to resolve for -
+        // an external item in the order already carries its own uri.
+        val nextId = (nextKey as? SessionKey.Library)?.episodeId
+        if (nextId != null && nextId == prefetchEpisodeId && prefetchJob?.isActive == true) return
+        clearPrefetch()
+        if (nextId == null) return
+
+        prefetchEpisodeId = nextId
+        prefetchJob = viewModelScope.launchIO {
+            while (isActive) {
+                val attempt = async { resolvePrefetch(nextId) }
+                prefetchAttempt.value = attempt
+                val result = attempt.await()
+                prefetchAttempt.value = null
+                if (result != null) prefetchedEpisode = result
+                delay(if (result == null) PREFETCH_RETRY_MS else PREFETCH_REFRESH_MS)
+            }
+        }
+    }
+
+    /**
+     * One resolve of [nextId], or null if it could not be resolved.
      *
      * Hosters are walked one at a time and the walk stops at the first video that
      * resolves, rather than fanning out across all of them - this runs while the
      * current episode is still streaming, and the point is to spend as little
      * bandwidth as possible alongside playback.
+     *
+     * Re-checks against the queue on every attempt rather than closing over a
+     * position: the loop outlives any one state snapshot now, and an episode that
+     * is no longer the next one must not be resolved on the strength of where it
+     * used to sit. The playlist is read only to get the [Episode] itself, by id -
+     * order comes from the queue, presentation from the playlist.
      */
-    private fun prefetchNextEpisode() {
-        val displayAnime = stateData.value.currentAnime ?: return
+    private suspend fun resolvePrefetch(nextId: Long): PrefetchedEpisode? {
         val state = stateData.value
-        val next = state.currentPlaylist.getOrNull(state.currentPlaylistIndex + 1) ?: return
-        val nextId = next.id ?: return
-        if (prefetchStartedForEpisodeId == nextId) return
-        prefetchStartedForEpisodeId = nextId
+        val displayAnime = state.currentAnime ?: return null
+        if ((nextQueueKey() as? SessionKey.Library)?.episodeId != nextId) return null
+        val next = state.currentPlaylist.firstOrNull { it.id == nextId } ?: return null
 
-        prefetchJob?.cancel()
-        prefetchJob = viewModelScope.launchIO {
-            try {
-                val (episodeAnime, episodeSource) = resolveEpisodeAnimeAndSource(displayAnime, next)
-                    ?: return@launchIO
-                val hosterList = episodeLoader.getHosters(next.toDomainEpisode()!!, episodeAnime, episodeSource)
-                if (hosterList.isEmpty()) return@launchIO
+        return try {
+            val (episodeAnime, episodeSource) = resolveEpisodeAnimeAndSource(displayAnime, next)
+                ?: return null
+            val hosterList = episodeLoader.getHosters(next.toDomainEpisode()!!, episodeAnime, episodeSource)
+            if (hosterList.isEmpty()) return null
 
-                val states = MutableList<HosterState>(hosterList.size) { HosterState.Idle(hosterList[it].hosterName) }
-                hosterList.forEachIndexed { hosterIdx, hoster ->
-                    states[hosterIdx] = episodeLoader.loadHosterVideos(episodeSource, hoster)
+            val states = MutableList<HosterState>(hosterList.size) { HosterState.Idle(hosterList[it].hosterName) }
+            hosterList.forEachIndexed { hosterIdx, hoster ->
+                states[hosterIdx] = episodeLoader.loadHosterVideos(episodeSource, hoster)
 
-                    val (bestHosterIdx, bestVideoIdx) = hosterLoader.selectBestVideo(states)
-                    if (bestHosterIdx == -1) return@forEachIndexed
+                val (bestHosterIdx, bestVideoIdx) = hosterLoader.selectBestVideo(states)
+                if (bestHosterIdx == -1) return@forEachIndexed
 
-                    val ready = states[bestHosterIdx] as? HosterState.Ready ?: return@forEachIndexed
-                    val video = ready.videoList.getOrNull(bestVideoIdx) ?: return@forEachIndexed
-                    val resolved = hosterLoader.getResolvedVideo(episodeSource, video)
-                    if (resolved == null || resolved.videoUrl.isEmpty()) return@forEachIndexed
+                val ready = states[bestHosterIdx] as? HosterState.Ready ?: return@forEachIndexed
+                val video = ready.videoList.getOrNull(bestVideoIdx) ?: return@forEachIndexed
+                val resolved = hosterLoader.getResolvedVideo(episodeSource, video)
+                if (resolved == null || resolved.videoUrl.isEmpty()) return@forEachIndexed
 
-                    states[bestHosterIdx] = ready.getChangedAt(bestVideoIdx, resolved, Video.State.READY)
-                    prefetchedEpisode = PrefetchedEpisode(
-                        episodeId = nextId,
-                        hosterList = hosterList,
-                        hosterState = states.toList(),
-                        selectedIndex = bestHosterIdx to bestVideoIdx,
-                        fetchedAt = System.currentTimeMillis(),
-                    )
-                    return@launchIO
-                }
-            } catch (e: Throwable) {
-                if (e is CancellationException) throw e
-                // A prefetch is an optimisation - a failure just means the normal
-                // load path runs, exactly as it did before.
-                logcat(LogPriority.INFO, e) { "NEXT_EPISODE_PREFETCH failed for episodeId=$nextId" }
+                states[bestHosterIdx] = ready.getChangedAt(bestVideoIdx, resolved, Video.State.READY)
+                // AM (PRELOAD_PLAYLISTS) -->
+                // Resolving the url is only half of preloading. Without this the
+                // transition still fetches the master, then the variant playlist,
+                // then the first segments, with the viewer watching - the url
+                // being ready saves the hoster round trips and none of those.
+                // Warming them here is kilobytes and moves the whole manifest
+                // phase off the transition.
+                warmPlaylists(resolved, episodeSource, nextId)
+                // <-- AM (PRELOAD_PLAYLISTS)
+                return PrefetchedEpisode(
+                    episodeId = nextId,
+                    hosterList = hosterList,
+                    hosterState = states.toList(),
+                    selectedIndex = bestHosterIdx to bestVideoIdx,
+                    fetchedAt = System.currentTimeMillis(),
+                )
             }
+            null
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            // A prefetch is an optimisation - a failure just means the normal
+            // load path runs, exactly as it did before.
+            logcat(LogPriority.INFO, e) { "NEXT_EPISODE_PREFETCH failed for episodeId=$nextId" }
+            null
         }
     }
+    // <-- AM (PREFETCH_FOLLOWS_THE_QUEUE)
+
+    // AM (PRELOAD_PLAYLISTS) -->
+    /**
+     * Fetches [video]'s manifests into the proxy's store before it is played.
+     *
+     * Headers resolve the same way proxyUrlFor's own caller resolves them - the
+     * video's if it has any, otherwise the source's - so the warm request is the
+     * one the player would have made rather than a second, differently
+     * authenticated one. Anything that is not an HLS url MediaProxyServer leaves
+     * alone, and a failure is silent: the normal path then fetches as before.
+     */
+    private fun warmPlaylists(video: Video, source: AnimeSource, episodeId: Long) {
+        val url = video.videoUrl
+        if (url.isEmpty() || !url.startsWith("http")) return
+        val headers = video.headers ?: (source as? AnimeHttpSource)?.headers ?: return
+        runCatching {
+            MediaProxyServer.warmPlaylists(
+                url = url,
+                headers = headers,
+                httpClient = networkService.client,
+                // The same key setVideo will register for this episode, so the
+                // segments warmed here are the ones its requests look up.
+                cacheKey = MediaProxyServer.cacheKeyFor(episodeId, video.videoTitle),
+            )
+        }
+    }
+    // <-- AM (PRELOAD_PLAYLISTS)
     // <-- AM (NEXT_EPISODE_PREFETCH)
 
     // AM (STOP_RESOLVING_UNUSED_HOSTERS) -->
@@ -4415,7 +4646,12 @@ class PlayerViewModel(
         // other caller (a genuine fresh load, a rehost) takes the normal path.
         val prefetch = prefetchedFor(stateData.value.currentEpisode?.id)
         if (prefetch != null && hosterList === prefetch.hosterList) {
-            clearPrefetch()
+            // AM (PREFETCH_FOLLOWS_THE_QUEUE): consume the result only. A full
+            // clearPrefetch() here would cancel the loop, which by this point may
+            // already have been pointed at the NEXT next episode by
+            // observeNextEpisode() - the queue owns that lifecycle now, not the
+            // transition that happens to be consuming an earlier result.
+            consumePrefetch()
             updateStateData { it.copy(hosterState = prefetch.hosterState) }
 
             val (prefetchedHosterIdx, prefetchedVideoIdx) = prefetch.selectedIndex
@@ -4833,7 +5069,13 @@ class PlayerViewModel(
                             "start" to pending.syncPosition.toString(),
                             "pause" to "yes",
                         )).joinToString(",") { (name, value) -> "$name=\"$value\"" }
-                        pending.player.mpv.loadFileWithHwdecGuard(url, options, hasAttachedSurface = true)
+                        pending.player.mpv.loadFileWithHwdecGuard(
+                            url,
+                            options,
+                            hasAttachedSurface = true,
+                            // AM (ADOPTED_SURFACE_KEEPS_HWDEC)
+                            hwdec = pending.player.preferredHwdec(),
+                        )
                     }
 
                     while (true) {
@@ -6815,7 +7057,9 @@ class PlayerViewModel(
                 anime = anime,
                 source = source,
                 displayAnime = displayAnime,
-                prefetched = prefetchedFor(chosenEpisode.id)?.hosterList,
+                // AM (PREFETCH_FOLLOWS_THE_QUEUE): awaits a resolve already in
+                // flight rather than starting a second copy of it beside one.
+                prefetched = awaitPrefetchedFor(chosenEpisode.id)?.hosterList,
             )
             // <-- AM (CONTENT_AGNOSTIC_SESSION)
             val resolved = try {
@@ -8709,11 +8953,10 @@ class PlayerViewModel(
         }
         // <-- AM (PERSIST_ON_CADENCE)
 
-        // AM (NEXT_EPISODE_PREFETCH) -->
-        if (duration > 0 && duration - position <= PREFETCH_LEAD_SECONDS) {
-            prefetchNextEpisode()
-        }
-        // <-- AM (NEXT_EPISODE_PREFETCH)
+        // AM (PREFETCH_FOLLOWS_THE_QUEUE) -->
+        // Was the PREFETCH_LEAD_SECONDS trigger. The prefetch no longer has
+        // anything to do with where the playhead is - see observeNextEpisode().
+        // <-- AM (PREFETCH_FOLLOWS_THE_QUEUE)
 
         // AM (DOWNLOAD_AHEAD_ONCE) -->
         // Was re-evaluated on every tick past the 35% mark. downloadNextEpisodes()
@@ -10028,11 +10271,30 @@ class PlayerViewModel(
         private const val PERSIST_INTERVAL_SECONDS = 5
         // <-- AM (PERSIST_ON_CADENCE)
 
-        /** How close to the end of an episode the next one is resolved, in seconds. */
-        private const val PREFETCH_LEAD_SECONDS = 30
-
         /** How long a prefetched, resolved hoster link is trusted. */
         private const val PREFETCH_TTL_MS = 5L * 60L * 1000L
+
+        // AM (PREFETCH_FOLLOWS_THE_QUEUE) -->
+        /**
+         * How often the next episode is re-resolved while it stays next.
+         *
+         * Inside [PREFETCH_TTL_MS] by a minute, so the held result is replaced
+         * before it can age out rather than expiring and leaving the transition
+         * with nothing. That margin is what makes starting early safe: the link
+         * handed to the loadfile is at most this old whether the episode ran for
+         * two minutes or forty.
+         */
+        private const val PREFETCH_REFRESH_MS = 4L * 60L * 1000L
+
+        /**
+         * How long to wait before trying again after a failed resolve.
+         *
+         * Short enough to recover from a transient failure well inside an
+         * episode, long enough that a source which is simply down is not polled
+         * at speed for the whole of one.
+         */
+        private const val PREFETCH_RETRY_MS = 30L * 1000L
+        // <-- AM (PREFETCH_FOLLOWS_THE_QUEUE)
 
         // AM (PINCH_ZOOM) -->
         private const val MIN_VIDEO_ZOOM = 1f

@@ -42,7 +42,9 @@ class MPVPlayer(
     @Assisted videoOutput: String,
     context: Context,
     private val playerPreferences: PlayerPreferences,
-    decoderPreferences: DecoderPreferences,
+    // AM (ADOPTED_SURFACE_KEEPS_HWDEC): held rather than read once in init, so
+    // [preferredHwdec] answers with the current setting at each load.
+    private val decoderPreferences: DecoderPreferences,
     networkPreferences: NetworkPreferences,
     advancedPreferences: AdvancedPlayerPreferences,
     private val subtitlePreferences: SubtitlePreferences,
@@ -99,6 +101,41 @@ class MPVPlayer(
      */
     var hasAttachedSurfaceBefore = false
     // <-- AM (HWDEC_REATTACH_FIX)
+
+    // AM (ADOPTED_SURFACE_KEEPS_HWDEC) -->
+    /**
+     * What hwdec should be whenever there is a surface to decode into.
+     *
+     * The guard turns hardware decoding off for a load with no surface, and
+     * nothing turned it back on: an instance that was ever loaded surface-less
+     * stayed on software decoding for the rest of its life. This is the value
+     * the next load restores - at a file boundary, which is the only safe point
+     * to change it (see HWDEC_REATTACH_FIX above).
+     *
+     * AM (ONE_DECODE_POLICY): one value, for every consumer. There was briefly a
+     * copyBack variant selecting `mediacodec-copy` for clips, on the theory that
+     * a pooled instance adopting someone else's SurfaceTexture wanted frames
+     * routed through mpv rather than rendered straight into the surface. It
+     * decoded in hardware and then handed the saving straight back: copy-back
+     * runs hwdownload plus a per-frame format conversion on the CPU, which at
+     * 1080p tops out around 12-15fps.
+     *
+     * Measured on-device (2026-11-07) with the same 1920x1080 59.94fps file in
+     * both paths: the fullscreen player on `mediacodec` held vodrop=0 and
+     * avsync=0.00, while a feed card on `mediacodec-copy` shed roughly 45 frames
+     * a second with decdrop=0 and a full demuxer cache - so the decoder and the
+     * network were both fine and every lost frame was lost after decoding. The
+     * 24fps and 30fps cards beside it were clean, which is what a fixed
+     * throughput ceiling looks like. `display-fps` was null in both, so it was
+     * never a display-clock difference either.
+     *
+     * Clips therefore take exactly what the player takes. If the short-file
+     * first-frame case the old ClipPlayback comment described turns out to be
+     * real, it gets its own narrow handling rather than a second decode policy.
+     */
+
+    fun preferredHwdec(): String = if (decoderPreferences.tryHWDecoding.get()) "mediacodec" else "no"
+    // <-- AM (ADOPTED_SURFACE_KEEPS_HWDEC)
 
     // AM (PERSISTENT_SURFACE_ARCHITECTURE) -->
     /**

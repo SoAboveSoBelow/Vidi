@@ -108,6 +108,38 @@ fun MpvSurface(
                             existing.setDefaultBufferSize(width, height)
                             mpv.setPropertyString("android-surface-size", "${width}x$height")
                             // <-- AM (FIXED_SURFACE_SIZE)
+                            // AM (ADOPTED_SURFACE_KEEPS_HWDEC) -->
+                            // This branch ends with a valid Surface attached, the
+                            // same as the fresh one below, so it has to make the
+                            // same two statements - and it was making neither.
+                            //
+                            // hasAttachedSurfaceBefore means "a valid Surface has
+                            // ever been attached" and loadFileWithHwdecGuard reads
+                            // it to decide whether there is anything to decode
+                            // into: false means the load is issued with hwdec
+                            // disabled. An instance that only ever reaches this
+                            // branch never set the flag, so EVERY load it issued
+                            // turned hardware decoding off, permanently - nothing
+                            // sets hwdec back afterwards.
+                            //
+                            // The fullscreen player never showed it because its
+                            // first attach is always the fresh path below. A
+                            // scroller card is a pooled instance reassigned
+                            // between cards, so its texture already exists and it
+                            // adopts from the start. Confirmed on-device
+                            // (2026-11-06): every feed card reported hwdec=no with
+                            // frame-drop-count climbing and avsync reaching 3.1s
+                            // on a 29.97fps clip, while the same content in the
+                            // player ran on mediacodec.
+                            //
+                            // Only the flag. hwdec is deliberately NOT re-set
+                            // here: HWDEC_REATTACH_FIX records that doing it on a
+                            // reattach tears MediaCodec down mid-stream and can
+                            // hang waiting for a keyframe. Restoring it belongs at
+                            // the next load instead, which is a file boundary -
+                            // see loadFileWithHwdecGuard.
+                            player.hasAttachedSurfaceBefore = true
+                            // <-- AM (ADOPTED_SURFACE_KEEPS_HWDEC)
                             onSurfaceAttachedChanged(true)
                             return
                         }

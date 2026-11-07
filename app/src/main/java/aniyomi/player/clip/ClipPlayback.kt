@@ -289,11 +289,41 @@ class ClipPlayback(
             // playing even for a frame before being paused.
             val options = buildList {
                 add("pause=yes")
-                // Samsung's MediaCodec path can consume a whole sub-second
-                // H.264 file without emitting its first frame. Feed cards and
-                // split-stream clips use software decoding; ordinary episodes
-                // retain the user's hardware-decoding preference.
-                if (managesAudio || audioUrl != null) add("hwdec=no")
+                // AM (ONE_DECODE_POLICY) -->
+                // Was `if (managesAudio || audioUrl != null) add("hwdec=no")`.
+                //
+                // managesAudio is true for every scroller card, so that line put
+                // the whole feed on SOFTWARE decoding, and because it rode in the
+                // loadfile options it also overrode whatever the guard had just
+                // set. Measured on-device (2026-11-06): every card reported
+                // hwdec=no, and the heavier clips could not be decoded in real
+                // time - frame-drop-count climbed steadily while avsync grew
+                // monotonically past three seconds, so the picture fell further
+                // behind the audio the longer a card played. Which clips were
+                // affected was fixed per clip, because it is purely a function of
+                // that clip's resolution and bitrate: a 29.97fps card collapsed
+                // while a 59.94fps one beside it was clean. Nothing was ever late
+                // to the screen (vo-delayed-frame-count stayed at zero), so this
+                // was never a presentation problem.
+                //
+                // The reason given for it was a decoder consuming a sub-second
+                // H.264 file without emitting a first frame. That is not vendor
+                // specific whatever the old comment said - a codec rendering
+                // straight into a surface holds frames until it has enough input,
+                // and drains the remainder only on end-of-stream, so a file short
+                // enough to be queued in full before the first output appears can
+                // be consumed entirely with every frame still inside the codec.
+                // Any Android device can do that; only the depth at which it
+                // starts varies.
+                //
+                // So the condition was keyed on the ROLE of the player, while the
+                // defect belongs to a file property interacting with a frame
+                // DELIVERY mode. mediacodec-copy addresses that delivery mode
+                // directly (see the hwdec argument below) and costs one frame copy
+                // against decoding every frame on the CPU, which is why the policy
+                // now lives in one place for player and clips alike instead of
+                // being overridden here.
+                // <-- AM (ONE_DECODE_POLICY)
                 // The same file on both instances: this one takes the video
                 // and the companion takes the audio, so the video can repeat
                 // on its own length while the audio plays through. Without
@@ -307,6 +337,9 @@ class ClipPlayback(
                 url = url,
                 options = options,
                 hasAttachedSurface = video.hasAttachedSurfaceBefore,
+                // AM (ONE_DECODE_POLICY): the same value the fullscreen player
+                // uses, for the reasons recorded on preferredHwdec itself.
+                hwdec = video.preferredHwdec(),
             )
             loadCompanion(audioUrl, httpHeaderFields)
             // A surface-delayed load must not overwrite the requested state
