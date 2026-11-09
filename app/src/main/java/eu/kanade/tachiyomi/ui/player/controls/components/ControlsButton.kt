@@ -17,7 +17,6 @@
 
 package eu.kanade.tachiyomi.ui.player.controls.components
 
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -45,6 +44,7 @@ import tachiyomi.presentation.core.components.material.ButtonColors
 import tachiyomi.presentation.core.components.material.ButtonDefaults
 import tachiyomi.presentation.core.components.material.DISABLED_ALPHA
 import tachiyomi.presentation.core.components.material.padding
+import tachiyomi.presentation.core.util.guardedCombinedClickable
 
 @Composable
 fun ControlsButton(
@@ -73,7 +73,10 @@ fun ControlsButton(
 
     Box(
         modifier = modifier
-            .combinedClickable(
+            // AM (DOUBLE_TAP_TAIL_GUARD): shared with the library grid. Absorbs the
+            // third tap of a triple tap, and keeps the immediate single tap where no
+            // double-tap handler is given.
+            .guardedCombinedClickable(
                 enabled = enabled,
                 onClick = {
                     clickEvent()
@@ -124,7 +127,7 @@ fun ControlsButton(
     val clickEvent = LocalPlayerButtonsClickEvent.current
     Box(
         modifier = modifier
-            .combinedClickable(
+            .guardedCombinedClickable(
                 onClick = {
                     clickEvent()
                     onClick()
@@ -132,7 +135,6 @@ fun ControlsButton(
                 onLongClick = onLongClick,
                 interactionSource = interactionSource,
                 indication = null,
-
             )
             .clip(CircleShape)
             .indication(
@@ -184,7 +186,7 @@ fun FilledControlsButton(
         Box(
             modifier = Modifier
                 .matchParentSize()
-                .combinedClickable(
+                .guardedCombinedClickable(
                     onClick = {
                         clickEvent()
                         onClick()

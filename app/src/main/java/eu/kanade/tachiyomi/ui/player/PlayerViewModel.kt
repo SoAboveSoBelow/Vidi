@@ -26,15 +26,17 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.CreationExtras
 import animiru.domain.player.interactor.TrackSelect
 import animiru.domain.player.model.ArtType
-import animiru.domain.player.model.BottomPlayerButton
-import animiru.domain.player.model.CustomKeyCodes
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlAnchor
+import animiru.domain.player.model.ControlInput
+import animiru.domain.player.model.ControlSurface
 import animiru.domain.player.model.PlayerOrientation
 import animiru.domain.player.model.QueueCleaning
 import animiru.domain.player.model.SetAsArt
-import animiru.domain.player.model.SingleActionGesture
 import animiru.domain.player.model.VideoAspect
 import animiru.domain.player.model.VideoAspectOverride
 import animiru.domain.player.service.AudioPreferences
+import animiru.domain.player.service.ControlBindingPreferences
 import animiru.domain.player.service.DecoderPreferences
 import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
@@ -331,6 +333,8 @@ class PlayerViewModel(
     private val playerPreferences: PlayerPreferences,
     decoderPreferences: DecoderPreferences,
     private val gesturePreferences: GesturePreferences,
+    // AM (CONTROL_BINDINGS)
+    private val controlBindingPreferences: ControlBindingPreferences,
     private val audioPreferences: AudioPreferences,
     private val subtitlePreferences: SubtitlePreferences,
     private val getCustomButtons: GetCustomButtons,
@@ -496,16 +500,13 @@ class PlayerViewModel(
     private val autoSkip = playerPreferences.autoSkipIntro.get()
     private val netflixStyle = playerPreferences.enableNetflixStyleIntroSkip.get()
     private val defaultWaitingTime = playerPreferences.waitingTimeIntroSkip.get()
-    private val leftDoubleTapGesture = gesturePreferences.leftDoubleTapGesture.get()
-    private val centerDoubleTapGesture = gesturePreferences.centerDoubleTapGesture.get()
-    private val rightDoubleTapGesture = gesturePreferences.rightDoubleTapGesture.get()
-    // AM (MEDIA_CONTROLS) -->
-    private val mediaPreviousGesture = gesturePreferences.mediaPreviousGesture.get()
-    private val mediaPlayPauseGesture = gesturePreferences.mediaPlayPauseGesture.get()
-    private val mediaNextGesture = gesturePreferences.mediaNextGesture.get()
-    // <-- AM (MEDIA_CONTROLS)
-    private val longPressGesture = gesturePreferences.longPressGesture.get()
-    private val bottomPlayerButtons = gesturePreferences.bottomPlayerButtons.get()
+    // AM (CONTROL_BINDINGS) -->
+    // Collected rather than read once at construction: the layout is editable from a
+    // surface that is itself a player, so a binding changed there has to take effect
+    // without the player being torn down and rebuilt first.
+    private val controlLayout = controlBindingPreferences.layout(ControlSurface.Player)
+        .stateIn(viewModelScope)
+    // <-- AM (CONTROL_BINDINGS)
     private val doubleTapToSeekDuration = gesturePreferences.skipLengthPreference.get()
     private val showSeekBar = gesturePreferences.showSeekBar.get()
     private val pipEpisodeToasts = playerPreferences.pipEpisodeToasts.get()
@@ -539,7 +540,6 @@ class PlayerViewModel(
             smoothSeeking = smoothSeeking,
             showChapterIndicator = showChapterIndicator,
             enableCast = enableCast,
-            bottomPlayerButtons = bottomPlayerButtons,
         ),
     )
     val uiData = _uiData.asStateFlow()
@@ -871,7 +871,7 @@ class PlayerViewModel(
     }
 
     fun buildMediaSessionCallback(): MediaSession.Callback =
-        mediaSessionCallbackFor(mediaSessionTarget, gesturePreferences)
+        mediaSessionCallbackFor(mediaSessionTarget, controlBindingPreferences)
     // <-- AM (MEDIA_SESSION_UNIFIED_CALLBACK)
 
     // AM (DUPLICATE_ACTIVITY_REINIT_FIX) -->
@@ -1388,6 +1388,10 @@ class PlayerViewModel(
     // <-- AM (AUDIO_BLIP_FIX)
 
     fun handlePlayerEvent(event: PlayerEvent) {
+        // The layout editor previews the player's controls; it must never operate the
+        // session underneath it. Enforce that here as well as at the composables so
+        // activity, media-session, and other callers cannot bypass the editor boundary.
+        if (PlayerMediaHolder.layoutEditorFlow.value && event != PlayerEvent.ShowEpisodeDialog) return
         when (event) {
             PlayerEvent.ChangeAspect -> {
                 cycleAspectRatio()
@@ -8433,130 +8437,67 @@ class PlayerViewModel(
         updatePlaybackData { it.copy(seekText = value) }
     }
 
-    fun handleLeftDoubleTap() {
-        when (leftDoubleTapGesture) {
-            SingleActionGesture.None -> { }
-            SingleActionGesture.Seek -> {
-                leftSeek()
-            }
-            SingleActionGesture.PlayPause -> {
-                pauseUnpause()
-            }
-            SingleActionGesture.Switch -> {
-                nextEpisode(next = false)
-            }
-            SingleActionGesture.Custom -> {
-                mpvCommand("keypress", CustomKeyCodes.DoubleTapLeft.keyCode)
-            }
-            SingleActionGesture.Screenshot -> { }
-        }
+    // AM (CONTROL_BINDINGS) -->
+    /**
+     * Runs whatever is bound to [anchor] for [input].
+     *
+     * One dispatcher rather than a handler per slot: the slots are about to become
+     * user-ordered, so a function that knows which position it belongs to cannot
+     * survive. Direction lives on the action, which is why there is no longer a
+     * left/right distinction here.
+     *
+     * Note this now honours bindings the old per-slot handlers silently dropped - a
+     * double tap bound to Screenshot, for instance, used to do nothing at all.
+     */
+    fun handleControl(anchor: ControlAnchor, input: ControlInput) {
+        dispatch(controlLayout.value.action(anchor, input))
     }
 
-    fun handleCenterDoubleTap() {
-        when (centerDoubleTapGesture) {
-            SingleActionGesture.None -> { }
-            SingleActionGesture.Seek -> { }
-            SingleActionGesture.PlayPause -> {
-                pauseUnpause()
-            }
-            SingleActionGesture.Switch -> { }
-            SingleActionGesture.Custom -> {
-                mpvCommand("keypress", CustomKeyCodes.DoubleTapCenter.keyCode)
-            }
-            SingleActionGesture.Screenshot -> { }
-        }
-    }
-
-    fun handleRightDoubleTap() {
-        when (rightDoubleTapGesture) {
-            SingleActionGesture.None -> { }
-            SingleActionGesture.Seek -> {
-                rightSeek()
-            }
-            SingleActionGesture.PlayPause -> {
-                pauseUnpause()
-            }
-            SingleActionGesture.Switch -> {
-                nextEpisode(next = true)
-            }
-            SingleActionGesture.Custom -> {
-                mpvCommand("keypress", CustomKeyCodes.DoubleTapRight.keyCode)
-            }
-            SingleActionGesture.Screenshot -> { }
-        }
-    }
-
-    fun handleLongPress() {
-        when (longPressGesture) {
-            SingleActionGesture.None -> { }
-            SingleActionGesture.Seek -> { }
-            SingleActionGesture.PlayPause -> {
-                pauseUnpause()
-            }
-            SingleActionGesture.Switch -> { }
-            SingleActionGesture.Custom -> {
-                uiData.value.primaryButton?.let { executeButton(it) }
-            }
-            SingleActionGesture.Screenshot -> {
+    private fun dispatch(action: ControlAction) {
+        when (action) {
+            ControlAction.None -> { }
+            ControlAction.PlayPause -> pauseUnpause()
+            ControlAction.SeekBackward -> leftSeek()
+            ControlAction.SeekForward -> rightSeek()
+            ControlAction.PreviousEpisode -> nextEpisode(next = false)
+            ControlAction.NextEpisode -> nextEpisode(next = true)
+            ControlAction.Screenshot -> {
                 pause()
                 setSheet(Sheets.Screenshot)
             }
+            ControlAction.PrimaryCustomButton -> uiData.value.primaryButton?.let { executeButton(it) }
+            is ControlAction.CustomKey -> mpvCommand("keypress", action.code)
+            // Everything else belongs to the controls layer, not here: the sheets,
+            // panels, screen state and row buttons are all driven from PlayerControls'
+            // action map, which turns them into PlayerEvents. Nothing reaches this
+            // dispatcher bound to one of them today - the screen-zone gestures are its
+            // only callers - and an else keeps a new UI action from having to be
+            // declared irrelevant in two places.
+            else -> { }
         }
     }
+
+    /**
+     * Named entry points kept for the fixed callers that have no slot of their own -
+     * hardware keys, the gesture handler's screen zones, and queue events. They are
+     * thin wrappers over [handleControl] so there is still exactly one dispatcher.
+     */
+    fun handleLeftDoubleTap() = handleControl(ControlAnchor.ScreenLeft, ControlInput.DoubleTap)
+
+    fun handleCenterDoubleTap() = handleControl(ControlAnchor.ScreenCenter, ControlInput.DoubleTap)
+
+    fun handleRightDoubleTap() = handleControl(ControlAnchor.ScreenRight, ControlInput.DoubleTap)
+
+    fun handleLongPress() = handleControl(ControlAnchor.ScreenCenter, ControlInput.LongPress)
+
     // AM (MEDIA_CONTROLS) -->
-    fun handleMediaPrevious() {
-        when (mediaPreviousGesture) {
-            SingleActionGesture.None -> { }
-            SingleActionGesture.Seek -> {
-                leftSeek()
-            }
-            SingleActionGesture.PlayPause -> {
-                pauseUnpause()
-            }
-            SingleActionGesture.Switch -> {
-                nextEpisode(next = false)
-            }
-            SingleActionGesture.Custom -> {
-                mpvCommand("keypress", CustomKeyCodes.MediaPrevious.keyCode)
-            }
-            SingleActionGesture.Screenshot -> { }
-        }
-    }
+    fun handleMediaPrevious() = handleControl(ControlAnchor.MediaPrevious, ControlInput.Tap)
 
-    fun handleMediaPlayPause() {
-        when (mediaPlayPauseGesture) {
-            SingleActionGesture.None -> { }
-            SingleActionGesture.Seek -> { }
-            SingleActionGesture.PlayPause -> {
-                pauseUnpause()
-            }
-            SingleActionGesture.Switch -> { }
-            SingleActionGesture.Custom -> {
-                mpvCommand("keypress", CustomKeyCodes.MediaPlay.keyCode)
-            }
-            SingleActionGesture.Screenshot -> { }
-        }
-    }
+    fun handleMediaPlayPause() = handleControl(ControlAnchor.MediaPlayPause, ControlInput.Tap)
 
-    fun handleMediaNext() {
-        when (mediaNextGesture) {
-            SingleActionGesture.None -> { }
-            SingleActionGesture.Seek -> {
-                rightSeek()
-            }
-            SingleActionGesture.PlayPause -> {
-                pauseUnpause()
-            }
-            SingleActionGesture.Switch -> {
-                nextEpisode(next = true)
-            }
-            SingleActionGesture.Custom -> {
-                mpvCommand("keypress", CustomKeyCodes.MediaNext.keyCode)
-            }
-            SingleActionGesture.Screenshot -> { }
-        }
-    }
+    fun handleMediaNext() = handleControl(ControlAnchor.MediaNext, ControlInput.Tap)
     // <-- AM (MEDIA_CONTROLS)
+    // <-- AM (CONTROL_BINDINGS)
 
     fun leftSeek() {
         if (playbackData.value.position > 0) {
@@ -10163,7 +10104,6 @@ class PlayerViewModel(
         // <-- AM (CUSTOM_EPISODE_ORDER)
         val showChapterIndicator: Boolean = true,
         val playerSpeedPref: Float = 1f,
-        val bottomPlayerButtons: List<BottomPlayerButton?> = emptyList(),
         val enableCast: Boolean = false,
     )
 

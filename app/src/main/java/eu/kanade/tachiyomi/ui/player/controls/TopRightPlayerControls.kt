@@ -18,84 +18,220 @@
 package eu.kanade.tachiyomi.ui.player.controls
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Audiotrack
-import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlBinding
+import animiru.domain.player.model.ControlSlotId
+import animiru.domain.player.model.ControlRegion
+import animiru.domain.player.model.freeSlots
 import eu.kanade.tachiyomi.ui.player.controls.components.AutoPlaySwitch
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
+import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlRow
+import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlSlot
+import eu.kanade.tachiyomi.ui.player.controls.components.StaticSlot
+import eu.kanade.tachiyomi.ui.player.controls.components.EmptySlotContent
+import eu.kanade.tachiyomi.ui.player.controls.components.controlActionIcon
 import tachiyomi.presentation.core.components.material.padding
 
+/**
+ * AM (CONTROL_BINDINGS): the top bar's button cluster, rendered from the TopBar region
+ * rather than from a fixed list of buttons with a parameter each.
+ *
+ * Every slot goes through the one handler: tap, long press and double tap are whatever
+ * the binding says, and an unbound double tap stays null so the single tap still fires
+ * immediately. How many slots render is measured, not fixed - the stored list keeps its
+ * full length and a narrower window simply shows fewer of them.
+ */
 @Composable
 fun TopRightPlayerControls(
-    // auto-play
+    entries: List<ControlBinding>,
     autoPlayEnabled: Boolean,
     onToggleAutoPlay: (Boolean) -> Unit,
-
-    // subtitles
-    onSubtitlesClick: () -> Unit,
-    onSubtitlesLongClick: () -> Unit,
-
-    // audio
-    onAudioClick: () -> Unit,
-    onAudioLongClick: () -> Unit,
-
-    // video
-    onQualityClick: () -> Unit,
     isEpisodeOnline: Boolean?,
-
-    // more
-    onMoreClick: () -> Unit,
-    onMoreLongClick: () -> Unit,
-
+    onAction: (ControlAction) -> Unit,
     modifier: Modifier = Modifier,
+    onContentWidthChanged: (Dp) -> Unit = {},
+    // AM (CONTROL_BINDINGS): non-null puts the row in the editor, where a tap opens
+    // the slot rather than running it and the unfilled positions become visible.
+    onSlotEdit: ((Int) -> Unit)? = null,
+    // AM (CONTROL_BINDINGS): hold-and-drag reorder; -1 or 1 per step.
+    onSlotMove: ((Int, Int) -> Unit)? = null,
+    onArrangeStart: ((Int) -> Unit)? = null,
+    /** Opens the picker for a position that does not exist yet, inserting at it. */
+    onSlotInsert: ((Int) -> Unit)? = null,
+    /**
+     * True while any row is being arranged. Every row reveals its free positions, not
+     * just the one holding the slot - a control being moved is as likely to be wanted
+     * in another bar as further along its own.
+     */
+    isArranging: Boolean = false,
+    heldIndex: Int? = null,
 ) {
-    Row(
-        modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Absolute.SpaceEvenly,
-    ) {
-        AutoPlaySwitch(
-            isChecked = autoPlayEnabled,
-            onToggleAutoPlay = onToggleAutoPlay,
-            modifier = Modifier
-                .padding(vertical = MaterialTheme.padding.medium, horizontal = MaterialTheme.padding.mediumSmall)
-                .size(width = 48.dp, height = 24.dp),
-        )
-        ControlsButton(
-            icon = Icons.Default.Subtitles,
-            onClick = onSubtitlesClick,
-            onLongClick = onSubtitlesLongClick,
-            horizontalSpacing = MaterialTheme.padding.mediumSmall,
-        )
-        ControlsButton(
-            icon = Icons.Default.Audiotrack,
-            onClick = onAudioClick,
-            onLongClick = onAudioLongClick,
-            horizontalSpacing = MaterialTheme.padding.mediumSmall,
-        )
-        if (isEpisodeOnline == true) {
-            ControlsButton(
-                icon = Icons.Default.HighQuality,
-                onClick = onQualityClick,
-                onLongClick = onQualityClick,
-                horizontalSpacing = MaterialTheme.padding.mediumSmall,
+    BoxWithConstraints(modifier) {
+        val density = LocalDensity.current
+        // Held as a local because BoxWithConstraints' receiver is not in scope inside
+        // with(density) - the Density receiver shadows it.
+        val regionWidth = maxWidth
+        val slotWidth = MaterialTheme.padding.mediumSmall * 2 + TOP_ICON_SIZE
+        // The autoplay switch is the one control in this row that is not an icon, and
+        // it is 28dp wider than one. Charging it as a normal slot is what let a bar
+        // already holding its last control offer one more position: the row reported
+        // room it did not have, by exactly the switch's excess.
+        val switchWidth = MaterialTheme.padding.mediumSmall * 2 + AUTO_PLAY_SWITCH_WIDTH
+        // Take the longest prefix whose REAL arranging widths fit. A minimum-width
+        // slot count cannot account for the wider auto-play switch; clipping that
+        // overflow only turns the measurement error into a half-visible slot.
+        val availableWidthPx = with(density) { (regionWidth - slotWidth).roundToPx() }
+        var filledWidthPx = 0
+        val filled = entries.indices.takeWhile { index ->
+            val width = with(density) {
+                when (entries[index].tap) {
+                    ControlAction.ToggleAutoPlay -> switchWidth.roundToPx()
+                    else -> slotWidth.roundToPx()
+                }
+            }
+            (filledWidthPx + width <= availableWidthPx).also { fits ->
+                if (fits) filledWidthPx += width
+            }
+        }.count()
+        // Never create free positions over stored positions hidden by this window.
+        val free = if (filled == entries.size) {
+            freeSlots(
+                availableWidthPx = availableWidthPx,
+                filledWidthPx = filledWidthPx,
+                slotWidthPx = with(density) { slotWidth.roundToPx() },
             )
+        } else {
+            0
         }
-        ControlsButton(
-            icon = Icons.Default.MoreVert,
-            onClick = onMoreClick,
-            onLongClick = onMoreLongClick,
-            horizontalSpacing = MaterialTheme.padding.mediumSmall,
-        )
+        val slots = buildList {
+            repeat(free) { position ->
+                val virtualIndex = position - free
+                add(
+                    ReorderableControlSlot(
+                        id = ControlSlotId(ControlRegion.TopBar, virtualIndex),
+                        width = 0.dp,
+                        arrangingWidth = slotWidth,
+                        onEdit = onSlotInsert?.let { insert -> { insert(0) } },
+                        content = { EmptySlotContent(horizontalSpacing = MaterialTheme.padding.mediumSmall) },
+                    ),
+                )
+            }
+            repeat(filled) { index ->
+                val entry = entries[index]
+                add(
+                    ReorderableControlSlot(
+                        id = ControlSlotId(ControlRegion.TopBar, index),
+                        width = when {
+                            entry.tap == ControlAction.None && !isArranging -> 0.dp
+                            entry.tap == ControlAction.ToggleAutoPlay -> switchWidth
+                            else -> slotWidth
+                        },
+                        arrangingWidth = if (entry.tap == ControlAction.ToggleAutoPlay) switchWidth else slotWidth,
+                        onEdit = onSlotEdit?.let { edit -> { edit(index) } },
+                        canDrag = onSlotEdit != null,
+                        onArrangeStart = { onArrangeStart?.invoke(index) },
+                    ) {
+                        when (entry.tap) {
+                            ControlAction.None -> EmptySlotContent(
+                                horizontalSpacing = MaterialTheme.padding.mediumSmall,
+                            )
+                            ControlAction.ToggleAutoPlay -> AutoPlaySwitch(
+                                isChecked = autoPlayEnabled,
+                                onToggleAutoPlay = onToggleAutoPlay,
+                                modifier = Modifier
+                                    .padding(vertical = MaterialTheme.padding.medium)
+                                    .size(width = AUTO_PLAY_SWITCH_WIDTH, height = 24.dp),
+                            )
+                            ControlAction.VideoQuality -> {
+                                if (isEpisodeOnline == true || onSlotEdit != null) {
+                                    BoundControlsButton(entry, onAction)
+                                }
+                            }
+                            else -> BoundControlsButton(entry, onAction)
+                        }
+                    },
+                )
+            }
+        }
+        val editableWidth = slots.fold(0.dp) { total, slot ->
+            total + if (isArranging) slot.arrangingWidth else slot.width
+        }
+        SideEffect { onContentWidthChanged(editableWidth + slotWidth) }
+        Row(
+            // The editor's parent supplies a fixed full-width boundary. Right-aligning
+            // within it keeps every existing control stationary when blanks appear.
+            modifier = if (onSlotEdit != null) Modifier.fillMaxWidth() else Modifier,
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Absolute.Right,
+        ) {
+            ReorderableControlRow(
+                slots = slots,
+                isEditing = onSlotEdit != null,
+            isArranging = isArranging,
+                modifier = Modifier.width(editableWidth).clipToBounds(),
+                onMove = { from, to ->
+                    val current = heldIndex ?: from.index
+                    onSlotMove?.invoke(current, to.index - current)
+                },
+                horizontalArrangement = Arrangement.Absolute.Right,
+            )
+            // Same fixed top-bar pattern as back and queue: an ordinary button in a
+            // static slot while editing, with exactly one slot width reserved above.
+            val overflow: @Composable () -> Unit = {
+                ControlsButton(
+                    icon = Icons.Default.MoreVert,
+                    onClick = { onAction(ControlAction.Overflow) },
+                    horizontalSpacing = MaterialTheme.padding.mediumSmall,
+                )
+            }
+            if (onSlotEdit != null) StaticSlot { overflow() } else overflow()
+        }
     }
 }
+
+@Composable
+private fun BoundControlsButton(
+    entry: ControlBinding,
+    onAction: (ControlAction) -> Unit,
+) {
+    val icon = controlActionIcon(entry.tap) ?: return
+    ControlsButton(
+        icon = icon,
+        onClick = { onAction(entry.tap) },
+        onLongClick = { entry.longPress?.let(onAction) ?: Unit },
+        onDoubleClick = entry.doubleTap?.let { action -> { onAction(action) } },
+        horizontalSpacing = MaterialTheme.padding.mediumSmall,
+    )
+}
+
+/** What this row's buttons draw at; its width is this plus padding on both sides. */
+private val TOP_ICON_SIZE = 20.dp
+
+/** The autoplay switch's track, named so the width math and the switch cannot disagree. */
+private val AUTO_PLAY_SWITCH_WIDTH = 48.dp
+
+/** Back button plus one full button-width clickable title area; titles take the rest. */
+private val TOP_BAR_BACK_WIDTH = 52.dp
+private val TOP_BAR_TITLE_MIN_WIDTH = 52.dp
+internal val TOP_BAR_RESERVED_START = TOP_BAR_BACK_WIDTH + TOP_BAR_TITLE_MIN_WIDTH

@@ -13,6 +13,9 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.calculateEndPadding
@@ -22,34 +25,33 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PlayCircleOutline
-import androidx.compose.material.icons.filled.Replay10
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.constraintlayout.compose.ConstraintLayout
 import androidx.constraintlayout.compose.Dimension
-import animiru.domain.player.model.SingleActionGesture
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlRegion
+import animiru.domain.player.model.ControlSurface
 import eu.kanade.tachiyomi.ui.player.Panels
 import eu.kanade.tachiyomi.ui.player.PlayerUpdates
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel
@@ -61,30 +63,15 @@ import eu.kanade.tachiyomi.ui.player.controls.components.SeekbarWithTimers
 import eu.kanade.tachiyomi.ui.player.controls.components.TextPlayerUpdate
 import eu.kanade.tachiyomi.ui.player.controls.components.ThumbnailPreview
 import eu.kanade.tachiyomi.ui.player.controls.components.VolumeSlider
+import eu.kanade.tachiyomi.ui.player.controls.components.controlActionIcon
 import kotlinx.coroutines.delay
 import mihon.app.di.appGraph
+import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.util.collectAsState
 import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
-
-// AM (MEDIA_CONTROLS) -->
-/**
- * Maps a gesture selection to the icon shown on the in-player previous/next buttons,
- * so the button reflects what it will actually do. `null` means the gesture is
- * [SingleActionGesture.None] and the button should not be shown at all.
- */
-private fun mediaGestureIcon(gesture: SingleActionGesture, isNext: Boolean): ImageVector? {
-    return when (gesture) {
-        SingleActionGesture.None -> null
-        SingleActionGesture.Seek -> if (isNext) Icons.Filled.Forward10 else Icons.Filled.Replay10
-        SingleActionGesture.PlayPause -> Icons.Filled.PlayCircleOutline
-        SingleActionGesture.Switch -> if (isNext) Icons.Filled.SkipNext else Icons.Filled.SkipPrevious
-        SingleActionGesture.Custom -> Icons.Filled.TouchApp
-        SingleActionGesture.Screenshot -> Icons.Filled.PhotoCamera
-    }
-}
-// <-- AM (MEDIA_CONTROLS)
 
 @Suppress("CompositionLocalAllowlist")
 val LocalPlayerButtonsClickEvent = staticCompositionLocalOf { {} }
@@ -124,6 +111,30 @@ fun PlayerControls(
      */
     showMediaButtons: Boolean = true,
     // <-- AM (BROWSE_SCROLLER_CONTROLS)
+    // AM (CONTROL_BINDINGS) -->
+    /**
+     * Non-null turns the whole surface into the layout editor: every slot reports the
+     * position it occupies instead of running what it is bound to. The controls are
+     * otherwise identical, which is the point - the editor is this screen, not a
+     * drawing of it.
+     */
+    editSlot: ((ControlRegion, Int) -> Unit)? = null,
+    /** Hold-and-drag reorder within a region; the Int is -1 or 1 per step. */
+    moveSlot: ((ControlRegion, Int, Int) -> Unit)? = null,
+    /** A hold has picked a slot up, putting its region into arrange mode. */
+    onArrangeStart: ((ControlRegion, Int) -> Unit)? = null,
+    /** Opens the picker for a free position, inserting rather than overwriting. */
+    insertSlot: ((ControlRegion, Int) -> Unit)? = null,
+    /** Puts the held slot back down. */
+    onArrangeEnd: (() -> Unit)? = null,
+    /**
+     * The slot a hold picked up, or null when nothing is. Every region reveals its
+     * free positions while one is held, not only the region holding it - a control
+     * being moved is as likely to be wanted in another bar as further along its own.
+     */
+    arrangingRegion: ControlRegion? = null,
+    arrangingIndex: Int? = null,
+    // <-- AM (CONTROL_BINDINGS)
 ) {
     val transparentOverlay by animateFloatAsState(
         if (uiData.controlsShown && !uiData.isControlsLocked) .8f else 0f,
@@ -133,23 +144,55 @@ fun PlayerControls(
 
     // AM (MEDIA_CONTROLS) -->
     val context = LocalContext.current
-    val gesturePreferences = remember { context.appGraph.gesturePreferences }
-    val mediaPreviousGesture = remember { gesturePreferences.mediaPreviousGesture.get() }
-    val mediaNextGesture = remember { gesturePreferences.mediaNextGesture.get() }
-    val previousIcon = remember(mediaPreviousGesture) { mediaGestureIcon(mediaPreviousGesture, isNext = false) }
-    val nextIcon = remember(mediaNextGesture) { mediaGestureIcon(mediaNextGesture, isNext = true) }
-    // Episode boundaries are only relevant when the gesture actually switches episodes;
+    // AM (CONTROL_BINDINGS): the icon follows whatever the slot is bound to, collected
+    // so an edit to the binding is reflected without the player being rebuilt.
+    val controlLayout by remember { context.appGraph.controlBindingPreferences.layout(ControlSurface.Player) }
+        .collectAsState()
+    // AM (CONTROL_BINDINGS): the one place an action becomes something the player does.
+    // Every bound slot goes through here, so adding an action is one branch rather than
+    // a new parameter on whichever control happens to host it. The view model keeps its
+    // own dispatcher for the screen-zone gestures, which have no composable to route
+    // through; the two converge once those gestures emit events too.
+    val onControlAction: (ControlAction) -> Unit = { action ->
+        // The editor previews bindings; it never executes playback actions.
+        if (editSlot == null) when (action) {
+            ControlAction.None -> Unit
+            ControlAction.PlayPause -> onPlayerEvent(PlayerEvent.PlayPause)
+            ControlAction.PreviousEpisode -> onPlayerEvent(PlayerEvent.NextEpisode(next = false))
+            ControlAction.NextEpisode -> onPlayerEvent(PlayerEvent.NextEpisode(next = true))
+            ControlAction.PreviousSource -> onPlayerEvent(PlayerEvent.NextSource(next = false))
+            ControlAction.NextSource -> onPlayerEvent(PlayerEvent.NextSource(next = true))
+            ControlAction.Lock -> onPlayerEvent(PlayerEvent.LockControls(lock = true))
+            ControlAction.CycleRotation -> onPlayerEvent(PlayerEvent.CycleRotation)
+            ControlAction.PictureInPicture -> onPlayerEvent(PlayerEvent.EnterPip)
+            ControlAction.AspectRatio -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.Aspect))
+            ControlAction.PlaybackSpeed -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.PlaybackSpeed))
+            ControlAction.Chapters -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.Chapters))
+            ControlAction.Screenshot -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.Screenshot))
+            ControlAction.SubtitleTracks -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.SubtitleTracks))
+            ControlAction.SubtitleSettings -> onPlayerEvent(PlayerEvent.SetPanel(Panels.SubtitleSettings))
+            ControlAction.AudioTracks -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.AudioTracks))
+            ControlAction.AudioDelay -> onPlayerEvent(PlayerEvent.SetPanel(Panels.AudioDelay))
+            ControlAction.VideoQuality -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.QualityTracks))
+            ControlAction.VideoFilters -> onPlayerEvent(PlayerEvent.SetPanel(Panels.VideoFilters))
+            ControlAction.Overflow -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.More))
+            ControlAction.PrimaryCustomButton -> onPlayerEvent(PlayerEvent.ExecuteCustomButton(false))
+            // Rendered as a switch and as a button of its own respectively, neither of
+            // which dispatches through here.
+            ControlAction.ToggleAutoPlay -> Unit
+            ControlAction.Cast -> Unit
+            // Directional seeking and raw key codes are the view model's: both need the
+            // player's own position and mpv handle, which this layer doesn't hold.
+            ControlAction.SeekBackward -> Unit
+            ControlAction.SeekForward -> Unit
+            is ControlAction.CustomKey -> Unit
+        }
+    }
+
+    // Episode boundaries are only relevant when the binding actually switches episodes;
     // seeking/play-pause/custom/screenshot aren't affected by which episode is playing.
-    val previousEnabled = if (mediaPreviousGesture == SingleActionGesture.Switch) {
-        stateData.hasPreviousEpisode
-    } else {
-        true
-    }
-    val nextEnabled = if (mediaNextGesture == SingleActionGesture.Switch) {
-        stateData.hasNextEpisode
-    } else {
-        true
-    }
+    val previousEnabled = stateData.hasPreviousEpisode
+    val nextEnabled = stateData.hasNextEpisode
     // <-- AM (MEDIA_CONTROLS)
 
     // AM (QUEUE_SOURCE_STEP) -->
@@ -160,6 +203,22 @@ fun PlayerControls(
         stateData.playlistBlockByEpisodeId.values.distinct().size > 1
     }
     // <-- AM (QUEUE_SOURCE_STEP)
+
+    // AM (CONTROL_BINDINGS): with nothing to step through, the source-step binding is
+    // dropped rather than left bound to a no-op - a live double-tap handler would still
+    // cost every single tap on that button the double-tap timeout.
+    val middleEntries = remember(controlLayout, hasMultipleSources) {
+        controlLayout.entries(ControlRegion.Middle).map { entry ->
+            if (hasMultipleSources) {
+                entry
+            } else {
+                when (entry.doubleTap) {
+                    ControlAction.PreviousSource, ControlAction.NextSource -> entry.copy(doubleTap = null)
+                    else -> entry
+                }
+            }
+        }
+    }
 
     // AM (SYSTEM_BAR_CONTROLS_INSET) -->
     // When "show system status bar with controls" is on, PlayerControls' edge-to-edge
@@ -201,6 +260,23 @@ fun PlayerControls(
     }
     // <-- AM (LANDSCAPE_NAV_BAR_INSET)
 
+    // The middle row is the one control group that can meet a landscape side cutout.
+    // safeDrawing includes the camera hole; subtract the bars so a hidden system bar is
+    // not mistaken for cutout space. Top and bottom already have their own edge rules.
+    val density = LocalDensity.current
+    val cutoutStartPadding = with(density) {
+        (
+            WindowInsets.safeDrawing.getLeft(this, LayoutDirection.Ltr) -
+                WindowInsets.systemBarsIgnoringVisibility.getLeft(this, LayoutDirection.Ltr)
+            ).coerceAtLeast(0).toDp()
+    }
+    val cutoutEndPadding = with(density) {
+        (
+            WindowInsets.safeDrawing.getRight(this, LayoutDirection.Ltr) -
+                WindowInsets.systemBarsIgnoringVisibility.getRight(this, LayoutDirection.Ltr)
+            ).coerceAtLeast(0).toDp()
+    }
+
     CompositionLocalProvider(
         LocalLayoutDirection provides LayoutDirection.Ltr,
     ) {
@@ -220,7 +296,26 @@ fun PlayerControls(
                     end = MaterialTheme.padding.medium + navigationBarEndPadding,
                 ),
         ) {
+            // AM (CONTROL_BINDINGS) -->
+            // Declared first so it sits UNDER every control: a tap that misses the
+            // controls puts the held slot down, while a tap that hits one still
+            // belongs to that control and opens it. Dismissing on a control instead
+            // would cost the only way to open a filled slot while arranging.
+            if (arrangingRegion != null && onArrangeEnd != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onArrangeEnd,
+                        ),
+                )
+            }
+            // <-- AM (CONTROL_BINDINGS)
+
             val (topLeftControls, topRightControls) = createRefs()
+            var topRightContentWidth by remember { mutableStateOf(0.dp) }
             val (volumeSlider, brightnessSlider) = createRefs()
             val unlockControlsButton = createRef()
             val bottomControls = createRef()
@@ -376,7 +471,10 @@ fun PlayerControls(
                     uiData.isLoadingEpisode,
                 enter = fadeIn(playerControlsEnterAnimationSpec()),
                 exit = fadeOut(playerControlsExitAnimationSpec()),
-                modifier = Modifier.constrainAs(centerControls) {
+                modifier = Modifier.padding(
+                    start = cutoutStartPadding,
+                    end = cutoutEndPadding,
+                ).constrainAs(centerControls) {
                     end.linkTo(parent.absoluteRight)
                     start.linkTo(parent.absoluteLeft)
                     top.linkTo(parent.top)
@@ -384,25 +482,15 @@ fun PlayerControls(
                 },
             ) {
                 MiddlePlayerControls(
-                    // AM (MEDIA_CONTROLS) -->
-                    // AM (BROWSE_SCROLLER_CONTROLS): a null icon is what
-                    // MiddlePlayerControls already treats as "no button".
-                    previousIcon = previousIcon.takeIf { showMediaButtons },
+                    // AM (CONTROL_BINDINGS): the row's own entries. Source stepping is
+                    // a double-tap binding now, dropped where the queue has nothing to
+                    // step through so those buttons keep their immediate single tap.
+                    entries = middleEntries,
                     hasPrevious = previousEnabled,
-                    onSkipPrevious = { onPlayerEvent(PlayerEvent.NextEpisode(false)) },
-                    // AM (BROWSE_SCROLLER_CONTROLS)
-                    nextIcon = nextIcon.takeIf { showMediaButtons },
                     hasNext = nextEnabled,
-                    onSkipNext = { onPlayerEvent(PlayerEvent.NextEpisode(true)) },
-                    // <-- AM (MEDIA_CONTROLS)
-                    // AM (QUEUE_SOURCE_STEP) -->
-                    onSkipPreviousSource = {
-                        onPlayerEvent(PlayerEvent.NextSource(false))
-                    }.takeIf { hasMultipleSources },
-                    onSkipNextSource = {
-                        onPlayerEvent(PlayerEvent.NextSource(true))
-                    }.takeIf { hasMultipleSources },
-                    // <-- AM (QUEUE_SOURCE_STEP)
+                    // AM (BROWSE_SCROLLER_CONTROLS)
+                    showMediaButtons = showMediaButtons,
+                    onAction = onControlAction,
                     isStopped = stateData.isStopped,
                     // AM (CLIP_PLAYBACK)
                     isLoading = loading,
@@ -412,9 +500,20 @@ fun PlayerControls(
                     showLoadingCircle = uiData.showLoadingCircle,
                     paused = playbackData.paused,
                     gestureSeekAmount = playbackData.gestureSeekAmount,
-                    onPlayPauseClick = { onPlayerEvent(PlayerEvent.PlayPause) },
                     enter = fadeIn(playerControlsEnterAnimationSpec()),
                     exit = fadeOut(playerControlsExitAnimationSpec()),
+                    onSlotEdit = editSlot?.let { edit -> { index -> edit(ControlRegion.Middle, index) } },
+                    onSlotMove = moveSlot?.let { move ->
+                        { index, offset -> move(ControlRegion.Middle, index, offset) }
+                    },
+                    onArrangeStart = onArrangeStart?.let { start ->
+                        { index -> start(ControlRegion.Middle, index) }
+                    },
+                    onSlotInsert = insertSlot?.let { insert ->
+                        { index -> insert(ControlRegion.Middle, index) }
+                    },
+                    isArranging = arrangingRegion != null,
+                    heldIndex = arrangingIndex.takeIf { arrangingRegion == ControlRegion.Middle },
                 )
             }
             AnimatedVisibility(
@@ -470,7 +569,7 @@ fun PlayerControls(
                     top.linkTo(parent.top, MaterialTheme.padding.medium + statusBarTopPadding)
                     start.linkTo(parent.start)
                     width = Dimension.fillToConstraints
-                    end.linkTo(topRightControls.start)
+                    end.linkTo(if (editSlot != null) parent.end else topRightControls.start)
                 },
             ) {
                 TopLeftPlayerControls(
@@ -482,7 +581,12 @@ fun PlayerControls(
                     // whichever entry started the session for the rest of it.
                     animeTitle = stateData.currentEpisode
                         ?.let(stateData::sourceTitleOf)
-                        ?: uiData.animeTitle,
+                        ?.takeIf { it.isNotBlank() }
+                        ?: uiData.animeTitle.takeIf { it.isNotBlank() }
+                        // AM (CONTROL_BINDINGS): the editor can be opened with nothing
+                        // playing, and an empty title collapses the area it is supposed
+                        // to be showing the size of.
+                        ?: if (editSlot != null) stringResource(AYMR.strings.pref_player_controls_sample_title) else "",
                     // <-- AM (PLAYLIST_SOURCE_IDENTITY)
                     // AM (EPISODE_NAMES) -->
                     // Resolved here rather than stored, so it matches the
@@ -490,10 +594,15 @@ fun PlayerControls(
                     // session is alive.
                     mediaTitle = stateData.currentEpisode
                         ?.let(stateData::displayNameOf)
-                        .orEmpty(),
+                        ?.takeIf { it.isNotBlank() }
+                        // AM (CONTROL_BINDINGS)
+                        ?: if (editSlot != null) stringResource(AYMR.strings.pref_player_controls_sample_episode) else "",
                     // <-- AM (EPISODE_NAMES)
                     onTitleClick = { onPlayerEvent(PlayerEvent.ShowEpisodeDialog) },
                     onBackClick = onBack,
+                    // AM (CONTROL_BINDINGS)
+                    showStaticSlots = editSlot != null,
+                    endPadding = if (editSlot != null) topRightContentWidth else 0.dp,
                 )
             }
 
@@ -513,22 +622,37 @@ fun PlayerControls(
                 },
                 modifier = Modifier.constrainAs(topRightControls) {
                     top.linkTo(parent.top, MaterialTheme.padding.medium + statusBarTopPadding)
+                    // Enforce the title's minimum here, in the parent layout. Measuring
+                    // the right row first and hoping its own arithmetic leaves room does
+                    // not constrain it. preferredWrapContent caps it at the remaining
+                    // width; bias keeps the editable controls beside fixed overflow.
+                    start.linkTo(parent.start, TOP_BAR_RESERVED_START)
                     end.linkTo(parent.end)
+                    width = if (editSlot != null) Dimension.fillToConstraints else Dimension.preferredWrapContent
+                    horizontalBias = 1f
                 },
             ) {
                 // AM (BROWSE_SCROLLER_CONTROLS)
                 if (showTrackControls) {
                     TopRightPlayerControls(
+                        entries = controlLayout.entries(ControlRegion.TopBar),
                         autoPlayEnabled = uiData.autoPlayEnabled,
-                        onToggleAutoPlay = { onPlayerEvent(PlayerEvent.SetAutoPlay(it)) },
-                        onSubtitlesClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.SubtitleTracks)) },
-                        onSubtitlesLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.SubtitleSettings)) },
-                        onAudioClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.AudioTracks)) },
-                        onAudioLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.AudioDelay)) },
-                        onQualityClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.QualityTracks)) },
+                        onToggleAutoPlay = { if (editSlot == null) onPlayerEvent(PlayerEvent.SetAutoPlay(it)) },
                         isEpisodeOnline = stateData.isEpisodeOnline,
-                        onMoreClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.More)) },
-                        onMoreLongClick = { onPlayerEvent(PlayerEvent.SetPanel(Panels.VideoFilters)) },
+                        onAction = onControlAction,
+                        onContentWidthChanged = { topRightContentWidth = it },
+                        onSlotEdit = editSlot?.let { edit -> { index -> edit(ControlRegion.TopBar, index) } },
+                        onSlotMove = moveSlot?.let { move ->
+                            { index, offset -> move(ControlRegion.TopBar, index, offset) }
+                        },
+                        onArrangeStart = onArrangeStart?.let { start ->
+                            { index -> start(ControlRegion.TopBar, index) }
+                        },
+                        onSlotInsert = insertSlot?.let { insert ->
+                            { index -> insert(ControlRegion.TopBar, index) }
+                        },
+                        isArranging = arrangingRegion != null,
+                        heldIndex = arrangingIndex.takeIf { arrangingRegion == ControlRegion.TopBar },
                     )
                 }
             }
@@ -585,7 +709,7 @@ fun PlayerControls(
                 },
             ) {
                 BottomPlayerControls(
-                    selectedButtons = uiData.bottomPlayerButtons,
+                    entries = controlLayout.entries(ControlRegion.Bottom),
                     playbackSpeed = playbackSpeed ?: uiData.playerSpeedPref,
                     showChapterIndicator = uiData.showChapterIndicator,
                     currentChapter = stateData.currentChapter,
@@ -593,15 +717,27 @@ fun PlayerControls(
                     castEnabled = uiData.enableCast,
                     castLoading = stateData.isLoadingCasting,
                     castError = stateData.isErrorCasting,
-                    onLockControls = { onPlayerEvent(PlayerEvent.LockControls(true)) },
-                    onCycleRotation = { onPlayerEvent(PlayerEvent.CycleRotation) },
-                    onPlaybackSpeedChange = { onPlayerEvent(PlayerEvent.ChangeSpeed(it)) },
-                    onOpenSheet = { onPlayerEvent(PlayerEvent.SetSheet(it)) },
-                    onPipClick = { onPlayerEvent(PlayerEvent.EnterPip) },
+                    onLockControls = { if (editSlot == null) onPlayerEvent(PlayerEvent.LockControls(true)) },
+                    onCycleRotation = { if (editSlot == null) onPlayerEvent(PlayerEvent.CycleRotation) },
+                    onPlaybackSpeedChange = { if (editSlot == null) onPlayerEvent(PlayerEvent.ChangeSpeed(it)) },
+                    onOpenSheet = { if (editSlot == null) onPlayerEvent(PlayerEvent.SetSheet(it)) },
+                    onPipClick = { if (editSlot == null) onPlayerEvent(PlayerEvent.EnterPip) },
                     // AM (ASPECT_OVERRIDE_PICKER): opens the picker rather than
                     // cycling blind. ChangeAspect still exists and still toggles
                     // fit/fill, for gestures and custom buttons bound to it.
-                    onAspectClick = { onPlayerEvent(PlayerEvent.SetSheet(Sheets.Aspect)) },
+                    onAspectClick = { if (editSlot == null) onPlayerEvent(PlayerEvent.SetSheet(Sheets.Aspect)) },
+                    onSlotEdit = editSlot?.let { edit -> { index -> edit(ControlRegion.Bottom, index) } },
+                    onSlotMove = moveSlot?.let { move ->
+                        { index, offset -> move(ControlRegion.Bottom, index, offset) }
+                    },
+                    onArrangeStart = onArrangeStart?.let { start ->
+                        { index -> start(ControlRegion.Bottom, index) }
+                    },
+                    onSlotInsert = insertSlot?.let { insert ->
+                        { index -> insert(ControlRegion.Bottom, index) }
+                    },
+                    isArranging = arrangingRegion != null,
+                    heldIndex = arrangingIndex.takeIf { arrangingRegion == ControlRegion.Bottom },
                 )
             }
 

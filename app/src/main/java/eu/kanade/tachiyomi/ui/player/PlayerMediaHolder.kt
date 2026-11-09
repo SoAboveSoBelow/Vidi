@@ -494,6 +494,42 @@ class PlayerMediaHolder(
         fun clearPlaybackRequest() {
             _playbackRequest.value = null
         }
+
+        // AM (CONTROL_BINDINGS) -->
+        private val _layoutEditor = MutableStateFlow(false)
+
+        /**
+         * The player is open to lay its controls out rather than to watch something.
+         *
+         * A flag beside the request rather than a kind of request: there is nothing to
+         * play, so there is nothing for a request to describe. Everything else about
+         * the session is the session's as usual - this only says which mode the
+         * controls are in, and that the host should show them with nothing loaded.
+         */
+        val layoutEditorFlow = _layoutEditor.asStateFlow()
+
+        fun openLayoutEditor() {
+            // The editor shows the player's controls at full size, so a session that
+            // is up comes out of the dummy pip first - laying out controls inside a
+            // floating window would be laying out the wrong thing. It is also paused:
+            // the controls are the subject here, and a video playing behind them is
+            // both a distraction and, left running, a session the user did not mean
+            // to keep watching while in settings. Backing out pauses nothing further,
+            // so the usual pip-on-exit behaviour resumes from exactly here.
+            current?.let { holder ->
+                holder.isDummyPipActive = false
+                holder.viewModel?.pause()
+                // Revealing the controls is PlayerScreen's, keyed on the mode and on
+                // the pip having actually collapsed - doing it here raced the expand,
+                // which leaves them hidden from when the pip was entered.
+            }
+            _layoutEditor.value = true
+        }
+
+        fun closeLayoutEditor() {
+            _layoutEditor.value = false
+        }
+        // <-- AM (CONTROL_BINDINGS)
         // <-- AM (PLAYER_OVERLAY_MIGRATION)
     }
     // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)

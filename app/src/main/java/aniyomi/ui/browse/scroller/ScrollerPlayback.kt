@@ -11,7 +11,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import aniyomi.player.clip.ClipVideoResolver
-import animiru.domain.player.model.SingleActionGesture
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlAnchor
+import animiru.domain.player.model.ControlInput
+import animiru.domain.player.model.ControlSurface
+import animiru.domain.player.service.ControlBindingPreferences
 import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
 import eu.kanade.tachiyomi.animesource.AnimeSource
@@ -98,6 +102,8 @@ class ScrollerPlaybackState internal constructor(
     private val context: Context,
     private val playerPreferences: PlayerPreferences,
     private val gesturePreferences: GesturePreferences,
+    // AM (CONTROL_BINDINGS)
+    private val controlBindingPreferences: ControlBindingPreferences,
     /**
      * MPVPlayer takes this as a constructor argument and does not keep it, so
      * it is carried here for MpvSurface, which needs the same value.
@@ -1012,19 +1018,24 @@ class ScrollerPlaybackState internal constructor(
             enterFullscreen(animeId)
             return
         }
-        val gesture = when (zone) {
-            TapZone.Left -> gesturePreferences.leftDoubleTapGesture.get()
-            TapZone.Center -> gesturePreferences.centerDoubleTapGesture.get()
-            TapZone.Right -> gesturePreferences.rightDoubleTapGesture.get()
+        // AM (CONTROL_BINDINGS): the feed reads the scroller surface's own layout
+        // rather than the player's, so the two can diverge once the editor exists.
+        // Their defaults are still derived from the same legacy keys, which is what
+        // they shared before.
+        val anchor = when (zone) {
+            TapZone.Left -> ControlAnchor.ScreenLeft
+            TapZone.Center -> ControlAnchor.ScreenCenter
+            TapZone.Right -> ControlAnchor.ScreenRight
         }
-        when (gesture) {
-            SingleActionGesture.Seek -> {
-                val amount = gesturePreferences.skipLengthPreference.get()
-                player.seekBy(if (zone == TapZone.Left) -amount else amount)
-            }
-            SingleActionGesture.PlayPause -> player.togglePaused()
-            // Switch, Custom, Screenshot and None all mean nothing here: there
-            // is no episode to switch to in a feed, no key to send, and a
+        val action = controlBindingPreferences.layout(ControlSurface.Scroller)
+            .get()
+            .action(anchor, ControlInput.DoubleTap)
+        when (action) {
+            ControlAction.SeekBackward -> player.seekBy(-gesturePreferences.skipLengthPreference.get())
+            ControlAction.SeekForward -> player.seekBy(gesturePreferences.skipLengthPreference.get())
+            ControlAction.PlayPause -> player.togglePaused()
+            // Episode switching, custom keys, screenshots and None all mean nothing
+            // here: there is no episode to switch to in a feed, no key to send, and a
             // screenshot of a browse card is not worth doing.
             else -> Unit
         }
@@ -1140,6 +1151,7 @@ fun rememberScrollerPlayback(source: AnimeSource?): ScrollerPlaybackState? {
                     context = context,
                     playerPreferences = graph.playerPreferences,
                     gesturePreferences = graph.gesturePreferences,
+                    controlBindingPreferences = graph.controlBindingPreferences,
                     videoOutput = videoOutput,
                 )
             }

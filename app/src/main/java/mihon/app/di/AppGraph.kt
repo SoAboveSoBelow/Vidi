@@ -4,6 +4,7 @@ import aniyomi.source.js.JsProjectRepository
 import android.content.Context
 import animiru.domain.player.service.AdvancedPlayerPreferences
 import animiru.domain.player.service.AudioPreferences
+import animiru.domain.player.service.ControlBindingPreferences
 import animiru.domain.player.service.DecoderPreferences
 import animiru.domain.player.service.GesturePreferences
 import animiru.domain.player.service.PlayerPreferences
@@ -140,6 +141,8 @@ interface AppGraph : ViewModelGraph {
     // AM -->
     val playerPreferences: PlayerPreferences
     val gesturePreferences: GesturePreferences
+    // AM (CONTROL_BINDINGS)
+    val controlBindingPreferences: ControlBindingPreferences
     val decoderPreferences: DecoderPreferences
     val subtitlePreferences: SubtitlePreferences
     val audioPreferences: AudioPreferences

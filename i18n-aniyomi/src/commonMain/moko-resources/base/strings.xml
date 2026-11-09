@@ -144,6 +144,24 @@
     <string name="single_action_switch">Change episode</string>
     <string name="single_action_custom">Custom</string>
     <string name="single_action_screenshot">Screenshot options</string>
+    <!-- AM (CONTROL_BINDINGS) -->
+    <string name="control_action_seek_backward">Seek backward</string>
+    <string name="control_action_seek_forward">Seek forward</string>
+    <string name="control_action_previous_episode">Previous episode</string>
+    <string name="control_action_next_episode">Next episode</string>
+    <string name="control_action_auto_play">Auto-play</string>
+    <string name="control_action_previous_source">Previous source</string>
+    <string name="control_action_next_source">Next source</string>
+    <string name="pref_player_controls">Controls</string>
+    <string name="pref_player_controls_summary">Choose what each button and gesture does</string>
+    <string name="pref_player_controls_info">Tap a slot to change what it does. Empty slots show where a control can go; rotate to see the layout for the other orientation.</string>
+    <string name="pref_player_controls_slot">Slot %1$d</string>
+    <string name="pref_player_controls_reorder">Move</string>
+    <string name="pref_player_controls_tap">Tap</string>
+    <string name="pref_player_controls_double_tap">Double tap</string>
+    <string name="pref_player_controls_long_press">Long press</string>
+    <string name="pref_player_controls_sample_title">Anime title</string>
+    <string name="pref_player_controls_sample_episode">Episode 1</string>
     <string name="pref_category_long_press">Long press</string>
     <string name="pref_long_press">Long press (center)</string>
     <string name="pref_long_press_info">When set to "Custom", long press triggers your favorited custom button instead of opening the screenshot menu.</string>
