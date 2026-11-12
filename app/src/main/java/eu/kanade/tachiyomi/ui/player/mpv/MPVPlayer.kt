@@ -384,6 +384,8 @@ class MPVPlayer(
             }
         }
 
+        mpv.setPropertyString("user-data/aniyomi/auto_play", playerPreferences.autoplayEnabled.get().toString())
+
         mpv.addObserver(this)
         mpv.addLogObserver(this)
 
@@ -400,10 +402,12 @@ class MPVPlayer(
             // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
 
             "user-data/aniyomi/show_text" to MPV.mpvFormat.MPV_FORMAT_STRING,
+            "user-data/aniyomi/control_action" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/toggle_ui" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/show_panel" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/software_keyboard" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/set_button_title" to MPV.mpvFormat.MPV_FORMAT_STRING,
+            "user-data/aniyomi/set_button_toggle" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/reset_button_title" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/toggle_button" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/switch_episode" to MPV.mpvFormat.MPV_FORMAT_STRING,

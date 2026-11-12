@@ -1,0 +1,3 @@
+-- Reusable custom switches; their Lua code owns the checked state.
+ALTER TABLE custom_buttons ADD COLUMN isToggle INTEGER NOT NULL DEFAULT 0;
+UPDATE custom_buttons SET isToggle = 1 WHERE _id = -17;

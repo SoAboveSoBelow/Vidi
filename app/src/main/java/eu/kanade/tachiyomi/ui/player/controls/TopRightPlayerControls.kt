@@ -20,7 +20,6 @@ package eu.kanade.tachiyomi.ui.player.controls
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -28,7 +27,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,7 +35,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import animiru.domain.player.model.ControlAction
 import animiru.domain.player.model.ControlBinding
@@ -46,11 +43,13 @@ import animiru.domain.player.model.ControlRegion
 import animiru.domain.player.model.freeSlots
 import eu.kanade.tachiyomi.ui.player.controls.components.AutoPlaySwitch
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlRow
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlSlot
 import eu.kanade.tachiyomi.ui.player.controls.components.StaticSlot
 import eu.kanade.tachiyomi.ui.player.controls.components.EmptySlotContent
 import eu.kanade.tachiyomi.ui.player.controls.components.controlActionIcon
+import tachiyomi.domain.custombutton.model.CustomButton
 import tachiyomi.presentation.core.components.material.padding
 
 /**
@@ -65,17 +64,16 @@ import tachiyomi.presentation.core.components.material.padding
 @Composable
 fun TopRightPlayerControls(
     entries: List<ControlBinding>,
-    autoPlayEnabled: Boolean,
-    onToggleAutoPlay: (Boolean) -> Unit,
+    customButtons: List<CustomButton>,
+    customToggleStates: Map<Long, Boolean>,
     isEpisodeOnline: Boolean?,
     onAction: (ControlAction) -> Unit,
     modifier: Modifier = Modifier,
-    onContentWidthChanged: (Dp) -> Unit = {},
     // AM (CONTROL_BINDINGS): non-null puts the row in the editor, where a tap opens
     // the slot rather than running it and the unfilled positions become visible.
     onSlotEdit: ((Int) -> Unit)? = null,
     // AM (CONTROL_BINDINGS): hold-and-drag reorder; -1 or 1 per step.
-    onSlotMove: ((Int, Int) -> Unit)? = null,
+    onSlotMove: ((List<ControlSlotMove>) -> Unit)? = null,
     onArrangeStart: ((Int) -> Unit)? = null,
     /** Opens the picker for a position that does not exist yet, inserting at it. */
     onSlotInsert: ((Int) -> Unit)? = null,
@@ -85,7 +83,6 @@ fun TopRightPlayerControls(
      * in another bar as further along its own.
      */
     isArranging: Boolean = false,
-    heldIndex: Int? = null,
 ) {
     BoxWithConstraints(modifier) {
         val density = LocalDensity.current
@@ -105,9 +102,10 @@ fun TopRightPlayerControls(
         var filledWidthPx = 0
         val filled = entries.indices.takeWhile { index ->
             val width = with(density) {
-                when (entries[index].tap) {
-                    ControlAction.ToggleAutoPlay -> switchWidth.roundToPx()
-                    else -> slotWidth.roundToPx()
+                if (entries[index].tap.showsToggle(customButtons)) {
+                    switchWidth.roundToPx()
+                } else {
+                    slotWidth.roundToPx()
                 }
             }
             (filledWidthPx + width <= availableWidthPx).also { fits ->
@@ -144,25 +142,30 @@ fun TopRightPlayerControls(
                         id = ControlSlotId(ControlRegion.TopBar, index),
                         width = when {
                             entry.tap == ControlAction.None && !isArranging -> 0.dp
-                            entry.tap == ControlAction.ToggleAutoPlay -> switchWidth
+                            entry.tap.showsToggle(customButtons) -> switchWidth
                             else -> slotWidth
                         },
-                        arrangingWidth = if (entry.tap == ControlAction.ToggleAutoPlay) switchWidth else slotWidth,
+                        arrangingWidth = if (entry.tap.showsToggle(customButtons)) switchWidth else slotWidth,
                         onEdit = onSlotEdit?.let { edit -> { edit(index) } },
                         canDrag = onSlotEdit != null,
                         onArrangeStart = { onArrangeStart?.invoke(index) },
                     ) {
-                        when (entry.tap) {
+                        when (val action = entry.tap) {
                             ControlAction.None -> EmptySlotContent(
                                 horizontalSpacing = MaterialTheme.padding.mediumSmall,
                             )
-                            ControlAction.ToggleAutoPlay -> AutoPlaySwitch(
-                                isChecked = autoPlayEnabled,
-                                onToggleAutoPlay = onToggleAutoPlay,
-                                modifier = Modifier
-                                    .padding(vertical = MaterialTheme.padding.medium)
-                                    .size(width = AUTO_PLAY_SWITCH_WIDTH, height = 24.dp),
-                            )
+                            ControlAction.ToggleAutoPlay -> BoundControlsButton(entry, onAction)
+                            is ControlAction.CustomButton -> if (action.showsToggle(customButtons)) {
+                                AutoPlaySwitch(
+                                    isChecked = customToggleStates[action.id] == true,
+                                    onToggleAutoPlay = { onAction(action) },
+                                    modifier = Modifier
+                                        .padding(vertical = MaterialTheme.padding.medium)
+                                        .size(width = AUTO_PLAY_SWITCH_WIDTH, height = 24.dp),
+                                )
+                            } else {
+                                BoundControlsButton(entry, onAction)
+                            }
                             ControlAction.VideoQuality -> {
                                 if (isEpisodeOnline == true || onSlotEdit != null) {
                                     BoundControlsButton(entry, onAction)
@@ -177,24 +180,22 @@ fun TopRightPlayerControls(
         val editableWidth = slots.fold(0.dp) { total, slot ->
             total + if (isArranging) slot.arrangingWidth else slot.width
         }
-        SideEffect { onContentWidthChanged(editableWidth + slotWidth) }
         Row(
             // The editor's parent supplies a fixed full-width boundary. Right-aligning
             // within it keeps every existing control stationary when blanks appear.
-            modifier = if (onSlotEdit != null) Modifier.fillMaxWidth() else Modifier,
+            modifier = Modifier,
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Absolute.Right,
         ) {
             ReorderableControlRow(
                 slots = slots,
                 isEditing = onSlotEdit != null,
-            isArranging = isArranging,
+                isArranging = isArranging,
                 modifier = Modifier.width(editableWidth).clipToBounds(),
-                onMove = { from, to ->
-                    val current = heldIndex ?: from.index
-                    onSlotMove?.invoke(current, to.index - current)
+                onMove = { moves ->
+                    onSlotMove?.invoke(moves)
                 },
-                horizontalArrangement = Arrangement.Absolute.Right,
+                horizontalArrangement = { Arrangement.Absolute.Right },
             )
             // Same fixed top-bar pattern as back and queue: an ordinary button in a
             // static slot while editing, with exactly one slot width reserved above.
@@ -209,6 +210,9 @@ fun TopRightPlayerControls(
         }
     }
 }
+
+private fun ControlAction.showsToggle(customButtons: List<CustomButton>): Boolean =
+    this is ControlAction.CustomButton && customButtons.firstOrNull { it.id == id }?.isToggle == true
 
 @Composable
 private fun BoundControlsButton(

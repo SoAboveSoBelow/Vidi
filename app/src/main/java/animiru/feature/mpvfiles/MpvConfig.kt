@@ -88,17 +88,26 @@ class MpvConfig(
             )
 
             buttons.forEach { button ->
+                // Negative IDs belong to seeded native defaults. Minus is not valid in a
+                // Lua identifier, so the function name is derived separately from the
+                // stable script-message name used by Android.
+                val functionName = "button_${button.id.toString().replace("-", "_")}"
                 appendLine(
                     """
+                        local button_id = ${button.id}
                         ${button.getButtonOnStartup(primaryButtonId)}
-                        function button${button.id}()
+                        function $functionName()
                             ${button.getButtonContent(primaryButtonId)}
                         end
-                        mp.register_script_message('call_button_${button.id}', button${button.id})
-                        function button${button.id}long()
+                        mp.register_script_message('call_button_${button.id}', $functionName)
+                        function ${functionName}_double()
+                            ${button.getButtonDoubleTapContent(primaryButtonId)}
+                        end
+                        mp.register_script_message('call_button_${button.id}_double', ${functionName}_double)
+                        function ${functionName}_long()
                             ${button.getButtonLongPressContent(primaryButtonId)}
                         end
-                        mp.register_script_message('call_button_${button.id}_long', button${button.id}long)
+                        mp.register_script_message('call_button_${button.id}_long', ${functionName}_long)
                     """.trimIndent(),
                 )
             }

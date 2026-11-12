@@ -1,0 +1,12 @@
+-- Publish the current Auto-play value before observing later changes. Observing alone
+-- leaves the toggle visually off when no property-change callback arrives at startup.
+UPDATE custom_buttons
+SET onStartup = 'local auto_play = mp.get_property("user-data/aniyomi/auto_play")
+aniyomi.set_button_toggle(button_id, auto_play == "true")
+mp.observe_property("user-data/aniyomi/auto_play", "native", function(_, enabled)
+  aniyomi.set_button_toggle(button_id, enabled == true or enabled == "true")
+end)'
+WHERE _id = -17
+  AND onStartup = 'mp.observe_property("user-data/aniyomi/auto_play", "native", function(_, enabled)
+  aniyomi.set_button_toggle(button_id, enabled == true or enabled == "true")
+end)';

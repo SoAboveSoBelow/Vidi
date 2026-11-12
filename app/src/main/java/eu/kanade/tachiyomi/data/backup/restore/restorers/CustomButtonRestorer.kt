@@ -33,8 +33,11 @@ class CustomButtonRestorer(
                         isFavorite,
                         sortIndex,
                         it.content,
+                        it.doubleTapContent,
                         it.longPressContent,
                         it.onStartup,
+                        it.icon,
+                        it.isToggle,
                     )
                         .awaitAsOne()
                 }

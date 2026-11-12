@@ -53,6 +53,7 @@ import dev.vivvvek.seeker.Segment
 import eu.kanade.tachiyomi.ui.player.Sheets
 import eu.kanade.tachiyomi.ui.player.components.CurrentChapter
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
 import eu.kanade.tachiyomi.ui.player.controls.components.EmptySlotContent
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlRow
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlSlot
@@ -93,7 +94,7 @@ fun BottomPlayerControls(
     // AM (CONTROL_BINDINGS): editor mode, as in the other rows.
     onSlotEdit: ((Int) -> Unit)? = null,
     // AM (CONTROL_BINDINGS): hold-and-drag reorder; -1 or 1 per step.
-    onSlotMove: ((Int, Int) -> Unit)? = null,
+    onSlotMove: ((List<ControlSlotMove>) -> Unit)? = null,
     onArrangeStart: ((Int) -> Unit)? = null,
     /** Opens the picker for a position that does not exist yet, inserting at it. */
     onSlotInsert: ((Int) -> Unit)? = null,
@@ -103,7 +104,6 @@ fun BottomPlayerControls(
      * in another bar as further along its own.
      */
     isArranging: Boolean = false,
-    heldIndex: Int? = null,
 ) {
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
         val density = LocalDensity.current
@@ -191,17 +191,18 @@ fun BottomPlayerControls(
             onPipClick = onPipClick,
             onAspectClick = onAspectClick,
         )
-        val split = leftSlots.size
+        val leftSlotIds = leftSlots.mapTo(mutableSetOf()) { it.id }
         ReorderableControlRow(
             slots = leftSlots + rightSlots,
             isEditing = onSlotEdit != null,
             isArranging = isArranging,
             modifier = Modifier.fillMaxWidth(),
-            onMove = { from, to ->
-                val current = heldIndex ?: from.index
-                onSlotMove?.invoke(current, to.index - current)
+            onMove = { moves ->
+                onSlotMove?.invoke(moves)
             },
-            horizontalArrangement = splitBottomArrangement(split, slotSpacing),
+            horizontalArrangement = { displayedSlots ->
+                splitBottomArrangement(displayedSlots.count { it.id in leftSlotIds }, slotSpacing)
+            },
         )
     }
 }
@@ -331,6 +332,18 @@ private fun ButtonGroup(
                             CastButton(loading = castLoading, error = castError)
                         } else if (onSlotEdit != null) {
                             ControlsButton(icon = controlActionIcon(button)!!, onClick = {})
+                        }
+                        is ControlAction.CustomButton -> if (
+                            ControlAction.nativeActionForButtonId(button.id) == ControlAction.Cast &&
+                            castIncluded && castEnabled
+                        ) {
+                            // MediaRouteButton is a platform view; retain its renderer for
+                            // the seeded Cast button even though all definitions are Lua.
+                            CastButton(loading = castLoading, error = castError)
+                        } else {
+                            controlActionIcon(button)?.let { icon ->
+                                ControlsButton(icon = icon, onClick = {})
+                            }
                         }
                         else -> controlActionIcon(button)?.let { icon ->
                             ControlsButton(icon = icon, onClick = {})

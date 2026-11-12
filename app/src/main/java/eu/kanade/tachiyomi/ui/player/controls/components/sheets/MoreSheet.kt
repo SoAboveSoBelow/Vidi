@@ -19,12 +19,9 @@ package eu.kanade.tachiyomi.ui.player.controls.components.sheets
 
 import android.text.format.DateUtils
 import androidx.compose.animation.animateContentSize
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -66,7 +63,6 @@ import androidx.compose.ui.window.DialogProperties
 import animiru.domain.player.model.AudioChannels
 import animiru.domain.player.model.Decoder
 import eu.kanade.presentation.player.components.PlayerSheet
-import tachiyomi.domain.custombutton.model.CustomButton
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.components.material.padding
@@ -81,12 +77,9 @@ fun MoreSheet(
     remainingTime: Int,
     onStartTimer: (Int) -> Unit,
     onStatisticsPageChange: (Int) -> Unit,
-    onCustomButtonClick: (CustomButton) -> Unit,
-    onCustomButtonLongClick: (CustomButton) -> Unit,
     onAudioChannelsChange: (AudioChannels) -> Unit,
     onDismissRequest: () -> Unit,
     onEnterFiltersPanel: () -> Unit,
-    customButtons: List<CustomButton>,
     modifier: Modifier = Modifier,
 ) {
     PlayerSheet(
@@ -191,38 +184,6 @@ fun MoreSheet(
                 }
             }
 
-            if (customButtons.isNotEmpty()) {
-                Text(text = stringResource(AYMR.strings.player_sheets_custom_buttons_title))
-                FlowRow(
-                    verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.mediumSmall),
-                    horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
-                    maxItemsInEachRow = Int.MAX_VALUE,
-                ) {
-                    customButtons.forEach { button ->
-
-                        val inputChipInteractionSource = remember { MutableInteractionSource() }
-
-                        Box {
-                            FilterChip(
-                                onClick = {},
-                                label = { Text(text = button.name) },
-                                selected = false,
-                                interactionSource = inputChipInteractionSource,
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .matchParentSize()
-                                    .combinedClickable(
-                                        onClick = { onCustomButtonClick(button) },
-                                        onLongClick = { onCustomButtonLongClick(button) },
-                                        interactionSource = inputChipInteractionSource,
-                                        indication = null,
-                                    ),
-                            )
-                        }
-                    }
-                }
-            }
             Text(text = stringResource(AYMR.strings.pref_audio_channels))
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),

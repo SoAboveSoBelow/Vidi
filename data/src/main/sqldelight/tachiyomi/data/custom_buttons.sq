@@ -7,14 +7,17 @@ CREATE TABLE custom_buttons (
     isFavorite INTEGER AS Boolean NOT NULL,
     sortIndex INTEGER NOT NULL,
     content TEXT NOT NULL,
+    doubleTapContent TEXT NOT NULL,
     longPressContent TEXT NOT NULL,
-    onStartup TEXT NOT NULL
+    onStartup TEXT NOT NULL,
+    icon TEXT,
+    isToggle INTEGER AS Boolean NOT NULL DEFAULT 0
 );
 
 -- Insert skip intro button --
-INSERT OR IGNORE INTO custom_buttons (_id, name, isFavorite, sortIndex, content, longPressContent, onStartup)
+INSERT OR IGNORE INTO custom_buttons (_id, name, isFavorite, sortIndex, content, doubleTapContent, longPressContent, onStartup)
 VALUES (1, '+85 s', 1, 0, 'local intro_length = mp.get_property_number("user-data/current-anime/intro-length")
-aniyomi.right_seek_by(intro_length)', 'aniyomi.int_picker("Change intro length", "%ds", 0, 255, 1, "user-data/current-anime/intro-length")', 'function update_button(_, length)
+aniyomi.right_seek_by(intro_length)', '', 'aniyomi.int_picker("Change intro length", "%ds", 0, 255, 1, "user-data/current-anime/intro-length")', 'function update_button(_, length)
   if length ~= nil then
     if length == 0 then
 	  aniyomi.hide_button()
@@ -30,18 +33,69 @@ if $isPrimary then
   mp.observe_property("user-data/current-anime/intro-length", "number", update_button)
 end');
 
+-- Native defaults are editable Lua buttons too. Negative IDs are reserved for these
+-- rows; user-created buttons use SQLite's positive generated IDs.
+INSERT OR IGNORE INTO custom_buttons (_id, name, isFavorite, sortIndex, content, doubleTapContent, longPressContent, onStartup, isToggle) VALUES
+(-2, 'Play / pause', 0, -24, 'aniyomi.control_action("play_pause")', '', '', '', 0),
+(-3, 'Seek backward', 0, -23, 'aniyomi.control_action("seek_backward")', '', '', '', 0),
+(-4, 'Seek forward', 0, -22, 'aniyomi.control_action("seek_forward")', '', '', '', 0),
+(-5, 'Previous video', 0, -21, 'aniyomi.control_action("previous_episode")', 'aniyomi.control_action("previous_source")', '', '', 0),
+(-6, 'Next video', 0, -20, 'aniyomi.control_action("next_episode")', 'aniyomi.control_action("next_source")', '', '', 0),
+(-9, 'Screenshot', 0, -17, 'aniyomi.control_action("screenshot")', '', '', '', 0),
+(-10, 'Lock', 0, -16, 'aniyomi.control_action("lock")', '', '', '', 0),
+(-11, 'Cycle rotation', 0, -15, 'aniyomi.control_action("cycle_rotation")', '', '', '', 0),
+(-12, 'Playback speed', 0, -14, 'aniyomi.control_action("playback_speed")', '', '', '', 0),
+(-13, 'Chapters', 0, -13, 'aniyomi.control_action("chapters")', '', '', '', 0),
+(-14, 'Picture in picture', 0, -12, 'aniyomi.control_action("picture_in_picture")', '', '', '', 0),
+(-15, 'Aspect ratio', 0, -11, 'aniyomi.control_action("aspect_ratio")', '', '', '', 0),
+(-16, 'Cast', 0, -10, 'aniyomi.control_action("cast")', '', '', '', 0),
+(-17, 'Auto-play', 0, -9, 'aniyomi.control_action("toggle_auto_play")', '', '', 'local auto_play = mp.get_property("user-data/aniyomi/auto_play")
+aniyomi.set_button_toggle(button_id, auto_play == "true")
+mp.observe_property("user-data/aniyomi/auto_play", "native", function(_, enabled)
+  aniyomi.set_button_toggle(button_id, enabled == true or enabled == "true")
+end)', 1),
+(-18, 'Subtitle tracks', 0, -8, 'aniyomi.control_action("subtitle_tracks")', '', 'aniyomi.control_action("subtitle_settings")', '', 0),
+(-20, 'Audio tracks', 0, -6, 'aniyomi.control_action("audio_tracks")', '', 'aniyomi.control_action("audio_delay")', '', 0),
+(-22, 'Video quality', 0, -4, 'aniyomi.control_action("video_quality")', '', 'aniyomi.control_action("video_quality")', '', 0),
+(-23, 'Video filters', 0, -3, 'aniyomi.control_action("video_filters")', '', '', '', 0);
+
+-- Restores only missing defaults; INSERT OR IGNORE preserves customized buttons.
+restoreDefaults:
+INSERT OR IGNORE INTO custom_buttons (_id, name, isFavorite, sortIndex, content, doubleTapContent, longPressContent, onStartup, isToggle) VALUES
+(-2, 'Play / pause', 0, -24, 'aniyomi.control_action("play_pause")', '', '', '', 0),
+(-3, 'Seek backward', 0, -23, 'aniyomi.control_action("seek_backward")', '', '', '', 0),
+(-4, 'Seek forward', 0, -22, 'aniyomi.control_action("seek_forward")', '', '', '', 0),
+(-5, 'Previous video', 0, -21, 'aniyomi.control_action("previous_episode")', 'aniyomi.control_action("previous_source")', '', '', 0),
+(-6, 'Next video', 0, -20, 'aniyomi.control_action("next_episode")', 'aniyomi.control_action("next_source")', '', '', 0),
+(-9, 'Screenshot', 0, -17, 'aniyomi.control_action("screenshot")', '', '', '', 0),
+(-10, 'Lock', 0, -16, 'aniyomi.control_action("lock")', '', '', '', 0),
+(-11, 'Cycle rotation', 0, -15, 'aniyomi.control_action("cycle_rotation")', '', '', '', 0),
+(-12, 'Playback speed', 0, -14, 'aniyomi.control_action("playback_speed")', '', '', '', 0),
+(-13, 'Chapters', 0, -13, 'aniyomi.control_action("chapters")', '', '', '', 0),
+(-14, 'Picture in picture', 0, -12, 'aniyomi.control_action("picture_in_picture")', '', '', '', 0),
+(-15, 'Aspect ratio', 0, -11, 'aniyomi.control_action("aspect_ratio")', '', '', '', 0),
+(-16, 'Cast', 0, -10, 'aniyomi.control_action("cast")', '', '', '', 0),
+(-17, 'Auto-play', 0, -9, 'aniyomi.control_action("toggle_auto_play")', '', '', 'local auto_play = mp.get_property("user-data/aniyomi/auto_play")
+aniyomi.set_button_toggle(button_id, auto_play == "true")
+mp.observe_property("user-data/aniyomi/auto_play", "native", function(_, enabled)
+  aniyomi.set_button_toggle(button_id, enabled == true or enabled == "true")
+end)', 1),
+(-18, 'Subtitle tracks', 0, -8, 'aniyomi.control_action("subtitle_tracks")', '', 'aniyomi.control_action("subtitle_settings")', '', 0),
+(-20, 'Audio tracks', 0, -6, 'aniyomi.control_action("audio_tracks")', '', 'aniyomi.control_action("audio_delay")', '', 0),
+(-22, 'Video quality', 0, -4, 'aniyomi.control_action("video_quality")', '', 'aniyomi.control_action("video_quality")', '', 0),
+(-23, 'Video filters', 0, -3, 'aniyomi.control_action("video_filters")', '', '', '', 0);
 findAll:
 SELECT *
 FROM custom_buttons
 ORDER BY sortIndex;
 
 insert:
-INSERT INTO custom_buttons(name, isFavorite, sortIndex, content, longPressContent, onStartup)
-VALUES (:name, :isFavorite, :sortIndex, :content, :longPressContent, :onStartup);
+INSERT INTO custom_buttons(name, isFavorite, sortIndex, content, doubleTapContent, longPressContent, onStartup, icon, isToggle)
+VALUES (:name, :isFavorite, :sortIndex, :content, :doubleTapContent, :longPressContent, :onStartup, :icon, :isToggle);
 
 insertReturningId:
-INSERT INTO custom_buttons(name, isFavorite, sortIndex, content, longPressContent, onStartup)
-VALUES (:name, :isFavorite, :sortIndex, :content, :longPressContent, :onStartup)
+INSERT INTO custom_buttons(name, isFavorite, sortIndex, content, doubleTapContent, longPressContent, onStartup, icon, isToggle)
+VALUES (:name, :isFavorite, :sortIndex, :content, :doubleTapContent, :longPressContent, :onStartup, :icon, :isToggle)
 RETURNING _id;
 
 delete:
@@ -54,7 +108,10 @@ SET name = coalesce(:name, name),
     isFavorite = coalesce(:isFavorite, isFavorite),
     sortIndex = coalesce(:sortIndex, sortIndex),
     content = coalesce(:content, content),
+    doubleTapContent = coalesce(:doubleTapContent, doubleTapContent),
     longPressContent = coalesce(:longPressContent, longPressContent),
-    onStartup = coalesce(:onStartup, onStartup)
+    onStartup = coalesce(:onStartup, onStartup),
+    icon = coalesce(:icon, icon),
+    isToggle = coalesce(:isToggle, isToggle)
 WHERE _id = :customButtonId;
 -- <-- AY

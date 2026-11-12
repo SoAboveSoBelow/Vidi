@@ -47,6 +47,7 @@ import animiru.domain.player.model.ControlRegion
 import animiru.domain.player.model.freeSlots
 import animiru.domain.player.model.slotCapacity
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
 import eu.kanade.tachiyomi.ui.player.controls.components.EmptySlotContent
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlRow
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlSlot
@@ -95,7 +96,7 @@ fun MiddlePlayerControls(
     // AM (CONTROL_BINDINGS): editor mode, as in the other rows.
     onSlotEdit: ((Int) -> Unit)? = null,
     // AM (CONTROL_BINDINGS): hold-and-drag reorder; -1 or 1 per step.
-    onSlotMove: ((Int, Int) -> Unit)? = null,
+    onSlotMove: ((List<ControlSlotMove>) -> Unit)? = null,
     onArrangeStart: ((Int) -> Unit)? = null,
     /** Opens the picker for a position that does not exist yet, inserting at it. */
     onSlotInsert: ((Int) -> Unit)? = null,
@@ -105,7 +106,6 @@ fun MiddlePlayerControls(
      * in another bar as further along its own.
      */
     isArranging: Boolean = false,
-    heldIndex: Int? = null,
 ) {
     BoxWithConstraints(modifier) {
         val density = LocalDensity.current
@@ -208,9 +208,9 @@ fun MiddlePlayerControls(
 
         val leftSlots = leftFree.map(::freeSlot) + leftVisible.map(::editableSlot)
         val rightSlots = rightVisible.map(::editableSlot) + rightFree.map(::freeSlot)
-        val onMove: (ControlSlotId, ControlSlotId) -> Unit = { from, to ->
-            val current = heldIndex ?: from.index
-            onSlotMove?.invoke(current, to.index - current)
+        val leftSlotIds = leftSlots.mapTo(mutableSetOf()) { it.id }
+        val onMove: (List<ControlSlotMove>) -> Unit = { moves ->
+            onSlotMove?.invoke(moves)
         }
 
         // One editable row and one drag state across both sides. The arrangement only
@@ -222,11 +222,13 @@ fun MiddlePlayerControls(
                 isArranging = isArranging,
                 onMove = onMove,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = middleControlsArrangement(
-                    leftCount = leftSlots.size,
-                    centerWidth = PLAY_PAUSE_SIZE,
-                    spacing = gap,
-                ),
+                horizontalArrangement = { displayedSlots ->
+                    middleControlsArrangement(
+                        leftCount = displayedSlots.count { it.id in leftSlotIds },
+                        centerWidth = PLAY_PAUSE_SIZE,
+                        spacing = gap,
+                    )
+                },
             )
             val playPause: @Composable () -> Unit = {
                 PlayPauseSlot(

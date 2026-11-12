@@ -153,6 +153,7 @@
     <string name="control_action_previous_source">Previous source</string>
     <string name="control_action_next_source">Next source</string>
     <string name="pref_player_controls">Controls</string>
+    <string name="pref_player_controls_player">Player controls</string>
     <string name="pref_player_controls_summary">Choose what each button and gesture does</string>
     <string name="pref_player_controls_info">Tap a slot to change what it does. Empty slots show where a control can go; rotate to see the layout for the other orientation.</string>
     <string name="pref_player_controls_slot">Slot %1$d</string>
@@ -227,11 +228,16 @@
     <string name="pref_player_custom_button_add">Add button</string>
     <string name="pref_player_custom_button_edit">Edit button</string>
     <string name="pref_player_custom_button_title">Title</string>
+    <string name="pref_player_custom_button_icon">Icon</string>
     <string name="pref_player_custom_button_error_exists">Button already exists!</string>
-    <string name="pref_player_custom_button_content">Lua code</string>
+    <string name="pref_player_custom_button_content">Lua code (on tap)</string>
+    <string name="pref_player_custom_button_content_double">Lua code (on double tap)</string>
     <string name="pref_player_custom_button_content_long">Lua code (on long press)</string>
     <string name="pref_player_custom_button_optional">(optional)</string>
     <string name="pref_player_custom_button_delete">Delete button</string>
+    <string name="pref_player_custom_button_delete_question">Delete?</string>
+    <string name="pref_player_custom_button_restore_defaults">Restore defaults</string>
+    <string name="action_yes">Yes</string>
     <string name="pref_player_custom_button_delete_confirm">Do you wish to delete the button "%s"?</string>
     <string name="pref_player_custom_button_startup">On startup</string>
     <string name="pref_player_custom_button_id">(ID: %d)</string>

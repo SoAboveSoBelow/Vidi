@@ -961,8 +961,15 @@ class PlayerViewModel(
                 .launchIn(this)
 
             playerPreferences.autoplayEnabled.changes()
-                .onEach { v -> updateUiData { it.copy(autoPlayEnabled = v) } }
+                .onEach { enabled ->
+                    setPropertyString("user-data/aniyomi/auto_play", enabled.toString())
+                    updateUiData { it.copy(autoPlayEnabled = enabled) }
+                }
                 .launchIn(this)
+
+            // Lua can initialize before this collector exists. Replaying the generic
+            // toggle cache now prevents those startup writes from being lost.
+            mpvCommand("script-message", "sync_button_toggles")
 
             playerPreferences.playerSpeed.changes()
                 .onEach { v -> updateUiData { it.copy(playerSpeedPref = v) } }
@@ -1419,6 +1426,11 @@ class PlayerViewModel(
                     } else {
                         executeButton(it)
                     }
+                }
+            }
+            is PlayerEvent.ExecuteCustomButtonById -> {
+                uiData.value.customButtons.firstOrNull { it.id == event.id }?.let {
+                    executeButton(it, event.input)
                 }
             }
             is PlayerEvent.LockControls -> {
@@ -2355,11 +2367,6 @@ class PlayerViewModel(
     }
     // <-- AM (QUEUE_BLOCK_STRUCTURE)
 
-    /** The queue's episode ids, in play order - see [PlayerStateData.playlistQueueIds]. */
-    private suspend fun queueIds(): List<Long> {
-        return queueRepository.getItems().mapNotNull { it.episodeId }.distinct()
-    }
-
     /**
      * Keeps the playlist following the queue.
      *
@@ -2487,8 +2494,6 @@ class PlayerViewModel(
         // the single-episode rule, covers, custom names, the owning entry
         // itself - already covers them. Nothing about queued episodes is
         // special-cased below or merged in afterwards.
-        // Read before the write below, for the guard on the playing episode.
-        val liveQueueIds = queueIds()
         val resolvedOrder = getEpisodeOrder.awaitResolved(anime, extraOwnerIds = queuedOwnerIds())
         // <-- AM (PLAYBACK_QUEUE)
         val rawEpisodes = resolvedOrder.episodes
@@ -2585,11 +2590,10 @@ class PlayerViewModel(
         // be a QUEUED one belonging to another entry, and `episodes` holds only
         // this entry's own. Reached by playing into the queue and then anything
         // rebuilding the playlist under it - a queue change, or a shuffle
-        // toggle - and before this guard it threw.
+        // toggle. Null is valid and is handled by the queue tail below. Do not
+        // validate it against a queue snapshot: resolving the order above suspends,
+        // and the queue can legitimately change before this continuation runs.
         val selectedEpisode = episodes.find { it.id == episodeId }
-        if (selectedEpisode == null && episodeId !in liveQueueIds) {
-            error("Requested episode of id $episodeId not found in episode list")
-        }
         // <-- AM (PLAYBACK_QUEUE)
 
         val filtered = episodes.filterNot {
@@ -8280,6 +8284,7 @@ class PlayerViewModel(
         }
         updateUiData { it.copy(playerUpdate = PlayerUpdates.ShowTextResource(textRes)) }
         playerPreferences.autoplayEnabled.set(value)
+        setPropertyString("user-data/aniyomi/auto_play", value.toString())
     }
 
     // === Custom buttons ===
@@ -8290,6 +8295,15 @@ class PlayerViewModel(
 
     fun executeLongPressButton(button: CustomButton) {
         mpvCommand("script-message", "call_button_${button.id}_long")
+    }
+
+    fun executeButton(button: CustomButton, input: ControlInput) {
+        val suffix = when (input) {
+            ControlInput.Tap -> ""
+            ControlInput.DoubleTap -> "_double"
+            ControlInput.LongPress -> "_long"
+        }
+        mpvCommand("script-message", "call_button_${button.id}$suffix")
     }
 
     fun setPrimaryCustomButtonTitle(button: CustomButton) {
@@ -8303,6 +8317,7 @@ class PlayerViewModel(
             .ifEmpty { return }
 
         when (property.substringAfterLast("/")) {
+            "control_action" -> ControlAction.fromKey(data)?.let(::dispatch)
             "show_text" -> updateUiData { it.copy(playerUpdate = PlayerUpdates.ShowText(data)) }
             "toggle_ui" -> {
                 when (data) {
@@ -8330,6 +8345,13 @@ class PlayerViewModel(
             }
             "set_button_title" -> {
                 updateUiData { it.copy(primaryButtonTitle = data) }
+            }
+            "set_button_toggle" -> {
+                val id = data.substringBefore(':').toLongOrNull()
+                val checked = data.substringAfter(':', "").toBooleanStrictOrNull()
+                if (id != null && checked != null) {
+                    updateUiData { it.copy(customToggleStates = it.customToggleStates + (id to checked)) }
+                }
             }
             "reset_button_title" -> {
                 uiData.value.customButtons.firstOrNull { it.isFavorite }?.let {
@@ -8455,25 +8477,48 @@ class PlayerViewModel(
 
     private fun dispatch(action: ControlAction) {
         when (action) {
-            ControlAction.None -> { }
+            ControlAction.None -> Unit
             ControlAction.PlayPause -> pauseUnpause()
             ControlAction.SeekBackward -> leftSeek()
             ControlAction.SeekForward -> rightSeek()
             ControlAction.PreviousEpisode -> nextEpisode(next = false)
             ControlAction.NextEpisode -> nextEpisode(next = true)
+            ControlAction.PreviousSource -> nextSource(next = false)
+            ControlAction.NextSource -> nextSource(next = true)
             ControlAction.Screenshot -> {
                 pause()
                 setSheet(Sheets.Screenshot)
             }
+            ControlAction.Lock -> updateUiData { it.copy(isControlsLocked = true) }
+            ControlAction.CycleRotation -> cycleRotations()
+            ControlAction.PlaybackSpeed -> setSheet(Sheets.PlaybackSpeed)
+            ControlAction.Chapters -> setSheet(Sheets.Chapters)
+            ControlAction.PictureInPicture -> viewModelScope.launch { _eventFlow.emit(Event.EnterPip) }
+            ControlAction.AspectRatio -> setSheet(Sheets.Aspect)
+            ControlAction.Cast -> Unit
+            ControlAction.ToggleAutoPlay -> setAutoPlay(!playerPreferences.autoplayEnabled.get())
+            ControlAction.SubtitleTracks -> setSheet(Sheets.SubtitleTracks)
+            ControlAction.SubtitleSettings -> setPanel(Panels.SubtitleSettings)
+            ControlAction.AudioTracks -> setSheet(Sheets.AudioTracks)
+            ControlAction.AudioDelay -> setPanel(Panels.AudioDelay)
+            ControlAction.VideoQuality -> setSheet(Sheets.QualityTracks)
+            ControlAction.VideoFilters -> setPanel(Panels.VideoFilters)
+            ControlAction.Overflow -> setSheet(Sheets.More)
             ControlAction.PrimaryCustomButton -> uiData.value.primaryButton?.let { executeButton(it) }
+            is ControlAction.CustomButton -> uiData.value.customButtons
+                .firstOrNull { it.id == action.id }
+                ?.let { button ->
+                    if (button.isToggle && action.input == ControlInput.Tap) {
+                        updateUiData {
+                            it.copy(
+                                customToggleStates = it.customToggleStates +
+                                    (button.id to !(it.customToggleStates[button.id] ?: false)),
+                            )
+                        }
+                    }
+                    executeButton(button, action.input)
+                }
             is ControlAction.CustomKey -> mpvCommand("keypress", action.code)
-            // Everything else belongs to the controls layer, not here: the sheets,
-            // panels, screen state and row buttons are all driven from PlayerControls'
-            // action map, which turns them into PlayerEvents. Nothing reaches this
-            // dispatcher bound to one of them today - the screen-zone gestures are its
-            // only callers - and an else keeps a new UI action from having to be
-            // declared irrelevant in two places.
-            else -> { }
         }
     }
 
@@ -10084,6 +10129,7 @@ class PlayerViewModel(
         val dismissSheet: Boolean = false,
         val fontList: List<String> = emptyList(),
         val customButtons: List<CustomButton> = emptyList(),
+        val customToggleStates: Map<Long, Boolean> = emptyMap(),
         val primaryButtonTitle: String = "",
         val primaryButton: CustomButton? = null,
         val skipIntroText: String? = null,
@@ -10162,6 +10208,7 @@ class PlayerViewModel(
         data object EnterPipFromBack : PlayerEvent
         // <-- AM (PIP_BRING_MAIN_TO_FRONT_FIX)
         data class ExecuteCustomButton(val long: Boolean) : PlayerEvent
+        data class ExecuteCustomButtonById(val id: Long, val input: ControlInput) : PlayerEvent
         data class LockControls(val lock: Boolean) : PlayerEvent
         data class NextEpisode(val next: Boolean) : PlayerEvent
         // AM (QUEUE_SOURCE_STEP)

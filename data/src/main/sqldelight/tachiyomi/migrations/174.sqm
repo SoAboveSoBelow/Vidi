@@ -1,0 +1,2 @@
+-- Remove standalone duplicates of actions nested in another button's double-tap/hold Lua.
+DELETE FROM custom_buttons WHERE _id IN (-7, -8, -19, -21, -25);

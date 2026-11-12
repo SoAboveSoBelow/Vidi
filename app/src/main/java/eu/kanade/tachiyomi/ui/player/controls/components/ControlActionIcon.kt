@@ -59,6 +59,31 @@ fun controlActionIcon(action: ControlAction): ImageVector? = when (action) {
     ControlAction.VideoFilters -> Icons.Filled.Tune
     ControlAction.Overflow -> Icons.Filled.MoreVert
     ControlAction.PrimaryCustomButton -> Icons.Filled.TouchApp
+    is ControlAction.CustomButton -> action.icon?.let(::controlButtonIcon)
+        ?: ControlAction.nativeActionForButtonId(action.id)?.let {
+            controlActionIcon(it) ?: Icons.Filled.PlayCircleOutline
+        }
+        ?: Icons.Filled.TouchApp
     is ControlAction.CustomKey -> Icons.Filled.TouchApp
+}
+
+data class ControlButtonIconChoice(
+    val key: String,
+    val action: ControlAction,
+    val icon: ImageVector,
+)
+
+val controlButtonIconChoices: List<ControlButtonIconChoice> = ControlAction.selectable
+    .filterNot { it == ControlAction.None }
+    .map { action ->
+        ControlButtonIconChoice(
+            key = action.key,
+            action = action,
+            icon = controlActionIcon(action) ?: Icons.Filled.PlayCircleOutline,
+        )
+    }
+
+fun controlButtonIcon(key: String): ImageVector? = ControlAction.fromKey(key)?.let { action ->
+    controlActionIcon(action) ?: Icons.Filled.PlayCircleOutline
 }
 // <-- AM (CONTROL_BINDINGS)

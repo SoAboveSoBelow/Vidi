@@ -85,6 +85,7 @@ import eu.kanade.tachiyomi.ui.player.controls.components.sheets.toFixed
 import eu.kanade.tachiyomi.ui.player.mpv.MpvVideoTrack
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
 import eu.kanade.tachiyomi.ui.player.controls.editor.SlotEdit
 import eu.kanade.tachiyomi.ui.player.controls.editor.SlotEditDialog
 import eu.kanade.tachiyomi.ui.player.controls.editor.SlotEditSaver
@@ -865,22 +866,18 @@ fun PlayerScreen(
                             null
                         },
                         onArrangeEnd = { arranging = null },
+                        onBackgroundTap = if (isLayoutEditor) {
+                            { if (uiData.controlsShown) viewModel.hideControls() else viewModel.showControls() }
+                        } else {
+                            null
+                        },
                         arrangingRegion = arranging?.region,
-                        arrangingIndex = arranging?.index,
-                        // Writes as the finger moves rather than on release: the row
-                        // is the preview, so it has to reorder while being dragged.
+                        // The row previews locally while dragging and submits its ordered
+                        // swaps on release, keeping parent state out of the active gesture.
                         moveSlot = if (isLayoutEditor) {
-                            { region, index, offset ->
+                            { region, moves ->
                                 val preference = controlBindings.entries(ControlSurface.Player, region)
-                                val entries = preference.get()
-                                val moved = entries.moved(index, offset)
-                                if (moved !== entries) {
-                                    preference.set(moved)
-                                    // The anchor follows the slot it is anchored to, or
-                                    // tapping to finish would land on whatever took its
-                                    // old position.
-                                    arranging = SlotEdit(region, (index + offset).coerceAtLeast(0))
-                                }
+                                preference.set(preference.get().reordered(moves))
                             }
                         } else {
                             null
@@ -974,9 +971,6 @@ fun PlayerScreen(
                         }
                         viewModel.setPropertyString(it.property, it.value)
                     },
-                    onCustomButtonClick = viewModel::executeButton,
-                    onCustomButtonLongClick = viewModel::executeLongPressButton,
-                    buttons = uiData.customButtons,
                     isLocalSource = stateData.currentSource?.isLocal() == true,
                     showSubtitles = showSubtitles,
                     onToggleShowSubtitles = { subtitlePreferences.screenshotSubtitles.set(it) },
@@ -1436,10 +1430,9 @@ fun PlayerScreen(
                     }
                     val entries = preference.get()
                     SlotEditDialog(
-                        region = slotEdit.region,
-                        index = slotEdit.index,
                         // Nothing to pre-fill for a position being inserted.
                         binding = entries.getOrNull(slotEdit.index).takeIf { !slotEdit.isInsert },
+                        customButtons = uiData.customButtons,
                         onDismissRequest = { editingSlot = null },
                         onConfirm = { updated ->
                             preference.set(
@@ -1449,10 +1442,6 @@ fun PlayerScreen(
                                     entries.replacingOrAdding(slotEdit.index, updated)
                                 },
                             )
-                            editingSlot = null
-                        },
-                        onMove = { offset ->
-                            preference.set(entries.moved(slotEdit.index, offset))
                             editingSlot = null
                         },
                     )
@@ -1484,32 +1473,24 @@ private fun List<ControlBinding>.replacingOrAdding(index: Int, binding: ControlB
 private fun List<ControlBinding>.insertedAt(index: Int, binding: ControlBinding): List<ControlBinding> =
     toMutableList().also { it.add(index.coerceIn(0, it.size), binding) }
 
-/**
- * Moves a control to the position [offset] along without compacting other positions.
- *
- * The target does NOT have to exist yet, and does not have to be one the current
- * window can show: dragging into a free position is how a control is put there, and
- * a position past what fits is a legitimate choice - the row simply renders fewer
- * than it holds and the control reappears at that spot when there is room.
- */
-private fun List<ControlBinding>.moved(index: Int, offset: Int): List<ControlBinding> {
-    if (index !in indices || offset == 0) return this
-    val target = index + offset
-    if (target == index) return this
-    // A leading virtual position becomes real by prefixing blanks. Existing entries
-    // retain their relative order, then the held entry exchanges places with the blank.
-    val prefix = (-target).coerceAtLeast(0)
-    val shiftedIndex = index + prefix
-    val shiftedTarget = target + prefix
-    val positioned = List(prefix) { ControlBinding() } + this
-    // Slots are positions, not a packed queue. Exchange the two positions so dropping
-    // into a blank leaves the source blank and does not shift the blanks around it.
-    val padded = positioned + List((shiftedTarget + 1 - positioned.size).coerceAtLeast(0)) { ControlBinding() }
-    return padded.toMutableList().also {
-        val held = it[shiftedIndex]
-        it[shiftedIndex] = it[shiftedTarget]
-        it[shiftedTarget] = held
+/** Applies the row's final visible placement in one write. */
+private fun List<ControlBinding>.reordered(moves: List<ControlSlotMove>): List<ControlBinding> {
+    if (moves.isEmpty() || moves.all { it.position == it.source }) return this
+
+    // Negative positions are the top bar's virtual leading blanks. Materialize them
+    // once, then place every visible source at its final position. Unseen entries keep
+    // their relative positions and returning to the original order returns this list.
+    val prefix = (-moves.minOf { it.position.index }).coerceAtLeast(0)
+    val size = maxOf(
+        this.size + prefix,
+        moves.maxOf { it.position.index } + prefix + 1,
+    )
+    val result = MutableList(size) { ControlBinding() }
+    forEachIndexed { index, binding -> result[index + prefix] = binding }
+    moves.forEach { move ->
+        result[move.position.index + prefix] = getOrElse(move.source.index) { ControlBinding() }
     }
+    return result
 }
 // <-- AM (CONTROL_BINDINGS)
 

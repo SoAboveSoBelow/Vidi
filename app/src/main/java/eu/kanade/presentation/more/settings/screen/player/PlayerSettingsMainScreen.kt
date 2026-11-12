@@ -1,6 +1,5 @@
 package eu.kanade.presentation.more.settings.screen.player
 
-import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.padding
@@ -12,12 +11,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.EditNote
-import androidx.compose.material.icons.outlined.Gesture
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.PlayCircleOutline
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Subtitles
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -32,7 +29,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.ColorUtils
 import cafe.adriel.voyager.navigator.LocalNavigator
@@ -42,8 +38,6 @@ import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.more.settings.screen.SettingsSearchScreen
-import eu.kanade.presentation.more.settings.screen.player.custombutton.PlayerSettingsCustomButtonScreen
-import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.presentation.more.settings.screen.player.editor.PlayerSettingsEditorScreen
 import eu.kanade.presentation.more.settings.widget.TextPreferenceWidget
 import eu.kanade.presentation.util.LocalBackPress
@@ -81,7 +75,6 @@ class PlayerSettingsMainScreen(private val mainSettings: Boolean) : Screen() {
     @Composable
     fun Content(twoPane: Boolean) {
         val navigator = LocalNavigator.currentOrThrow
-        val context = LocalContext.current
         val backPress = LocalBackPress.currentOrThrow
         val containerColor = if (twoPane) getPalerSurface() else MaterialTheme.colorScheme.surface
         val topBarState = rememberTopAppBarState()
@@ -116,8 +109,6 @@ class PlayerSettingsMainScreen(private val mainSettings: Boolean) : Screen() {
             content = { contentPadding ->
                 val state = rememberLazyListState()
                 val indexSelected = if (twoPane) {
-                    // An item that launches an activity has no screen to match against,
-                    // so it is never the selected pane.
                     items.indexOfFirst { it.screen?.let { screen -> screen::class } == navigator.items.first()::class }
                         .also {
                             LaunchedEffect(Unit) {
@@ -167,12 +158,7 @@ class PlayerSettingsMainScreen(private val mainSettings: Boolean) : Screen() {
                                 subtitle = item.formatSubtitle(),
                                 icon = item.icon,
                                 onPreferenceClick = {
-                                    val screen = item.screen
-                                    if (screen != null) {
-                                        navigator.navigate(screen, twoPane)
-                                    } else {
-                                        item.launch?.invoke(context)
-                                    }
+                                    item.screen?.let { navigator.navigate(it, twoPane) }
                                 },
                             )
                         }
@@ -193,10 +179,6 @@ private data class Item(
     val formatSubtitle: @Composable () -> String? = { subtitleRes?.let { stringResource(it) } },
     val icon: ImageVector,
     val screen: VoyagerScreen? = null,
-    // AM (CONTROL_BINDINGS): an item that does something rather than navigating - the
-    // controls editor submits a playback request and the overlay host shows the
-    // player, exactly as opening a video does.
-    val launch: ((Context) -> Unit)? = null,
 )
 
 private val items = listOf(
@@ -205,12 +187,6 @@ private val items = listOf(
         subtitleRes = AYMR.strings.pref_player_internal_summary,
         icon = Icons.Outlined.PlayCircleOutline,
         screen = PlayerSettingsPlayerScreen,
-    ),
-    Item(
-        titleRes = AYMR.strings.pref_player_gestures,
-        subtitleRes = AYMR.strings.pref_player_gestures_summary,
-        icon = Icons.Outlined.Gesture,
-        screen = PlayerSettingsGesturesScreen,
     ),
     Item(
         titleRes = AYMR.strings.pref_player_decoder,
@@ -230,23 +206,11 @@ private val items = listOf(
         icon = Icons.Outlined.Audiotrack,
         screen = PlayerSettingsAudioScreen,
     ),
-    // AM (CONTROL_BINDINGS): custom buttons are reached from inside the controls
-    // editor now - they are one kind of thing a control can be bound to, not a
-    // settings area of their own.
-    Item(
-        titleRes = AYMR.strings.pref_player_custom_button,
-        subtitleRes = AYMR.strings.pref_player_custom_button_summary,
-        icon = Icons.Outlined.Terminal,
-        screen = PlayerSettingsCustomButtonScreen,
-    ),
     Item(
         titleRes = AYMR.strings.pref_player_controls,
         subtitleRes = AYMR.strings.pref_player_controls_summary,
         icon = Icons.Outlined.Tune,
-        // AM (CONTROL_BINDINGS): the same call opening a video makes. The overlay
-        // host picks the request up and shows the player over whatever is on
-        // screen - no Activity, so no second task and nothing to keep in step.
-        launch = { PlayerMediaHolder.openLayoutEditor() },
+        screen = PlayerSettingsControlsScreen,
     ),
     Item(
         titleRes = AYMR.strings.pref_player_editor,

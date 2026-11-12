@@ -1,0 +1,21 @@
+-- Native defaults are editable Lua buttons too. Negative IDs are reserved for these
+-- rows; user-created buttons use SQLite's positive generated IDs.
+INSERT OR IGNORE INTO custom_buttons (_id, name, isFavorite, sortIndex, content, doubleTapContent, longPressContent, onStartup) VALUES
+(-2, 'Play / pause', 0, -24, 'aniyomi.control_action("play_pause")', '', '', ''),
+(-3, 'Seek backward', 0, -23, 'aniyomi.control_action("seek_backward")', '', '', ''),
+(-4, 'Seek forward', 0, -22, 'aniyomi.control_action("seek_forward")', '', '', ''),
+(-5, 'Previous video', 0, -21, 'aniyomi.control_action("previous_episode")', 'aniyomi.control_action("previous_source")', '', ''),
+(-6, 'Next video', 0, -20, 'aniyomi.control_action("next_episode")', 'aniyomi.control_action("next_source")', '', ''),
+(-9, 'Screenshot', 0, -17, 'aniyomi.control_action("screenshot")', '', '', ''),
+(-10, 'Lock', 0, -16, 'aniyomi.control_action("lock")', '', '', ''),
+(-11, 'Cycle rotation', 0, -15, 'aniyomi.control_action("cycle_rotation")', '', '', ''),
+(-12, 'Playback speed', 0, -14, 'aniyomi.control_action("playback_speed")', '', '', ''),
+(-13, 'Chapters', 0, -13, 'aniyomi.control_action("chapters")', '', '', ''),
+(-14, 'Picture in picture', 0, -12, 'aniyomi.control_action("picture_in_picture")', '', '', ''),
+(-15, 'Aspect ratio', 0, -11, 'aniyomi.control_action("aspect_ratio")', '', '', ''),
+(-16, 'Cast', 0, -10, 'aniyomi.control_action("cast")', '', '', ''),
+(-17, 'Auto-play', 0, -9, 'aniyomi.control_action("toggle_auto_play")', '', '', ''),
+(-18, 'Subtitle tracks', 0, -8, 'aniyomi.control_action("subtitle_tracks")', '', 'aniyomi.control_action("subtitle_settings")', ''),
+(-20, 'Audio tracks', 0, -6, 'aniyomi.control_action("audio_tracks")', '', 'aniyomi.control_action("audio_delay")', ''),
+(-22, 'Video quality', 0, -4, 'aniyomi.control_action("video_quality")', '', 'aniyomi.control_action("video_quality")', ''),
+(-23, 'Video filters', 0, -3, 'aniyomi.control_action("video_filters")', '', '', '');

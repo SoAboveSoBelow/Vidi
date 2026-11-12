@@ -52,6 +52,8 @@ import eu.kanade.presentation.components.UpIcon
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsAdvancedScreen
 import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsAudioScreen
+import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsButtonsScreen
+import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsControlsScreen
 import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsDecoderScreen
 import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsGesturesScreen
 import eu.kanade.presentation.more.settings.screen.player.PlayerSettingsPlayerScreen
@@ -333,6 +335,8 @@ private fun getLocalizedBreadcrumb(nodes: List<String>, isLtr: Boolean): String 
 
 private val playerSettingScreens = listOf(
     PlayerSettingsPlayerScreen,
+    PlayerSettingsControlsScreen,
+    PlayerSettingsButtonsScreen,
     PlayerSettingsGesturesScreen,
     PlayerSettingsDecoderScreen,
     PlayerSettingsSubtitleScreen,

@@ -68,15 +68,18 @@ object PlayerSettingsCustomButtonScreen : Screen() {
             is CustomButtonDialog.Edit -> {
                 CustomButtonEditDialog(
                     onDismissRequest = viewModel::dismissDialog,
-                    onEdit = { title, content, longPressContent, onStartup ->
+                    onEdit = { title, content, doubleTapContent, longPressContent, onStartup, icon, isToggle ->
                         viewModel.editCustomButton(
                             CustomButtonUpdate(
                                 id = dialog.customButton.id,
                                 name = title,
                                 sortIndex = dialog.customButton.sortIndex,
                                 content = content,
+                                doubleTapContent = doubleTapContent,
                                 longPressContent = longPressContent,
                                 onStartup = onStartup,
+                                icon = icon,
+                                isToggle = isToggle,
                             ),
                         )
                     },

@@ -34,10 +34,28 @@ import kotlin.properties.ReadOnlyProperty
 import kotlin.reflect.KProperty
 
 internal fun Uri.openContentFd(context: Context): String? {
-    return context.contentResolver.openFileDescriptor(this, "r")?.detachFd()?.let {
-        Utils.findRealPath(it)?.also { _ ->
-            ParcelFileDescriptor.adoptFd(it).close()
-        } ?: "fd://$it"
+    return try {
+        context.contentResolver.openFileDescriptor(this, "r")?.use { descriptor ->
+            val fd = descriptor.detachFd()
+            val realPath = try {
+                Utils.findRealPath(fd)
+            } catch (e: Exception) {
+                ParcelFileDescriptor.adoptFd(fd).close()
+                throw e
+            }
+            if (realPath != null) {
+                ParcelFileDescriptor.adoptFd(fd).close()
+                realPath
+            } else {
+                // Ownership deliberately passes to mpv through fd://.
+                "fd://$fd"
+            }
+        }
+    } catch (e: Exception) {
+        // A launching app's grant can disappear before a reload. The existing
+        // URI fallback then reports an ordinary playback error instead of crashing.
+        logcat(LogPriority.INFO) { "openContentFd failed: ${e.message}" }
+        null
     }
 }
 

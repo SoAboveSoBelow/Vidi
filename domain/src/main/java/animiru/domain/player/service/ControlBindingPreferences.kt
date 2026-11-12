@@ -17,6 +17,7 @@ import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.json.Json
@@ -24,6 +25,8 @@ import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.preference.getEnum
 import tachiyomi.core.common.preference.getEnumSlots
+import tachiyomi.domain.custombutton.model.CustomButton
+import tachiyomi.domain.custombutton.repository.CustomButtonRepository
 
 // AM (CONTROL_BINDINGS) -->
 
@@ -34,14 +37,14 @@ import tachiyomi.core.common.preference.getEnumSlots
  * scheme needed a new key, a new field and a new settings row for every slot added,
  * which doesn't survive user-orderable regions.
  *
- * Nothing is written here until the user changes something. Until then a surface's
- * value is derived from the legacy per-slot keys, so an existing install keeps its
- * bindings without a migration pass and without the old keys being rewritten.
+ * Button options are shared by action identity. A one-time migration seeds them from
+ * the current layout so existing installs retain their customized secondary actions.
  */
 @Inject
 @SingleIn(AppScope::class)
 class ControlBindingPreferences(
     private val preferenceStore: PreferenceStore,
+    private val customButtonRepository: CustomButtonRepository,
 ) {
 
     private val json = Json {
@@ -49,10 +52,39 @@ class ControlBindingPreferences(
         encodeDefaults = true
     }
 
+    private val rawLayouts = mutableMapOf<ControlSurface, Preference<ControlLayout>>()
     private val layouts = mutableMapOf<ControlSurface, Preference<ControlLayout>>()
+    private val optionsMigrated by lazy {
+        preferenceStore.getBoolean("pref_control_button_options_migrated", false)
+    }
+    private val storedButtonOptions by lazy {
+        preferenceStore.getObjectFromString(
+            key = "pref_control_button_options",
+            defaultValue = emptyMap<ControlAction, ControlBinding>(),
+            serializer = { options ->
+                json.encodeToString(
+                    options.mapKeys { (action, _) -> action.key }.mapValues { (_, binding) ->
+                        ControlLayoutRecord.BindingRecord(
+                            tap = binding.tap.key,
+                            doubleTap = binding.doubleTap?.key,
+                            longPress = binding.longPress?.key,
+                        )
+                    },
+                )
+            },
+            deserializer = { stored ->
+                runCatching {
+                    json.decodeFromString<Map<String, ControlLayoutRecord.BindingRecord>>(stored)
+                        .mapNotNull { (key, record) ->
+                            ControlAction.fromKey(key)?.let { it to record.toBinding() }
+                        }.toMap()
+                }.getOrDefault(emptyMap())
+            },
+        )
+    }
 
     @Synchronized
-    fun layout(surface: ControlSurface): Preference<ControlLayout> = layouts.getOrPut(surface) {
+    private fun rawLayout(surface: ControlSurface): Preference<ControlLayout> = rawLayouts.getOrPut(surface) {
         preferenceStore.getObjectFromString(
             key = "pref_control_layout_${surface.key}",
             defaultValue = legacyLayout(surface),
@@ -62,6 +94,151 @@ class ControlBindingPreferences(
                     .getOrElse { legacyLayout(surface) }
             },
         )
+    }
+
+    @Synchronized
+    fun layout(surface: ControlSurface): Preference<ControlLayout> = layouts.getOrPut(surface) {
+        LayoutPreference(rawLayout(surface))
+    }
+
+    /** Shared tap, double-tap and hold behavior, keyed by the button placed in a slot. */
+    fun buttonOptions(): Preference<Map<ControlAction, ControlBinding>> = ButtonOptionsPreference()
+
+    @Synchronized
+    private fun ensureButtonOptionsMigrated() {
+        if (optionsMigrated.get()) return
+
+        val options = defaultButtonOptions().toMutableMap()
+        val seen = mutableSetOf<ControlAction>()
+        rawLayout(ControlSurface.Player).get().regions.values.flatten().forEach { entry ->
+            val button = entry.button ?: entry.tap
+            if (button != ControlAction.None && seen.add(button)) {
+                options[button] = ControlBinding(
+                    tap = button,
+                    doubleTap = entry.doubleTap,
+                    longPress = entry.longPress,
+                )
+            }
+        }
+        storedButtonOptions.set(options)
+        optionsMigrated.set(true)
+    }
+
+    private fun applyButtonOptions(
+        layout: ControlLayout,
+        options: Map<ControlAction, ControlBinding>,
+        customButtons: List<CustomButton> = emptyList(),
+        resolveNativeButtons: Boolean = false,
+    ): ControlLayout {
+        val customBindings = customButtons.associate { button ->
+            val identity = ControlAction.CustomButton(button.id, icon = button.icon)
+            identity to ControlBinding(
+                tap = identity,
+                doubleTap = ControlAction.CustomButton(button.id, ControlInput.DoubleTap, button.icon)
+                    .takeIf { button.doubleTapContent.isNotBlank() },
+                longPress = ControlAction.CustomButton(button.id, ControlInput.LongPress, button.icon)
+                    .takeIf { button.longPressContent.isNotBlank() },
+                button = identity,
+            )
+        }
+        return layout.copy(
+            regions = layout.regions.mapValues { (_, entries) ->
+                entries.map { entry ->
+                    val originalButton = entry.button ?: entry.tap
+                    val nativeButtonId = ControlAction.nativeButtonId(originalButton)
+                        .takeIf { resolveNativeButtons }
+                    val originalCustomId = (originalButton as? ControlAction.CustomButton)?.id
+                    val customId = nativeButtonId ?: originalCustomId
+                    val customButton = customButtons.firstOrNull { it.id == customId }
+                    val button = if (customId != null) {
+                        ControlAction.CustomButton(customId, icon = customButton?.icon)
+                    } else {
+                        originalButton
+                    }
+                    val option = if (customId != null) customBindings[button] else options[button]
+                    when {
+                        option != null -> entry.copy(
+                            tap = option.tap,
+                            doubleTap = option.doubleTap,
+                            longPress = option.longPress,
+                            button = button,
+                        )
+                        // A deleted seeded button must not silently fall back to its old
+                        // native action. Keep its stable identity so restoring/recreating
+                        // the row can resolve the slot again.
+                        nativeButtonId != null -> entry.copy(
+                            tap = ControlAction.None,
+                            doubleTap = null,
+                            longPress = null,
+                            button = button,
+                        )
+                        else -> entry
+                    }
+                }
+            },
+        )
+    }
+
+    private inner class LayoutPreference(
+        private val source: Preference<ControlLayout>,
+    ) : Preference<ControlLayout> {
+        override fun key(): String = source.key()
+
+        override fun get(): ControlLayout {
+            ensureButtonOptionsMigrated()
+            return applyButtonOptions(source.get(), storedButtonOptions.get())
+        }
+
+        override fun set(value: ControlLayout) = source.set(value)
+
+        override fun isSet(): Boolean = source.isSet()
+
+        override fun delete() = source.delete()
+
+        override fun defaultValue(): ControlLayout = applyButtonOptions(
+            source.defaultValue(),
+            defaultButtonOptions(),
+        )
+
+        override fun changes(): Flow<ControlLayout> = combine(
+            source.changes(),
+            storedButtonOptions.changes(),
+            customButtonRepository.subscribeAll(),
+        ) { layout, options, customButtons ->
+            applyButtonOptions(layout, options, customButtons, resolveNativeButtons = true)
+        }
+
+        override fun stateIn(scope: CoroutineScope): StateFlow<ControlLayout> =
+            changes().stateIn(scope, kotlinx.coroutines.flow.SharingStarted.Eagerly, get())
+    }
+
+    private inner class ButtonOptionsPreference : Preference<Map<ControlAction, ControlBinding>> {
+        override fun key(): String = storedButtonOptions.key()
+
+        override fun get(): Map<ControlAction, ControlBinding> {
+            ensureButtonOptionsMigrated()
+            return defaultButtonOptions() + storedButtonOptions.get()
+        }
+
+        override fun set(value: Map<ControlAction, ControlBinding>) {
+            storedButtonOptions.set(value)
+            optionsMigrated.set(true)
+        }
+
+        override fun isSet(): Boolean = storedButtonOptions.isSet()
+
+        override fun delete() {
+            storedButtonOptions.delete()
+            optionsMigrated.set(true)
+        }
+
+        override fun defaultValue(): Map<ControlAction, ControlBinding> = defaultButtonOptions()
+
+        override fun changes(): Flow<Map<ControlAction, ControlBinding>> = storedButtonOptions.changes()
+            .map { defaultButtonOptions() + it }
+
+        override fun stateIn(scope: CoroutineScope): StateFlow<Map<ControlAction, ControlBinding>> =
+            changes().stateIn(scope, kotlinx.coroutines.flow.SharingStarted.Eagerly, get())
     }
 
     /**
@@ -296,6 +473,25 @@ class ControlBindingPreferences(
     }
 }
 
+private fun defaultButtonOptions(): Map<ControlAction, ControlBinding> = ControlAction.selectable
+    .filterNot { it == ControlAction.None }
+    .associateWith { action ->
+        ControlBinding(
+            tap = action,
+            doubleTap = when (action) {
+                ControlAction.PreviousEpisode -> ControlAction.PreviousSource
+                ControlAction.NextEpisode -> ControlAction.NextSource
+                else -> null
+            },
+            longPress = when (action) {
+                ControlAction.SubtitleTracks -> ControlAction.SubtitleSettings
+                ControlAction.AudioTracks -> ControlAction.AudioDelay
+                ControlAction.VideoQuality -> ControlAction.VideoQuality
+                else -> null
+            },
+        )
+    }
+
 private fun ControlLayout.withoutFixedRegionControls(): ControlLayout =
     ControlRegion.entries.fold(this) { result, region ->
         result.withEntries(region, result.entries(region).withoutFixedControls(region))
@@ -303,8 +499,8 @@ private fun ControlLayout.withoutFixedRegionControls(): ControlLayout =
 
 private fun List<ControlBinding>.withoutFixedControls(region: ControlRegion) = filterNot { entry ->
     when (region) {
-        ControlRegion.TopBar -> entry.tap == ControlAction.Overflow
-        ControlRegion.Middle -> entry.tap == ControlAction.PlayPause
+        ControlRegion.TopBar -> (entry.button ?: entry.tap) == ControlAction.Overflow
+        ControlRegion.Middle -> (entry.button ?: entry.tap) == ControlAction.PlayPause
         ControlRegion.Bottom -> false
     }
 }

@@ -21,6 +21,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -81,6 +82,8 @@ fun TopLeftPlayerControls(
             Column(
                 verticalArrangement = Arrangement.spacedBy(-MaterialTheme.padding.extraSmall),
                 modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
                     .clickable(onClick = onTitleClick),
             ) {
                 Text(

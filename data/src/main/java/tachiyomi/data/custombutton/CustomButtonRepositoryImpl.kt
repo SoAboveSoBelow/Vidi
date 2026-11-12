@@ -33,8 +33,11 @@ class CustomButtonRepositoryImpl(
         name: String,
         sortIndex: Long,
         content: String,
+        doubleTapContent: String,
         longPressContent: String,
         onStartup: String,
+        icon: String?,
+        isToggle: Boolean,
     ) {
         try {
             database.custom_buttonsQueries.insert(
@@ -42,8 +45,11 @@ class CustomButtonRepositoryImpl(
                 false,
                 sortIndex,
                 content,
+                doubleTapContent,
                 longPressContent,
                 onStartup,
+                icon,
+                isToggle,
             )
         } catch (ex: SQLiteException) {
             throw SaveCustomButtonException(ex)
@@ -56,9 +62,12 @@ class CustomButtonRepositoryImpl(
             isFavorite = update.isFavorite,
             sortIndex = update.sortIndex,
             content = update.content,
+            doubleTapContent = update.doubleTapContent,
             longPressContent = update.longPressContent,
             customButtonId = update.id,
             onStartup = update.onStartup,
+            icon = update.icon,
+            isToggle = update.isToggle,
         )
     }
 
@@ -72,22 +81,32 @@ class CustomButtonRepositoryImpl(
         database.custom_buttonsQueries.delete(customButtonId)
     }
 
+    override suspend fun restoreDefaultCustomButtons() {
+        database.custom_buttonsQueries.restoreDefaults()
+    }
+
     private fun mapCustomButton(
         id: Long,
         name: String,
         isFavorite: Boolean,
         sortIndex: Long,
         content: String,
+        doubleTapContent: String,
         longPressContent: String,
         onStartup: String,
+        icon: String?,
+        isToggle: Boolean,
     ): CustomButton = CustomButton(
         id = id,
         name = name,
         isFavorite = isFavorite,
         sortIndex = sortIndex,
         content = content,
+        doubleTapContent = doubleTapContent,
         longPressContent = longPressContent,
         onStartup = onStartup,
+        icon = icon,
+        isToggle = isToggle,
     )
 }
 // <-- AY

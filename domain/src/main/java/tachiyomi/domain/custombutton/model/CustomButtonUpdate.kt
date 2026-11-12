@@ -7,7 +7,10 @@ data class CustomButtonUpdate(
     val isFavorite: Boolean? = null,
     val sortIndex: Long? = null,
     val content: String? = null,
+    val doubleTapContent: String? = null,
     val longPressContent: String? = null,
     val onStartup: String? = null,
+    val icon: String? = null,
+    val isToggle: Boolean? = null,
 )
 // <-- AY

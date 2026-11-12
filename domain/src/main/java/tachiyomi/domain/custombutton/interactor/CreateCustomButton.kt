@@ -14,8 +14,11 @@ class CreateCustomButton(
     suspend fun await(
         name: String,
         content: String,
+        doubleTapContent: String,
         longPressContent: String,
         onStartup: String,
+        icon: String?,
+        isToggle: Boolean,
     ): Result = withNonCancellableContext {
         val customButtons = customButtonRepository.getAll()
         val nextSortIndex = customButtons.maxOfOrNull { it.sortIndex }?.plus(1) ?: 0
@@ -25,8 +28,11 @@ class CreateCustomButton(
                 name = name,
                 sortIndex = nextSortIndex,
                 content = content,
+                doubleTapContent = doubleTapContent,
                 longPressContent = longPressContent,
                 onStartup = onStartup,
+                icon = icon,
+                isToggle = isToggle,
             )
             Result.Success
         } catch (e: Exception) {

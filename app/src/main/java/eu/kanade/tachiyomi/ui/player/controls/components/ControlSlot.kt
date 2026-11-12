@@ -76,6 +76,11 @@ fun StaticSlot(content: @Composable () -> Unit) {
 private val SLOT_SHAPE = RoundedCornerShape(4.dp)
 
 /** One queue-style item for a real stored position or an available free position. */
+data class ControlSlotMove(
+    val position: ControlSlotId,
+    val source: ControlSlotId,
+)
+
 data class ReorderableControlSlot(
     val id: ControlSlotId,
     val width: Dp,
@@ -101,9 +106,9 @@ fun ReorderableControlRow(
     slots: List<ReorderableControlSlot>,
     isEditing: Boolean,
     isArranging: Boolean,
-    onMove: (ControlSlotId, ControlSlotId) -> Unit,
+    onMove: (List<ControlSlotMove>) -> Unit,
     modifier: Modifier = Modifier,
-    horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
+    horizontalArrangement: (List<ReorderableControlSlot>) -> Arrangement.Horizontal = { Arrangement.Start },
 ) {
     val density = LocalDensity.current
     val currentSlots by rememberUpdatedState(slots)
@@ -111,12 +116,16 @@ fun ReorderableControlRow(
     val localSlots = remember { mutableStateListOf<ReorderableControlSlot>() }
     val centers = remember { mutableStateMapOf<String, Float>() }
     var heldKey by remember { mutableStateOf<String?>(null) }
+    val dragStartSlots = remember { mutableListOf<ReorderableControlSlot>() }
     var dragOffset by remember { mutableFloatStateOf(0f) }
     val displayedSlots = if (heldKey == null) slots else localSlots
+    val rowArrangement = horizontalArrangement(displayedSlots)
 
     Row(
         modifier = modifier,
-        horizontalArrangement = horizontalArrangement,
+        // A drag can reveal free positions without replacing its local snapshot. Build
+        // the arrangement from the same list the Row measures, not the newer parent list.
+        horizontalArrangement = rowArrangement,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         displayedSlots.forEach { slot ->
@@ -158,18 +167,43 @@ fun ReorderableControlRow(
                                                 onDragStart = {
                                                     localSlots.clear()
                                                     localSlots.addAll(currentSlots)
+                                                    dragStartSlots.clear()
+                                                    dragStartSlots.addAll(currentSlots)
                                                     heldKey = slot.lazyKey
                                                     dragOffset = 0f
                                                     slot.onArrangeStart()
                                                 },
-                                                onDragEnd = { heldKey = null },
-                                                onDragCancel = { heldKey = null },
+                                                onDragEnd = {
+                                                    // Commit the final visible placement in one write. Source
+                                                    // ids name original entries, not stale intermediate indices.
+                                                    currentOnMove(
+                                                        localSlots.mapIndexed { index, source ->
+                                                            ControlSlotMove(
+                                                                position = dragStartSlots[index].id,
+                                                                source = source.id,
+                                                            )
+                                                        },
+                                                    )
+                                                    dragStartSlots.clear()
+                                                    heldKey = null
+                                                },
+                                                onDragCancel = {
+                                                    dragStartSlots.clear()
+                                                    heldKey = null
+                                                },
                                                 onDrag = { change, amount ->
                                                     change.consume()
                                                     dragOffset += amount.x
                                                     var moving = true
                                                     while (moving) {
-                                                        val from = localSlots.indexOfFirst { it.lazyKey == slot.lazyKey }
+                                                        // heldKey, not the composable's captured slot
+                                                        // parameter, owns this gesture's identity.
+                                                        val activeKey = heldKey
+                                                        if (activeKey == null) {
+                                                            moving = false
+                                                            continue
+                                                        }
+                                                        val from = localSlots.indexOfFirst { it.lazyKey == activeKey }
                                                         if (from == -1) {
                                                             moving = false
                                                             continue
@@ -180,7 +214,7 @@ fun ReorderableControlRow(
                                                             moving = false
                                                             continue
                                                         }
-                                                        val sourceCenter = centers[slot.lazyKey]
+                                                        val sourceCenter = centers[activeKey]
                                                         val targetCenter = centers[target.lazyKey]
                                                         val fallback = with(density) {
                                                             val width = if (isArranging) {
@@ -188,7 +222,7 @@ fun ReorderableControlRow(
                                                             } else {
                                                                 target.width
                                                             }
-                                                            width.toPx() + horizontalArrangement.spacing.toPx()
+                                                            width.toPx() + rowArrangement.spacing.toPx()
                                                         }
                                                         val distance = if (sourceCenter != null && targetCenter != null) {
                                                             abs(targetCenter - sourceCenter)
@@ -202,9 +236,8 @@ fun ReorderableControlRow(
                                                         val source = localSlots[from]
                                                         localSlots[from] = target
                                                         localSlots[from + direction] = source
-                                                        if (targetCenter != null) centers[slot.lazyKey] = targetCenter
+                                                        if (targetCenter != null) centers[activeKey] = targetCenter
                                                         dragOffset -= direction * distance
-                                                        currentOnMove(source.id, target.id)
                                                     }
                                                 },
                                             )

@@ -202,6 +202,17 @@ sealed interface ControlAction {
         override val stringRes = AYMR.strings.single_action_custom
     }
 
+    /** Runs one input of a user-created Lua button. */
+    data class CustomButton(
+        val id: Long,
+        val input: ControlInput = ControlInput.Tap,
+        /** Presentation only; deliberately excluded from the persisted action key. */
+        val icon: String? = null,
+    ) : ControlAction {
+        override val key = "$CUSTOM_BUTTON_PREFIX$id:${input.key}"
+        override val stringRes = AYMR.strings.single_action_custom
+    }
+
     /**
      * Sends a raw keypress to mpv, for users who bound the slot in their own Lua.
      *
@@ -215,6 +226,7 @@ sealed interface ControlAction {
 
     companion object {
         private const val CUSTOM_KEY_PREFIX = "custom_key:"
+        private const val CUSTOM_BUTTON_PREFIX = "custom_button:"
 
         /** Actions offered by every picker, in display order. Direction filtering is the caller's. */
         val selectable: List<ControlAction> = listOf(
@@ -245,6 +257,18 @@ sealed interface ControlAction {
             PrimaryCustomButton,
         )
 
+        /** Stable seeded Lua row for a native default button; user buttons use positive IDs. */
+        fun nativeButtonId(action: ControlAction): Long? = selectable.indexOf(action)
+            .takeIf { it > 0 }
+            ?.let { -(it + 1).toLong() }
+
+        /** Original presentation for a seeded default, or null for a user-created button. */
+        fun nativeActionForButtonId(id: Long): ControlAction? = if (id <= -2L && id >= -25L) {
+            selectable.getOrNull((-id).toInt() - 1)
+        } else {
+            null
+        }
+
         /**
          * Returns null for an unrecognised key rather than falling back to [None], so a
          * layout written by a newer release keeps its other bindings instead of being
@@ -252,6 +276,14 @@ sealed interface ControlAction {
          */
         fun fromKey(key: String): ControlAction? = when {
             key.startsWith(CUSTOM_KEY_PREFIX) -> CustomKey(key.removePrefix(CUSTOM_KEY_PREFIX))
+            key.startsWith(CUSTOM_BUTTON_PREFIX) -> {
+                val parts = key.removePrefix(CUSTOM_BUTTON_PREFIX).split(':', limit = 2)
+                val id = parts.getOrNull(0)?.toLongOrNull()
+                val input = parts.getOrNull(1)?.let { stored ->
+                    ControlInput.entries.firstOrNull { it.key == stored }
+                }
+                if (id != null && input != null) CustomButton(id, input) else null
+            }
             else -> selectable.firstOrNull { it.key == key }
         }
     }
@@ -268,6 +300,8 @@ data class ControlBinding(
     val tap: ControlAction = ControlAction.None,
     val doubleTap: ControlAction? = null,
     val longPress: ControlAction? = null,
+    /** Stable button-option identity; [tap] is its editable single-tap action. */
+    val button: ControlAction? = null,
 ) {
     fun forInput(input: ControlInput): ControlAction? = when (input) {
         ControlInput.Tap -> tap
@@ -388,11 +422,13 @@ data class ControlLayoutRecord(
         val tap: String = ControlAction.None.key,
         val doubleTap: String? = null,
         val longPress: String? = null,
+        val button: String? = null,
     ) {
         fun toBinding(): ControlBinding = ControlBinding(
             tap = ControlAction.fromKey(tap) ?: ControlAction.None,
             doubleTap = doubleTap?.let(ControlAction::fromKey),
             longPress = longPress?.let(ControlAction::fromKey),
+            button = button?.let(ControlAction::fromKey),
         )
     }
 
@@ -408,7 +444,7 @@ data class ControlLayoutRecord(
     )
 
     companion object {
-        const val CURRENT_VERSION = 1
+        const val CURRENT_VERSION = 2
 
         fun from(layout: ControlLayout): ControlLayoutRecord = ControlLayoutRecord(
             anchors = layout.anchors.entries.associate { (anchor, binding) ->
@@ -423,6 +459,7 @@ data class ControlLayoutRecord(
             tap = tap.key,
             doubleTap = doubleTap?.key,
             longPress = longPress?.key,
+            button = button?.key,
         )
     }
 }
