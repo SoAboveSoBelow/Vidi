@@ -40,6 +40,20 @@ class SourcePreferences(
         preferenceStore.getString("pref_display_mode_catalogue_$sourceId", "")
     // <-- AM (BROWSE_SCROLLER)
 
+    // AM (BROWSE_HIDE_VIEWED) -->
+    /**
+     * Whether a source's browse listing drops entries that have already been
+     * viewed - opened in the player or played as a card in the scroller feed,
+     * which is not the same as marked seen.
+     *
+     * Per source, and persisted, so a source that was left with it on opens
+     * with its first page already trimmed instead of needing the toggle and a
+     * reload. Keyed like [sourceDisplayModeOverride] above.
+     */
+    fun hideViewedItems(sourceId: Long): Preference<Boolean> =
+        preferenceStore.getBoolean("browse_hide_viewed_items_$sourceId", false)
+    // <-- AM (BROWSE_HIDE_VIEWED)
+
     val enabledLanguages: Preference<Set<String>> = preferenceStore.getStringSet(
         "source_languages",
         LocaleHelper.getDefaultEnabledLanguages(),

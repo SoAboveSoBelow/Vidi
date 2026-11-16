@@ -121,9 +121,13 @@ class MergeSettingsState(
         MaterialAlertDialogBuilder(context)
             .setTitle(context.stringResource(AMMR.strings.am_merge_settings_remove_source))
             .setMessage(context.stringResource(AMMR.strings.am_merge_settings_remove_confirm, source.anime.title))
+            // AM (MERGE_SETTINGS_STAY_OPEN): the dialog stays up and loses the
+            // row instead of closing. The removal is applied immediately, like
+            // Restore below it, and the ViewModel hands the shortened source
+            // list back through onSourcesRefreshed - so the staged order,
+            // seasons and dedupe choice all survive removing a source.
             .setPositiveButton(context.stringResource(MR.strings.action_ok)) { _, _ ->
                 onDeleteClick(source.anime)
-                onDismissRequest()
             }
             .setNegativeButton(context.stringResource(MR.strings.action_cancel), null)
             .show()
@@ -199,6 +203,44 @@ class MergeSettingsState(
         adapter?.updateSeasons(shownSeasons)
     }
     // <-- AM (NAMED_SEASONS)
+
+    // AM (MERGE_SETTINGS_STAY_OPEN) -->
+    /**
+     * Sources after one was removed while this dialog stayed open.
+     *
+     * The rebuilt list is the ViewModel's, so it carries the SAVED order, not
+     * the one dragged here - reapplying it wholesale would undo a reorder the
+     * user had not saved yet. The displayed order wins instead: the rows left
+     * keep their current positions and anything the dialog has not seen before
+     * goes on the end, which is where a source added behind this dialog would
+     * belong anyway.
+     *
+     * The removed child's staged season goes with it, or Save would write a
+     * season for a source that is no longer in the merge, and a season staged
+     * only for that row is dropped along with it.
+     */
+    fun onSourcesRefreshed(refreshed: List<AnimeViewModel.MergeSource>) {
+        if (refreshed.map { it.anime.id } == sources.map { it.anime.id }) return
+        sources = refreshed
+
+        val bySourceId = refreshed.associateBy { it.anime.id }
+        val shown = adapter?.currentItems.orEmpty().mapNotNull { bySourceId[it.source.anime.id] }
+        val added = refreshed.filterNot { source -> shown.any { it.anime.id == source.anime.id } }
+        val ordered = shown + added
+
+        seasonByChild = seasonByChild.filterKeys { it in bySourceId }
+        dropUnusedPendingSeasons()
+        val stagedInfoAnimeId = infoAnimeId
+        if (stagedInfoAnimeId != null && stagedInfoAnimeId !in bySourceId) infoAnimeId = null
+
+        adapter?.updateDataSet(ordered.map { MergeSettingsItem(it) })
+        adapter?.updateSeasons(shownSeasons)
+        // The header's info-entry spinner is built from the source list when it
+        // binds, and its listener closes over that same list - left alone it
+        // would go on offering the removed source and write its id back.
+        headerAdapter?.notifyItemChanged(0)
+    }
+    // <-- AM (MERGE_SETTINGS_STAY_OPEN)
 
     override fun seasonOf(position: Int): Long? {
         val source = adapter?.currentItems?.getOrNull(position)?.source ?: return null
@@ -278,7 +320,12 @@ fun MergeSettingsDialog(
                     // AM (NAMED_SEASONS): onViewCreated runs once, so without
                     // this the adapter keeps the season list the dialog opened
                     // with and never sees one added in the season manager.
-                    update = { state.onSeasonsRefreshed(dialog.seasons) },
+                    // AM (MERGE_SETTINGS_STAY_OPEN): same for the sources, now
+                    // that removing one leaves the dialog open.
+                    update = {
+                        state.onSeasonsRefreshed(dialog.seasons)
+                        state.onSourcesRefreshed(dialog.sources)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
 

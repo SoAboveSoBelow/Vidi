@@ -1,0 +1,9 @@
+-- Auto-play demonstrates the same Lua-controlled toggle API available to users.
+UPDATE custom_buttons
+SET onStartup = 'mp.observe_property("user-data/aniyomi/auto_play", "native", function(_, enabled)
+  aniyomi.set_button_toggle(button_id, enabled == true or enabled == "true")
+end)',
+    isToggle = 1
+WHERE _id = -17
+  AND content = 'aniyomi.control_action("toggle_auto_play")'
+  AND onStartup = '';

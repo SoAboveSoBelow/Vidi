@@ -15,8 +15,11 @@ interface CustomButtonRepository {
         name: String,
         sortIndex: Long,
         content: String,
+        doubleTapContent: String,
         longPressContent: String,
         onStartup: String,
+        icon: String?,
+        isToggle: Boolean,
     )
 
     suspend fun updatePartialCustomButton(update: CustomButtonUpdate)
@@ -24,5 +27,8 @@ interface CustomButtonRepository {
     suspend fun updatePartialCustomButtons(updates: List<CustomButtonUpdate>)
 
     suspend fun deleteCustomButton(customButtonId: Long)
+
+    /** Reinserts missing built-in rows without overwriting the user's edited copies. */
+    suspend fun restoreDefaultCustomButtons()
 }
 // <-- AY

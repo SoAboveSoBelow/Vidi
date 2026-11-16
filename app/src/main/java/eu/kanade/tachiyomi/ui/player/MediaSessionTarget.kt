@@ -1,9 +1,11 @@
 package eu.kanade.tachiyomi.ui.player
 
 import android.media.session.MediaSession
-import animiru.domain.player.model.SingleActionGesture
-import animiru.domain.player.service.GesturePreferences
-import animiru.domain.player.model.CustomKeyCodes
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlAnchor
+import animiru.domain.player.model.ControlInput
+import animiru.domain.player.model.ControlSurface
+import animiru.domain.player.service.ControlBindingPreferences
 
 // AM (SESSION_OWNS_ITS_CONTROLS) -->
 /**
@@ -55,87 +57,67 @@ interface MediaSessionTarget {
  * The app's MediaSession callback, over any [target].
  *
  * Moved out of PlayerViewModel with its behaviour unchanged, including the
- * branches that deliberately do nothing: a gesture configured as None, Seek on
- * play/pause, or Screenshot on a transport button are all no-ops, and they stay
- * no-ops here rather than becoming a default.
+ * branches that deliberately do nothing: an unbound control, or one bound to
+ * something a transport button cannot express, stays a no-op rather than
+ * becoming a default.
+ *
+ * AM (CONTROL_BINDINGS): the three transport buttons read the same anchors the
+ * on-screen media buttons do, so a session button and its on-screen twin cannot
+ * drift apart. Bindings are read per press rather than captured once, since the
+ * session outlives any one visit to the editor.
  */
 fun mediaSessionCallbackFor(
     target: MediaSessionTarget,
-    gesturePreferences: GesturePreferences,
+    controlBindingPreferences: ControlBindingPreferences,
 ): MediaSession.Callback {
-    val previousAction = gesturePreferences.mediaPreviousGesture.get()
-    val playAction = gesturePreferences.mediaPlayPauseGesture.get()
-    val nextAction = gesturePreferences.mediaNextGesture.get()
+    val layout = controlBindingPreferences.layout(ControlSurface.Player)
+
+    fun actionFor(anchor: ControlAnchor): ControlAction = layout.get().action(anchor, ControlInput.Tap)
+
+    /**
+     * [playing] separates onPlay from onPause for the one action that cares.
+     *
+     * An opt-in list rather than an exhaustive one: a transport button is three
+     * controls on a lock screen or a headset, and most actions - sheets, panels, screen
+     * state, the row's own buttons - have nowhere to go on one. A new action should not
+     * have to be considered here to compile, because the answer is almost always that
+     * this surface ignores it.
+     */
+    fun run(action: ControlAction, playing: Boolean?) {
+        when (action) {
+            ControlAction.PlayPause -> when (playing) {
+                true -> target.play()
+                false -> target.pause()
+                null -> target.togglePause()
+            }
+            ControlAction.SeekBackward -> target.seekStep(forward = false)
+            ControlAction.SeekForward -> target.seekStep(forward = true)
+            ControlAction.PreviousEpisode -> target.stepItem(next = false)
+            ControlAction.NextEpisode -> target.stepItem(next = true)
+            is ControlAction.CustomKey -> target.keypress(action.code)
+            else -> Unit
+        }
+    }
 
     return object : MediaSession.Callback() {
         override fun onPlay() {
-            when (playAction) {
-                SingleActionGesture.None -> {}
-                SingleActionGesture.Seek -> {}
-                SingleActionGesture.PlayPause -> {
-                    super.onPlay()
-                    target.play()
-                }
-                SingleActionGesture.Custom -> {
-                    target.keypress(CustomKeyCodes.MediaPlay.keyCode)
-                }
-
-                SingleActionGesture.Switch -> {}
-                SingleActionGesture.Screenshot -> {}
-            }
+            val action = actionFor(ControlAnchor.MediaPlayPause)
+            if (action == ControlAction.PlayPause) super.onPlay()
+            run(action, playing = true)
         }
 
         override fun onPause() {
-            when (playAction) {
-                SingleActionGesture.None -> {}
-                SingleActionGesture.Seek -> {}
-                SingleActionGesture.PlayPause -> {
-                    super.onPause()
-                    target.pause()
-                }
-                SingleActionGesture.Custom -> {
-                    target.keypress(CustomKeyCodes.MediaPlay.keyCode)
-                }
-
-                SingleActionGesture.Switch -> {}
-                SingleActionGesture.Screenshot -> {}
-            }
+            val action = actionFor(ControlAnchor.MediaPlayPause)
+            if (action == ControlAction.PlayPause) super.onPause()
+            run(action, playing = false)
         }
 
         override fun onSkipToPrevious() {
-            when (previousAction) {
-                SingleActionGesture.None -> {}
-                SingleActionGesture.Seek -> {
-                    target.seekStep(forward = false)
-                }
-                SingleActionGesture.PlayPause -> {
-                    target.togglePause()
-                }
-                SingleActionGesture.Custom -> {
-                    target.keypress(CustomKeyCodes.MediaPrevious.keyCode)
-                }
-
-                SingleActionGesture.Switch -> target.stepItem(next = false)
-                SingleActionGesture.Screenshot -> {}
-            }
+            run(actionFor(ControlAnchor.MediaPrevious), playing = null)
         }
 
         override fun onSkipToNext() {
-            when (nextAction) {
-                SingleActionGesture.None -> {}
-                SingleActionGesture.Seek -> {
-                    target.seekStep(forward = true)
-                }
-                SingleActionGesture.PlayPause -> {
-                    target.togglePause()
-                }
-                SingleActionGesture.Custom -> {
-                    target.keypress(CustomKeyCodes.MediaNext.keyCode)
-                }
-
-                SingleActionGesture.Switch -> target.stepItem(next = true)
-                SingleActionGesture.Screenshot -> {}
-            }
+            run(actionFor(ControlAnchor.MediaNext), playing = null)
         }
 
         override fun onStop() {

@@ -39,7 +39,6 @@ import eu.kanade.tachiyomi.ui.player.controls.components.sheets.PlaybackSpeedShe
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.ScreenshotSheet
 import eu.kanade.tachiyomi.ui.player.controls.components.sheets.SubtitlesSheet
 import eu.kanade.tachiyomi.ui.player.mpv.MpvVideoTrack
-import tachiyomi.domain.custombutton.model.CustomButton
 import java.io.InputStream
 
 @Composable
@@ -101,9 +100,6 @@ fun PlayerSheets(
     onStartSleepTimer: (Int) -> Unit,
     onStatisticsPageChange: (Int) -> Unit,
     onAudioChannelsChange: (AudioChannels) -> Unit,
-    onCustomButtonClick: (CustomButton) -> Unit,
-    onCustomButtonLongClick: (CustomButton) -> Unit,
-    buttons: List<CustomButton>,
 
     // Screenshot sheet
     isLocalSource: Boolean,
@@ -200,12 +196,9 @@ fun PlayerSheets(
                 remainingTime = sleepTimerTimeRemaining,
                 onStartTimer = onStartSleepTimer,
                 onStatisticsPageChange = onStatisticsPageChange,
-                onCustomButtonClick = onCustomButtonClick,
-                onCustomButtonLongClick = onCustomButtonLongClick,
                 onAudioChannelsChange = onAudioChannelsChange,
                 onDismissRequest = onDismissRequest,
                 onEnterFiltersPanel = { onOpenPanel(Panels.VideoFilters) },
-                customButtons = buttons,
             )
         }
 

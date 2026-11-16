@@ -24,8 +24,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import animiru.domain.player.model.BottomPlayerButton
-import animiru.domain.player.service.GesturePreferences.Companion.MAX_BOTTOM_PLAYER_BUTTONS
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlBinding
+import animiru.domain.player.model.ControlRegion
 import eu.kanade.presentation.components.AlertDialog
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.aniyomi.AYMR
@@ -34,15 +35,18 @@ import tachiyomi.presentation.core.i18n.stringResource
 
 @Composable
 fun BottomPlayerButtonsDialog(
-    initialSelection: List<BottomPlayerButton?>,
+    initialSelection: List<ControlBinding>,
     onDismissRequest: () -> Unit,
-    onConfirm: (List<BottomPlayerButton?>) -> Unit,
+    onConfirm: (List<ControlBinding>) -> Unit,
 ) {
-    // One slot per bottom-row position; null means that position is empty. Always exactly
-    // MAX_BOTTOM_PLAYER_BUTTONS entries so positions stay stable across saves - no compacting.
+    // AM (CONTROL_BINDINGS): one entry per bottom-row position, None meaning the position
+    // is empty. Always exactly the region's hard cap so positions stay stable across saves
+    // - no compacting. How many of them a given window actually shows is measured when the
+    // row renders, not decided here.
     val slots = remember {
-        val trimmed = initialSelection.take(MAX_BOTTOM_PLAYER_BUTTONS)
-        (trimmed + List(MAX_BOTTOM_PLAYER_BUTTONS - trimmed.size) { null }).toMutableStateList()
+        val trimmed = initialSelection.take(ControlRegion.Bottom.hardCap).map { it.tap }
+        (trimmed + List(ControlRegion.Bottom.hardCap - trimmed.size) { ControlAction.None })
+            .toMutableStateList()
     }
 
     AlertDialog(
@@ -57,10 +61,10 @@ fun BottomPlayerButtonsDialog(
                         onSelect = { chosen ->
                             // A button can only occupy one position - if it's already
                             // assigned elsewhere, move it here instead of duplicating it.
-                            if (chosen != null) {
+                            if (chosen != ControlAction.None) {
                                 val existingIndex = slots.indexOf(chosen)
                                 if (existingIndex != -1 && existingIndex != index) {
-                                    slots[existingIndex] = null
+                                    slots[existingIndex] = ControlAction.None
                                 }
                             }
                             slots[index] = chosen
@@ -72,7 +76,7 @@ fun BottomPlayerButtonsDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    onConfirm(slots.toList())
+                    onConfirm(slots.map { ControlBinding(tap = it) })
                     onDismissRequest()
                 },
             ) {
@@ -90,8 +94,8 @@ fun BottomPlayerButtonsDialog(
 @Composable
 private fun BottomPlayerButtonSlot(
     position: Int,
-    selected: BottomPlayerButton?,
-    onSelect: (BottomPlayerButton?) -> Unit,
+    selected: ControlAction,
+    onSelect: (ControlAction) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -110,9 +114,9 @@ private fun BottomPlayerButtonSlot(
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = selected?.let { stringResource(it.stringRes) } ?: stringResource(MR.strings.none),
+                    text = stringResource(selected.stringRes),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (selected != null) {
+                    color = if (selected != ControlAction.None) {
                         MaterialTheme.colorScheme.onSurface
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -126,14 +130,7 @@ private fun BottomPlayerButtonSlot(
             expanded = expanded,
             onDismissRequest = { expanded = false },
         ) {
-            DropdownMenuItem(
-                text = { Text(text = stringResource(MR.strings.none)) },
-                onClick = {
-                    expanded = false
-                    onSelect(null)
-                },
-            )
-            BottomPlayerButton.entries.forEach { option ->
+            BOTTOM_SLOT_ACTIONS.forEach { option ->
                 DropdownMenuItem(
                     text = { Text(text = stringResource(option.stringRes)) },
                     onClick = {
@@ -146,9 +143,26 @@ private fun BottomPlayerButtonSlot(
     }
 }
 
+/**
+ * What a bottom slot can be set to. Every action the row knows how to draw, plus None
+ * for an empty position - the playback actions have no button in that row yet, so
+ * offering them here would bind something invisible.
+ */
+private val BOTTOM_SLOT_ACTIONS = listOf(
+    ControlAction.None,
+    ControlAction.Lock,
+    ControlAction.CycleRotation,
+    ControlAction.PlaybackSpeed,
+    ControlAction.Chapters,
+    ControlAction.PictureInPicture,
+    ControlAction.AspectRatio,
+    ControlAction.Screenshot,
+    ControlAction.Cast,
+)
+
 @Composable
-fun bottomPlayerButtonsSubtitle(selection: List<BottomPlayerButton?>): String {
-    val names = selection.filterNotNull()
+fun bottomPlayerButtonsSubtitle(selection: List<ControlBinding>): String {
+    val names = selection.map { it.tap }.filter { it != ControlAction.None }
     if (names.isEmpty()) return stringResource(MR.strings.none)
     return names.map { stringResource(it.stringRes) }.joinToString()
 }

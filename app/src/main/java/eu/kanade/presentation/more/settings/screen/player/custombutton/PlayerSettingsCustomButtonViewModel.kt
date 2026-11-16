@@ -23,6 +23,7 @@ import tachiyomi.domain.custombutton.interactor.CreateCustomButton
 import tachiyomi.domain.custombutton.interactor.DeleteCustomButton
 import tachiyomi.domain.custombutton.interactor.GetCustomButtons
 import tachiyomi.domain.custombutton.interactor.ReorderCustomButton
+import tachiyomi.domain.custombutton.interactor.RestoreCustomButtons
 import tachiyomi.domain.custombutton.interactor.ToggleFavoriteCustomButton
 import tachiyomi.domain.custombutton.interactor.UpdateCustomButton
 import tachiyomi.domain.custombutton.model.CustomButton
@@ -38,6 +39,7 @@ class PlayerSettingsCustomButtonViewModel(
     private val deleteCustomButton: DeleteCustomButton,
     private val updateCustomButton: UpdateCustomButton,
     private val reorderCustomButton: ReorderCustomButton,
+    private val restoreCustomButtons: RestoreCustomButtons,
     private val toggleFavoriteCustomButton: ToggleFavoriteCustomButton,
     // AM -->
     private val mpvConfig: MpvConfig,
@@ -73,9 +75,17 @@ class PlayerSettingsCustomButtonViewModel(
         // <-- AM
     }
 
-    fun createCustomButton(name: String, content: String, longPressContent: String, onStartup: String) {
+    fun createCustomButton(
+        name: String,
+        content: String,
+        doubleTapContent: String,
+        longPressContent: String,
+        onStartup: String,
+        icon: String?,
+        isToggle: Boolean,
+    ) {
         viewModelScope.launch {
-            when (createCustomButton.await(name, content, longPressContent, onStartup)) {
+            when (createCustomButton.await(name, content, doubleTapContent, longPressContent, onStartup, icon, isToggle)) {
                 is CreateCustomButton.Result.InternalError -> _events.send(
                     CustomButtonEvent.InternalError,
                 )
@@ -114,6 +124,12 @@ class PlayerSettingsCustomButtonViewModel(
                 )
                 else -> {}
             }
+        }
+    }
+
+    fun restoreDefaults() {
+        viewModelScope.launchIO {
+            restoreCustomButtons.await()
         }
     }
 

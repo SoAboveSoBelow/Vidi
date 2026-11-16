@@ -24,6 +24,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -40,6 +41,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import animiru.domain.player.model.AudioChannels
+import animiru.domain.player.model.ControlBinding
+import animiru.domain.player.model.ControlSurface
 import animiru.domain.player.model.DebandSettings
 import animiru.domain.player.model.Debanding
 import animiru.domain.player.model.Decoder.Companion.getDecoderFromValue
@@ -82,6 +85,10 @@ import eu.kanade.tachiyomi.ui.player.controls.components.sheets.toFixed
 import eu.kanade.tachiyomi.ui.player.mpv.MpvVideoTrack
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
+import eu.kanade.tachiyomi.ui.player.controls.editor.SlotEdit
+import eu.kanade.tachiyomi.ui.player.controls.editor.SlotEditDialog
+import eu.kanade.tachiyomi.ui.player.controls.editor.SlotEditSaver
 import mihon.app.di.appGraph
 import tachiyomi.core.common.preference.deleteAndGet
 import tachiyomi.core.common.preference.minusAssign
@@ -113,9 +120,30 @@ fun PlayerScreen(
     // Navigator, so registration order never shifts under them.
     backPressPriorityKey: Any? = null,
     // <-- AM (PLAYER_BACK_PRIORITY_FIX)
+    // AM (CONTROL_BINDINGS) -->
+    /**
+     * True when this player was opened to lay its controls out rather than to watch
+     * something. Nothing about the screen changes except that a control reports the
+     * slot it occupies instead of running what it is bound to - everything else, the
+     * gesture layer included, is the session's as usual.
+     */
+    isLayoutEditor: Boolean = false,
+    // <-- AM (CONTROL_BINDINGS)
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+
+    // AM (CONTROL_BINDINGS) -->
+    // Which slot the editor has open, and the dialog that edits it. Both are inert
+    // unless this player was opened as the layout editor.
+    var editingSlot by rememberSaveable(stateSaver = SlotEditSaver) { mutableStateOf(null as SlotEdit?) }
+    // The slot a hold picked up, and with it the region whose empty positions are
+    // being shown. Outlives the gesture on purpose - the positions it reveals are
+    // there to be tapped - so it ends the way the app's other selection modes do:
+    // by acting on the thing that started it, or by pressing back.
+    var arranging by rememberSaveable(stateSaver = SlotEditSaver) { mutableStateOf(null as SlotEdit?) }
+    val controlBindings = remember { context.appGraph.controlBindingPreferences }
+    // <-- AM (CONTROL_BINDINGS)
     val appGraph = remember { context.appGraph }
     val interactionSource = remember { MutableInteractionSource() }
     val uiPreferences = remember { appGraph.uiPreferences }
@@ -250,7 +278,16 @@ fun PlayerScreen(
             // scratch instead of resuming. Dropping the paused check lets a paused
             // video enter PIP (and take the same preserve-session path) on back too,
             // same as an unpaused one.
-            if (!stateData.isCasting && stateData.isPipAvailable &&
+            // AM (CONTROL_BINDINGS) -->
+            // Back out of the editor leaves the EDITOR, it does not background the
+            // player: the mode ends and whatever was playing underneath is simply
+            // the player again, from which the next back does the usual pip-on-exit
+            // thing. Entering pip here instead put the editor straight back on screen
+            // when it expanded, and onBack() - the only thing that ends the mode -
+            // was never reached.
+            // <-- AM (CONTROL_BINDINGS)
+            if (!isLayoutEditor &&
+                !stateData.isCasting && stateData.isPipAvailable &&
                 // <-- AM (BACK_PRESERVE_PAUSED_FIX)
                 playerPreferences.pipOnExit.get() &&
                 uiData.sheetShown == Sheets.None &&
@@ -271,7 +308,9 @@ fun PlayerScreen(
                 }
                 // <-- AM (DUMMY_PIP)
             } else {
-                viewModel.castManager.disconnect()
+                // AM (CONTROL_BINDINGS): leaving the editor must not disconnect a
+                // cast the session it was opened over is still using.
+                if (!isLayoutEditor) viewModel.castManager.disconnect()
                 onBack()
             }
         }
@@ -292,7 +331,13 @@ fun PlayerScreen(
     // DisposableEffect on every stack change re-adds this callback last,
     // so a visible fullscreen player owns system back again.
     key(backPressPriorityKey) {
-        BackHandler(enabled = !dummyPipActive) {
+        // AM (CONTROL_BINDINGS): back leaves arrange mode before it leaves the
+        // player, which is how the app's other selection modes behave.
+        BackHandler(enabled = arranging != null) {
+            arranging = null
+        }
+
+        BackHandler(enabled = !dummyPipActive && arranging == null) {
             handleBackPress()
         }
     }
@@ -633,7 +678,32 @@ fun PlayerScreen(
                     qualitySwitch?.let { pending ->
                         key(pending.player) {
                             MpvSurface(
-                                modifier = Modifier.requiredSize(1.dp),
+                                // AM (A_PREPARED_FRAME_IS_FULL_SIZE) -->
+                                // The same size as the live surface, not a 1.dp stub.
+                                //
+                                // A prepared instance decodes at full resolution
+                                // but its VO renders to the surface it was given,
+                                // so a 1.dp surface meant mpv configured output at
+                                // 3x3 px - "Video display: 1920x1080 -> 3x1" in the
+                                // logs - and wrote 3-pixel frames into the
+                                // instance's persistent texture. The promote then
+                                // handed that texture to the full-size surface,
+                                // which stretched a 3-pixel image across the
+                                // screen: the first moment of every switch arrived
+                                // as a smear until a correctly sized frame
+                                // replaced it.
+                                //
+                                // It stays invisible for the same reason it always
+                                // was - it is composed BEFORE the live surface in
+                                // this Box, so the live one draws over it
+                                // completely - and the cost is one extra
+                                // full-size VO for the length of a preparation,
+                                // which is the thing a preparation is for.
+                                modifier = Modifier.fillMaxSize(),
+                                // <-- AM (A_PREPARED_FRAME_IS_FULL_SIZE)
+                                // AM (AN_OFFSCREEN_INSTANCE_FORCES_NO_WINDOW): no
+                                // dummy video for an instance nobody is watching.
+                                forceWindow = false,
                                 player = pending.player,
                                 videoOutput = viewModel.videoOutput,
                                 onSurfaceAttachedChanged = { attached ->
@@ -714,13 +784,25 @@ fun PlayerScreen(
             // sync. Paused/seeking keeps controls up - and the bars with
             // them, exactly the tie the setting promises.
             // <-- AM (SYSTEM_BARS_DERIVED_FROM_CONTROLS)
+            // AM (CONTROL_BINDINGS) -->
+            // The controls ARE the screen in the editor, so the mode opens with them
+            // up rather than waiting for a tap. Keyed on dummyPipActive too: entering
+            // the editor from a floating pip expands it first, and the controls were
+            // hidden when that pip was entered - so the reveal has to happen once the
+            // expand has actually landed, not alongside the request for it.
+            LaunchedEffect(isLayoutEditor, dummyPipActive) {
+                if (isLayoutEditor && !dummyPipActive && !uiData.controlsShown) viewModel.showControls()
+            }
+            // <-- AM (CONTROL_BINDINGS)
+
             LaunchedEffect(
                 uiData.controlsShown,
                 playbackData.paused,
                 playbackData.isSeeking,
                 resetControls,
+                isLayoutEditor,
             ) {
-                if (uiData.controlsShown && !playbackData.paused && !playbackData.isSeeking) {
+                if (!isLayoutEditor && uiData.controlsShown && !playbackData.paused && !playbackData.isSeeking) {
                     delay(uiData.playerTimeToDisappearMs.milliseconds)
                     viewModel.hideControls()
                 }
@@ -787,6 +869,44 @@ fun PlayerScreen(
                         playbackSpeed = playbackSpeed,
                         systemBarsVisible = uiData.controlsShown && showStatusBarWithControls,
                         modifier = Modifier.fillMaxSize(),
+                        // AM (CONTROL_BINDINGS)
+                        editSlot = if (isLayoutEditor) {
+                            // Tapping a FILLED slot while arranging puts it down - the
+                            // rows handle that themselves, since only they know which
+                            // positions are filled. What reaches here is a tap meant to
+                            // open a slot: any slot when not arranging, an empty one
+                            // when arranging.
+                            { region, index -> editingSlot = SlotEdit(region, index) }
+                        } else {
+                            null
+                        },
+                        insertSlot = if (isLayoutEditor) {
+                            { region, index -> editingSlot = SlotEdit(region, index, isInsert = true) }
+                        } else {
+                            null
+                        },
+                        onArrangeStart = if (isLayoutEditor) {
+                            { region, index -> arranging = SlotEdit(region, index) }
+                        } else {
+                            null
+                        },
+                        onArrangeEnd = { arranging = null },
+                        onBackgroundTap = if (isLayoutEditor) {
+                            { if (uiData.controlsShown) viewModel.hideControls() else viewModel.showControls() }
+                        } else {
+                            null
+                        },
+                        arrangingRegion = arranging?.region,
+                        // The row previews locally while dragging and submits its ordered
+                        // swaps on release, keeping parent state out of the active gesture.
+                        moveSlot = if (isLayoutEditor) {
+                            { region, moves ->
+                                val preference = controlBindings.entries(ControlSurface.Player, region)
+                                preference.set(preference.get().reordered(moves))
+                            }
+                        } else {
+                            null
+                        },
                     )
                 }
                 // <-- AM (DUMMY_PIP_CONTROLS_MIDSCREEN_FIX)
@@ -876,9 +996,6 @@ fun PlayerScreen(
                         }
                         viewModel.setPropertyString(it.property, it.value)
                     },
-                    onCustomButtonClick = viewModel::executeButton,
-                    onCustomButtonLongClick = viewModel::executeLongPressButton,
-                    buttons = uiData.customButtons,
                     isLocalSource = stateData.currentSource?.isLocal() == true,
                     showSubtitles = showSubtitles,
                     onToggleShowSubtitles = { subtitlePreferences.screenshotSubtitles.set(it) },
@@ -1329,10 +1446,78 @@ fun PlayerScreen(
                     )
                 }
                 // <-- AM (CUSTOM_EPISODE_ORDER)
+
+                // AM (CONTROL_BINDINGS) -->
+                val slotEdit = editingSlot
+                if (slotEdit != null) {
+                    val preference = remember(slotEdit.region) {
+                        controlBindings.entries(ControlSurface.Player, slotEdit.region)
+                    }
+                    val entries = preference.get()
+                    SlotEditDialog(
+                        // Nothing to pre-fill for a position being inserted.
+                        binding = entries.getOrNull(slotEdit.index).takeIf { !slotEdit.isInsert },
+                        customButtons = uiData.customButtons,
+                        onDismissRequest = { editingSlot = null },
+                        onConfirm = { updated ->
+                            preference.set(
+                                if (slotEdit.isInsert) {
+                                    entries.insertedAt(slotEdit.index, updated)
+                                } else {
+                                    entries.replacingOrAdding(slotEdit.index, updated)
+                                },
+                            )
+                            editingSlot = null
+                        },
+                    )
+                }
+                // <-- AM (CONTROL_BINDINGS)
             }
         }
     }
 }
+
+// AM (CONTROL_BINDINGS) -->
+/**
+ * Writing to a position past the end fills the gap with empty entries rather than
+ * appending, so the position a user picked is the position they get.
+ */
+private fun List<ControlBinding>.replacingOrAdding(index: Int, binding: ControlBinding): List<ControlBinding> {
+    val padded = this + List((index + 1 - size).coerceAtLeast(0)) { ControlBinding() }
+    return padded.toMutableList().also { it[index] = binding }
+}
+
+/**
+ * Puts a new control AT [index], moving everything from there along.
+ *
+ * The free positions a row reveals are not indices into the stored list - the middle
+ * row opens them either side of its centre and the bottom row opens them in the gap
+ * between its halves, so filling one has to insert where it sits rather than
+ * overwrite whatever currently holds that index.
+ */
+private fun List<ControlBinding>.insertedAt(index: Int, binding: ControlBinding): List<ControlBinding> =
+    toMutableList().also { it.add(index.coerceIn(0, it.size), binding) }
+
+/** Applies the row's final visible placement in one write. */
+private fun List<ControlBinding>.reordered(moves: List<ControlSlotMove>): List<ControlBinding> {
+    if (moves.isEmpty() || moves.all { it.position == it.source }) return this
+
+    // Negative positions are the top bar's virtual leading blanks. Materialize them
+    // once, then place every visible source at its final position. Unseen entries keep
+    // their relative positions and returning to the original order returns this list.
+    val prefix = (-moves.minOf { it.position.index }).coerceAtLeast(0)
+    val size = maxOf(
+        this.size + prefix,
+        moves.maxOf { it.position.index } + prefix + 1,
+    )
+    val result = MutableList(size) { ControlBinding() }
+    forEachIndexed { index, binding -> result[index + prefix] = binding }
+    moves.forEach { move ->
+        result[move.position.index + prefix] = getOrElse(move.source.index) { ControlBinding() }
+    }
+    return result
+}
+// <-- AM (CONTROL_BINDINGS)
 
 // AM (SMALL_WINDOW_NO_CONTROLS) -->
 // Below either of these the player's own controls are not composed at all - see the

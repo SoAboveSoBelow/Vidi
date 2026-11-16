@@ -40,8 +40,8 @@ import java.util.concurrent.ConcurrentHashMap
  * position, which made this the one storage layer a non-library session could
  * not use - the reason a feed card's progress had nowhere to go and was lost
  * the moment the real player asked for it. What a session is stays opaque here;
- * only [syncRetainedMedia] looks inside a key, and only because the media cache
- * is genuinely episode-scoped.
+ * only storageKeyEpisodeId looks inside a key, and only because the media
+ * cache is genuinely episode-scoped.
  */
 @Inject
 @SingleIn(AppScope::class)
@@ -109,6 +109,19 @@ class RecentPositionManager(
     }
 
 
+    // AM (ONE_DEFINITION_OF_THE_RESUME_POINT) -->
+    /**
+     * The temp position for [key] WITHOUT consuming it.
+     *
+     * [consume] removes what it returns, on the premise that the caller is about
+     * to resume playback and live tracking takes over. A caller that only wants
+     * to DISPLAY where the session will resume - the seekbar and the
+     * notification, during the switch and before the load - must not take it
+     * away from the load that follows.
+     */
+    fun peek(key: SessionKey): Long? = cache[key.storageKey]?.positionMs
+    // <-- AM (ONE_DEFINITION_OF_THE_RESUME_POINT)
+
     // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
     /**
      * Called when the retention setting changes, so turning it off frees the disk
@@ -119,7 +132,8 @@ class RecentPositionManager(
             // AM (RETAIN_MEDIA_SIZE_LIMIT) -->
             MediaCache.peek()?.setMaxBytes(playerPreferences.retainRecentEpisodeMediaMaxBytes.get())
             // <-- AM (RETAIN_MEDIA_SIZE_LIMIT)
-            syncRetainedMedia()
+            // AM (BYTES_ARE_NOT_TIED_TO_TEMP_MEMORY)
+            applyRetentionDisabled()
         }
     }
     // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
@@ -146,6 +160,15 @@ class RecentPositionManager(
 
         val updatedAt = System.currentTimeMillis()
         cache[stored] = Entry(positionMs, updatedAt)
+        // AM (TRIM_TO_RESUME_WINDOW): the cache keeps the bytes around this
+        // point when it cannot keep them all. Both numbers are passed because
+        // turning a position into a byte offset needs the duration, and this is
+        // the only place that has it next to the position. Nothing to do with
+        // WHETHER bytes are kept - see BYTES_ARE_NOT_TIED_TO_TEMP_MEMORY - only
+        // with which of them survive a trim.
+        storageKeyEpisodeId(stored)?.let { episodeId ->
+            MediaCache.peek()?.setResumePosition(episodeId, positionMs, durationMs)
+        }
         scope.launch {
             repository.upsert(stored, positionMs, updatedAt)
             pruneToCurrentLimit()
@@ -161,37 +184,38 @@ class RecentPositionManager(
                 .forEach { cache.remove(it.key) }
         }
         repository.pruneToMostRecent(maxSlots)
-        // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
-        syncRetainedMedia()
-        // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
+        // AM (BYTES_ARE_NOT_TIED_TO_TEMP_MEMORY): a position slot being pruned
+        // says nothing about whether cached bytes are worth keeping.
     }
 
-    // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
+    // AM (BYTES_ARE_NOT_TIED_TO_TEMP_MEMORY) -->
     /**
-     * Keeps the media cache's contents in step with this table.
+     * Applies the retention setting's OFF state to the media cache.
      *
-     * This table is what "recent" means for the retention setting, so an episode
-     * losing its slot - by being consumed, or pruned when the limit shrinks - is
-     * precisely when its cached bytes stop being worth disk space. Doing it here
-     * rather than on a timer or a size trigger means the two never disagree.
+     * Nothing else. This used to call retainOnly() with this table's keys on
+     * every write and prune, which tied the lifetime of cached bytes to the
+     * lifetime of a position slot: consume() deletes an episode's row the
+     * moment that episode is resumed, so resuming an episode was what made its
+     * own bytes evictable, and recentEpisodePositionSlots - a count of
+     * POSITIONS - silently decided how many episodes could keep media at all.
      *
-     * Nothing happens when no media has been proxied yet (no cache exists), and an
-     * entry being read right now is never dropped.
+     * The two are unrelated. Cached bytes accumulate as they are read and are
+     * bounded by their own ceiling, which evictIfNeeded enforces, oldest first,
+     * trimming the newest to its resume window rather than deleting it. That is
+     * the whole policy, and it needs no help from this table.
      *
-     * AM (SESSION_KEYED_TEMP_POSITIONS): the media cache is keyed by episode id, so
-     * only library slots can name anything in it. A non-library session holding a slot
-     * therefore retains nothing here - correct rather than incidental: its media was
-     * never proxied under an episode id to begin with.
+     * A ceiling of zero is the setting being off, which is the one thing this
+     * table's own preference observer is still the right place to act on: it is
+     * what turns the feature off, and the disk should come back immediately
+     * rather than at some later read.
      */
-    private fun syncRetainedMedia() {
+    private fun applyRetentionDisabled() {
         val mediaCache = MediaCache.peek() ?: return
         if (playerPreferences.retainRecentEpisodeMediaMaxBytes.get() <= 0) {
             mediaCache.retainOnly(emptySet())
-            return
         }
-        mediaCache.retainOnly(cache.keys.mapNotNull(::storageKeyEpisodeId).toSet())
     }
-    // <-- AM (RETAIN_RECENT_EPISODE_MEDIA)
+    // <-- AM (BYTES_ARE_NOT_TIED_TO_TEMP_MEMORY)
 
     /**
      * Called when the user changes the "temporary position memory" setting, so a

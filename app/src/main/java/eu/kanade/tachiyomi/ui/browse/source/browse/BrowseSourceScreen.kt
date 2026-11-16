@@ -172,6 +172,9 @@ data class BrowseSourceScreen(
                         source = viewModel.source,
                         displayMode = viewModel.displayMode,
                         onDisplayModeChange = { viewModel.displayMode = it },
+                        // AM (BROWSE_HIDE_VIEWED)
+                        hideViewed = viewModel.hideViewed,
+                        onHideViewedChange = { viewModel.hideViewed = it },
                         navigateUp = navigateUp,
                         onWebViewClick = onWebViewClick,
                         onHelpClick = onHelpClick,

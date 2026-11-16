@@ -34,6 +34,9 @@ fun BrowseSourceToolbar(
     // AM (BROWSE_SCROLLER)
     displayMode: BrowseDisplayMode,
     onDisplayModeChange: (BrowseDisplayMode) -> Unit,
+    // AM (BROWSE_HIDE_VIEWED)
+    hideViewed: Boolean,
+    onHideViewedChange: (Boolean) -> Unit,
     navigateUp: () -> Unit,
     onWebViewClick: () -> Unit,
     onHelpClick: () -> Unit,
@@ -69,6 +72,16 @@ fun BrowseSourceToolbar(
                                 else -> Icons.Filled.ViewModule
                             },
                             onClick = { selectingDisplayMode = true },
+                        ),
+                    )
+                    // AM (BROWSE_HIDE_VIEWED): first in the overflow rather than
+                    // after Settings - it is the entry that gets used, and it
+                    // is the only one here that carries a state to read.
+                    add(
+                        AppBar.OverflowAction(
+                            title = stringResource(AMMR.strings.action_hide_viewed),
+                            onClick = { onHideViewedChange(!hideViewed) },
+                            isChecked = hideViewed,
                         ),
                     )
                     if (isLocalSource) {

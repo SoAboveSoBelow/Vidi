@@ -285,9 +285,12 @@ enum class SubtitlesBorderStyle(
 
 // AM (BOTTOM_PLAYER_BUTTONS) -->
 /**
- * Buttons that can be shown in the customizable row along the bottom of the player.
- * Order in [entries] is only the declaration order; the user's chosen order and
- * selection are stored separately via [animiru.domain.player.service.GesturePreferences.bottomPlayerButtons].
+ * Buttons that could be shown in the customizable row along the bottom of the player.
+ *
+ * AM (CONTROL_BINDINGS): superseded by [ControlAction], which covers these alongside
+ * everything else a control can be bound to. Kept only so a stored `pref_bottom_player_buttons`
+ * written before the change still parses while the Bottom region's starting layout is
+ * derived from it.
  */
 enum class BottomPlayerButton(val stringRes: StringResource) {
     Lock(AYMR.strings.pref_bottom_button_lock),

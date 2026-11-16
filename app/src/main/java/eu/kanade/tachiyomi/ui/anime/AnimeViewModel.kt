@@ -3649,19 +3649,29 @@ class AnimeViewModel(
 
     // <-- AM (TAG_LIMIT)
 
+    /**
+     * The merge's sources as merge settings shows them, in stored order.
+     *
+     * AM (MERGE_SETTINGS_STAY_OPEN): shared with removeSourceFromMerge, which
+     * rebuilds this list for the dialog it leaves open.
+     */
+    private suspend fun mergeSourcesOf(mergeParentId: Long): List<MergeSource> {
+        val seasonById = mergeChildRepository.getChildOrderingByMergeParentId(mergeParentId)
+            .associate { it.animeId to it.seasonNumber }
+        return mergeChildRepository.getChildrenByMergeParentId(mergeParentId).map {
+            MergeSource(
+                anime = it,
+                sourceName = sourceManager.getOrStub(it.source).name,
+                seasonNumber = seasonById[it.id] ?: MERGE_DEFAULT_SEASON_NUMBER,
+            )
+        }
+    }
+
     fun showMergeSettingsDialog() {
         val anime = successState?.anime ?: return
         if (anime.source != MergedSource.ID) return
         viewModelScope.launchIO {
-            val seasonById = mergeChildRepository.getChildOrderingByMergeParentId(anime.id)
-                .associate { it.animeId to it.seasonNumber }
-            val sources = mergeChildRepository.getChildrenByMergeParentId(anime.id).map {
-                MergeSource(
-                    anime = it,
-                    sourceName = sourceManager.getOrStub(it.source).name,
-                    seasonNumber = seasonById[it.id] ?: MERGE_DEFAULT_SEASON_NUMBER,
-                )
-            }
+            val sources = mergeSourcesOf(anime.id)
             val settings = mergeSettingsRepository.get(anime.id)
             // AM (MERGE_EPISODE_EXCLUSION) -->
             val removedEpisodes = getRemovedMergeEpisodes.await(anime.id)
@@ -3759,15 +3769,35 @@ class AnimeViewModel(
     }
 
     /** Immediate, not staged, and closes the dialog - as in Komikku. */
+    /**
+     * Takes one source out of the merge, from merge settings.
+     *
+     * AM (MERGE_SETTINGS_STAY_OPEN): the dialog is left open and refreshed in
+     * place rather than closed, the way restoring a removed episode already
+     * works. Closing it threw away every other staged edit - a reorder, the
+     * dedupe mode, seasons picked for the remaining rows - for an action that
+     * only concerns one row, and made removing two sources a matter of
+     * reopening the dialog in between.
+     *
+     * RemoveFromMerge refuses to take the last source out, so there is no case
+     * where this empties the list and the dialog has to go.
+     */
     fun removeSourceFromMerge(child: Anime) {
         val anime = successState?.anime ?: return
-        updateSuccessState { it.copy(dialogStack = emptyList()) }
         viewModelScope.launchIO {
             // AM (NAMED_SEASONS): read before the removal - afterwards there is
             // no row left to say which season the source held.
             val vacated = mergeChildRepository.getChildSeasonsByMergeParentId(anime.id)[child.id]
-            removeFromMerge.await(anime.id, child)
+            if (!removeFromMerge.await(anime.id, child)) return@launchIO
             manageEntrySeasons.pruneEmpty(anime, setOfNotNull(vacated))
+            // Both lists are rebuilt: removing a source also drops the episode
+            // exclusions that belonged to it (see RemoveFromMerge).
+            val sources = mergeSourcesOf(anime.id)
+            val removedEpisodes = getRemovedMergeEpisodes.await(anime.id)
+            updateSuccessState { state ->
+                val dialog = state.dialog as? Dialog.MergeSettings ?: return@updateSuccessState state
+                state.withTopDialog(dialog.copy(sources = sources, removedEpisodes = removedEpisodes))
+            }
         }
     }
     // <-- AM (MERGE_SETTINGS)

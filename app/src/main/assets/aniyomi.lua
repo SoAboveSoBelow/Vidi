@@ -37,6 +37,21 @@ end
 function aniyomi.set_button_title(text)
     mp.set_property("user-data/aniyomi/set_button_title", text)
 end
+-- Custom toggle buttons own their state in Lua. $id is replaced with the button ID.
+local button_toggle_states = {}
+function aniyomi.set_button_toggle(id, checked)
+    button_toggle_states[tostring(id)] = checked == true
+    mp.set_property("user-data/aniyomi/set_button_toggle", tostring(id) .. ":" .. tostring(button_toggle_states[tostring(id)]))
+end
+function aniyomi.sync_button_toggles()
+    -- Clear first so replaying an unchanged value still produces a property event.
+    mp.set_property("user-data/aniyomi/set_button_toggle", "")
+    for id, checked in pairs(button_toggle_states) do
+        mp.set_property("user-data/aniyomi/set_button_toggle", id .. ":" .. tostring(checked))
+    end
+end
+mp.register_script_message("sync_button_toggles", aniyomi.sync_button_toggles)
+
 function aniyomi.reset_button_title()
     mp.set_property("user-data/aniyomi/reset_button_title", "unused")
 end
@@ -50,6 +65,9 @@ function aniyomi.toggle_button()
     mp.set_property("user-data/aniyomi/toggle_button", "toggle")
 end
 -- Controls
+function aniyomi.control_action(action)
+    mp.set_property("user-data/aniyomi/control_action", action)
+end
 function aniyomi.previous_episode()
     mp.set_property("user-data/aniyomi/switch_episode", "p")
 end

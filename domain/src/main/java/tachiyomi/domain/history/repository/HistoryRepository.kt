@@ -14,6 +14,11 @@ interface HistoryRepository {
 
     suspend fun getHistoryByAnimeId(animeId: Long): List<History>
 
+    // AM (BROWSE_HIDE_VIEWED): every entry of one source that has been viewed
+    // at all, as it stands now - see history.sq for what counts and why this is
+    // a one-shot read rather than a flow.
+    suspend fun getViewedAnimeIdsBySource(sourceId: Long): Set<Long>
+
     suspend fun resetHistory(historyId: Long)
 
     suspend fun resetHistoryByAnimeId(animeId: Long)

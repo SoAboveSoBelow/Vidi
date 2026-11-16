@@ -494,6 +494,42 @@ class PlayerMediaHolder(
         fun clearPlaybackRequest() {
             _playbackRequest.value = null
         }
+
+        // AM (CONTROL_BINDINGS) -->
+        private val _layoutEditor = MutableStateFlow(false)
+
+        /**
+         * The player is open to lay its controls out rather than to watch something.
+         *
+         * A flag beside the request rather than a kind of request: there is nothing to
+         * play, so there is nothing for a request to describe. Everything else about
+         * the session is the session's as usual - this only says which mode the
+         * controls are in, and that the host should show them with nothing loaded.
+         */
+        val layoutEditorFlow = _layoutEditor.asStateFlow()
+
+        fun openLayoutEditor() {
+            // The editor shows the player's controls at full size, so a session that
+            // is up comes out of the dummy pip first - laying out controls inside a
+            // floating window would be laying out the wrong thing. It is also paused:
+            // the controls are the subject here, and a video playing behind them is
+            // both a distraction and, left running, a session the user did not mean
+            // to keep watching while in settings. Backing out pauses nothing further,
+            // so the usual pip-on-exit behaviour resumes from exactly here.
+            current?.let { holder ->
+                holder.isDummyPipActive = false
+                holder.viewModel?.pause()
+                // Revealing the controls is PlayerScreen's, keyed on the mode and on
+                // the pip having actually collapsed - doing it here raced the expand,
+                // which leaves them hidden from when the pip was entered.
+            }
+            _layoutEditor.value = true
+        }
+
+        fun closeLayoutEditor() {
+            _layoutEditor.value = false
+        }
+        // <-- AM (CONTROL_BINDINGS)
         // <-- AM (PLAYER_OVERLAY_MIGRATION)
     }
     // <-- AM (SYNCHRONOUS_HOLDER_LOOKUP_FIX)
@@ -1765,7 +1801,30 @@ class PlayerMediaHolder(
                 episodeTitle = episodeTitle,
                 animeThumbnailUrl = animeThumbnailUrl,
                 episodePreviewUrl = episodePreviewUrl,
-                positionMs = positionMs ?: it.positionMs,
+                // AM (A_POSITION_BELONGS_TO_ONE_SESSION) -->
+                // Carried only while the session is the same one.
+                //
+                // "Keep what is there" is right for a caller that has no newer
+                // position to offer about the SAME session - which is why the
+                // foreground path passes null, having its own position timer.
+                // It is never right across a session change: this function
+                // repoints sessionKey at the episode being switched TO, and the
+                // old number then described that new episode. The holder would
+                // report, say, 46s for an episode that had not loaded a frame.
+                //
+                // Harmless where a reader checks the key and the key has just
+                // changed; not harmless on reinit after process death, where the
+                // key genuinely matches what is being resumed and that stale
+                // number is taken as the resume point - an episode never opened
+                // starting part way in. The notification and the dummy pip read
+                // this too, and showed the same wrong position.
+                //
+                // Zero rather than null: there is no position in a session that
+                // has not played yet, and the first tick overwrites it.
+                positionMs = positionMs
+                    ?: it.positionMs.takeIf { _ -> it.sessionKey == sessionKey }
+                    ?: 0,
+                // <-- AM (A_POSITION_BELONGS_TO_ONE_SESSION)
             )
         }
     }

@@ -1,5 +1,7 @@
 package aniyomi.ui.browse.scroller
 
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlBinding
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -42,6 +44,7 @@ import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
 import eu.kanade.tachiyomi.ui.player.controls.LocalPlayerButtonsClickEvent
 import eu.kanade.tachiyomi.ui.player.controls.MiddlePlayerControls
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlAvailability
 import eu.kanade.tachiyomi.ui.player.controls.PlayerControls
 import eu.kanade.tachiyomi.ui.player.controls.components.SeekbarWithTimers
 import kotlinx.coroutines.delay
@@ -107,9 +110,9 @@ fun ScrollerCardControls(
                         ),
                 ) {
                     MiddlePlayerControls(
-                        previousIcon = null,
-                        hasPrevious = false,
-                        onSkipPrevious = {},
+                        // AM (CONTROL_BINDINGS): the feed draws the centre only, so it
+                        // passes the one entry rather than the player's Middle region.
+                        entries = listOf(ControlBinding(tap = ControlAction.PlayPause)),
                         isStopped = false,
                         isLoading = false,
                         isLoadingEpisode = false,
@@ -118,12 +121,13 @@ fun ScrollerCardControls(
                         showLoadingCircle = false,
                         paused = playback.controlsPaused,
                         gestureSeekAmount = null,
-                        onPlayPauseClick = { playback.togglePlayPause(animeId) },
-                        nextIcon = null,
+                        hasPrevious = false,
                         hasNext = false,
-                        onSkipNext = {},
-                        onSkipPreviousSource = null,
-                        onSkipNextSource = null,
+                        showMediaButtons = false,
+                        // AM (CONTROL_BINDINGS): nothing here is video-dependent -
+                        // the feed binds play/pause and nothing else.
+                        availability = ControlAvailability(),
+                        onAction = { playback.togglePlayPause(animeId) },
                         enter = fadeIn(),
                         exit = fadeOut(),
                         modifier = Modifier.align(Alignment.Center),
@@ -330,7 +334,6 @@ fun ScrollerFullscreenPlayer(
                         controlsShown = controlsShown,
                         seekBarShown = controlsShown,
                         showLoadingCircle = false,
-                        bottomPlayerButtons = emptyList(),
                         playerTimeToDisappearMs = playback.controlsTimeToDisappearMs,
                     ),
                     playbackData = PlayerViewModel.PlayerPlaybackData(

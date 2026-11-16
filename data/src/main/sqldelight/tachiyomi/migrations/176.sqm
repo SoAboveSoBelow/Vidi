@@ -1,0 +1,2 @@
+-- Overflow is a fixed control, not an assignable custom button.
+DELETE FROM custom_buttons WHERE _id = -24;

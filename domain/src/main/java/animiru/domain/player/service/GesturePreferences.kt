@@ -1,14 +1,10 @@
 package animiru.domain.player.service
 
-import animiru.domain.player.model.BottomPlayerButton
-import animiru.domain.player.model.SingleActionGesture
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
-import tachiyomi.core.common.preference.getEnum
-import tachiyomi.core.common.preference.getEnumSlots
 
 @Inject
 @SingleIn(AppScope::class)
@@ -40,63 +36,12 @@ class GesturePreferences(
     val skipLengthPreference: Preference<Int> = preferenceStore.getInt("pref_skip_length_preference", 10)
     val playerSmoothSeek: Preference<Boolean> = preferenceStore.getBoolean("pref_player_smooth_seek", false)
 
-    // Double tap
-
-    val leftDoubleTapGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
-        "pref_left_double_tap",
-        SingleActionGesture.Seek,
-    )
-    val centerDoubleTapGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
-        "pref_center_double_tap",
-        SingleActionGesture.PlayPause,
-    )
-    val rightDoubleTapGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
-        "pref_right_double_tap",
-        SingleActionGesture.Seek,
-    )
-
-    // Long press
-
-    val longPressGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
-        "pref_long_press",
-        SingleActionGesture.Screenshot,
-    )
-
-    // Media controls
-
-    val mediaPreviousGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
-        "pref_media_previous",
-        SingleActionGesture.Switch,
-    )
-    val mediaPlayPauseGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
-        "pref_media_playpause",
-        SingleActionGesture.PlayPause,
-    )
-    val mediaNextGesture: Preference<SingleActionGesture> = preferenceStore.getEnum(
-        "pref_media_next",
-        SingleActionGesture.Switch,
-    )
-
-    // Bottom controls
-
-    /**
-     * Fixed [MAX_BOTTOM_PLAYER_BUTTONS]-length list of positions along the bottom of the
-     * player; a null entry means that position is empty. Gaps are preserved so a button
-     * assigned to position 5 stays at position 5 even if earlier positions are empty.
-     */
-    val bottomPlayerButtons: Preference<List<BottomPlayerButton?>> = preferenceStore.getEnumSlots(
-        "pref_bottom_player_buttons",
-        listOf(
-            BottomPlayerButton.Lock,
-            BottomPlayerButton.Rotation,
-            BottomPlayerButton.Speed,
-            BottomPlayerButton.Chapters,
-            BottomPlayerButton.PictureInPicture,
-            BottomPlayerButton.AspectRatio,
-        ),
-    )
-
-    companion object {
-        const val MAX_BOTTOM_PLAYER_BUTTONS = 6
-    }
+    // AM (CONTROL_BINDINGS) -->
+    // Double tap, long press and the media buttons used to live here as one preference
+    // per slot. They are bindings now, held per surface by ControlBindingPreferences,
+    // which reads these keys directly to derive a surface's starting layout. The fields
+    // are gone rather than deprecated because a second accessor is a second way for the
+    // two stores to disagree. The bottom row went the same way: it is the Bottom region
+    // of the player's layout now, measured at render instead of capped at six.
+    // <-- AM (CONTROL_BINDINGS)
 }

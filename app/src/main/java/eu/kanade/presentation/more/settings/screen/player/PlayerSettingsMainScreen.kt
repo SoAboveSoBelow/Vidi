@@ -11,12 +11,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.EditNote
-import androidx.compose.material.icons.outlined.Gesture
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.PlayCircleOutline
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Subtitles
-import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TopAppBarDefaults
@@ -39,7 +38,6 @@ import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.more.settings.screen.SettingsSearchScreen
-import eu.kanade.presentation.more.settings.screen.player.custombutton.PlayerSettingsCustomButtonScreen
 import eu.kanade.presentation.more.settings.screen.player.editor.PlayerSettingsEditorScreen
 import eu.kanade.presentation.more.settings.widget.TextPreferenceWidget
 import eu.kanade.presentation.util.LocalBackPress
@@ -111,7 +109,7 @@ class PlayerSettingsMainScreen(private val mainSettings: Boolean) : Screen() {
             content = { contentPadding ->
                 val state = rememberLazyListState()
                 val indexSelected = if (twoPane) {
-                    items.indexOfFirst { it.screen::class == navigator.items.first()::class }
+                    items.indexOfFirst { it.screen?.let { screen -> screen::class } == navigator.items.first()::class }
                         .also {
                             LaunchedEffect(Unit) {
                                 state.animateScrollToItem(it)
@@ -159,7 +157,9 @@ class PlayerSettingsMainScreen(private val mainSettings: Boolean) : Screen() {
                                 title = stringResource(item.titleRes),
                                 subtitle = item.formatSubtitle(),
                                 icon = item.icon,
-                                onPreferenceClick = { navigator.navigate(item.screen, twoPane) },
+                                onPreferenceClick = {
+                                    item.screen?.let { navigator.navigate(it, twoPane) }
+                                },
                             )
                         }
                     }
@@ -178,7 +178,7 @@ private data class Item(
     val subtitleRes: StringResource? = null,
     val formatSubtitle: @Composable () -> String? = { subtitleRes?.let { stringResource(it) } },
     val icon: ImageVector,
-    val screen: VoyagerScreen,
+    val screen: VoyagerScreen? = null,
 )
 
 private val items = listOf(
@@ -187,12 +187,6 @@ private val items = listOf(
         subtitleRes = AYMR.strings.pref_player_internal_summary,
         icon = Icons.Outlined.PlayCircleOutline,
         screen = PlayerSettingsPlayerScreen,
-    ),
-    Item(
-        titleRes = AYMR.strings.pref_player_gestures,
-        subtitleRes = AYMR.strings.pref_player_gestures_summary,
-        icon = Icons.Outlined.Gesture,
-        screen = PlayerSettingsGesturesScreen,
     ),
     Item(
         titleRes = AYMR.strings.pref_player_decoder,
@@ -213,10 +207,10 @@ private val items = listOf(
         screen = PlayerSettingsAudioScreen,
     ),
     Item(
-        titleRes = AYMR.strings.pref_player_custom_button,
-        subtitleRes = AYMR.strings.pref_player_custom_button_summary,
-        icon = Icons.Outlined.Terminal,
-        screen = PlayerSettingsCustomButtonScreen,
+        titleRes = AYMR.strings.pref_player_controls,
+        subtitleRes = AYMR.strings.pref_player_controls_summary,
+        icon = Icons.Outlined.Tune,
+        screen = PlayerSettingsControlsScreen,
     ),
     Item(
         titleRes = AYMR.strings.pref_player_editor,

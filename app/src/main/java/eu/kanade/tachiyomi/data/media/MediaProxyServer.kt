@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import logcat.LogPriority
+import okhttp3.Dispatcher
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -115,6 +116,9 @@ object MediaProxyServer {
         }
         // <-- AM (RELEASE_PREVIOUS_REGISTRATION)
         upstreams[key] = Upstream(url, headers, cacheKey, throttled)
+        // AM (PRELOAD_PLAYLISTS): something is being played now, so nothing
+        // speculative should still be holding a connection.
+        if (!throttled) cancelWarms()
         // AM (PROXY_RELATIVE_PATHS) -->
         // The URL keeps the upstream's own filename as its last path segment, so a
         // consumer resolving a relative reference from it lands on
@@ -281,8 +285,30 @@ object MediaProxyServer {
 
                 // AM (MEDIA_CACHE) -->
                 val cache = mediaCache
-                val entry = upstream.cacheKey?.let { cache?.entryFor(it) }
-                if (entry != null) {
+                // AM (HLS_SERVE_ONE_VARIANT) -->
+                // A playlist is a text index, not media. serveCached() frames a
+                // byte range of a known total length and never passes through
+                // forward(), so a cached manifest would be served unfiltered -
+                // and sharing the bytes of a text file between a player and a
+                // download buys nothing in the first place.
+                val entry = upstream.cacheKey
+                    ?.takeUnless { looksLikePlaylist(upstream.url, null) }
+                    ?.let { cache?.entryFor(it) }
+                // <-- AM (HLS_SERVE_ONE_VARIANT)
+                // AM (PRELOAD_PLAYLISTS) -->
+                // Playback leads: a warm still filling this entry stands down so
+                // the two are never pulling the same bytes at once.
+                upstream.cacheKey?.let { warmingKeys.remove(it) }
+                val cachedPlaylist = if (range == null || range.trim().equals("bytes=0-", true)) {
+                    cachedPlaylistFor(upstream.url)
+                } else {
+                    null
+                }
+                if (cachedPlaylist != null) {
+                    logcat(LogPriority.INFO) { "PRELOAD_PLAYLISTS served from memory" }
+                    respondPlaylist(method, range, cachedPlaylist, output)
+                    // <-- AM (PRELOAD_PLAYLISTS)
+                } else if (entry != null) {
                     serveCached(method, upstream, range, httpClient, output, entry)
                 } else {
                     forward(method, upstream, range, httpClient, output)
@@ -548,13 +574,64 @@ object MediaProxyServer {
             val body = response.body
             val expectedBytes = response.header("Content-Length")?.toLongOrNull()
 
+            // AM (HLS_SERVE_ONE_VARIANT) -->
+            // A Master Playlist is rewritten to the single variant that will be
+            // played. Everything else passes through untouched.
+            // mpv's stream callback opens every url with "Range: bytes=0-",
+            // which asks for the whole body and gets a 206 back. An earlier
+            // version required no Range header at all and so never examined a
+            // single playlist - confirmed on-device, every one logged
+            // "range=bytes=0- code=206" on its way past. A rangeless request
+            // and a request for byte zero onwards want the same bytes, and a
+            // partial range of a text index is not something to rewrite.
+            val wantsWholeBody = range == null || range.trim().equals("bytes=0-", ignoreCase = true)
+            val eligible = wantsWholeBody &&
+                response.isSuccessful &&
+                !method.equals("HEAD", ignoreCase = true) &&
+                looksLikePlaylist(upstream.url, response.header("Content-Type"))
+            if (!eligible && looksLikePlaylist(upstream.url, response.header("Content-Type"))) {
+                // The only way a playlist is served without being examined, so
+                // it says which of the three conditions kept it out.
+                logcat(LogPriority.INFO) {
+                    "HLS_SERVE_ONE_VARIANT playlist passed through: " +
+                        "method=$method range=$range code=${response.code}"
+                }
+            }
+            val playlistBody = if (eligible) {
+                val text = body.string()
+                val served = narrowMasterPlaylist(text) ?: text
+                // AM (PRELOAD_PLAYLISTS): keep what was served, not what was
+                // fetched, so a replay is handed the same narrowed master.
+                val bytes = served.toByteArray()
+                storePlaylist(upstream.url, served, bytes, response.header("Content-Type"))
+                bytes
+            } else {
+                null
+            }
+            // <-- AM (HLS_SERVE_ONE_VARIANT)
+
             val responseHeaders = buildString {
                 append("HTTP/1.1 ").append(response.code).append(" ").append(statusText(response.code))
                     .append("\r\n")
                 append("Accept-Ranges: bytes\r\n")
                 response.header("Content-Type")?.let { append("Content-Type: ").append(it).append("\r\n") }
-                response.header("Content-Length")?.let { append("Content-Length: ").append(it).append("\r\n") }
-                response.header("Content-Range")?.let { append("Content-Range: ").append(it).append("\r\n") }
+                // AM (HLS_SERVE_ONE_VARIANT) -->
+                // Both length headers describe the playlist that was FETCHED.
+                // A rewritten one is shorter, and a 206 whose Content-Range
+                // promises more bytes than follow leaves the reader waiting on
+                // a body that already ended.
+                if (playlistBody != null) {
+                    val last = (playlistBody.size - 1).coerceAtLeast(0)
+                    append("Content-Length: ").append(playlistBody.size).append("\r\n")
+                    if (response.code == 206) {
+                        append("Content-Range: bytes 0-").append(last)
+                            .append("/").append(playlistBody.size).append("\r\n")
+                    }
+                } else {
+                    response.header("Content-Length")?.let { append("Content-Length: ").append(it).append("\r\n") }
+                    response.header("Content-Range")?.let { append("Content-Range: ").append(it).append("\r\n") }
+                }
+                // <-- AM (HLS_SERVE_ONE_VARIANT)
                 // One response per connection: a consumer that seeks opens a new
                 // one anyway, and this removes any chance of desyncing the stream
                 // by mismanaging keep-alive framing.
@@ -566,6 +643,19 @@ object MediaProxyServer {
                 output.flush()
                 return
             }
+
+            // AM (HLS_SERVE_ONE_VARIANT) -->
+            // Already read in full above; there is no stream left to loop over,
+            // and a text index is never large enough to want one. The truncation
+            // check below does not apply either - the length served is this
+            // body's own, not the upstream's.
+            if (playlistBody != null) {
+                Throttle.record(playlistBody.size)
+                output.write(playlistBody)
+                output.flush()
+                return
+            }
+            // <-- AM (HLS_SERVE_ONE_VARIANT)
 
             var written = 0L
             val buffer = ByteArray(CHUNK_BYTES)
@@ -591,6 +681,472 @@ object MediaProxyServer {
             }
         }
     }
+
+    // AM (PRELOAD_PLAYLISTS) -->
+    private data class CachedPlaylist(val body: ByteArray, val contentType: String?)
+
+    /**
+     * Manifests already fetched this session, keyed by UPSTREAM url.
+     *
+     * Keyed that way on purpose: [proxyUrlFor] mints a fresh UUID on every
+     * registration, so the same episode played twice arrives under two loopback
+     * urls and anything keyed by those would never hit. The upstream url is what
+     * is actually stable across a re-registration, a quality switch and a
+     * switch back to an episode played a minute ago.
+     *
+     * Only immutable manifests are kept - a master, or a VOD media playlist that
+     * has reached EXT-X-ENDLIST. A live playlist is a moving window and serving
+     * a remembered copy of one would pin playback to a stale segment list.
+     *
+     * Memory, not disk, and tiny: a master is a few hundred bytes and a
+     * media playlist is one EXTINF plus one uri per segment, so a 24-minute
+     * episode is around 17 KB. [PLAYLIST_CACHE_ENTRIES] of them is well under a
+     * megabyte, which is why this needs no interaction with MediaCache's ceiling
+     * and no eviction policy beyond least-recently-used.
+     */
+    private val playlistCache = object : LinkedHashMap<String, CachedPlaylist>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedPlaylist>): Boolean =
+            size > PLAYLIST_CACHE_ENTRIES
+    }
+
+    /**
+     * Cache keys a speculative warm is currently filling.
+     *
+     * Removed by [serve] the moment a real request arrives for that entry, which
+     * is how the warm learns to stand down - see [streamSegmentInto].
+     */
+    private val warmingKeys: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * A client for speculative fetches only, sharing the caller's connection
+     * pool but with a dispatcher of its own.
+     *
+     * OkHttp's dispatcher limits concurrent requests PER HOST, and a warm pulls
+     * 20MB segments from the same CDN host playback uses. Sharing the player's
+     * client let two of those occupy the host's slots while a transition's own
+     * request queued behind them - confirmed on-device (2026-11-06): manifests
+     * served from memory at 20:26:14, playback not starting until 20:26:19, and
+     * a 21MB warm completing at 20:26:44. One request at a time here means a
+     * warm can never be the reason playback is waiting for a connection.
+     */
+    @Volatile
+    private var warmClient: OkHttpClient? = null
+
+    private fun warmClientFrom(httpClient: OkHttpClient): OkHttpClient {
+        warmClient?.let { return it }
+        return synchronized(this) {
+            warmClient ?: httpClient.newBuilder()
+                .dispatcher(
+                    Dispatcher().apply {
+                        maxRequests = 1
+                        maxRequestsPerHost = 1
+                    },
+                )
+                .build()
+                .also { warmClient = it }
+        }
+    }
+
+    /**
+     * Stops every warm in flight.
+     *
+     * Called when a new stream is registered, which means the user started
+     * something: whatever was being speculatively fetched is now, at best, not
+     * the thing in front of them. Per-entry standing down (see [serve]) only
+     * covers a warm for the very episode being opened; this covers the far more
+     * common case of having moved somewhere else entirely.
+     */
+    private fun cancelWarms() {
+        if (warmingKeys.isNotEmpty()) {
+            logcat(LogPriority.INFO) { "PRELOAD_PLAYLISTS cancelling ${warmingKeys.size} warm(s)" }
+            warmingKeys.clear()
+        }
+    }
+
+    private fun cachedPlaylistFor(url: String): CachedPlaylist? =
+        synchronized(playlistCache) { playlistCache[url] }
+
+    private fun storePlaylist(url: String, text: String, body: ByteArray, contentType: String?) {
+        // A master is fixed for the life of the content; a media playlist is only
+        // final once it says so.
+        val immutable = text.contains("#EXT-X-STREAM-INF") || text.contains("#EXT-X-ENDLIST")
+        if (!immutable) return
+        synchronized(playlistCache) { playlistCache[url] = CachedPlaylist(body, contentType) }
+    }
+
+    /**
+     * Fetches an HLS entry's manifests ahead of playback, so the loadfile finds
+     * them already here.
+     *
+     * This is the half of preloading that a url resolve does not do. Resolving
+     * the next episode's video url ahead of time removes the hoster round trips;
+     * it leaves mpv to fetch the master, then the variant playlist, then the
+     * first segments, at the moment the episode starts - measured on-device at
+     * around half a second with everything else warm, and far worse cold. Doing
+     * the two manifest fetches here moves that off the transition entirely, at a
+     * cost of kilobytes.
+     *
+     * The master is narrowed before it is stored, so the copy mpv is handed has
+     * one variant and the other renditions are never probed. The chosen
+     * variant's own playlist is then fetched and stored too, because that is the
+     * second round trip and it is just as fixed.
+     *
+     * Blocking: call it from an IO context. Failures are silent by design - a
+     * warm that did not happen just means the normal path fetches as it always
+     * did.
+     */
+    fun warmPlaylists(url: String, headers: Headers, httpClient: OkHttpClient, cacheKey: String? = null) {
+        if (!looksLikePlaylist(url, null)) return
+        val (masterText, masterType) = fetchPlaylist(url, headers, httpClient) ?: return
+        val narrowed = narrowMasterPlaylist(masterText)
+        val served = narrowed ?: masterText
+        storePlaylist(url, served, served.toByteArray(), masterType)
+
+        // Only a narrowed master names a single variant to follow.
+        val variant = narrowed
+            ?.lines()
+            ?.firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+            ?: return
+        val variantUrl = url.toHttpUrlOrNull()?.resolve(variant)?.toString() ?: return
+        val (variantText, variantType) = fetchPlaylist(variantUrl, headers, httpClient) ?: return
+        storePlaylist(variantUrl, variantText, variantText.toByteArray(), variantType)
+        logcat(LogPriority.INFO) { "PRELOAD_PLAYLISTS warmed master and variant for $variant" }
+        warmSegments(url, variantUrl, variantText, headers, httpClient, cacheKey)
+    }
+
+    /**
+     * Fetches the opening segments into [MediaCache], under the exact keys this
+     * server will look them up by.
+     *
+     * The manifests alone are not the preload. Measured on-device (2026-11-06):
+     * with both manifests served from memory and the segments already on disk a
+     * transition reached "Starting playback" in 85-97ms; with the same manifests
+     * warm and the segments cold it took 2.0-2.5s, because ffmpeg reads two
+     * segments before it starts and each one is about a second on a phone
+     * connection. Media3's playlist preloading buffers the next item's samples
+     * for the same reason, and this app's own scroller holds cards open at
+     * CacheTier.Near rather than merely knowing their urls.
+     *
+     * [WARM_SEGMENT_COUNT] is two because two is what the demuxer waits for.
+     * Beyond that it is bytes spent on an episode the user may never reach.
+     *
+     * The key has to match what [serve] computes for the same request, which is
+     * [resolveSibling]'s derivation over the path mpv asks for - hence
+     * relativising the absolute segment url against the MASTER, the registered
+     * upstream. A segment that cannot be expressed that way, or whose url
+     * carries a signed query, is simply not warmed: the key would not match, the
+     * normal path fetches it, and nothing breaks.
+     */
+    private fun warmSegments(
+        masterUrl: String,
+        variantUrl: String,
+        variantText: String,
+        headers: Headers,
+        httpClient: OkHttpClient,
+        cacheKey: String?,
+    ) {
+        if (cacheKey == null) return
+        val cache = mediaCache ?: return
+        val segments = variantText.lines()
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+            .take(WARM_SEGMENT_COUNT)
+        for (uri in segments) {
+            val absolute = variantUrl.toHttpUrlOrNull()?.resolve(uri)?.toString() ?: continue
+            val relative = relativeToSiblingOf(masterUrl, absolute) ?: continue
+            val key = "$cacheKey-s${relative.hashCode().toUInt()}"
+            val entry = cache.entryFor(key)
+            val known = entry.totalLength
+            if (known != null && entry.availableAt(0) >= known) continue
+            // The active video comes first. Throttling alone was not enough: it
+            // slowed a warm that was already competing, where the right answer
+            // for a purely speculative fetch is not to start until what the
+            // viewer is actually watching is comfortably ahead.
+            if (!awaitHealthyBuffer()) {
+                logcat(LogPriority.INFO) { "PRELOAD_PLAYLISTS buffer never settled - skipping segment warm" }
+                break
+            }
+            warmingKeys.add(key)
+            try {
+                val written = streamSegmentInto(entry, key, absolute, headers, httpClient)
+                logcat(LogPriority.INFO) { "PRELOAD_PLAYLISTS warmed segment $relative ($written bytes)" }
+            } finally {
+                warmingKeys.remove(key)
+            }
+            // A warm that was abandoned, because playback arrived or the fetch
+            // failed, has no business starting the next segment.
+            val complete = entry.totalLength?.let { entry.availableAt(0) >= it } == true
+            if (!complete) break
+        }
+    }
+
+    /**
+     * Fills [entry] from the network as the bytes arrive, and stops the moment
+     * playback wants the same entry.
+     *
+     * Both halves matter. Buffering the whole segment and writing it at the end
+     * left the entry empty for the seconds the fetch took, so a transition into
+     * that episode mid-warm found nothing cached and fetched the same 20MB
+     * again alongside this one - confirmed on-device (2026-11-06), a transition
+     * that otherwise took under 100ms took 1.4s because it collided with the
+     * warm of the very segment it needed. Writing incrementally means a reader
+     * arriving late consumes what has already landed.
+     *
+     * Abandoning on contact is the rule PLAYER_LEADS_DOWNLOAD_FOLLOWS already
+     * sets out: one fetcher per region, and playback is the one that leads. A
+     * warm is the most speculative fetcher there is, so it yields rather than
+     * competing for the same bytes on the same connection.
+     */
+    private fun streamSegmentInto(
+        entry: MediaCache.Entry,
+        key: String,
+        url: String,
+        headers: Headers,
+        httpClient: OkHttpClient,
+    ): Long = runCatching {
+        val client = warmClientFrom(httpClient)
+        client.newCall(Request.Builder().url(url).headers(headers).build()).execute().use { response ->
+            if (!response.isSuccessful) return@use 0L
+            val length = response.header("Content-Length")?.toLongOrNull()
+            if (length != null && length > WARM_SEGMENT_MAX_BYTES) return@use 0L
+            if (length != null) entry.totalLength = length
+            var offset = 0L
+            val buffer = ByteArray(CHUNK_BYTES)
+            response.body.byteStream().use { stream ->
+                while (true) {
+                    if (key !in warmingKeys) return@use offset
+                    // Starving mid-warm means the active video lost the race for
+                    // bandwidth. Stop outright rather than carry on at the
+                    // throttle's floor; what has landed stays cached.
+                    if (PlayerMediaHolder.playbackStarved.value) return@use offset
+                    val read = stream.read(buffer)
+                    if (read == -1) break
+                    // Yields bandwidth the same way a download does - a warm is
+                    // the lowest-priority fetcher in the system, and the rate
+                    // limiter already ranks it below a starving player.
+                    Throttle.acquire(read)
+                    Throttle.record(read)
+                    entry.write(offset, buffer, read)
+                    offset += read
+                    if (offset > WARM_SEGMENT_MAX_BYTES) return@use offset
+                }
+            }
+            if (length == null) entry.totalLength = offset
+            offset
+        }
+    }.getOrDefault(0L)
+
+    /**
+     * Blocks until the active session's buffer is comfortably ahead, or gives
+     * up.
+     *
+     * Returns true when there is nothing streaming to protect, or its fill has
+     * reached [HEALTHY_BUFFER_FILL] - the same threshold the rate limiter treats
+     * as "no longer needs the bandwidth". Returns false if the buffer has not
+     * settled within [WARM_BUFFER_WAIT_MS], which is the honest outcome on a
+     * connection that cannot sustain one stream, let alone two: the warm is
+     * abandoned and the next prefetch cycle tries again.
+     */
+    private fun awaitHealthyBuffer(): Boolean {
+        val deadline = System.nanoTime() + WARM_BUFFER_WAIT_MS * 1_000_000L
+        while (true) {
+            if (!PlayerMediaHolder.streamingPlaybackActive.value) return true
+            if (!PlayerMediaHolder.playbackStarved.value) {
+                val fill = PlayerMediaHolder.playbackBufferFill.value
+                if (fill == null || fill >= HEALTHY_BUFFER_FILL) return true
+            }
+            if (System.nanoTime() >= deadline) return false
+            Thread.sleep(WARM_BUFFER_POLL_MS)
+        }
+    }
+
+    /** [absolute] expressed the way a consumer would ask this server for it. */
+    private fun relativeToSiblingOf(parentUrl: String, absolute: String): String? {
+        val parent = parentUrl.toHttpUrlOrNull() ?: return null
+        val target = absolute.toHttpUrlOrNull() ?: return null
+        if (parent.scheme != target.scheme || parent.host != target.host || parent.port != target.port) {
+            return null
+        }
+        // A signed or otherwise parameterised segment url is left alone - the
+        // request path this server sees would not carry the same query.
+        if (absolute.contains('?')) return null
+        val base = parentUrl.substringBefore('?').substringBeforeLast('/') + "/"
+        if (!absolute.startsWith(base)) return null
+        return absolute.removePrefix(base).takeIf { it.isNotEmpty() }
+    }
+
+    private fun fetchPlaylist(
+        url: String,
+        headers: Headers,
+        httpClient: OkHttpClient,
+    ): Pair<String, String?>? = runCatching {
+        httpClient.newCall(Request.Builder().url(url).headers(headers).build()).execute().use { response ->
+            if (!response.isSuccessful) return@use null
+            val type = response.header("Content-Type")
+            val text = response.body.string()
+            if (text.length > PLAYLIST_MAX_CHARS) null else text to type
+        }
+    }.getOrNull()
+
+    /** Writes a manifest we already hold, framed to match what was asked for. */
+    private fun respondPlaylist(
+        method: String,
+        range: String?,
+        cached: CachedPlaylist,
+        output: OutputStream,
+    ) {
+        val body = cached.body
+        val last = (body.size - 1).coerceAtLeast(0)
+        val partial = range != null
+        output.write(
+            buildString {
+                append(if (partial) "HTTP/1.1 206 Partial Content\r\n" else "HTTP/1.1 200 OK\r\n")
+                append("Accept-Ranges: bytes\r\n")
+                cached.contentType?.let { append("Content-Type: ").append(it).append("\r\n") }
+                append("Content-Length: ").append(body.size).append("\r\n")
+                if (partial) {
+                    append("Content-Range: bytes 0-").append(last).append("/").append(body.size).append("\r\n")
+                }
+                append("Connection: close\r\n\r\n")
+            }.toByteArray(),
+        )
+        if (!method.equals("HEAD", ignoreCase = true)) {
+            Throttle.record(body.size)
+            output.write(body)
+        }
+        output.flush()
+    }
+    // <-- AM (PRELOAD_PLAYLISTS)
+
+    // AM (HLS_SERVE_ONE_VARIANT) -->
+    /**
+     * Whether this response is worth reading as text before serving it.
+     *
+     * Cheap and wrong-side-safe: a false positive costs one buffered text file,
+     * and [narrowMasterPlaylist] then returns null and the bytes are served
+     * unchanged. Nothing that is not announced as a playlist is ever buffered,
+     * so media bodies keep streaming as they do now.
+     */
+    private fun looksLikePlaylist(url: String, contentType: String?): Boolean =
+        url.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
+            contentType?.contains("mpegurl", ignoreCase = true) == true
+
+    /**
+     * Rewrites an HLS Master Playlist down to its highest-bandwidth variant, or
+     * returns null when [text] is not one.
+     *
+     * ffmpeg's HLS demuxer reads a master by opening EVERY variant's media
+     * playlist and the first segments of each, then plays one and discards the
+     * rest. Measured on-device (2026-11-06): a four-rendition master spent 11.7s
+     * between the first open and "Starting playback", twelve fetches of which
+     * eleven were thrown away. Serving one variant leaves it nothing to probe.
+     *
+     * This is the narrow exception to PROXY_RELATIVE_PATHS' "resolve, don't
+     * parse" rule, and it does not weaken it. That rule exists because DASH
+     * SegmentTemplate urls are generated at playback time and cannot be
+     * enumerated, so a rewriting proxy could never be general. Nothing here
+     * enumerates or rewrites a url: the variant lines are the playlist's own
+     * text, kept verbatim, and every path in the result still resolves against
+     * this server exactly as before.
+     *
+     * Dropped: the other EXT-X-STREAM-INF entries and their uri lines, and
+     * EXT-X-I-FRAME-STREAM-INF, which only describes trick-play playlists.
+     * Kept verbatim: EXT-X-MEDIA renditions - separate audio and subtitle
+     * tracks belong to the variant that is played - and every other tag.
+     *
+     * Variants are not surfaced in the UI (MPVModels parses hls-bitrate and
+     * program-id; nothing reads either), so highest bandwidth is the whole
+     * policy. Quality is chosen by the source before a url reaches here.
+     */
+    private fun narrowMasterPlaylist(text: String): String? {
+        // A BOM or leading blank line is common enough from a CDN, and a body
+        // that is a playlist should not be passed through for the sake of one.
+        val trimmed = text.removePrefix("﻿").trimStart()
+        if (!trimmed.startsWith("#EXTM3U")) {
+            logcat(LogPriority.INFO) { "HLS_SERVE_ONE_VARIANT not a playlist, serving unchanged" }
+            return null
+        }
+        if (!trimmed.contains("#EXT-X-STREAM-INF")) {
+            logcat(LogPriority.INFO) { "HLS_SERVE_ONE_VARIANT media playlist, serving unchanged" }
+            return null
+        }
+
+        val lines = trimmed.lines()
+        var bestTag = -1
+        var bestBandwidth = -1L
+        var variants = 0
+        for (i in lines.indices) {
+            if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue
+            if (uriLineAfter(lines, i) == -1) continue
+            variants++
+            val bandwidth = bandwidthOf(lines[i])
+            if (bandwidth > bestBandwidth) {
+                bestBandwidth = bandwidth
+                bestTag = i
+            }
+        }
+        // One variant is already the narrow case, and a master whose entries
+        // have no uri line is malformed - pass both through untouched rather
+        // than rebuilding them from a parse that clearly did not understand it.
+        if (variants < 2 || bestTag == -1) {
+            logcat(LogPriority.INFO) {
+                "HLS_SERVE_ONE_VARIANT $variants usable variants, serving unchanged"
+            }
+            return null
+        }
+        val bestUri = uriLineAfter(lines, bestTag)
+
+        val kept = StringBuilder()
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i]
+            when {
+                line.startsWith("#EXT-X-I-FRAME-STREAM-INF") -> i++
+                line.startsWith("#EXT-X-STREAM-INF") -> {
+                    val uri = uriLineAfter(lines, i)
+                    if (i == bestTag) {
+                        kept.append(line).append('\n').append(lines[bestUri]).append('\n')
+                    }
+                    i = if (uri == -1) i + 1 else uri + 1
+                }
+                else -> {
+                    kept.append(line).append('\n')
+                    i++
+                }
+            }
+        }
+        logcat(LogPriority.INFO) {
+            "HLS_SERVE_ONE_VARIANT serving 1 of $variants variants (bandwidth $bestBandwidth)"
+        }
+        return kept.toString()
+    }
+
+    /** The index of the uri line belonging to the stream tag at [tag], or -1. */
+    private fun uriLineAfter(lines: List<String>, tag: Int): Int {
+        for (i in tag + 1 until lines.size) {
+            val line = lines[i].trim()
+            if (line.isEmpty()) continue
+            return if (line.startsWith("#")) -1 else i
+        }
+        return -1
+    }
+
+    /** BANDWIDTH from a stream tag; AVERAGE-BANDWIDTH is deliberately ignored. */
+    private fun bandwidthOf(tag: String): Long {
+        val marker = "BANDWIDTH="
+        var index = tag.indexOf(marker)
+        while (index > 0) {
+            // AVERAGE-BANDWIDTH ends with the same characters, so a match is
+            // only the real attribute when what precedes it is a separator.
+            val before = tag[index - 1]
+            if (before == ',' || before == ':') break
+            index = tag.indexOf(marker, index + 1)
+        }
+        if (index < 0) return -1
+        return tag.substring(index + marker.length)
+            .takeWhile { it.isDigit() }
+            .toLongOrNull() ?: -1
+    }
+    // <-- AM (HLS_SERVE_ONE_VARIANT)
 
     private fun respondError(output: OutputStream, code: Int) {
         try {
@@ -727,6 +1283,44 @@ object MediaProxyServer {
 
     private const val BACKLOG = 8
     private const val CHUNK_BYTES = 32 * 1024
+
+    // AM (PRELOAD_PLAYLISTS) -->
+    /**
+     * How many manifests to remember. At roughly 17 KB for a 24-minute episode
+     * and a few hundred bytes for a master, 256 of them is a few megabytes -
+     * enough to cover a long queue and every episode revisited in a session.
+     */
+    private const val PLAYLIST_CACHE_ENTRIES = 256
+
+    /** A manifest larger than this is not one worth holding in memory. */
+    private const val PLAYLIST_MAX_CHARS = 2 * 1024 * 1024
+
+    /**
+     * How many opening segments to fetch ahead. Two, because that is what the
+     * HLS demuxer reads before it starts; a third would be bandwidth spent on an
+     * episode that may never be reached.
+     */
+    private const val WARM_SEGMENT_COUNT = 2
+
+    /**
+     * A segment larger than this is not warmed. These go to disk through
+     * MediaCache and are bounded by its own ceiling, but a single oversized
+     * object should not be pulled in whole on an episode nobody asked for yet.
+     */
+    private const val WARM_SEGMENT_MAX_BYTES = 24L * 1024 * 1024
+
+    /**
+     * How long a warm waits for the active video's buffer to be comfortably
+     * ahead before giving up on this cycle.
+     *
+     * A minute is long enough to cover an ordinary dip and short enough that a
+     * thread is not parked for the length of an episode. Giving up costs
+     * nothing: the prefetch loop comes back.
+     */
+    private const val WARM_BUFFER_WAIT_MS = 60_000L
+
+    private const val WARM_BUFFER_POLL_MS = 500L
+    // <-- AM (PRELOAD_PLAYLISTS)
     private const val SOCKET_TIMEOUT_MS = 30_000
     private val UPSTREAM_READ_TIMEOUT: Duration = Duration.ofSeconds(60)
     private const val MAX_REQUEST_LINE = 8 * 1024

@@ -16,7 +16,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import animiru.domain.player.model.SingleActionGesture
+import animiru.domain.player.model.ControlAction
+import animiru.domain.player.model.ControlAnchor
+import animiru.domain.player.model.ControlInput
+import animiru.domain.player.model.ControlRegion
+import animiru.domain.player.model.ControlSurface
+import animiru.domain.player.model.CustomKeyCodes
+import animiru.domain.player.service.ControlBindingPreferences
 import animiru.domain.player.service.GesturePreferences
 import eu.kanade.presentation.components.AlertDialog
 import eu.kanade.presentation.more.settings.Preference
@@ -41,14 +47,16 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
     override fun getPreferences(): List<Preference> {
         val context = LocalContext.current
         val gesturePreferences = remember { context.appGraph.gesturePreferences }
+        // AM (CONTROL_BINDINGS)
+        val controlBindings = remember { context.appGraph.controlBindingPreferences }
 
         return listOf(
             getSlidersGroup(gesturePreferences = gesturePreferences),
             getSeekingGroup(gesturePreferences = gesturePreferences),
-            getDoubleTapGroup(gesturePreferences = gesturePreferences),
-            getLongPressGroup(gesturePreferences = gesturePreferences),
-            getMediaControlsGroup(gesturePreferences = gesturePreferences),
-            getBottomControlsGroup(gesturePreferences = gesturePreferences),
+            getDoubleTapGroup(controlBindings = controlBindings),
+            getLongPressGroup(controlBindings = controlBindings),
+            getMediaControlsGroup(controlBindings = controlBindings),
+            getBottomControlsGroup(controlBindings = controlBindings),
         )
     }
 
@@ -151,44 +159,53 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
         )
     }
 
+    // AM (CONTROL_BINDINGS) -->
+    /**
+     * The rows below write into the surface's layout record rather than into a key per
+     * slot. Picking "Custom" keeps the key code the slot used to imply, so an existing
+     * Lua binding keeps firing from the same place.
+     */
     @Composable
-    private fun getDoubleTapGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
-        val leftDoubleTap = gesturePreferences.leftDoubleTapGesture
-        val centerDoubleTap = gesturePreferences.centerDoubleTapGesture
-        val rightDoubleTap = gesturePreferences.rightDoubleTapGesture
+    private fun actionEntries(vararg actions: ControlAction): Map<ControlAction, String> =
+        actions.associateWith { stringResource(it.stringRes) }
+
+    @Composable
+    private fun getDoubleTapGroup(controlBindings: ControlBindingPreferences): Preference.PreferenceGroup {
+        fun binding(anchor: ControlAnchor) =
+            controlBindings.action(ControlSurface.Player, anchor, ControlInput.DoubleTap)
 
         return Preference.PreferenceGroup(
             title = stringResource(AYMR.strings.pref_category_double_tap),
             preferenceItems = listOf(
                 Preference.PreferenceItem.ListPreference(
-                    preference = leftDoubleTap,
-                    entries = listOf(
-                        SingleActionGesture.None,
-                        SingleActionGesture.Seek,
-                        SingleActionGesture.PlayPause,
-                        SingleActionGesture.Switch,
-                        SingleActionGesture.Custom,
-                    ).associateWith { stringResource(it.stringRes) },
+                    preference = binding(ControlAnchor.ScreenLeft),
+                    entries = actionEntries(
+                        ControlAction.None,
+                        ControlAction.SeekBackward,
+                        ControlAction.PlayPause,
+                        ControlAction.PreviousEpisode,
+                        ControlAction.CustomKey(CustomKeyCodes.DoubleTapLeft.keyCode),
+                    ),
                     title = stringResource(AYMR.strings.pref_left_double_tap),
                 ),
                 Preference.PreferenceItem.ListPreference(
-                    preference = centerDoubleTap,
-                    entries = listOf(
-                        SingleActionGesture.None,
-                        SingleActionGesture.PlayPause,
-                        SingleActionGesture.Custom,
-                    ).associateWith { stringResource(it.stringRes) },
+                    preference = binding(ControlAnchor.ScreenCenter),
+                    entries = actionEntries(
+                        ControlAction.None,
+                        ControlAction.PlayPause,
+                        ControlAction.CustomKey(CustomKeyCodes.DoubleTapCenter.keyCode),
+                    ),
                     title = stringResource(AYMR.strings.pref_center_double_tap),
                 ),
                 Preference.PreferenceItem.ListPreference(
-                    preference = rightDoubleTap,
-                    entries = listOf(
-                        SingleActionGesture.None,
-                        SingleActionGesture.Seek,
-                        SingleActionGesture.PlayPause,
-                        SingleActionGesture.Switch,
-                        SingleActionGesture.Custom,
-                    ).associateWith { stringResource(it.stringRes) },
+                    preference = binding(ControlAnchor.ScreenRight),
+                    entries = actionEntries(
+                        ControlAction.None,
+                        ControlAction.SeekForward,
+                        ControlAction.PlayPause,
+                        ControlAction.NextEpisode,
+                        ControlAction.CustomKey(CustomKeyCodes.DoubleTapRight.keyCode),
+                    ),
                     title = stringResource(AYMR.strings.pref_right_double_tap),
                 ),
                 Preference.PreferenceItem.InfoPreference(
@@ -199,20 +216,22 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
     }
 
     @Composable
-    private fun getLongPressGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
-        val longPress = gesturePreferences.longPressGesture
-
+    private fun getLongPressGroup(controlBindings: ControlBindingPreferences): Preference.PreferenceGroup {
         return Preference.PreferenceGroup(
             title = stringResource(AYMR.strings.pref_category_long_press),
             preferenceItems = persistentListOf(
                 Preference.PreferenceItem.ListPreference(
-                    preference = longPress,
-                    entries = listOf(
-                        SingleActionGesture.None,
-                        SingleActionGesture.Screenshot,
-                        SingleActionGesture.PlayPause,
-                        SingleActionGesture.Custom,
-                    ).associateWith { stringResource(it.stringRes) }.toPersistentMap(),
+                    preference = controlBindings.action(
+                        ControlSurface.Player,
+                        ControlAnchor.ScreenCenter,
+                        ControlInput.LongPress,
+                    ),
+                    entries = actionEntries(
+                        ControlAction.None,
+                        ControlAction.Screenshot,
+                        ControlAction.PlayPause,
+                        ControlAction.PrimaryCustomButton,
+                    ).toPersistentMap(),
                     title = stringResource(AYMR.strings.pref_long_press),
                 ),
                 Preference.PreferenceItem.InfoPreference(
@@ -223,43 +242,42 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
     }
 
     @Composable
-    private fun getMediaControlsGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
-        val mediaPrevious = gesturePreferences.mediaPreviousGesture
-        val mediaPlayPause = gesturePreferences.mediaPlayPauseGesture
-        val mediaNext = gesturePreferences.mediaNextGesture
+    private fun getMediaControlsGroup(controlBindings: ControlBindingPreferences): Preference.PreferenceGroup {
+        fun binding(anchor: ControlAnchor) =
+            controlBindings.action(ControlSurface.Player, anchor, ControlInput.Tap)
 
         return Preference.PreferenceGroup(
             title = stringResource(AYMR.strings.pref_category_media_controls),
             preferenceItems = listOf(
                 Preference.PreferenceItem.ListPreference(
-                    preference = mediaPrevious,
-                    entries = listOf(
-                        SingleActionGesture.None,
-                        SingleActionGesture.Seek,
-                        SingleActionGesture.PlayPause,
-                        SingleActionGesture.Switch,
-                        SingleActionGesture.Custom,
-                    ).associateWith { stringResource(it.stringRes) },
+                    preference = binding(ControlAnchor.MediaPrevious),
+                    entries = actionEntries(
+                        ControlAction.None,
+                        ControlAction.SeekBackward,
+                        ControlAction.PlayPause,
+                        ControlAction.PreviousEpisode,
+                        ControlAction.CustomKey(CustomKeyCodes.MediaPrevious.keyCode),
+                    ),
                     title = stringResource(AYMR.strings.pref_media_previous),
                 ),
                 Preference.PreferenceItem.ListPreference(
-                    preference = mediaPlayPause,
-                    entries = listOf(
-                        SingleActionGesture.None,
-                        SingleActionGesture.PlayPause,
-                        SingleActionGesture.Custom,
-                    ).associateWith { stringResource(it.stringRes) },
+                    preference = binding(ControlAnchor.MediaPlayPause),
+                    entries = actionEntries(
+                        ControlAction.None,
+                        ControlAction.PlayPause,
+                        ControlAction.CustomKey(CustomKeyCodes.MediaPlay.keyCode),
+                    ),
                     title = stringResource(AYMR.strings.pref_media_playpause),
                 ),
                 Preference.PreferenceItem.ListPreference(
-                    preference = mediaNext,
-                    entries = listOf(
-                        SingleActionGesture.None,
-                        SingleActionGesture.Seek,
-                        SingleActionGesture.PlayPause,
-                        SingleActionGesture.Switch,
-                        SingleActionGesture.Custom,
-                    ).associateWith { stringResource(it.stringRes) },
+                    preference = binding(ControlAnchor.MediaNext),
+                    entries = actionEntries(
+                        ControlAction.None,
+                        ControlAction.SeekForward,
+                        ControlAction.PlayPause,
+                        ControlAction.NextEpisode,
+                        ControlAction.CustomKey(CustomKeyCodes.MediaNext.keyCode),
+                    ),
                     title = stringResource(AYMR.strings.pref_media_next),
                 ),
                 Preference.PreferenceItem.InfoPreference(
@@ -268,11 +286,14 @@ object PlayerSettingsGesturesScreen : SearchableSettings {
             ),
         )
     }
+    // <-- AM (CONTROL_BINDINGS)
 
     @Composable
-    private fun getBottomControlsGroup(gesturePreferences: GesturePreferences): Preference.PreferenceGroup {
+    private fun getBottomControlsGroup(controlBindings: ControlBindingPreferences): Preference.PreferenceGroup {
         val scope = rememberCoroutineScope()
-        val bottomPlayerButtonsPref = gesturePreferences.bottomPlayerButtons
+        val bottomPlayerButtonsPref = remember {
+            controlBindings.entries(ControlSurface.Player, ControlRegion.Bottom)
+        }
         val selectedButtons by bottomPlayerButtonsPref.stateIn(scope).collectAsState()
 
         var showDialog by rememberSaveable { mutableStateOf(false) }

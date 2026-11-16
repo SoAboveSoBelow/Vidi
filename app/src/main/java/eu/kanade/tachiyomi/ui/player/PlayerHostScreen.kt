@@ -99,8 +99,11 @@ fun PlayerOverlayHost(
     // <-- AM (PLAYER_BACK_PRIORITY_FIX)
 ) {
     val request by PlayerMediaHolder.playbackRequestFlow.collectAsStateWithLifecycle()
+    // AM (CONTROL_BINDINGS): the editor shows the player with nothing playing, so it
+    // is the one case where the host renders without a request.
+    val layoutEditor by PlayerMediaHolder.layoutEditorFlow.collectAsStateWithLifecycle()
     val currentRequest = request
-    if (currentRequest == null) {
+    if (currentRequest == null && !layoutEditor) {
         // AM (APP_WIDE_ORIENTATION_RESET_FIX) -->
         // The player locks requestedOrientation while it's up
         // (OrientationOverlay). With the persistent-host architecture
@@ -142,7 +145,12 @@ fun PlayerOverlayHost(
         // availability, the dummy-pip window, the PlayerScreen render - none of
         // which cares what is playing. The request type is only consulted where
         // it genuinely matters: the one effect that decides what to load.
-        PlayerHostScreen(request = currentRequest, backPressPriorityKey = backPressPriorityKey)
+        PlayerHostScreen(
+            request = currentRequest,
+            // AM (CONTROL_BINDINGS)
+            isLayoutEditor = layoutEditor,
+            backPressPriorityKey = backPressPriorityKey,
+        )
         // <-- AM (EXTERNAL_PLAYBACK)
         // <-- AM (CONTENT_AGNOSTIC_SESSION)
     }
@@ -161,8 +169,11 @@ fun PlayerHostScreen(
     // Was six loose library parameters. The request carries them, and carries
     // which kind of request it is - which the reconciliation effect below needs
     // and six longs could not express.
-    request: PlaybackRequest,
+    request: PlaybackRequest?,
     // <-- AM (EXTERNAL_PLAYBACK)
+    // AM (CONTROL_BINDINGS): null request plus this is the editor; null request
+    // without it cannot happen, the overlay having already returned.
+    isLayoutEditor: Boolean = false,
     // AM (PLAYER_BACK_PRIORITY_FIX) -->
     // Forwarded to PlayerScreen unchanged - see PlayerOverlayHost.
     backPressPriorityKey: Any? = null,
@@ -194,7 +205,7 @@ fun PlayerHostScreen(
         if (existingViewModel != null) {
             logcat(LogPriority.INFO) {
                 "PLAYER_HOST_SCREEN reusing existing viewModel=${System.identityHashCode(existingViewModel)} " +
-                    "for ${request.sessionKey}"
+                    "for ${request?.sessionKey}"
             }
             existingHolder.hasExternalScreenConsumer = true
             // AM (DUMMY_PIP_REOPEN_STAYS_PIP_FIX) -->
@@ -232,7 +243,7 @@ fun PlayerHostScreen(
             val vm = graph.playerViewModelFactory.create(SavedStateHandle())
             logcat(LogPriority.INFO) {
                 "PLAYER_HOST_SCREEN constructed fresh viewModel=${System.identityHashCode(vm)} " +
-                    "${request.sessionKey}"
+                    "${request?.sessionKey}"
             }
 
             val connection = object : android.content.ServiceConnection {
@@ -317,8 +328,10 @@ fun PlayerHostScreen(
     }
     LaunchedEffect(reconcilingViewModel, request) {
         val vm = reconcilingViewModel ?: return@LaunchedEffect
+        // AM (CONTROL_BINDINGS): no request is the editor, which has nothing to load.
+        val target = request ?: return@LaunchedEffect
         val last = lastReconciled
-        if (last != null && last == request.sessionKey) return@LaunchedEffect
+        if (last != null && last == target.sessionKey) return@LaunchedEffect
 
         // AM (LOAD_FAILURE_NOT_FATAL) -->
         // Records what the session ACTUALLY ended up on, not what was asked
@@ -333,7 +346,7 @@ fun PlayerHostScreen(
         }
         // <-- AM (LOAD_FAILURE_NOT_FATAL)
 
-        when (request) {
+        when (target) {
             is PlaybackRequest.External -> {
                 // No same-anime/cross-anime distinction to make: an external
                 // file has no entry to stay within, so every external request
@@ -342,17 +355,17 @@ fun PlayerHostScreen(
                 // rapid A->B still cancels cleanly.
                 PlayerMediaHolder.current?.isDummyPipActive = false
                 vm.changeToExternal(
-                    uri = request.uri,
-                    title = request.title,
+                    uri = target.uri,
+                    title = target.title,
                     // AM (EXTERNAL_RESUME_POSITION)
-                    positionMs = request.positionMs,
+                    positionMs = target.positionMs,
                     // AM (EXTERNAL_APP_LABEL)
-                    appLabel = request.appLabel,
+                    appLabel = target.appLabel,
                 )
                 recordSettledTarget()
             }
             is PlaybackRequest.Library -> {
-                val hostList = request.hosterList?.let { it.serialize() } ?: ""
+                val hostList = target.hosterList?.let { it.serialize() } ?: ""
                 when {
                     // Fresh ViewModel, nothing loaded - initial load. Guarded by
                     // currentAnime so an adopted-VM race (state not yet read)
@@ -360,13 +373,13 @@ fun PlayerHostScreen(
                     last == null -> {
                         if (vm.stateData.value.currentAnime == null) {
                             vm.changeAnime(
-                                animeId = request.animeId,
-                                episodeId = request.episodeId,
+                                animeId = target.animeId,
+                                episodeId = target.episodeId,
                                 hostList = hostList,
-                                hostIndex = request.hosterIndex,
-                                vidIndex = request.videoIndex,
+                                hostIndex = target.hosterIndex,
+                                vidIndex = target.videoIndex,
                                 // AM (PLAYBACK_QUEUE)
-                                continuesQueue = request.continuesQueue,
+                                continuesQueue = target.continuesQueue,
                             )
                             recordSettledTarget()
                         }
@@ -376,21 +389,21 @@ fun PlayerHostScreen(
                     // that comparison did implicitly when the only possible
                     // session was a library one - an external session must not
                     // fall into the same-anime branch on a null animeId.
-                    last is SessionKey.Library && last.animeId == request.animeId -> {
+                    last is SessionKey.Library && last.animeId == target.animeId -> {
                         PlayerMediaHolder.current?.isDummyPipActive = false
-                        vm.changeEpisode(request.episodeId)
+                        vm.changeEpisode(target.episodeId)
                         recordSettledTarget()
                     }
                     else -> {
                         PlayerMediaHolder.current?.isDummyPipActive = false
                         vm.changeAnime(
-                            animeId = request.animeId,
-                            episodeId = request.episodeId,
+                            animeId = target.animeId,
+                            episodeId = target.episodeId,
                             hostList = hostList,
-                            hostIndex = request.hosterIndex,
-                            vidIndex = request.videoIndex,
+                            hostIndex = target.hosterIndex,
+                            vidIndex = target.videoIndex,
                             // AM (PLAYBACK_QUEUE)
-                            continuesQueue = request.continuesQueue,
+                            continuesQueue = target.continuesQueue,
                         )
                         recordSettledTarget()
                     }
@@ -568,9 +581,28 @@ fun PlayerHostScreen(
     ) {
         PlayerScreen(
             viewModel = currentViewModel,
-            onBack = { PlayerMediaHolder.clearPlaybackRequest() },
+            // AM (CONTROL_BINDINGS)
+            isLayoutEditor = isLayoutEditor,
+            onBack = {
+                // AM (CONTROL_BINDINGS): the editor is the flag, so leaving it clears
+                // the flag; a real session still ends by clearing its request.
+                if (isLayoutEditor) {
+                    PlayerMediaHolder.closeLayoutEditor()
+                } else {
+                    PlayerMediaHolder.clearPlaybackRequest()
+                }
+            },
             backPressPriorityKey = backPressPriorityKey,
-            onEnterDummyPip = {
+            // AM (CONTROL_BINDINGS) -->
+            // Null is this parameter's existing way of saying the surface cannot get
+            // out of the way (it is already null for PlayerActivity and the spike
+            // screens), so the editor says it the same way rather than guarding each
+            // of the call sites that reads it. There is no video to shrink into a
+            // window, and the controls being laid out are the point of the screen.
+            onEnterDummyPip = if (isLayoutEditor) {
+                null
+            } else {
+                {
                 if (holder?.isDummyPipActive == true) {
                     // Effectively unreachable: PlayerScreen's BackHandler
                     // is now DISABLED while the dummy pip is up (see
@@ -609,6 +641,7 @@ fun PlayerHostScreen(
                     // before the user actually leaves the app.
                     (context as? MainActivity)?.updateAutoEnterPipParams()
                     // <-- AM (DUMMY_PIP_STALE_AUTO_ENTER_FIX)
+                    }
                 }
             },
         )
