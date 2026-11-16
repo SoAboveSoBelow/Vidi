@@ -172,10 +172,127 @@ class MediaCache(private val cacheDir: File) {
         @Synchronized
         fun cachedBytes(): Long = ranges.sumOf { it.last - it.first + 1 }
 
+        // AM (RESUME_WINDOW_IS_PER_EPISODE_FILE) -->
+        /**
+         * Whether this entry is ONE SEGMENT of a segmented stream rather than
+         * the episode's own file.
+         *
+         * MediaProxyServer mints a key per upstream file, so a progressive
+         * episode is one entry spanning the whole timeline while an HLS episode
+         * is one entry per .ts - the episode's key with "-s<hash>" appended (see
+         * resolveSibling and warmSegments, the two places that build it).
+         *
+         * The distinction decides whether a position in milliseconds means
+         * anything about which BYTES of this entry to keep. For the episode's
+         * own file it does: length over duration is the bitrate. For a segment
+         * it does not, and treating it as though it did was actively
+         * destructive - resumeWindow computed the bitrate as the SEGMENT's
+         * length over the EPISODE's duration, which for a half-megabyte segment
+         * of a 45-second clip put the resume point a few hundred bytes in, so
+         * the trim dropped the leading bytes of every segment in the episode.
+         * Those few hundred bytes are the PAT/PMT and the first PES header: it
+         * freed nothing worth freeing and left every segment a partial entry
+         * with its header missing, which is what produced "mpegts: Packet
+         * corrupt", timestamps jumping between 0.1s and 33s, audio and video
+         * opening at unrelated positions, and seeks failing outright.
+         */
+        val isSegment: Boolean get() = SEGMENT_KEY_SUFFIX.containsMatchIn(key)
+        // <-- AM (RESUME_WINDOW_IS_PER_EPISODE_FILE)
+
         // AM (RETAIN_RECENT_EPISODE_MEDIA) -->
         /** The range map as "start-end,start-end", for the on-disk index. */
         @Synchronized
         fun serializeRanges(): String = ranges.joinToString(",") { "${it.first}-${it.last}" }
+
+        // AM (TRIM_TO_RESUME_WINDOW) -->
+        /**
+         * Where a viewer would resume this entry, and the duration that position
+         * is measured against. Both null until a position has been recorded.
+         *
+         * The duration is kept because it is the only way to turn a position in
+         * MILLISECONDS into an offset in BYTES: the file's length over its
+         * duration is the bitrate, and nothing else here knows it. It is also
+         * what makes the pre-roll below an actual number of seconds rather than
+         * a guessed number of megabytes.
+         */
+        @Volatile
+        var resumePositionMs: Long? = null
+
+        @Volatile
+        var resumeDurationMs: Long? = null
+
+        /**
+         * The byte window worth keeping within [budgetBytes], or null when there
+         * is nothing to anchor one to - no recorded position, no known length.
+         *
+         * Anchored [RESUME_PRE_ROLL_MS] BEFORE the resume point and extending
+         * forward, not centred on it: playback resumes slightly behind where it
+         * stopped and then moves forward, so forward bytes are the ones about to
+         * be read. A null here means the caller has no basis for choosing which
+         * bytes matter and should fall back to deleting the entry - keeping an
+         * arbitrary prefix would be the "worthless data" case.
+         */
+        @Synchronized
+        fun resumeWindow(budgetBytes: Long): LongRange? {
+            // AM (RESUME_WINDOW_IS_PER_EPISODE_FILE) -->
+            // A segment has no timeline of its own, so there is no position to
+            // convert and no window to compute - see isSegment.
+            if (isSegment) return null
+            // <-- AM (RESUME_WINDOW_IS_PER_EPISODE_FILE)
+            val length = totalLength?.takeIf { it > 0L } ?: return null
+            val position = resumePositionMs?.takeIf { it >= 0L } ?: return null
+            val duration = resumeDurationMs?.takeIf { it > 0L } ?: return null
+            if (budgetBytes <= 0L) return null
+            val bytesPerMs = length.toDouble() / duration
+            val resumeAt = (position * bytesPerMs).toLong().coerceIn(0L, length - 1)
+            val preRoll = (RESUME_PRE_ROLL_MS * bytesPerMs).toLong().coerceAtLeast(0L)
+            val from = (resumeAt - preRoll).coerceAtLeast(0L)
+            val to = (from + budgetBytes - 1).coerceAtMost(length - 1)
+            return if (to >= from) from..to else null
+        }
+
+        /**
+         * Whether every cached byte already lies inside [window].
+         *
+         * This is what makes trimming repeatable without compounding: a second
+         * trim against an unchanged window has nothing to do and says so, so no
+         * file is rewritten and no bytes are lost to rounding on each pass. A
+         * window that has MOVED (the viewer watched on) reports false and the
+         * entry is rewritten once against the new one.
+         */
+        @Synchronized
+        fun isWithin(window: LongRange): Boolean =
+            ranges.all { it.first >= window.first && it.last <= window.last }
+
+        /** The cached ranges clipped to [window] - exactly what a trim keeps. */
+        @Synchronized
+        fun rangesWithin(window: LongRange): List<LongRange> =
+            ranges.mapNotNull { range ->
+                val from = maxOf(range.first, window.first)
+                val to = minOf(range.last, window.last)
+                if (to >= from) from..to else null
+            }
+
+        @Synchronized
+        fun replaceRanges(kept: List<LongRange>) {
+            ranges.clear()
+            ranges.addAll(kept.sortedBy { it.first })
+        }
+
+        /** The 4th index field: the resume anchor, or empty when there is none. */
+        @Synchronized
+        fun serializeResume(): String {
+            val position = resumePositionMs ?: return ""
+            val duration = resumeDurationMs ?: return ""
+            return "$position/$duration"
+        }
+
+        @Synchronized
+        fun restoreResume(serialized: String) {
+            resumePositionMs = serialized.substringBefore('/').toLongOrNull()
+            resumeDurationMs = serialized.substringAfter('/', "").toLongOrNull()
+        }
+        // <-- AM (TRIM_TO_RESUME_WINDOW)
 
         @Synchronized
         fun restoreRanges(serialized: String, length: Long?) {
@@ -232,23 +349,63 @@ class MediaCache(private val cacheDir: File) {
      */
     @Synchronized
     fun restore() {
-        if (!indexFile.exists()) return
         runCatching {
-            indexFile.readLines().forEach { line ->
-                val parts = line.split('\t')
-                if (parts.size < 3) return@forEach
-                val key = parts[0]
-                val file = File(cacheDir, key)
-                if (!file.exists()) return@forEach
-                val entry = Entry(key, file)
-                entry.restoreRanges(parts[2], parts[1].toLongOrNull())
-                entries[key] = entry
+            if (indexFile.exists()) {
+                indexFile.readLines().forEach { line ->
+                    val parts = line.split('\t')
+                    if (parts.size < 3) return@forEach
+                    val key = parts[0]
+                    val file = File(cacheDir, key)
+                    if (!file.exists()) return@forEach
+                    val entry = Entry(key, file)
+                    entry.restoreRanges(parts[2], parts[1].toLongOrNull())
+                    // AM (TRIM_TO_RESUME_WINDOW)
+                    parts.getOrNull(3)?.takeIf { it.isNotEmpty() }?.let(entry::restoreResume)
+                    entries[key] = entry
+                }
             }
         }.onFailure {
             logcat(LogPriority.WARN, it) { "MEDIA_CACHE index unreadable, starting empty" }
             entries.clear()
         }
+        // AM (MEDIA_CACHE_ORPHAN_SWEEP): always, including the no-index and
+        // unreadable-index paths above, which used to return before any of the
+        // files those cases orphan could be dealt with.
+        sweepOrphans()
     }
+
+    // AM (MEDIA_CACHE_ORPHAN_SWEEP) -->
+    /**
+     * Deletes data files the index does not describe.
+     *
+     * The ceiling is enforced against [entries], so a file no entry points at is
+     * not merely unusable - it is invisible: [evictIfNeeded] cannot count it and
+     * will never delete it, so it sits in cacheDir for the rest of the install.
+     * The index is only written by [persist], so every end of a process that did
+     * not get to run it - a crash, a swipe-kill, the service being stopped -
+     * orphans whatever had been written since the last one. That is how a 512MB
+     * setting ends up with gigabytes on disk and stays there across restarts,
+     * and why clearing the app's cache by hand was the only thing that helped.
+     *
+     * Deleting rather than adopting them, for the reason [restore]'s own comment
+     * gives: bytes with no range record cannot be told apart from holes, so they
+     * are not usable as cache - which is exactly why this cache was wiped at
+     * process start before the index existed. This keeps that guarantee for the
+     * part the index does not cover, instead of extending trust to it.
+     */
+    private fun sweepOrphans() {
+        val known = entries.keys
+        runCatching {
+            cacheDir.listFiles()?.forEach { file ->
+                if (file.name == INDEX_FILE_NAME || file.name in known) return@forEach
+                val size = file.length()
+                if (file.delete()) {
+                    logcat(LogPriority.INFO) { "MEDIA_CACHE swept orphan ${file.name} ($size bytes)" }
+                }
+            }
+        }
+    }
+    // <-- AM (MEDIA_CACHE_ORPHAN_SWEEP)
 
     /** Writes the range maps so a later process can tell which bytes are real. */
     @Synchronized
@@ -257,7 +414,11 @@ class MediaCache(private val cacheDir: File) {
             cacheDir.mkdirs()
             indexFile.writeText(
                 entries.values.joinToString("\n") { entry ->
-                    "${entry.key}\t${entry.totalLength ?: ""}\t${entry.serializeRanges()}"
+                    "${entry.key}\t${entry.totalLength ?: ""}\t${entry.serializeRanges()}" +
+                        // AM (TRIM_TO_RESUME_WINDOW): a 4th field, so an index
+                        // written by an older build still parses - the reader
+                        // only requires the first three.
+                        "\t${entry.serializeResume()}"
                 },
             )
         }.onFailure {
@@ -287,6 +448,156 @@ class MediaCache(private val cacheDir: File) {
             }
         persist()
     }
+
+    // AM (TRIM_TO_RESUME_WINDOW) -->
+    /**
+     * Records where [episodeId] would resume, so eviction can keep the bytes
+     * around that point instead of the whole entry or none of it.
+     *
+     * Takes milliseconds rather than a byte offset because the caller has the
+     * position and the duration and this has the length; splitting it any other
+     * way would make one side guess the bitrate.
+     */
+    @Synchronized
+    fun setResumePosition(episodeId: Long, positionMs: Long, durationMs: Long) {
+        if (durationMs <= 0L) return
+        entries.values
+            .filter { episodeIdOf(it.key) == episodeId }
+            // AM (RESUME_WINDOW_IS_PER_EPISODE_FILE): the episode's position is
+            // measured against the episode's timeline, which only the episode's
+            // own file has - see Entry.isSegment.
+            .filterNot { it.isSegment }
+            .forEach { entry ->
+                entry.resumePositionMs = positionMs
+                entry.resumeDurationMs = durationMs
+            }
+    }
+
+    /**
+     * Rewrites [entry] to hold only the bytes inside its resume window, freeing
+     * the rest of the disk. Returns whether anything was kept.
+     *
+     * A rewrite rather than a hole-punch because there is no portable way to
+     * free bytes from the middle of a file on Android - forgetting the ranges
+     * alone would leave the disk exactly as full, which is the thing being
+     * fixed. The window is small, so this copies megabytes, not gigabytes.
+     *
+     * What it guarantees:
+     * - It does nothing when the entry is already inside its window, so running
+     *   it repeatedly cannot shave the kept region a little smaller each time.
+     * - It only ever reports success after the kept ranges have been read in
+     *   full. A short read means the range map claimed bytes the file does not
+     *   have, so the original is left untouched and the caller deletes it as
+     *   before - a trim never turns a questionable entry into a confident one.
+     * - The range map is replaced with what was actually copied, so a later read
+     *   can only ask for bytes that are really there.
+     *
+     * What it does not guarantee: the delete-then-rename at the end is not
+     * atomic. A process death inside that window leaves the entry's file
+     * missing, which restore() already treats as a dropped entry and
+     * sweepOrphans() cleans the partial file up. The failure mode is a lost
+     * cache entry, never a file whose ranges describe someone else's bytes.
+     */
+    @Synchronized
+    private fun trimToResumeWindow(entry: Entry, budgetBytes: Long): Boolean {
+        val window = entry.resumeWindow(budgetBytes) ?: return false
+        if (entry.isWithin(window)) return true
+        val kept = entry.rangesWithin(window)
+        if (kept.isEmpty()) return false
+
+        val target = File(cacheDir, entry.key + TRIM_SUFFIX)
+        runCatching { target.delete() }
+        val copied = runCatching {
+            RandomAccessFile(entry.file, "r").use { source ->
+                RandomAccessFile(target, "rw").use { destination ->
+                    val buffer = ByteArray(TRIM_COPY_BUFFER_BYTES)
+                    kept.forEach { range ->
+                        var offset = range.first
+                        while (offset <= range.last) {
+                            val chunk = minOf(buffer.size.toLong(), range.last - offset + 1).toInt()
+                            source.seek(offset)
+                            var read = 0
+                            while (read < chunk) {
+                                val count = source.read(buffer, read, chunk - read)
+                                if (count < 0) return@runCatching false
+                                read += count
+                            }
+                            destination.seek(offset)
+                            destination.write(buffer, 0, chunk)
+                            offset += chunk
+                        }
+                    }
+                    destination.fd.sync()
+                }
+            }
+            true
+        }.getOrDefault(false)
+
+        val expectedLength = kept.last().last + 1
+        if (!copied || target.length() != expectedLength) {
+            runCatching { target.delete() }
+            logcat(LogPriority.WARN) { "MEDIA_CACHE trim of ${entry.key} failed, leaving it intact" }
+            return false
+        }
+
+        val freed = entry.file.length() - target.length()
+        if (!entry.file.delete() || !target.renameTo(entry.file)) {
+            runCatching { target.delete() }
+            logcat(LogPriority.WARN) { "MEDIA_CACHE trim of ${entry.key} could not be swapped in" }
+            return false
+        }
+        entry.replaceRanges(kept)
+        logcat(LogPriority.INFO) {
+            "MEDIA_CACHE trimmed ${entry.key} to $window, freed $freed bytes"
+        }
+        return true
+    }
+    // <-- AM (TRIM_TO_RESUME_WINDOW)
+
+    // AM (DOWNLOADED_NEEDS_NO_CACHE) -->
+    /**
+     * Drops every entry belonging to [episodeId].
+     *
+     * Called when an episode finishes downloading: the download is a permanent
+     * copy that playback reads straight off disk (a local path is never proxied,
+     * see Downloader.proxiedVideoUrl and the player's equivalent), so the cached
+     * bytes are a second copy of the same file that can never be read again.
+     * They also went on competing for the retention ceiling, evicting the
+     * previous episode - which the cache does need - to keep bytes for one that
+     * is already on disk.
+     *
+     * Protected entries are left alone, as everywhere else: if the episode is
+     * being watched through the proxy at this moment, its bytes are being read
+     * and the next sweep will take them instead.
+     */
+    @Synchronized
+    fun dropEpisode(episodeId: Long) {
+        entries.values.toList()
+            .filterNot { isProtected(it) }
+            .filter { episodeIdOf(it.key) == episodeId }
+            .forEach { entry ->
+                entries.remove(entry.key)
+                runCatching { entry.file.delete() }
+                logcat(LogPriority.INFO) { "MEDIA_CACHE dropped downloaded ${entry.key}" }
+            }
+        persist()
+    }
+    // <-- AM (DOWNLOADED_NEEDS_NO_CACHE)
+
+    // AM (CACHED_BYTES_STAY_ADDRESSABLE) -->
+    /**
+     * Whether any bytes of [episodeId] are still held.
+     *
+     * Asked before a proxy registration is released: the registration is what
+     * maps a request to an entry, so letting it go while the entry is still on
+     * disk makes those bytes unreachable until something re-resolves the stream
+     * and registers it again - a server round trip to read a file that never
+     * left the device.
+     */
+    @Synchronized
+    fun holdsEpisode(episodeId: Long): Boolean =
+        entries.values.any { episodeIdOf(it.key) == episodeId && it.cachedBytes() > 0L }
+    // <-- AM (CACHED_BYTES_STAY_ADDRESSABLE)
 
     /** "ep<id>-<quality>" - see MediaProxyServer.cacheKeyFor. */
     private fun episodeIdOf(key: String): Long? =
@@ -341,19 +652,75 @@ class MediaCache(private val cacheDir: File) {
      */
     @Synchronized
     private fun evictIfNeeded() {
-        var total = entries.values.sumOf { it.cachedBytes() }
+        // AM (CEILING_EXCLUDES_PROTECTED) -->
+        // The total counts only what the ceiling actually governs.
+        //
+        // It used to sum every entry, the protected ones included, while only
+        // the unprotected ones could be evicted to bring it down - so the
+        // episode being watched was charged against a ceiling it is exempt from.
+        // One HD episode is larger than any sane setting on its own, which made
+        // the comparison true from the moment playback started and evicted the
+        // whole remainder however small it was: the previous episode in the
+        // queue was always deleted within seconds of the next one starting, and
+        // going back to it re-downloaded from nothing. That is the opposite of
+        // what the setting is for, and it is what the doc comment above has
+        // always claimed this does - "the ceiling bounds the kept remainder,
+        // not the active episode on top of it".
+        //
+        // Taken once rather than re-read per step, so the sum and the eviction
+        // order describe the same set - entries is concurrent, and the old form
+        // iterated it twice.
+        val evictable = entries.values.filterNot { isProtected(it) }
+        var total = evictable.sumOf { it.cachedBytes() }
         if (total <= maxBytes) return
+        // <-- AM (CEILING_EXCLUDES_PROTECTED)
 
-        entries.values
-            .filterNot { isProtected(it) }
-            .sortedBy { it.lastUsedAt }
-            .forEach { entry ->
-                if (total <= maxBytes) return
-                total -= entry.cachedBytes()
-                entries.remove(entry.key)
-                runCatching { entry.file.delete() }
-                logcat(LogPriority.INFO) { "MEDIA_CACHE evicted ${entry.key}" }
-            }
+        // AM (TRIM_TO_RESUME_WINDOW) -->
+        // The most recently used entry is trimmed rather than deleted; the ones
+        // behind it are deleted as before.
+        //
+        // That entry is the episode just left - the one being come back to - and
+        // on any realistic setting it does not fit whole: a ceiling smaller than
+        // an HD episode made the old all-or-nothing pass delete it in full, so
+        // the feature kept nothing at all in exactly the case it exists for.
+        // Deleting the older entries first means the survivor gets the whole
+        // budget rather than a share of it, which is what keeps the kept window
+        // as long as the setting allows instead of trimming more than it has to.
+        // AM (RESUME_WINDOW_IS_PER_EPISODE_FILE) -->
+        // Only an entry that CAN be trimmed is spared from the pass below.
+        //
+        // A segmented episode's newest entry is one .ts, not the episode, so
+        // sparing it bought nothing and the trim then mangled it. With no
+        // trimmable entry there is no survivor, and this is the whole-entry
+        // eviction by recency that it was before the trim existed - which for a
+        // segmented stream is the better unit anyway: the segments still held
+        // are the ones most recently read, so they are the ones around where the
+        // viewer stopped, and a segment is either complete or absent rather than
+        // complete-looking and short of its header.
+        val ordered = evictable.sortedBy { it.lastUsedAt }
+        val survivor = ordered.lastOrNull { !it.isSegment }
+        // <-- AM (RESUME_WINDOW_IS_PER_EPISODE_FILE)
+        ordered.forEach { entry ->
+            if (total <= maxBytes) return
+            if (entry === survivor) return@forEach
+            total -= entry.cachedBytes()
+            entries.remove(entry.key)
+            runCatching { entry.file.delete() }
+            logcat(LogPriority.INFO) { "MEDIA_CACHE evicted ${entry.key}" }
+        }
+
+        if (total <= maxBytes || survivor == null) return
+        // Falls through to deleting it when there is no resume anchor to keep a
+        // window around, or when the rewrite could not be trusted - an entry
+        // whose kept bytes cannot be verified is not kept.
+        if (trimToResumeWindow(survivor, maxBytes)) {
+            persist()
+            return
+        }
+        entries.remove(survivor.key)
+        runCatching { survivor.file.delete() }
+        logcat(LogPriority.INFO) { "MEDIA_CACHE evicted ${survivor.key}" }
+        // <-- AM (TRIM_TO_RESUME_WINDOW)
     }
 
     // AM (EVICT_ON_WRITE) -->
@@ -395,6 +762,16 @@ class MediaCache(private val cacheDir: File) {
         /** How many bytes may land between ceiling checks. */
         private const val EVICTION_CHECK_INTERVAL_BYTES = 8L * 1024 * 1024
         // <-- AM (EVICT_ON_WRITE)
+
+        // AM (TRIM_TO_RESUME_WINDOW) -->
+        /** How far before the resume point the kept window starts. */
+        private const val RESUME_PRE_ROLL_MS = 10_000L
+        private const val TRIM_SUFFIX = ".trim"
+        private const val TRIM_COPY_BUFFER_BYTES = 1 shl 16
+        // <-- AM (TRIM_TO_RESUME_WINDOW)
+
+        // AM (RESUME_WINDOW_IS_PER_EPISODE_FILE)
+        private val SEGMENT_KEY_SUFFIX = Regex("-s\\d+$")
 
         @Volatile
         private var instance: MediaCache? = null

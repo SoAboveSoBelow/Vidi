@@ -15,6 +15,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.calculateEndPadding
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.MaterialTheme
@@ -61,12 +63,14 @@ import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
 import eu.kanade.tachiyomi.ui.player.Sheets
 import eu.kanade.tachiyomi.ui.player.controls.components.BrightnessSlider
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlAvailability
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
 import eu.kanade.tachiyomi.ui.player.controls.components.SeekbarWithTimers
 import eu.kanade.tachiyomi.ui.player.controls.components.TextPlayerUpdate
 import eu.kanade.tachiyomi.ui.player.controls.components.ThumbnailPreview
 import eu.kanade.tachiyomi.ui.player.controls.components.VolumeSlider
 import eu.kanade.tachiyomi.ui.player.controls.components.controlActionIcon
+import eu.kanade.tachiyomi.util.system.castIncluded
 import kotlinx.coroutines.delay
 import mihon.app.di.appGraph
 import tachiyomi.i18n.aniyomi.AYMR
@@ -226,6 +230,17 @@ fun PlayerControls(
             }
         }
     }
+
+    // AM (CONTROL_BINDINGS): one answer per session for which bindings have
+    // anything to act on, shared by every region so the same control does not
+    // appear in one bar and not another. The conditions are the ones each of
+    // these buttons carried before the rows were rendered from stored bindings.
+    val controlAvailability = ControlAvailability(
+        isEpisodeOnline = stateData.isEpisodeOnline,
+        hasChapterIndicator = uiData.showChapterIndicator && stateData.currentChapter != null,
+        isPipAvailable = stateData.isPipAvailable,
+        isCastAvailable = castIncluded && uiData.enableCast,
+    )
 
     // AM (SYSTEM_BAR_CONTROLS_INSET) -->
     // When "show system status bar with controls" is on, PlayerControls' edge-to-edge
@@ -507,6 +522,7 @@ fun PlayerControls(
                     hasNext = nextEnabled,
                     // AM (BROWSE_SCROLLER_CONTROLS)
                     showMediaButtons = showMediaButtons,
+                    availability = controlAvailability,
                     onAction = onControlAction,
                     isStopped = stateData.isStopped,
                     // AM (CLIP_PLAYBACK)
@@ -567,8 +583,19 @@ fun PlayerControls(
                 )
             }
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            // AM (CONTROL_BINDINGS_TOP_BAR_RESERVE) -->
+            // The button cluster is measured against the bar MINUS what the back
+            // button and the title need, rather than against the whole bar.
+            //
+            // Row measures a child with no weight first, and against everything
+            // available, so the cluster sized itself as though the left side were
+            // not there and then took that room from it: the title was squeezed
+            // to nothing (and past its own minimum) while the cluster laid out
+            // more slots than the bar can hold. Capping the cluster is what makes
+            // the reserve real - the weighted left side then receives at least
+            // TOP_BAR_RESERVED_START, and the title still absorbs whatever the
+            // cluster leaves beyond it.
+            BoxWithConstraints(
                 modifier = Modifier.constrainAs(topBar) {
                     top.linkTo(parent.top, MaterialTheme.padding.medium + statusBarTopPadding)
                     start.linkTo(parent.start)
@@ -576,93 +603,109 @@ fun PlayerControls(
                     width = Dimension.fillToConstraints
                 },
             ) {
-                AnimatedVisibility(
-                    visible = uiData.controlsShown && !uiData.isControlsLocked,
-                    enter = if (!uiData.reduceMotion) {
-                        slideInHorizontally(playerControlsEnterAnimationSpec()) { -it } +
-                            fadeIn(playerControlsEnterAnimationSpec())
-                    } else {
-                        fadeIn(playerControlsEnterAnimationSpec())
-                    },
-                    exit = if (!uiData.reduceMotion) {
-                        slideOutHorizontally(playerControlsExitAnimationSpec()) { -it } +
-                            fadeOut(playerControlsExitAnimationSpec())
-                    } else {
-                        fadeOut(playerControlsExitAnimationSpec())
-                    },
-                    modifier = Modifier.weight(1f),
+                val topBarClusterMaxWidth = (maxWidth - TOP_BAR_RESERVED_START).coerceAtLeast(0.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    TopLeftPlayerControls(
-                        // AM (PLAYLIST_SOURCE_IDENTITY) -->
-                        // The source the PLAYING episode came from, not the entry
-                        // the session was opened on: a playlist can run across a
-                        // merged entry's children and anything queued, and
-                        // uiData.animeTitle is written once per load, so it named
-                        // whichever entry started the session for the rest of it.
-                        animeTitle = stateData.currentEpisode
-                            ?.let(stateData::sourceTitleOf)
-                            ?.takeIf { it.isNotBlank() }
-                            ?: uiData.animeTitle.takeIf { it.isNotBlank() }
-                            // AM (CONTROL_BINDINGS): the editor can be opened with nothing
-                            // playing, and an empty title collapses the area it is supposed
-                            // to be showing the size of.
-                            ?: if (editSlot != null) stringResource(AYMR.strings.pref_player_controls_sample_title) else "",
-                        // <-- AM (PLAYLIST_SOURCE_IDENTITY)
-                        // AM (EPISODE_NAMES) -->
-                        // Resolved here rather than stored, so it matches the
-                        // episode list and follows a rename made while this
-                        // session is alive.
-                        mediaTitle = stateData.currentEpisode
-                            ?.let(stateData::displayNameOf)
-                            ?.takeIf { it.isNotBlank() }
+                    AnimatedVisibility(
+                        visible = uiData.controlsShown && !uiData.isControlsLocked,
+                        enter = if (!uiData.reduceMotion) {
+                            slideInHorizontally(playerControlsEnterAnimationSpec()) { -it } +
+                                fadeIn(playerControlsEnterAnimationSpec())
+                        } else {
+                            fadeIn(playerControlsEnterAnimationSpec())
+                        },
+                        exit = if (!uiData.reduceMotion) {
+                            slideOutHorizontally(playerControlsExitAnimationSpec()) { -it } +
+                                fadeOut(playerControlsExitAnimationSpec())
+                        } else {
+                            fadeOut(playerControlsExitAnimationSpec())
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        TopLeftPlayerControls(
+                            // AM (PLAYLIST_SOURCE_IDENTITY) -->
+                            // The source the PLAYING episode came from, not the entry
+                            // the session was opened on: a playlist can run across a
+                            // merged entry's children and anything queued, and
+                            // uiData.animeTitle is written once per load, so it named
+                            // whichever entry started the session for the rest of it.
+                            animeTitle = stateData.currentEpisode
+                                ?.let(stateData::sourceTitleOf)
+                                ?.takeIf { it.isNotBlank() }
+                                ?: uiData.animeTitle.takeIf { it.isNotBlank() }
+                                // AM (CONTROL_BINDINGS): the editor can be opened with nothing
+                                // playing, and an empty title collapses the area it is supposed
+                                // to be showing the size of.
+                                ?: if (editSlot != null) {
+                                    stringResource(AYMR.strings.pref_player_controls_sample_title)
+                                } else {
+                                    ""
+                                },
+                            // <-- AM (PLAYLIST_SOURCE_IDENTITY)
+                            // AM (EPISODE_NAMES) -->
+                            // Resolved here rather than stored, so it matches the
+                            // episode list and follows a rename made while this
+                            // session is alive.
+                            mediaTitle = stateData.currentEpisode
+                                ?.let(stateData::displayNameOf)
+                                ?.takeIf { it.isNotBlank() }
+                                // AM (CONTROL_BINDINGS)
+                                ?: if (editSlot != null) {
+                                    stringResource(AYMR.strings.pref_player_controls_sample_episode)
+                                } else {
+                                    ""
+                                },
+                            // <-- AM (EPISODE_NAMES)
+                            onTitleClick = { onPlayerEvent(PlayerEvent.ShowEpisodeDialog) },
+                            onBackClick = onBack,
                             // AM (CONTROL_BINDINGS)
-                            ?: if (editSlot != null) stringResource(AYMR.strings.pref_player_controls_sample_episode) else "",
-                        // <-- AM (EPISODE_NAMES)
-                        onTitleClick = { onPlayerEvent(PlayerEvent.ShowEpisodeDialog) },
-                        onBackClick = onBack,
-                        // AM (CONTROL_BINDINGS)
-                        showStaticSlots = editSlot != null,
-                    )
-                }
-
-                AnimatedVisibility(
-                    visible = uiData.controlsShown && !uiData.isControlsLocked,
-                    enter = if (!uiData.reduceMotion) {
-                        slideInHorizontally(playerControlsEnterAnimationSpec()) { it } +
-                            fadeIn(playerControlsEnterAnimationSpec())
-                    } else {
-                        fadeIn(playerControlsEnterAnimationSpec())
-                    },
-                    exit = if (!uiData.reduceMotion) {
-                        slideOutHorizontally(playerControlsExitAnimationSpec()) { it } +
-                            fadeOut(playerControlsExitAnimationSpec())
-                    } else {
-                        fadeOut(playerControlsExitAnimationSpec())
-                    },
-                ) {
-                    // AM (BROWSE_SCROLLER_CONTROLS)
-                    if (showTrackControls) {
-                        TopRightPlayerControls(
-                            entries = controlLayout.entries(ControlRegion.TopBar),
-                            customButtons = uiData.customButtons,
-                            customToggleStates = uiData.customToggleStates,
-                            isEpisodeOnline = stateData.isEpisodeOnline,
-                            onAction = onControlAction,
-                            onSlotEdit = editSlot?.let { edit -> { index -> edit(ControlRegion.TopBar, index) } },
-                            onSlotMove = moveSlot?.let { move ->
-                                { moves -> move(ControlRegion.TopBar, moves) }
-                            },
-                            onArrangeStart = onArrangeStart?.let { start ->
-                                { index -> start(ControlRegion.TopBar, index) }
-                            },
-                            onSlotInsert = insertSlot?.let { insert ->
-                                { index -> insert(ControlRegion.TopBar, index) }
-                            },
-                            isArranging = arrangingRegion != null,
+                            showStaticSlots = editSlot != null,
                         )
                     }
-                }
 
+                    AnimatedVisibility(
+                        visible = uiData.controlsShown && !uiData.isControlsLocked,
+                        enter = if (!uiData.reduceMotion) {
+                            slideInHorizontally(playerControlsEnterAnimationSpec()) { it } +
+                                fadeIn(playerControlsEnterAnimationSpec())
+                        } else {
+                            fadeIn(playerControlsEnterAnimationSpec())
+                        },
+                        exit = if (!uiData.reduceMotion) {
+                            slideOutHorizontally(playerControlsExitAnimationSpec()) { it } +
+                                fadeOut(playerControlsExitAnimationSpec())
+                        } else {
+                            fadeOut(playerControlsExitAnimationSpec())
+                        },
+                        modifier = Modifier.widthIn(max = topBarClusterMaxWidth),
+                    ) {
+                        // AM (BROWSE_SCROLLER_CONTROLS)
+                        if (showTrackControls) {
+                            TopRightPlayerControls(
+                                entries = controlLayout.entries(ControlRegion.TopBar),
+                                customButtons = uiData.customButtons,
+                                customToggleStates = uiData.customToggleStates,
+                                autoPlayEnabled = uiData.autoPlayEnabled,
+                                availability = controlAvailability,
+                                onAction = onControlAction,
+                                onSlotEdit = editSlot?.let { edit -> { index -> edit(ControlRegion.TopBar, index) } },
+                                onSlotMove = moveSlot?.let { move ->
+                                    { moves -> move(ControlRegion.TopBar, moves) }
+                                },
+                                onArrangeStart = onArrangeStart?.let { start ->
+                                    { index -> start(ControlRegion.TopBar, index) }
+                                },
+                                onSlotInsert = insertSlot?.let { insert ->
+                                    { index -> insert(ControlRegion.TopBar, index) }
+                                },
+                                isArranging = arrangingRegion != null,
+                            )
+                        }
+                    }
+
+                }
             }
 
             AnimatedVisibility(
@@ -725,6 +768,7 @@ fun PlayerControls(
                     castEnabled = uiData.enableCast,
                     castLoading = stateData.isLoadingCasting,
                     castError = stateData.isErrorCasting,
+                    availability = controlAvailability,
                     onLockControls = { if (editSlot == null) onPlayerEvent(PlayerEvent.LockControls(true)) },
                     onCycleRotation = { if (editSlot == null) onPlayerEvent(PlayerEvent.CycleRotation) },
                     onPlaybackSpeedChange = { if (editSlot == null) onPlayerEvent(PlayerEvent.ChangeSpeed(it)) },

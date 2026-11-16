@@ -678,7 +678,32 @@ fun PlayerScreen(
                     qualitySwitch?.let { pending ->
                         key(pending.player) {
                             MpvSurface(
-                                modifier = Modifier.requiredSize(1.dp),
+                                // AM (A_PREPARED_FRAME_IS_FULL_SIZE) -->
+                                // The same size as the live surface, not a 1.dp stub.
+                                //
+                                // A prepared instance decodes at full resolution
+                                // but its VO renders to the surface it was given,
+                                // so a 1.dp surface meant mpv configured output at
+                                // 3x3 px - "Video display: 1920x1080 -> 3x1" in the
+                                // logs - and wrote 3-pixel frames into the
+                                // instance's persistent texture. The promote then
+                                // handed that texture to the full-size surface,
+                                // which stretched a 3-pixel image across the
+                                // screen: the first moment of every switch arrived
+                                // as a smear until a correctly sized frame
+                                // replaced it.
+                                //
+                                // It stays invisible for the same reason it always
+                                // was - it is composed BEFORE the live surface in
+                                // this Box, so the live one draws over it
+                                // completely - and the cost is one extra
+                                // full-size VO for the length of a preparation,
+                                // which is the thing a preparation is for.
+                                modifier = Modifier.fillMaxSize(),
+                                // <-- AM (A_PREPARED_FRAME_IS_FULL_SIZE)
+                                // AM (AN_OFFSCREEN_INSTANCE_FORCES_NO_WINDOW): no
+                                // dummy video for an instance nobody is watching.
+                                forceWindow = false,
                                 player = pending.player,
                                 videoOutput = viewModel.videoOutput,
                                 onSurfaceAttachedChanged = { attached ->

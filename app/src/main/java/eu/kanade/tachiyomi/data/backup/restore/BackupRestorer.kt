@@ -150,6 +150,13 @@ class BackupRestorer(
             restoreAmount += 1
         }
         // <-- AY
+        // AM (JS_PROJECTS_ARE_NOT_OPTIONAL) -->
+        // Its own step when the extension step is not running, since that is the
+        // step it used to be folded into - see restoreJsProjects.
+        if (!options.extensions && backup.backupJsProjects.isNotEmpty()) {
+            restoreAmount += 1
+        }
+        // <-- AM (JS_PROJECTS_ARE_NOT_OPTIONAL)
         // AM -->
         if (needsSecondPass(options)) {
             restoreAmount += 1
@@ -180,6 +187,13 @@ class BackupRestorer(
                 restoreExtensions(backup.backupExtensions, backup.backupJsProjects)
             }
             // <-- AY
+            // AM (JS_PROJECTS_ARE_NOT_OPTIONAL) -->
+            // Restored whether or not the extension list is, to match what the
+            // backup now always carries.
+            else if (backup.backupJsProjects.isNotEmpty()) {
+                restoreJsProjects(backup.backupJsProjects)
+            }
+            // <-- AM (JS_PROJECTS_ARE_NOT_OPTIONAL)
 
             // TODO: optionally trigger online library + tracker update
         }
@@ -422,6 +436,29 @@ class BackupRestorer(
             isSync,
         )
     }
+
+    // AM (JS_PROJECTS_ARE_NOT_OPTIONAL) -->
+    /**
+     * Projects alone, for a restore that is not restoring the extension list.
+     *
+     * The same body as the tail of [restoreExtensions], progress tick included,
+     * so the two paths are interchangeable from the notification's point of view.
+     */
+    private fun CoroutineScope.restoreJsProjects(
+        jsProjects: List<BackupJsProject>,
+    ) = launch {
+        ensureActive()
+        jsProjectsRestorer.restoreJsProjects(jsProjects)
+
+        val progress = restoreProgress.incrementAndFetch()
+        notifier.showRestoreProgress(
+            context.stringResource(MR.strings.source_settings),
+            progress,
+            restoreAmount,
+            isSync,
+        )
+    }
+    // <-- AM (JS_PROJECTS_ARE_NOT_OPTIONAL)
 
     private fun CoroutineScope.restoreExtensions(
         extensions: List<BackupExtension>,

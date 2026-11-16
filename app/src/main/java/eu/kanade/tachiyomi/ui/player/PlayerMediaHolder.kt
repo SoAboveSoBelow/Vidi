@@ -1801,7 +1801,30 @@ class PlayerMediaHolder(
                 episodeTitle = episodeTitle,
                 animeThumbnailUrl = animeThumbnailUrl,
                 episodePreviewUrl = episodePreviewUrl,
-                positionMs = positionMs ?: it.positionMs,
+                // AM (A_POSITION_BELONGS_TO_ONE_SESSION) -->
+                // Carried only while the session is the same one.
+                //
+                // "Keep what is there" is right for a caller that has no newer
+                // position to offer about the SAME session - which is why the
+                // foreground path passes null, having its own position timer.
+                // It is never right across a session change: this function
+                // repoints sessionKey at the episode being switched TO, and the
+                // old number then described that new episode. The holder would
+                // report, say, 46s for an episode that had not loaded a frame.
+                //
+                // Harmless where a reader checks the key and the key has just
+                // changed; not harmless on reinit after process death, where the
+                // key genuinely matches what is being resumed and that stale
+                // number is taken as the resume point - an episode never opened
+                // starting part way in. The notification and the dummy pip read
+                // this too, and showed the same wrong position.
+                //
+                // Zero rather than null: there is no position in a session that
+                // has not played yet, and the first tick overwrites it.
+                positionMs = positionMs
+                    ?: it.positionMs.takeIf { _ -> it.sessionKey == sessionKey }
+                    ?: 0,
+                // <-- AM (A_POSITION_BELONGS_TO_ONE_SESSION)
             )
         }
     }

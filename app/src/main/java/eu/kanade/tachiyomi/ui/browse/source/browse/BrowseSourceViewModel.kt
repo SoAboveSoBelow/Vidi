@@ -501,7 +501,20 @@ class BrowseSourceViewModel(
     private val _mergeResultEvent = MutableSharedFlow<Long?>()
     val mergeResultEvent = _mergeResultEvent.asSharedFlow()
 
-    /** Merges the browse selection, adding it to the library first when needed. */
+    /**
+     * Merges the browse selection.
+     *
+     * AM (BROWSE_MERGE_PARENT_ONLY): the sources themselves are deliberately NOT
+     * added to the library. The merged entry is the thing being added, so it is
+     * the one that gets favorited (createMerge inserts it favorite) and the one
+     * the category dialog's choice is applied to. Children a selection already
+     * had in the library keep the state they had - merging never takes an entry
+     * back out either.
+     *
+     * The category dialog still comes first, so the merged entry appears in the
+     * categories picked for it rather than landing uncategorized; see
+     * [confirmCategorySelection].
+     */
     fun mergeSelection() {
         viewModelScope.launchIO {
             val animeList = selectedAnime()
@@ -510,6 +523,8 @@ class BrowseSourceViewModel(
                 return@launchIO
             }
             if (animeList.all { it.favorite }) {
+                // Already in the library, so there is nothing to ask about:
+                // createMerge unions their categories onto the merged entry.
                 clearSelection()
                 merge(animeList)
             } else {
@@ -518,14 +533,22 @@ class BrowseSourceViewModel(
         }
     }
 
-    private suspend fun merge(animeList: List<Anime>) {
+    /**
+     * [categoryIds] are the merged entry's categories, replacing the union of the
+     * children's that createMerge seeds it with. Empty leaves that union alone,
+     * which is what the all-favorites path above wants.
+     */
+    private suspend fun merge(animeList: List<Anime>, categoryIds: List<Long> = emptyList()) {
         val current = animeList.mapNotNull { getAnime.await(it.id) }
-        val mergedId = try {
-            mergeAnimeEntries.mergeSelection(current).id
+        val merged = try {
+            mergeAnimeEntries.mergeSelection(current)
         } catch (_: IllegalArgumentException) {
             null
         }
-        _mergeResultEvent.emit(mergedId)
+        if (merged != null && categoryIds.isNotEmpty()) {
+            setAnimeCategories.await(merged.id, categoryIds)
+        }
+        _mergeResultEvent.emit(merged?.id)
     }
 
     /**
@@ -578,10 +601,15 @@ class BrowseSourceViewModel(
         val categories = getCategories()
         if (categories.isEmpty()) {
             clearSelection()
-            animeList.filterNot { it.favorite }.forEach {
-                if (mergeAfter) changeAnimeFavorite(it) else addFavorite(it)
+            // AM (BROWSE_MERGE_PARENT_ONLY): with nothing to merge into a
+            // category, a merge has nothing to ask - and the sources still do
+            // not join the library, so there is no per-entry add to fall back
+            // to here either.
+            if (mergeAfter) {
+                merge(animeList)
+            } else {
+                animeList.filterNot { it.favorite }.forEach { addFavorite(it) }
             }
-            if (mergeAfter) merge(animeList)
             return
         }
 
@@ -611,6 +639,15 @@ class BrowseSourceViewModel(
         mergeAfter: Boolean = false,
     ) {
         viewModelScope.launchIO {
+            // AM (BROWSE_MERGE_PARENT_ONLY): for a merge the dialog is picking
+            // categories for the entry about to be created, not for the sources
+            // going into it, so none of the per-entry writes below apply - the
+            // selection's own library state is left exactly as it was.
+            if (mergeAfter) {
+                setDialog(null)
+                merge(animeList, include)
+                return@launchIO
+            }
             animeList.forEach { anime ->
                 val categoryIds = getVisibleCategories.await(anime.id)
                     .map { it.id }
@@ -624,7 +661,6 @@ class BrowseSourceViewModel(
                 updateAnime.awaitUpdateFavorite(anime.id, categoryIds.isNotEmpty())
             }
             setDialog(null)
-            if (mergeAfter) merge(animeList)
         }
     }
     // <-- AM (BROWSE_SELECTION)

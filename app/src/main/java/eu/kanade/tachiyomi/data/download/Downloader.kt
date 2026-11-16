@@ -545,6 +545,12 @@ class Downloader(
             }
 
             download.status = Download.State.DOWNLOADED
+
+            // AM (DOWNLOADED_NEEDS_NO_CACHE): the file on disk is the copy from
+            // here on, and a local path is never proxied, so anything this
+            // episode left in the media cache is unreachable bytes holding
+            // retention budget that the episode before it needs.
+            MediaCache.peek()?.dropEpisode(download.episode.id)
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
             // If the video threw, it will resume here

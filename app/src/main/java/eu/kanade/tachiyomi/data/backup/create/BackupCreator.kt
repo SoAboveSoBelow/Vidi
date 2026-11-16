@@ -200,11 +200,23 @@ class BackupCreator(
      * "the sources I installed or wrote", and projects are a few KB of text
      * where extension APKs are megabytes, so nothing is gained by splitting it.
      */
+    // AM (JS_PROJECTS_ARE_NOT_OPTIONAL) -->
+    // Ungated, unlike the extension list it used to ride with.
+    //
+    // The reasoning above - "the sources I installed or wrote" - put a few KB of
+    // code the user TYPED behind a checkbox that is off by default, and an
+    // automatic backup falls back to BackupOptions(), where extensions is false.
+    // So every automatic backup carried no projects at all, and the one category
+    // of content in this app that exists nowhere else was the only category not
+    // being backed up. An extension APK can be reinstalled from its repo; a
+    // project lives in filesDir and nothing but this file can bring it back.
+    //
+    // The extension LIST stays gated - that part really is a convenience.
+    @Suppress("UNUSED_PARAMETER")
     private fun backupJsProjects(options: BackupOptions): List<BackupJsProject> {
-        if (!options.extensions) return emptyList()
-
         return jsProjectsBackupCreator()
     }
+    // <-- AM (JS_PROJECTS_ARE_NOT_OPTIONAL)
     // <-- AM (JS_PROJECT_SOURCES)
 
     companion object {

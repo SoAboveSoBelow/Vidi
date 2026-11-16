@@ -43,6 +43,7 @@ import animiru.domain.player.model.ControlRegion
 import animiru.domain.player.model.freeSlots
 import eu.kanade.tachiyomi.ui.player.controls.components.AutoPlaySwitch
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlAvailability
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlRow
 import eu.kanade.tachiyomi.ui.player.controls.components.ReorderableControlSlot
@@ -66,7 +67,12 @@ fun TopRightPlayerControls(
     entries: List<ControlBinding>,
     customButtons: List<CustomButton>,
     customToggleStates: Map<Long, Boolean>,
-    isEpisodeOnline: Boolean?,
+    // AM (CONTROL_BINDINGS): the seeded auto-play toggle reports the preference
+    // the app already owns, not a state round-tripped through Lua - see
+    // switchChecked.
+    autoPlayEnabled: Boolean,
+    /** Which bindings have something to act on for what is playing. */
+    availability: ControlAvailability,
     onAction: (ControlAction) -> Unit,
     modifier: Modifier = Modifier,
     // AM (CONTROL_BINDINGS): non-null puts the row in the editor, where a tap opens
@@ -99,10 +105,16 @@ fun TopRightPlayerControls(
         // slot count cannot account for the wider auto-play switch; clipping that
         // overflow only turns the measurement error into a half-visible slot.
         val availableWidthPx = with(density) { (regionWidth - slotWidth).roundToPx() }
+        // AM (CONTROL_BINDINGS): a binding with nothing to act on is not a slot,
+        // so the window measures and fills from what is actually drawable and a
+        // later stored control moves up into the space. The editor keeps every
+        // stored position regardless - see ControlAvailability.isRendered.
+        val isEditing = onSlotEdit != null || isArranging
+        val renderable = entries.withIndex().filter { availability.isRendered(it.value, isEditing) }
         var filledWidthPx = 0
-        val filled = entries.indices.takeWhile { index ->
+        val filled = renderable.takeWhile { (_, entry) ->
             val width = with(density) {
-                if (entries[index].tap.showsToggle(customButtons)) {
+                if (entry.tap.drawsSwitch(customButtons)) {
                     switchWidth.roundToPx()
                 } else {
                     slotWidth.roundToPx()
@@ -111,9 +123,9 @@ fun TopRightPlayerControls(
             (filledWidthPx + width <= availableWidthPx).also { fits ->
                 if (fits) filledWidthPx += width
             }
-        }.count()
+        }
         // Never create free positions over stored positions hidden by this window.
-        val free = if (filled == entries.size) {
+        val free = if (filled.size == renderable.size) {
             freeSlots(
                 availableWidthPx = availableWidthPx,
                 filledWidthPx = filledWidthPx,
@@ -135,42 +147,32 @@ fun TopRightPlayerControls(
                     ),
                 )
             }
-            repeat(filled) { index ->
-                val entry = entries[index]
+            filled.forEach { (index, entry) ->
                 add(
                     ReorderableControlSlot(
                         id = ControlSlotId(ControlRegion.TopBar, index),
                         width = when {
                             entry.tap == ControlAction.None && !isArranging -> 0.dp
-                            entry.tap.showsToggle(customButtons) -> switchWidth
+                            entry.tap.drawsSwitch(customButtons) -> switchWidth
                             else -> slotWidth
                         },
-                        arrangingWidth = if (entry.tap.showsToggle(customButtons)) switchWidth else slotWidth,
+                        arrangingWidth = if (entry.tap.drawsSwitch(customButtons)) switchWidth else slotWidth,
                         onEdit = onSlotEdit?.let { edit -> { edit(index) } },
                         canDrag = onSlotEdit != null,
                         onArrangeStart = { onArrangeStart?.invoke(index) },
                     ) {
-                        when (val action = entry.tap) {
-                            ControlAction.None -> EmptySlotContent(
+                        val action = entry.tap
+                        when {
+                            action == ControlAction.None -> EmptySlotContent(
                                 horizontalSpacing = MaterialTheme.padding.mediumSmall,
                             )
-                            ControlAction.ToggleAutoPlay -> BoundControlsButton(entry, onAction)
-                            is ControlAction.CustomButton -> if (action.showsToggle(customButtons)) {
-                                AutoPlaySwitch(
-                                    isChecked = customToggleStates[action.id] == true,
-                                    onToggleAutoPlay = { onAction(action) },
-                                    modifier = Modifier
-                                        .padding(vertical = MaterialTheme.padding.medium)
-                                        .size(width = AUTO_PLAY_SWITCH_WIDTH, height = 24.dp),
-                                )
-                            } else {
-                                BoundControlsButton(entry, onAction)
-                            }
-                            ControlAction.VideoQuality -> {
-                                if (isEpisodeOnline == true || onSlotEdit != null) {
-                                    BoundControlsButton(entry, onAction)
-                                }
-                            }
+                            action.drawsSwitch(customButtons) -> AutoPlaySwitch(
+                                isChecked = switchChecked(action, autoPlayEnabled, customToggleStates),
+                                onToggleAutoPlay = { onAction(action) },
+                                modifier = Modifier
+                                    .padding(vertical = MaterialTheme.padding.medium)
+                                    .size(width = AUTO_PLAY_SWITCH_WIDTH, height = 24.dp),
+                            )
                             else -> BoundControlsButton(entry, onAction)
                         }
                     },
@@ -211,8 +213,48 @@ fun TopRightPlayerControls(
     }
 }
 
-private fun ControlAction.showsToggle(customButtons: List<CustomButton>): Boolean =
-    this is ControlAction.CustomButton && customButtons.firstOrNull { it.id == id }?.isToggle == true
+/**
+ * Whether this slot draws the switch rather than an icon button.
+ *
+ * The seeded auto-play default counts whether or not its Lua row is still there
+ * to be read: it has no icon of its own (controlActionIcon returns null for it),
+ * so an icon button would draw an empty slot. Its stored form is the only one a
+ * region normally sees, but the unresolved action is matched too - a layout
+ * written before the native defaults were seeded still holds it.
+ */
+private fun ControlAction.drawsSwitch(customButtons: List<CustomButton>): Boolean = when {
+    this == ControlAction.ToggleAutoPlay -> true
+    this is ControlAction.CustomButton ->
+        ControlAction.nativeActionForButtonId(id) == ControlAction.ToggleAutoPlay ||
+            customButtons.firstOrNull { it.id == id }?.isToggle == true
+    else -> false
+}
+
+/**
+ * AM (CONTROL_BINDINGS_AUTOPLAY_STATE): auto-play's checked state is the
+ * preference, as it was before the port.
+ *
+ * The generic path for a user's Lua switch is [customToggleStates], written from
+ * set_button_toggle, and that is still what a user-created toggle reports
+ * through. Auto-play cannot use it: the app owns that preference, the seeded Lua
+ * only asks the app to flip it, and the state Lua reports at startup is written
+ * before anything is subscribed to hear it - so the switch opened every session
+ * showing off while auto-play was on, and only looked right once tapped.
+ */
+private fun switchChecked(
+    action: ControlAction,
+    autoPlayEnabled: Boolean,
+    customToggleStates: Map<Long, Boolean>,
+): Boolean = when {
+    action == ControlAction.ToggleAutoPlay -> autoPlayEnabled
+    action is ControlAction.CustomButton ->
+        if (ControlAction.nativeActionForButtonId(action.id) == ControlAction.ToggleAutoPlay) {
+            autoPlayEnabled
+        } else {
+            customToggleStates[action.id] == true
+        }
+    else -> false
+}
 
 @Composable
 private fun BoundControlsButton(

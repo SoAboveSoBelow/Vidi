@@ -1207,10 +1207,42 @@ fun DummyPipContainer(
                     controlsShown = false
                     pipRotation = 0f
                     mode = DummyPipMode.AnimatingOut
-                    transition.animateTo(0f, tween(PIP_EXIT_MORPH_MS, easing = FastOutSlowInEasing))
-                    // Flips isDummyPipActive false - the LaunchedEffect
-                    // below then lands mode in Fullscreen.
-                    currentActions.value.onExpand()
+                    // AM (DUMMY_PIP_EXIT_MORPH_PUBLISHES_ON_CANCEL) -->
+                    // The expand is published in a finally, so leaving
+                    // AnimatingOut always reports it, not only when the
+                    // animation is allowed to finish.
+                    //
+                    // animateTo suspends for the length of the morph and throws
+                    // CancellationException if the calling coroutine dies or
+                    // another animation takes the Animatable over. onExpand is
+                    // the only thing that clears isDummyPipActive, so a morph
+                    // interrupted part-way - the session subtree recomposing,
+                    // the window being resized, the Activity being recreated,
+                    // or real PiP auto-entering on a task switch - left the
+                    // holder saying pip was up with the window already out of
+                    // Pip mode. Nothing recovers from that state: PlayerScreen
+                    // stops composing the controls while the flag is true, and
+                    // PlayerHostScreen's leak-fix collector hides them again on
+                    // every emission, so the controls could never be revealed
+                    // again for the rest of the session, however the player was
+                    // expanded. Playback, the notification and the pip's own
+                    // controls were unaffected, which is what made it look like
+                    // a controls bug rather than a stranded mode.
+                    //
+                    // The mode check keeps the hand-off: an entry morph that
+                    // takes over sets AnimatingIn, and that request owns the
+                    // outcome, exactly as before. On the normal path this runs
+                    // in the same place it always did - after the animation -
+                    // so the morph still completes before the video Box goes
+                    // back to fillMaxSize, and nothing about the visuals moves.
+                    try {
+                        transition.animateTo(0f, tween(PIP_EXIT_MORPH_MS, easing = FastOutSlowInEasing))
+                    } finally {
+                        // Flips isDummyPipActive false - the LaunchedEffect
+                        // below then lands mode in Fullscreen.
+                        if (mode == DummyPipMode.AnimatingOut) currentActions.value.onExpand()
+                    }
+                    // <-- AM (DUMMY_PIP_EXIT_MORPH_PUBLISHES_ON_CANCEL)
                 }
                 DummyPipMode.StashedLeft, DummyPipMode.StashedRight -> {
                     // Off-screen - a morph from here would look wrong, just expand.

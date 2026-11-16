@@ -18,6 +18,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkQuery
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import aniyomi.domain.merge.repository.MergeChildRepository
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.animesource.model.AnimeUpdateStrategy
 import eu.kanade.tachiyomi.animesource.model.FetchType
@@ -62,6 +63,7 @@ import tachiyomi.domain.anime.interactor.GetAnime
 import tachiyomi.domain.anime.interactor.GetLibraryAnime
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.category.model.Category
+import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
 import tachiyomi.domain.episode.model.Episode
 import tachiyomi.domain.episode.model.NoEpisodesException
 import tachiyomi.domain.library.model.GroupLibraryMode
@@ -124,6 +126,12 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
 
     @Inject private lateinit var trackerManager: TrackerManager
     // <-- AM (GROUPING)
+
+    // AM (MERGED_SOURCES_UPDATE_CHILDREN) -->
+    @Inject private lateinit var mergeChildRepository: MergeChildRepository
+
+    @Inject private lateinit var getEpisodesByAnimeId: GetEpisodesByAnimeId
+    // <-- AM (MERGED_SOURCES_UPDATE_CHILDREN)
 
     private var animeToUpdate: List<LibraryAnime> = mutableListOf()
 
@@ -197,16 +205,13 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
         groupExtra: String?,
         // <-- AM (GROUPING)
     ) {
+        // AM (MERGED_SOURCES): merge parents are kept in the list here on
+        // purpose, so the category and group filters below see them, and are
+        // replaced by their children further down - see mergeExpanded. A parent
+        // is never fetched itself: MergedSource's fetch methods throw by design
+        // (see its doc comment), which is what surfaced as an "update error" on
+        // every library update when they were passed through.
         val libraryAnime = getLibraryAnime.await()
-            // AM (MERGED_SOURCES) -->
-            // Merge parents have no fetchable source of their own -
-            // MergedSource's fetch methods throw by design (see its doc
-            // comment), which surfaced as an "update error" on every library
-            // update. Their children stay favorited, so they're updated
-            // directly as ordinary entries and the merged entry needs no
-            // special handling here at all.
-            .filterNot { it.anime.source == MergedSource.ID }
-            // <-- AM (MERGED_SOURCES)
 
         // AM (GROUPING) -->
         val groupLibraryUpdateType = libraryPreferences.groupLibraryUpdateType.get()
@@ -242,6 +247,10 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
                 LibraryGroup.BY_SOURCE -> {
                     val sourceExtra = groupExtra?.nullIfBlank()?.toIntOrNull()
                     val source = libraryAnime.map { it.anime.source }
+                        // AM (MERGED_SOURCES): not a browsable source, so it is
+                        // not one of the groups to pick from - and leaving it in
+                        // would shift every real source's position in this list.
+                        .filterNot { it == MergedSource.ID }
                         .distinct()
                         .sorted()
                         .getOrNull(sourceExtra ?: -1)
@@ -260,9 +269,31 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
         }
         // <-- AM (GROUPING)
 
+        // AM (MERGED_SOURCES_UPDATE_CHILDREN) -->
+        // A merged entry becomes the sources behind it, the same way a seasons
+        // parent becomes its seasons just below. This is what keeps a merged
+        // entry's episodes fresh when its sources are not in the library - a
+        // browse merge adds only the merged entry, and the library's own
+        // post-merge "remove originals" takes them back out.
+        //
+        // A child that IS in the library keeps its real row, counts, categories
+        // and all, rather than a synthesized one; the dedupe then collapses it
+        // with the copy the list already holds, so no entry is fetched twice
+        // however many merges it belongs to.
+        val libraryAnimeById = libraryAnime.associateBy { it.anime.id }
+        val mergeExpanded = listToUpdate.flatMap { libAnime ->
+            if (libAnime.anime.source != MergedSource.ID) return@flatMap listOf(libAnime)
+            mergeChildRepository.getChildrenByMergeParentId(libAnime.anime.id)
+                .map { child ->
+                    libraryAnimeById[child.id] ?: child.toMergeChildLibraryAnime(libAnime.categories)
+                }
+        }
+            .distinctBy { it.anime.id }
+        // <-- AM (MERGED_SOURCES_UPDATE_CHILDREN)
+
         // AY -->
         val includeSeasons = libraryPreferences.updateSeasonOnLibraryUpdate.get()
-        val lastToUpdateWithSeasons = listToUpdate.flatMap { libAnime ->
+        val lastToUpdateWithSeasons = mergeExpanded.flatMap { libAnime ->
             when (libAnime.anime.fetchType) {
                 FetchType.Seasons -> {
                     if (includeSeasons) {
@@ -342,6 +373,34 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
             }
         }
     }
+
+    // AM (MERGED_SOURCES_UPDATE_CHILDREN) -->
+    /**
+     * A merge child that is not in the library, as a row the filters can read.
+     *
+     * Counts come from the child's own episodes rather than from libraryView,
+     * which selects favorites only, so "has unseen" and "not started" mean the
+     * same thing for a merge child as for any other entry. [categories] are the
+     * merged entry's, because that is the row the user actually filed, and that
+     * is what a category-scoped update has already matched on by this point.
+     * lastSeen is left at 0: nothing on the update path reads it, so loading
+     * history for it would buy nothing.
+     */
+    private suspend fun Anime.toMergeChildLibraryAnime(categories: List<Long>): LibraryAnime {
+        val episodes = getEpisodesByAnimeId.await(id)
+        return LibraryAnime(
+            anime = this,
+            categories = categories,
+            totalCount = episodes.size.toLong(),
+            seenCount = episodes.count { it.seen }.toLong(),
+            bookmarkCount = episodes.count { it.bookmark }.toLong(),
+            fillermarkCount = episodes.count { it.fillermark }.toLong(),
+            latestUpload = episodes.maxOfOrNull { it.dateUpload } ?: 0L,
+            episodeFetchedAt = episodes.maxOfOrNull { it.dateFetch } ?: 0L,
+            lastSeen = 0L,
+        )
+    }
+    // <-- AM (MERGED_SOURCES_UPDATE_CHILDREN)
 
     /**
      * Method that updates anime in [animeToUpdate]. It's called in a background thread, so it's safe

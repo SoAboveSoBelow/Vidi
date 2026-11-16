@@ -46,6 +46,7 @@ import animiru.domain.player.model.ControlSlotId
 import animiru.domain.player.model.ControlRegion
 import animiru.domain.player.model.freeSlots
 import animiru.domain.player.model.slotCapacity
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlAvailability
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlsButton
 import eu.kanade.tachiyomi.ui.player.controls.components.ControlSlotMove
 import eu.kanade.tachiyomi.ui.player.controls.components.EmptySlotContent
@@ -87,6 +88,9 @@ fun MiddlePlayerControls(
     // AM (BROWSE_SCROLLER_CONTROLS): the feed draws no transport buttons, only the
     // centre, so the surrounding slots collapse rather than being bound to nothing.
     showMediaButtons: Boolean,
+
+    /** Which bindings have something to act on for what is playing. */
+    availability: ControlAvailability,
 
     onAction: (ControlAction) -> Unit,
 
@@ -130,8 +134,15 @@ fun MiddlePlayerControls(
         // the renderer. The left side is reversed only for middle-out presentation.
         val leftStored = entries.withIndex().filter { it.index % 2 == 0 }
         val rightStored = entries.withIndex().filter { it.index % 2 == 1 }
-        fun List<IndexedValue<ControlBinding>>.displayed() =
-            if (isArranging) this else filter { it.value.tap != ControlAction.None }
+        // AM (CONTROL_BINDINGS): a binding with nothing to act on for what is
+        // playing is not drawn at all, so the positions behind it move up -
+        // same rule as an unbound position, and the same editor exception.
+        val isEditing = onSlotEdit != null || isArranging
+        fun List<IndexedValue<ControlBinding>>.displayed() = if (isArranging) {
+            this
+        } else {
+            filter { it.value.tap != ControlAction.None && availability.isRendered(it.value, isEditing) }
+        }
         val leftDisplayed = leftStored.displayed()
         val rightDisplayed = rightStored.displayed()
         // Select from the fixed center outward, THEN trim only the outer end. Never

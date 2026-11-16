@@ -44,6 +44,7 @@ import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
 import eu.kanade.tachiyomi.ui.player.controls.LocalPlayerButtonsClickEvent
 import eu.kanade.tachiyomi.ui.player.controls.MiddlePlayerControls
+import eu.kanade.tachiyomi.ui.player.controls.components.ControlAvailability
 import eu.kanade.tachiyomi.ui.player.controls.PlayerControls
 import eu.kanade.tachiyomi.ui.player.controls.components.SeekbarWithTimers
 import kotlinx.coroutines.delay
@@ -123,6 +124,9 @@ fun ScrollerCardControls(
                         hasPrevious = false,
                         hasNext = false,
                         showMediaButtons = false,
+                        // AM (CONTROL_BINDINGS): nothing here is video-dependent -
+                        // the feed binds play/pause and nothing else.
+                        availability = ControlAvailability(),
                         onAction = { playback.togglePlayPause(animeId) },
                         enter = fadeIn(),
                         exit = fadeOut(),
