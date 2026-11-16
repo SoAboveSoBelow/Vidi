@@ -436,4 +436,7 @@
 
     <!-- AM (BROWSE_SCROLLER) -->
     <string name="action_display_scroller">Scroller</string>
+
+    <!-- AM (BROWSE_HIDE_VIEWED) -->
+    <string name="action_hide_viewed">Hide viewed</string>
 </resources>

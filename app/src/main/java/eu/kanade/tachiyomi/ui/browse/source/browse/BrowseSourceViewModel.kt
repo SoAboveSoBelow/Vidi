@@ -36,10 +36,13 @@ import eu.kanade.domain.track.interactor.AddTracks
 import eu.kanade.tachiyomi.ui.player.PlayerMediaHolder
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
@@ -62,6 +65,7 @@ import tachiyomi.domain.category.interactor.GetVisibleCategories
 import tachiyomi.domain.category.interactor.SetAnimeCategories
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.episode.interactor.SetAnimeDefaultEpisodeFlags
+import tachiyomi.domain.history.interactor.GetViewedAnimeIds
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.source.interactor.GetRemoteAnime
 import tachiyomi.domain.source.service.SourceManager
@@ -87,6 +91,8 @@ class BrowseSourceViewModel(
     private val setAnimeCategories: SetAnimeCategories,
     private val setAnimeDefaultEpisodeFlags: SetAnimeDefaultEpisodeFlags,
     private val getAnime: GetAnime,
+    // AM (BROWSE_HIDE_VIEWED)
+    private val getViewedAnimeIds: GetViewedAnimeIds,
     private val updateAnime: UpdateAnime,
     private val addTracks: AddTracks,
     // AM (MERGED_SOURCES)
@@ -196,10 +202,45 @@ class BrowseSourceViewModel(
      * Flow of Pager flow tied to [State.listing]
      */
     private val hideInLibraryItems = sourcePreferences.hideInLibraryItems.get()
+
+    // AM (BROWSE_HIDE_VIEWED) -->
+    private val hideViewedPreference = sourcePreferences.hideViewedItems(sourceId)
+
+    /**
+     * The source's own hide-viewed state, read straight off the preference so
+     * the overflow toggle and the listing below cannot disagree about it.
+     */
+    var hideViewed by hideViewedPreference.asState(viewModelScope)
+
+    /**
+     * The entries the trim is to drop, or null for no trim.
+     *
+     * Read once per answer and then held, which is what makes the trim a
+     * decision rather than a running condition. Two things ask for a new one:
+     * the toggle, and a listing change - which refetches from page one anyway.
+     * Nothing else, and in particular not the history table: an entry becoming
+     * viewed must not take itself off a listing that is already on screen.
+     *
+     * Hot, with the answer replayed, because the trim below is downstream of
+     * cachedIn and so re-runs over the cached pages every time the screen is
+     * collected again - leaving and coming back among them. A cold flow would
+     * re-read here and hand those pages a newer answer, which is the same
+     * entries disappearing, just later. Replaying the one answer means a
+     * re-collection reaches every entry's same verdict and the listing comes
+     * back as it was left.
+     */
+    private val viewedTrim: Flow<Set<Long>?> = combine(
+        state.map { it.listing }.distinctUntilChanged(),
+        hideViewedPreference.changes().distinctUntilChanged(),
+    ) { _, trimViewed -> trimViewed }
+        .map { trimViewed -> if (trimViewed) getViewedAnimeIds.await(sourceId) else null }
+        .shareIn(viewModelScope, SharingStarted.Eagerly, replay = 1)
+    // <-- AM (BROWSE_HIDE_VIEWED)
+
     val animePagerFlowFlow = state.map { it.listing }
         .distinctUntilChanged()
         .map { listing ->
-            Pager(PagingConfig(pageSize = 25)) {
+            val pager = Pager(PagingConfig(pageSize = 25)) {
                 getRemoteAnime(sourceId, listing.query ?: "", listing.filters)
             }.flow.map { pagingData ->
                 pagingData.map { anime ->
@@ -210,6 +251,24 @@ class BrowseSourceViewModel(
                     .filter { !hideInLibraryItems || !it.value.favorite }
             }
                 .cachedIn(viewModelScope)
+
+            // AM (BROWSE_HIDE_VIEWED) -->
+            // Deliberately AFTER cachedIn: a transform upstream of it runs once
+            // per page and is cached with the page, so the trim would have
+            // applied only to pages loaded after it was turned on. Downstream
+            // the transform re-runs over everything the cache holds whenever
+            // this flow emits again, which is what lets the toggle clean up -
+            // or restore - the pages already on screen without refetching one.
+            //
+            // That re-run is also why [viewedTrim] holds its answer still: the
+            // transform cannot tell a toggle from the screen merely being
+            // collected again - leaving a source and coming back is the latter -
+            // so the verdict it is handed has to be the same one either way.
+            combine(pager, viewedTrim) { pagingData, viewed ->
+                if (viewed == null) return@combine pagingData
+                pagingData.filter { it.value.id !in viewed }
+            }
+            // <-- AM (BROWSE_HIDE_VIEWED)
         }
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyFlow())
 

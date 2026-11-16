@@ -54,6 +54,33 @@ WHERE _id IN (
     WHERE A._id = :animeId
 );
 
+-- AM (BROWSE_HIDE_VIEWED) -->
+-- Every entry of one source that has been viewed at all - read once, when
+-- browse's hide-viewed trim is turned on or the listing changes, and held as
+-- the answer for the rest of that listing. Deliberately a one-shot read and
+-- not a subscription: a trim that moved with the table would take entries off
+-- a listing nobody had touched.
+--
+-- Whole source rather than the loaded page's ids: the trim is applied to the
+-- paging data on every collection, so it has no fixed set of ids to ask about.
+--
+-- Either origin counts: a card the scroller feed auto-played was opened as
+-- surely as an episode started in the player, and "viewed" here means opened,
+-- not marked seen - which is why this reads history rather than episodes.seen.
+-- One episode is enough for the entry.
+--
+-- last_seen > 0 is the same "not reset" test the history list itself applies
+-- (see historyView.sq): clearing an entry from history un-views it.
+getViewedAnimeIdsBySource:
+SELECT DISTINCT A._id
+FROM animes A
+JOIN episodes EP
+ON A._id = EP.anime_id
+JOIN history H
+ON EP._id = H.episode_id
+WHERE A.source = :sourceId AND H.last_seen > 0;
+-- <-- AM (BROWSE_HIDE_VIEWED)
+
 removeAllHistory:
 DELETE FROM history;
 

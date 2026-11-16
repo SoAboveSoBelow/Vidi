@@ -10,6 +10,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.CheckBox
+import androidx.compose.material.icons.outlined.CheckBoxOutlineBlank
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Search
@@ -248,11 +250,34 @@ fun AppBarActions(
                         showMenu = false
                     },
                     text = { Text(it.title, fontWeight = FontWeight.Normal) },
+                    // AM (OVERFLOW_TOGGLE): null leaves the slot empty rather
+                    // than filling it with nothing, so a plain action's label
+                    // keeps the padding it always had.
+                    trailingIcon = if (it.isChecked == null) {
+                        null
+                    } else {
+                        { OverflowActionCheckbox(checked = it.isChecked) }
+                    },
                 )
             }
         }
     }
 }
+
+// AM (OVERFLOW_TOGGLE) -->
+/**
+ * The checkbox an [AppBar.OverflowAction] with a state draws, matching
+ * RadioMenuItem's trailing icon so a toggle and a choice read the same.
+ */
+@Composable
+private fun OverflowActionCheckbox(checked: Boolean) {
+    Icon(
+        imageVector = if (checked) Icons.Outlined.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
+        contentDescription = stringResource(if (checked) MR.strings.selected else MR.strings.not_selected),
+        tint = if (checked) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+    )
+}
+// <-- AM (OVERFLOW_TOGGLE)
 
 /**
  * @param searchEnabled Set to false if you don't want to show search action.
@@ -426,5 +451,10 @@ sealed interface AppBar {
     data class OverflowAction(
         val title: String,
         val onClick: () -> Unit,
+        // AM (OVERFLOW_TOGGLE): an overflow entry that is a setting rather than
+        // a command carries its state here, and the menu draws a checkbox for
+        // it the way RadioMenuItem draws a radio. Null is the plain action
+        // every entry was before this, with no trailing icon at all.
+        val isChecked: Boolean? = null,
     ) : AppBarAction
 }

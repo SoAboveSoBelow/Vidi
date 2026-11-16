@@ -39,6 +39,14 @@ class HistoryRepositoryImpl(
         return database.historyQueries.getHistoryByAnimeId(animeId, HistoryMapper::mapHistory).awaitAsList()
     }
 
+    // AM (BROWSE_HIDE_VIEWED) -->
+    override suspend fun getViewedAnimeIdsBySource(sourceId: Long): Set<Long> {
+        return database.historyQueries.getViewedAnimeIdsBySource(sourceId)
+            .awaitAsList()
+            .toSet()
+    }
+    // <-- AM (BROWSE_HIDE_VIEWED)
+
     override suspend fun resetHistory(historyId: Long) {
         try {
             database.historyQueries.resetHistoryById(historyId)
