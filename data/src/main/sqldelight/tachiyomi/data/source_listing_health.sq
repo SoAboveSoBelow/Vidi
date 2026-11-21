@@ -1,0 +1,50 @@
+-- AM (A_AN_UNSTABLE_LISTING_STOPS_BEING_TRACKED) -->
+-- Whether a listing's ordering has proven stable enough to be worth recording.
+--
+-- source_page_coverage records a page so a later walk can skip it, which only
+-- ever pays off if the ordering still holds on that later walk. A listing whose
+-- order is recomputed per request - a recents feed, an algorithmic one - fails
+-- that check every time, and without this table it re-learns and re-fails
+-- forever: a walk records every page, the next walk voids every row, and the
+-- cost repeats for a skip that can never be earned.
+--
+-- One row per listing that has failed, so the table is strictly smaller than
+-- the coverage it suppresses. This is also the only bound on coverage storage
+-- as a whole: listing keys are per filter combination and so unbounded in
+-- principle, and an unstable listing is exactly the kind that accumulates rows
+-- nothing will ever read. It costs one walk to find out, then stops.
+--
+-- failures is reset by a clean verification rather than decayed, because the
+-- question is about the listing as it behaves NOW, and a walk that verified is
+-- direct evidence of stability. updated_at is when the count last changed, and
+-- is what lets a suppressed listing be retried later: a source can be quiet for
+-- a week and reorder nothing, and permanently giving up on it would be wrong.
+CREATE TABLE source_listing_health(
+    source INTEGER NOT NULL,
+    listing_key TEXT NOT NULL,
+    failures INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(source, listing_key)
+);
+
+get:
+SELECT source, listing_key, failures, updated_at
+FROM source_listing_health
+WHERE source = :source
+AND listing_key = :listingKey;
+
+noteShift:
+INSERT INTO source_listing_health(source, listing_key, failures, updated_at)
+VALUES (:source, :listingKey, 1, :updatedAt)
+ON CONFLICT(source, listing_key)
+DO UPDATE
+SET
+    failures = failures + 1,
+    updated_at = :updatedAt;
+
+clear:
+DELETE FROM source_listing_health
+WHERE source = :source
+AND listing_key = :listingKey;
+
+-- <-- AM (A_AN_UNSTABLE_LISTING_STOPS_BEING_TRACKED)

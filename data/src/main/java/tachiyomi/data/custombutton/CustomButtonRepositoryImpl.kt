@@ -2,13 +2,14 @@
 package tachiyomi.data.custombutton
 
 import android.database.sqlite.SQLiteException
-import app.cash.sqldelight.async.coroutines.awaitAsList
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.data.Database
+import tachiyomi.data.awaitList
 import tachiyomi.data.subscribeToList
 import tachiyomi.domain.custombutton.exception.SaveCustomButtonException
 import tachiyomi.domain.custombutton.model.CustomButton
@@ -26,7 +27,7 @@ class CustomButtonRepositoryImpl(
     }
 
     override suspend fun getAll(): List<CustomButton> {
-        return database.custom_buttonsQueries.findAll(::mapCustomButton).awaitAsList()
+        return database.custom_buttonsQueries.findAll(::mapCustomButton).awaitList()
     }
 
     override suspend fun insertCustomButton(
@@ -40,49 +41,66 @@ class CustomButtonRepositoryImpl(
         isToggle: Boolean,
     ) {
         try {
-            database.custom_buttonsQueries.insert(
-                name,
-                false,
-                sortIndex,
-                content,
-                doubleTapContent,
-                longPressContent,
-                onStartup,
-                icon,
-                isToggle,
-            )
+            withIOContext {
+                database.custom_buttonsQueries.insert(
+                    name,
+                    false,
+                    sortIndex,
+                    content,
+                    doubleTapContent,
+                    longPressContent,
+                    onStartup,
+                    icon,
+                    isToggle,
+                )
+            }
         } catch (ex: SQLiteException) {
             throw SaveCustomButtonException(ex)
         }
     }
 
     override suspend fun updatePartialCustomButton(update: CustomButtonUpdate) {
-        database.custom_buttonsQueries.update(
-            name = update.name,
-            isFavorite = update.isFavorite,
-            sortIndex = update.sortIndex,
-            content = update.content,
-            doubleTapContent = update.doubleTapContent,
-            longPressContent = update.longPressContent,
-            customButtonId = update.id,
-            onStartup = update.onStartup,
-            icon = update.icon,
-            isToggle = update.isToggle,
-        )
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.custom_buttonsQueries.update(
+                name = update.name,
+                isFavorite = update.isFavorite,
+                sortIndex = update.sortIndex,
+                content = update.content,
+                doubleTapContent = update.doubleTapContent,
+                longPressContent = update.longPressContent,
+                customButtonId = update.id,
+                onStartup = update.onStartup,
+                icon = update.icon,
+                isToggle = update.isToggle,
+            )
+        }
     }
 
     override suspend fun updatePartialCustomButtons(updates: List<CustomButtonUpdate>) {
-        database.transaction {
-            updates.forEach { updatePartialCustomButton(it) }
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a bulk write, and the
+        // whole transaction on one IO thread rather than each statement on
+        // the caller's - nothing inside suspends at a dispatch point, so the
+        // body does not move between threads mid-transaction.
+        withIOContext {
+            database.transaction {
+                updates.forEach { updatePartialCustomButton(it) }
+            }
         }
     }
 
     override suspend fun deleteCustomButton(customButtonId: Long) {
-        database.custom_buttonsQueries.delete(customButtonId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.custom_buttonsQueries.delete(customButtonId)
+        }
     }
 
     override suspend fun restoreDefaultCustomButtons() {
-        database.custom_buttonsQueries.restoreDefaults()
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.custom_buttonsQueries.restoreDefaults()
+        }
     }
 
     private fun mapCustomButton(

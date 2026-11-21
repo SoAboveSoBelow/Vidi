@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.data.media.MediaProxyServer
 import eu.kanade.domain.anime.model.toSAnime
 import eu.kanade.domain.episode.model.copyFromSEpisode
 import eu.kanade.tachiyomi.animesource.AnimeSource
+import eu.kanade.tachiyomi.network.SourceRequestBudget
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.ui.player.loader.EpisodeLoader
@@ -50,6 +51,9 @@ import tachiyomi.domain.episode.model.Episode
 class ClipVideoResolver(
     private val episodeLoader: EpisodeLoader,
     private val hosterLoader: HosterLoader,
+    // AM (A_SPECULATIVE_RESOLVES_YIELD_TO_REAL_ONES): null leaves every resolve
+    // unmetered, which is what a caller with no budget to spend passes.
+    private val requestBudget: SourceRequestBudget? = null,
 ) {
 
     sealed interface Result {
@@ -84,7 +88,28 @@ class ClipVideoResolver(
         cache.remove(animeId)
     }
 
-    suspend fun resolve(anime: Anime, source: AnimeSource): Result {
+    // AM (A_SPECULATIVE_RESOLVES_YIELD_TO_REAL_ONES) -->
+
+    /**
+     * @param speculative true when nothing is waiting on the answer - the feed
+     * measuring a card's aspect ratio ahead of time rather than a card being
+     * played. A speculative resolve is refused once the source's request budget
+     * is half spent, so the half that is left belongs to loads the user is
+     * actually waiting for.
+     *
+     * This is the feed's largest request cost by a distance, and the one the
+     * budget did not cover: the geometry pass runs over a window of ten cards
+     * (GEOMETRY_BEHIND..GEOMETRY_AHEAD), and a card that the listing does not
+     * state media for costs an episode list, a hoster lookup and a video
+     * resolution each - two or three source requests per card, against one for
+     * ScrollerDetailsFetcher.
+     *
+     * Checked HERE rather than at the call site because the two free paths
+     * below - a cached success, and a source that states its media in the
+     * listing - cost no requests at all, and refusing those would spend the
+     * budget's protection on work that was never going to touch the network.
+     */
+    suspend fun resolve(anime: Anime, source: AnimeSource, speculative: Boolean = false): Result {
         // AM (CLIP_RESOLVE_ONLY_CACHES_SUCCESS) -->
         // Successes only. A failure used to be cached here for the life of
         // the feed, which is the whole reason a card could sit black while
@@ -103,6 +128,14 @@ class ClipVideoResolver(
         statedBy(anime, source)?.let { result ->
             cache[anime.id] = result
             return result
+        }
+
+        // AM (A_SPECULATIVE_RESOLVES_YIELD_TO_REAL_ONES): past this point the
+        // network is involved, so this is where a speculative caller yields.
+        // Unresolved rather than an error: the caller wanted a refinement, and
+        // not getting one is the same to it as a source that could not answer.
+        if (speculative && requestBudget?.tryAcquire(anime.source, SPECULATIVE_PERMITS) == false) {
+            return Result.Unresolved
         }
 
         val result = try {
@@ -160,6 +193,7 @@ class ClipVideoResolver(
          * entries the listing says nothing about, and needs no episode list,
          * hoster or video list for the ones it does.
          */
+
         fun statedBy(anime: Anime, source: AnimeSource?): Result.Playable? {
             val feed = ScrollerFeedMedia.from(anime) ?: return null
             val httpSource = source as? AnimeHttpSource
@@ -236,6 +270,14 @@ class ClipVideoResolver(
          */
         private const val MAX_CACHED = 128
 
+        // AM (A_SPECULATIVE_RESOLVES_YIELD_TO_REAL_ONES): the ceiling a
+        // speculative resolve measures itself against, below
+        // SourceRequestBudget's own. Expressed as a smaller permit count rather
+        // than a separate window, so the reserve is simply the difference: once
+        // a source's window holds this many requests from any consumer,
+        // speculative work stops and whatever remains of the real ceiling is
+        // there for a listing load or a card the user opened.
+        private const val SPECULATIVE_PERMITS = SourceRequestBudget.DEFAULT_PERMITS / 2
     }
 }
 // <-- AM (BROWSE_SCROLLER)

@@ -1,5 +1,6 @@
 package aniyomi.ui.browse.scroller
 
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
@@ -7,6 +8,14 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegate
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import mihon.app.di.appGraph
 
 // AM (BROWSE_SCROLLER) -->
 /**
@@ -22,6 +31,9 @@ import androidx.lifecycle.ProcessLifecycleOwner
  * SecureActivityDelegate's own lock already keys off - observed here directly
  * through ProcessLifecycleOwner rather than through the lock, so this behaves
  * the same whether or not the user has app locking turned on.
+ *
+ * AM (A_LEAVING_THE_FEED_IS_NOT_LOSING_IT): cleared AFTER a grace period
+ * rather than on the stop itself - see [scheduleClear].
  */
 object ScrollerSession {
 
@@ -91,17 +103,98 @@ object ScrollerSession {
 
     private var observing = false
 
-    fun startObserving() {
+    // AM (A_LEAVING_THE_FEED_IS_NOT_LOSING_IT) -->
+    private val scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
+
+    /** The grace period in flight, if the app is currently in the background. */
+    private var pendingClear: Job? = null
+
+    /**
+     * The application context, for reading the app-lock setting the grace
+     * period ends at. Held as the application's, so this object outliving any
+     * activity leaks nothing.
+     */
+    private var appContext: Context? = null
+
+    fun startObserving(context: Context) {
+        appContext = context.applicationContext
         if (observing) return
         observing = true
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
+                /** Back before the grace period ran out: nothing was lost. */
+                override fun onStart(owner: LifecycleOwner) {
+                    pendingClear?.cancel()
+                    pendingClear = null
+                }
+
                 override fun onStop(owner: LifecycleOwner) {
-                    clear()
+                    scheduleClear()
                 }
             },
         )
     }
+
+    /**
+     * Throws the feed away [BACKGROUND_GRACE_MS] from now, or when the app
+     * lock falls due, whichever comes first.
+     *
+     * Leaving the app was treated as the end of the feed, and for the trip it
+     * is usually made for - answering a message, following a link out and
+     * coming straight back - that is the same loss the in-feed retention
+     * exists to prevent, except total: every instance released, every captured
+     * frame dropped, and the whole first screenful resolved and decoded again
+     * on return.
+     *
+     * The lock is the other bound because what is being held is decoded video
+     * of what the user was watching. Once the app is locked that is behind an
+     * authentication prompt, so holding it past the lock would keep the one
+     * thing the lock exists to put away. Read from the setting rather than
+     * timed against SecurityPreferences.lastAppClosed: the stop that writes
+     * that value is this same stop, so the delay from here is the whole of it,
+     * and a lock that never arms (authenticator off, "never", or background
+     * playback keeping the app alive - see SecureActivityDelegate) imposes no
+     * bound at all.
+     */
+    private fun scheduleClear() {
+        pendingClear?.cancel()
+        val grace = graceMillis()
+        if (grace <= 0L) {
+            pendingClear = null
+            clear()
+            return
+        }
+        pendingClear = scope.launch {
+            delay(grace)
+            pendingClear = null
+            clear()
+        }
+    }
+
+    private fun graceMillis(): Long {
+        val preferences = appContext?.appGraph?.securityPreferences ?: return BACKGROUND_GRACE_MS
+        if (!preferences.useAuthenticator.get()) return BACKGROUND_GRACE_MS
+        // The lock timer does not arm while PIP or notification playback keeps
+        // the player alive, so neither does this bound.
+        if (SecureActivityDelegate.isBackgroundPlaybackActive) return BACKGROUND_GRACE_MS
+        return when (val lockAfterMinutes = preferences.lockAppAfter.get()) {
+            -1 -> BACKGROUND_GRACE_MS // Never
+            0 -> 0L // Always: locked the moment it is in the background
+            else -> minOf(BACKGROUND_GRACE_MS, lockAfterMinutes * 60_000L)
+        }
+    }
+
+    /**
+     * How long a backgrounded feed is kept.
+     *
+     * The same figure as ScrollerPlayback's RETAIN_MS, and the same reasoning:
+     * long enough to cover a trip out of the app and back, short enough that
+     * an app left in the background overnight is not holding decoders. The two
+     * are kept equal so that leaving the feed has one answer rather than one
+     * per route out of it.
+     */
+    private const val BACKGROUND_GRACE_MS = 300_000L
+    // <-- AM (A_LEAVING_THE_FEED_IS_NOT_LOSING_IT)
 
     private fun clear() {
         playbackStates.values.forEach { it.releaseAll() }

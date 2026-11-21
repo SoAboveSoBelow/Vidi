@@ -11,6 +11,8 @@ import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.preference.getEnum
 import tachiyomi.core.common.preference.getLongArray
+// AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS)
+import tachiyomi.domain.source.model.SourcePageCoverage
 
 @Inject
 @SingleIn(AppScope::class)
@@ -53,6 +55,29 @@ class SourcePreferences(
     fun hideViewedItems(sourceId: Long): Preference<Boolean> =
         preferenceStore.getBoolean("browse_hide_viewed_items_$sourceId", false)
     // <-- AM (BROWSE_HIDE_VIEWED)
+
+    // AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS) -->
+    /**
+     * How much of a listing page must already have been viewed before
+     * hide-viewed passes the page over instead of requesting it.
+     *
+     * Not per source, unlike the toggle above: it is a statement about how much
+     * unviewed content the user is willing to miss in exchange for fewer
+     * requests, which is the same willingness on every source. See
+     * SourcePageCoverage.COVERED_FRACTION for the default and for what moving
+     * it costs in each direction, and PlayerPreferences.historyThresholdSeconds
+     * for the setting it has to be read alongside - a page's viewed fraction is
+     * only as high as that threshold lets it get.
+     *
+     * At 1.0 a page is skipped only when every entry on it was viewed, which is
+     * the conservative end rather than off; the toggle is what turns skipping
+     * off, because with the trim off nothing may be skipped at all.
+     */
+    val browsePageSkipThreshold: Preference<Float> = preferenceStore.getFloat(
+        "browse_page_skip_threshold",
+        SourcePageCoverage.COVERED_FRACTION,
+    )
+    // <-- AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS)
 
     val enabledLanguages: Preference<Set<String>> = preferenceStore.getStringSet(
         "source_languages",

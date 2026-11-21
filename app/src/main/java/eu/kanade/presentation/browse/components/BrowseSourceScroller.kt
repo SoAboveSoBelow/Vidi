@@ -64,6 +64,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import aniyomi.ui.browse.scroller.ScrollerPlaybackState
@@ -147,6 +150,52 @@ fun BrowseSourceScroller(
 
     val playback = rememberScrollerPlayback(source = source)
 
+    // AM (A_FEED_PLAYS_ONLY_ON_A_SCREEN_IN_FRONT) -->
+    // Whether anything is in front of the feed, which only an activity change
+    // answers: in-app navigation leaves this activity resumed, so a feed's
+    // audio still survives a trip to an entry screen, while the player opened
+    // over it - or any other app - stops it. Registering the observer reports
+    // the lifecycle's current state immediately, so a composition that comes
+    // back while covered starts out knowing it is.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(playback, lifecycleOwner) {
+        val observer = object : DefaultLifecycleObserver {
+            override fun onResume(owner: LifecycleOwner) {
+                playback?.setScreenInFront(true)
+            }
+
+            override fun onPause(owner: LifecycleOwner) {
+                playback?.setScreenInFront(false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        // Only the observer is removed. Leaving composition is in-app
+        // navigation, which is deliberately not a reason to stop the feed.
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    // <-- AM (A_FEED_PLAYS_ONLY_ON_A_SCREEN_IN_FRONT)
+
+    // AM (A_THE_FEED_KEEPS_ITS_PLACE) -->
+    /**
+     * The entry being looked at, and the entries just after it, as of the last
+     * time the active card settled.
+     *
+     * The feed supplies its own anchor rather than taking the top of the
+     * viewport like the other layouts: it already knows which card is being
+     * watched, and that is a better answer than whichever card the viewport
+     * happens to start on. See BrowseListingAnchor for what is done with it.
+     */
+    var anchorTrail by remember { mutableStateOf<List<Long>>(emptyList()) }
+
+    RestoreListingAnchor(
+        animeList = animeList,
+        anchorTrail = anchorTrail,
+        firstVisibleItemIndex = { listState.firstVisibleItemIndex },
+        leadingItemCount = { if (animeList.loadState.prepend is LoadState.Loading) 1 else 0 },
+        scrollToItem = { index -> listState.scrollToItem(index) },
+    )
+    // <-- AM (A_THE_FEED_KEEPS_ITS_PLACE)
+
     // AM (SCROLLER_SPEED_GATE): how fast the feed is moving right now, which is
     // what decides whether anything new may be started - see the tracker.
     val speed = rememberScrollSpeedTracker(listState)
@@ -169,6 +218,28 @@ fun BrowseSourceScroller(
                 // At the exact top, the first card is active even when a later
                 // or taller card currently occupies more of the viewport.
                 0.takeIf { animeList.itemCount > 0 }
+            } else if (!listState.canScrollForward && animeList.itemCount > 0) {
+                // AM (A_FEED_HAS_A_BOTTOM_AS_WELL_AS_A_TOP) -->
+                // The same at the other end, which it did not have.
+                //
+                // The rule below is whichever card covers the most visible
+                // pixels, and the last card in the feed is the one card that
+                // can be prevented from ever winning it: the scroll stops with
+                // it still sharing the viewport with the card above, so if it
+                // is the shorter of the two - a portrait card under a landscape
+                // one, which is most of them - no amount of scrolling can make
+                // it dominant. It therefore never became active and never
+                // played, however deliberately the user stopped on it.
+                //
+                // Keyed on the list being unable to scroll any further rather
+                // than on a visibility fraction, for the same reason the top
+                // case is: being at the end IS the statement that this is the
+                // card the user stopped on, and a fraction only moves the
+                // threshold that cannot be reached. An append still loading
+                // leaves the feed scrollable, so this is the end of the
+                // listing, not a pause part way down it.
+                animeList.itemCount - 1
+                // <-- AM (A_FEED_HAS_A_BOTTOM_AS_WELL_AS_A_TOP)
             } else {
                 layoutInfo.visibleItemsInfo
                     // Visible pixels, not fraction of the viewport: the old
@@ -208,6 +279,10 @@ fun BrowseSourceScroller(
                 // <-- AM (SCROLLER_SPEED_GATE)
                 activeIndex = index
                 playback?.setActive(animeId)
+                // AM (A_THE_FEED_KEEPS_ITS_PLACE): where the user is, recorded
+                // where the feed already works that out. Peeked rather than
+                // read, so capturing it does not ask the pager for a page.
+                anchorTrail = anchorTrailFrom(animeList, index)
                 currentOnActiveIndexChange(index)
             }
     }
@@ -1016,13 +1091,38 @@ private const val ScrollerMaxAspectRatio = 3f
  */
 private const val ACTIVE_CARD_SETTLE_MS = 120L
 
+
+// AM (A_WINDOW_IS_WHAT_THE_POOL_IS_SIZED_FOR) -->
 /**
- * Cards kept loaded behind and ahead of the one being looked at. Three decoder
- * sessions in total, which is modest enough to be safe on real hardware while
- * still meaning both directions of a scroll land on something already loaded.
+ * Cards kept loaded behind and ahead of the one being looked at.
+ *
+ * FIVE cards, and the count is load-bearing rather than descriptive:
+ * ScrollerPlayerPool.CAPACITY has to be at least this window plus one, because
+ * a pool smaller than the window evicts a card that is still inside it on every
+ * step. The two constants move together or not at all.
+ *
+ * Symmetric at 2, tried at 1 and put back: two cards out is far enough that a
+ * scroll of any pace lands on a card that already exists, and reaching one that
+ * does not is noticeable in a way the saved memory did not pay for.
+ *
+ * Cheap rather than few is the bargain. The outer ring is not held at the same
+ * cost as the inner one - the tier ladder above puts distance -1..1 on Near and
+ * everything past it on Far, which is 8MiB either way and two seconds of
+ * readahead (see MPVPlayer.applyScrollerCache). So widening the window by a
+ * card adds a card that EXISTS, with a player and an open file, rather than one
+ * holding content. That is what the ladder is for, and it is why the answer to
+ * memory pressure here is the Far tier's byte limits rather than this number.
+ *
+ * Not for url resolution, which this is sometimes mistaken for: the 20-30s a
+ * source can take to hand over a video url is covered by ClipVideoResolver,
+ * which caches 128 resolved links and is driven speculatively across
+ * GEOMETRY_BEHIND..GEOMETRY_AHEAD below - six cards ahead, further than any
+ * pool reaches, and needing no decoder. What the window buys is a decoded first
+ * frame.
  */
-private const val WINDOW_BEHIND = 1
+private const val WINDOW_BEHIND = 2
 private const val WINDOW_AHEAD = 2
+// <-- AM (A_WINDOW_IS_WHAT_THE_POOL_IS_SIZED_FOR)
 
 /**
  * How far ahead and behind card heights are worked out. Far wider than the

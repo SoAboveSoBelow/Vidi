@@ -83,6 +83,15 @@ class ClipPlayback(
     private val managesAudio: Boolean = false,
     /** The longer stream finished, for a host whose normal EOF is on video. */
     private val onEntryEnded: (() -> Unit)? = null,
+    // AM (A_A_TIMELINE_IS_NOT_KNOWN_UNTIL_BOTH_HALVES_ARE): raised once both
+    // halves have reported a length, which is the first moment a host can ask
+    // how long the entry is without being told the bed's length instead.
+    private val onTimelineReady: (() -> Unit)? = null,
+    // AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED): this load's audio could
+    // not be opened. The entry is let through to play without it; this exists
+    // so the host can drop the resolution that produced the url, which would
+    // otherwise be handed back for the life of the session.
+    private val onAudioLoadFailed: (() -> Unit)? = null,
 ) {
 
     private var audio: MPVPlayer? = null
@@ -133,7 +142,10 @@ class ClipPlayback(
      * Whether the video is the shorter, repeating stream. Its EOF is a lap,
      * not completion; the longer stream is the entry's single-play timeline.
      */
-    val videoIsRepeating: Boolean get() = looping && isSplit && audioIsLonger
+    // AM (A_THE_SHORTER_HALF_IS_A_BED): a video end is a lap when the entry
+    // loops and also when the video is the bed, which it is whenever the audio
+    // outlasts it - see applyStreamLooping.
+    val videoIsRepeating: Boolean get() = isSplit && (looping || audioIsLonger)
 
     var isMuted: Boolean = managesAudio
         private set
@@ -150,6 +162,23 @@ class ClipPlayback(
      * instance is reused between them, and an ordinary episode must not
      * inherit a loop left behind by the clip before it.
      */
+    // AM (A_LOOPING_IS_THE_USERS_CALL) -->
+    /**
+     * Turns the loop on or off for the entry already playing.
+     *
+     * [prepare] answers the same question for an entry about to load and
+     * cannot serve both: it clears the loop off both streams on the assumption
+     * that a file is about to replace whatever is there, so called
+     * mid-playback it would drop the running entry's loop and not restore it.
+     */
+    fun setLoopEnabled(enabled: Boolean) {
+        if (looping == enabled) return
+        looping = enabled
+        applyStreamLooping()
+        onTimelineReady?.invoke()
+    }
+    // <-- AM (A_LOOPING_IS_THE_USERS_CALL)
+
     fun prepare(looping: Boolean) {
         this.looping = looping
         setLooping(video, false)
@@ -195,6 +224,12 @@ class ClipPlayback(
     private fun companion(): MPVPlayer? {
         audio?.let { return it }
         val created = audioFactory?.invoke() ?: return null
+        // AM (A_AN_OPTION_OUTLIVES_THE_FILE): options, not properties.
+        // These are set on an instance with no file in it, and must hold
+        // for every file it loads - a property write here lands on nothing
+        // and is then overridden per file by MPVPlayer's own aid=no, which
+        // leaves a companion with no audio track and, with vid=no beside
+        // it, no streams at all.
         created.mpv.setOptionString("aid", "auto")
         created.mpv.setOptionString("vid", "no")
         created.mpv.setPropertyBoolean("mute", true)
@@ -272,9 +307,12 @@ class ClipPlayback(
         // the last one's, so neither are their lengths.
         latchedVideoLength = null
         latchedAudioLength = null
+        // AM (A_AN_ENDED_ENTRY_HAS_NO_POSITION)
+        // AM (A_A_LOAD_IS_MEASURED_ONCE)
+        measuredThisLoad = false
         // AM (CLIP_RESUME_FOLDS_ONTO_STREAMS)
         pendingResume = resumeAt?.toFloat()?.takeIf { it > 0f && audioUrl != null }
-        awaitStreamsOpen(key, url, audioUrl != null)
+        awaitStreamsOpen(key, url, audioUrl)
         followHostPause(key, loadGeneration)
 
         val issue = {
@@ -283,6 +321,8 @@ class ClipPlayback(
             // without them. Cleared rather than left behind when an entry
             // carries none, so one entry's headers never go to another's host.
             applyPlaybackBuffer(preloading = !shouldPlay)
+            // AM (A_AN_OPTION_OUTLIVES_THE_FILE): the demuxer reads this
+            // when it opens the stream, which is after this.
             video.mpv.setOptionString("http-header-fields", httpHeaderFields ?: "")
             audio?.mpv?.setOptionString("http-header-fields", httpHeaderFields ?: "")
             // pause=yes in the load's own options, so the file is never
@@ -324,11 +364,29 @@ class ClipPlayback(
                 // now lives in one place for player and clips alike instead of
                 // being overridden here.
                 // <-- AM (ONE_DECODE_POLICY)
-                // The same file on both instances: this one takes the video
-                // and the companion takes the audio, so the video can repeat
-                // on its own length while the audio plays through. Without
-                // aid=no the file's audio would play on both.
-                if (audioUrl == url) add("aid=no")
+                // AM (A_SPLIT_LOAD_HAS_ONE_AUDIO_OWNER) -->
+                // In any split load the companion owns the audio and this
+                // instance owns the picture. audioOwner() already says so for
+                // every split, and loadCompanion has no path that falls back to
+                // this instance's audio - a companion that cannot be built
+                // returns and the entry plays silent.
+                //
+                // Was keyed on `audioUrl == url`, which is only the same-file
+                // split. A separate-URL split therefore left this instance free
+                // to select the audio of a muxed video rendition: a second
+                // AudioTrack held open for a stream nothing reads, and that
+                // audio playing under the companion's whenever the card was
+                // unmuted, since applyMuteState clears mute on both.
+                //
+                // The same-file case the option was written for still holds and
+                // is the reason the companion exists: one file on both
+                // instances, so the video can repeat on its own length while
+                // the audio plays through, and without aid=no the file's audio
+                // would play on both.
+                // AM (A_EVERY_LOAD_STATES_ITS_OWN_TRACKS): both branches
+                // stated, so this instance's leftover aid cannot decide it.
+                if (audioUrl != null) add("aid=no") else add("aid=auto")
+                // <-- AM (A_SPLIT_LOAD_HAS_ONE_AUDIO_OWNER)
                 // AM (CLIP_RESUME_FOLDS_ONTO_STREAMS): a pair is put in place
                 // by the seek once both streams are open - see pendingResume.
                 if (resumeAt != null && audioUrl == null) add("start=$resumeAt")
@@ -360,11 +418,19 @@ class ClipPlayback(
             return
         }
         val companion = companion() ?: return
+        // AM (A_AN_OPTION_OUTLIVES_THE_FILE)
         companion.mpv.setOptionString("http-header-fields", httpHeaderFields ?: "")
         setLooping(companion, false)
         val audioOptions = buildList {
             add("pause=yes")
             add("vid=no")
+            // AM (A_EVERY_LOAD_STATES_ITS_OWN_TRACKS): the companion owns this
+            // entry's sound and has no video, so a load that selects no audio
+            // track has selected nothing - which mpv reports as having no
+            // playable data. Stated here rather than inherited from the
+            // instance, whose aid is set to no every time this card stops
+            // being the audible one.
+            add("aid=auto")
         }.joinToString(",")
         companion.mpv.command("loadfile", audioUrl, "replace", "0", audioOptions)
     }
@@ -374,7 +440,11 @@ class ClipPlayback(
      * until every stream this entry needs has reached FileLoaded; otherwise a
      * fast video runs silently or a fast audio track plays over a placeholder.
      */
-    private fun awaitStreamsOpen(key: Long, url: String, hasSeparateAudio: Boolean) {
+    // AM (A_A_DEAD_AUDIO_STREAM_IS_NOT_A_DEAD_ENTRY): the url rather than a
+    // flag, because the poll below has to compare the companion's path against
+    // it - a reused instance's previous track list opened this gate otherwise.
+    private fun awaitStreamsOpen(key: Long, url: String, audioUrl: String?) {
+        val hasSeparateAudio = audioUrl != null
         val generation = ++loadGeneration
         videoReady = false
         audioReady = !hasSeparateAudio
@@ -403,6 +473,37 @@ class ClipPlayback(
                 // AM (CLIP_RESUME_FOLDS_ONTO_STREAMS)
                 onStreamReady()
             }
+            // AM (A_A_DEAD_AUDIO_STREAM_IS_NOT_A_DEAD_ENTRY) -->
+            // The other way a stream open can finish: it can fail.
+            //
+            // The gate above has no failure branch, and the poll below only
+            // ever looks for a track list that is never going to appear - so
+            // an audio url that does not open (an expired hoster link, a 403)
+            // left audioReady false forever, both instances paused by the
+            // gate, and the card sat there with its video open and its first
+            // frame decoded, never starting.
+            //
+            // Keyed on file_error being present, not on an end arriving: a
+            // companion is reused between entries, so issuing this load's
+            // loadfile ends whatever it held before and that replacement end
+            // arrives against this generation. Only a genuine failure carries
+            // file_error.
+            loadScope.launch {
+                val companion = audio ?: return@launch
+                companion.eventFlow
+                    .filterIsInstance<MPVPlayer.Event.EndFile>()
+                    .collect { event ->
+                        if (generation != loadGeneration || loadedKey != key) return@collect
+                        if (audioReady) return@collect
+                        event.node.asMap()?.get("file_error") ?: return@collect
+                        // Open, not shut: a card with no sound is worse than
+                        // one that plays, and better than one that never does.
+                        stopCompanion()
+                        onAudioLoadFailed?.invoke()
+                        onStreamReady()
+                    }
+            }
+            // <-- AM (A_A_DEAD_AUDIO_STREAM_IS_NOT_A_DEAD_ENTRY)
         }
 
         // MPV's event flow has no replay value. A native event can therefore
@@ -419,8 +520,19 @@ class ClipPlayback(
                     if (tracks > 0 && video.mpv.getPropertyString("path") == url) videoReady = true
                 }
                 if (hasSeparateAudio && !audioReady) {
-                    val tracks = audio?.mpv?.getPropertyInt("track-list/count") ?: 0
-                    if (tracks > 0) audioReady = true
+                    // AM (A_A_DEAD_AUDIO_STREAM_IS_NOT_A_DEAD_ENTRY): match the
+                    // path as well as the tracks, which this half did not. A
+                    // companion is reused between entries and is not stopped
+                    // between them, so a track list left over from the previous
+                    // entry's audio opened this load's gate before its own
+                    // loadfile had been issued - and the card then played the
+                    // entry before's sound. The video half has always compared
+                    // its path for this reason.
+                    val companion = audio
+                    val tracks = companion?.mpv?.getPropertyInt("track-list/count") ?: 0
+                    if (tracks > 0 && companion?.mpv?.getPropertyString("path") == audioUrl) {
+                        audioReady = true
+                    }
                 }
                 if (videoReady && audioReady) {
                     // AM (CLIP_RESUME_FOLDS_ONTO_STREAMS)
@@ -448,6 +560,12 @@ class ClipPlayback(
         latchedAudioLength = null
         runCatching { audio?.mpv?.command("stop") }
     }
+
+
+    /** AM (A_A_LOAD_IS_MEASURED_ONCE): whether this load's lengths are taken. */
+    private var measuredThisLoad = false
+
+
 
     /** True once this instance has a file loaded, whether playing or held. */
     val isLoaded: Boolean get() = loadedKey != null
@@ -546,22 +664,11 @@ class ClipPlayback(
 
     /** The feed repeats both streams; the player repeats only the shorter one. */
     private fun applyStreamLooping() {
-        if (!looping) {
-            setLooping(video, false)
-            audio?.let { setLooping(it, false) }
-            return
-        }
         if (!isSplit) {
-            // The scroller's default is a looping clip. managesAudio scopes
-            // that default to the feed; the canonical player retains its
-            // single-play behavior for an ordinary episode.
-            setLooping(video, managesAudio)
-            return
-        }
-        val videoLength = videoDurationSeconds
-        val audioLength = audioDurationSeconds
-        if (videoLength <= 0f || audioLength <= 0f) {
-            setLooping(video, false)
+            // AM (A_LOOPING_IS_THE_USERS_CALL): the loop control decides an
+            // ordinary file, where this used to be scoped to the feed because
+            // nothing else could ask for it.
+            setLooping(video, looping)
             audio?.let { setLooping(it, false) }
             return
         }
@@ -569,12 +676,26 @@ class ClipPlayback(
             // The feed loops the whole entry, so neither stream may stop.
             setLooping(video, true)
             audio?.let { setLooping(it, true) }
-        } else {
-            // The player runs the longer stream once as the entry timeline;
-            // the shorter stream repeats underneath it until that timeline ends.
-            setLooping(video, audioLength > videoLength)
-            audio?.let { setLooping(it, videoLength > audioLength) }
+            return
         }
+        // AM (A_THE_SHORTER_HALF_IS_A_BED) -->
+        // The player runs the longer stream once as the entry's timeline and
+        // the shorter one repeats underneath it - and that repeat is not
+        // conditional on the entry looping. It is what a pair of different
+        // lengths is FOR: a few seconds of picture under a whole track. Left
+        // unlooped it runs out partway and the rest of the entry is a frozen
+        // frame or silence.
+        //
+        // So the loop control decides the LONGER half only: off, it plays once
+        // and its end ends the entry; on, both come round and there is no
+        // natural end.
+        val videoLength = videoDurationSeconds
+        val audioLength = audioDurationSeconds
+        setLooping(video, looping || (videoLength > 0f && audioLength > 0f && videoLength < audioLength))
+        audio?.let {
+            setLooping(it, looping || (videoLength > 0f && audioLength > 0f && audioLength < videoLength))
+        }
+        // <-- AM (A_THE_SHORTER_HALF_IS_A_BED)
     }
     // <-- AM (CLIP_TIMELINE_LENGTHS_ARE_LATCHED)
 
@@ -951,9 +1072,16 @@ class ClipPlayback(
         if (managesAudio) restoreAudioTrackSelection()
         // AM (CLIP_TIMELINE_LENGTHS_ARE_LATCHED): before the seek below, which
         // needs both lengths to fold a position onto them.
-        if (videoReady && audioReady) {
+        // AM (A_A_LOAD_IS_MEASURED_ONCE): and only once. Each half reports its
+        // own readiness and the bounded poll reports both, so this ran twice
+        // for every pair - measuring again, re-applying the loop, and telling
+        // the host its timeline was ready a second time.
+        if (videoReady && audioReady && !measuredThisLoad) {
             latchLengths()
+            measuredThisLoad = latchedVideoLength != null && latchedAudioLength != null
             applyStreamLooping()
+            // AM (A_A_TIMELINE_IS_NOT_KNOWN_UNTIL_BOTH_HALVES_ARE)
+            onTimelineReady?.invoke()
         }
         pendingResume?.takeIf { videoReady && audioReady }?.let { resume ->
             pendingResume = null
@@ -977,9 +1105,40 @@ class ClipPlayback(
         // Only the entry being watched makes sound, whatever the mute setting
         // says.
         val effectivelyMuted = isMuted || !mayHoldAudioFocus
-        if (managesAudio && !effectivelyMuted) restoreAudioTrackSelection()
+        // AM (A_THE_PLAYING_CARD_KEEPS_ITS_TRACK): keyed on playing, not on
+        // being audible. Selecting a track is not free - mpv opens the stream,
+        // syncs it and starts an output - and keying it on audibility put that
+        // between reaching a card and hearing it. The feed plays one card at a
+        // time, so this still leaves a track selected on one instance, which
+        // is what the release below was measured to be worth.
+        if (managesAudio && (shouldPlay || !effectivelyMuted)) restoreAudioTrackSelection()
         video.mpv.setPropertyBoolean("mute", effectivelyMuted)
         audio?.mpv?.setPropertyBoolean("mute", effectivelyMuted)
+        // AM (A_SILENT_IS_NOT_THE_SAME_AS_OFF) -->
+        // Muting an instance does not stop it producing audio: mute is a
+        // volume of zero, so mpv keeps the track selected, keeps decoding it,
+        // and keeps an AudioTrack started and writing. A feed holds a pool of
+        // instances and mutes all but one, so every one of them was running an
+        // audio output nobody could hear.
+        //
+        // Measured on a release build, 20s of scrolling: five AudioTracks in
+        // `dumpsys audio`, all for this process, all state:started. The profile
+        // put 20.18% of all thread time in one chain - libmpv -> CallIntMethod
+        // -> AudioTrack.write -> JNI -> pthread_mutex_unlock -> futex - with
+        // only one underrun in the whole run, so it was contention between the
+        // tracks rather than any of them starving. Decode was not the cost:
+        // libmpv.so was 6.62% in total and libavcodec did not place.
+        //
+        // Deselecting the track tears the output down, which is what makes an
+        // inactive card free. The pairing with restoreAudioTrackSelection above
+        // is deliberate: that one already knows which instance owns sound for a
+        // split load, and this one has to make exactly the same choice or a
+        // split card goes permanently silent.
+        // AM (A_THE_PLAYING_CARD_KEEPS_ITS_TRACK): released from the cards
+        // that are neither playing nor audible - the preloaded ones either
+        // side, which is where the outputs nobody could hear were.
+        if (managesAudio && effectivelyMuted && !shouldPlay) clearAudioTrackSelection()
+        // <-- AM (A_SILENT_IS_NOT_THE_SAME_AS_OFF)
         return effectivelyMuted
     }
 
@@ -990,12 +1149,52 @@ class ClipPlayback(
      * video half of a same-file split, which would play its audio twice.
      */
     private fun restoreAudioTrackSelection() {
-        val target = audio ?: video.takeUnless { splitLoad } ?: return
+        // AM (A_TRACK_SELECTION_BELONGS_TO_AN_OPEN_STREAM)
+        if (!videoReady || !audioReady) return
+        val target = audioOwner() ?: return
         val selected = target.mpv.getPropertyString("aid")
         if (selected == null || selected == "no") {
             target.mpv.setPropertyString("aid", "auto")
         }
     }
+
+    // AM (A_SILENT_IS_NOT_THE_SAME_AS_OFF) -->
+    /**
+     * Deselects the audio track, so an instance nobody is listening to stops
+     * holding an audio output. The inverse of [restoreAudioTrackSelection],
+     * and it picks the same instance for the same reason.
+     *
+     * Only reached for a host that manages audio - see [managesAudio] - where
+     * exactly one card is audible at a time. A host that does not is never
+     * silenced this way, so an ordinary player cannot lose its audio here.
+     */
+    private fun clearAudioTrackSelection() {
+        // AM (A_TRACK_SELECTION_BELONGS_TO_AN_OPEN_STREAM) -->
+        // There is nothing to release until the streams are open, and writing
+        // aid before they are does not postpone the release - it breaks the
+        // open. applyPlaybackState runs immediately after the loadfile
+        // commands go out and every card the feed loads is muted at that
+        // moment, so this fired on a companion whose file was still opening
+        // and mpv then selected its tracks with aid=no in force: no audio
+        // track, vid=no beside it, no streams at all, and the card never
+        // started. Deferred rather than dropped - onStreamReady applies the
+        // playback state again once both halves are open.
+        if (!videoReady || !audioReady) return
+        // <-- AM (A_TRACK_SELECTION_BELONGS_TO_AN_OPEN_STREAM)
+        val target = audioOwner() ?: return
+        val selected = target.mpv.getPropertyString("aid")
+        if (selected != null && selected != "no") {
+            target.mpv.setPropertyString("aid", "no")
+        }
+    }
+
+    /**
+     * The instance that owns sound for the current load: the companion for a
+     * split, otherwise the video - never the video half of a same-file split,
+     * whose audio would then play twice.
+     */
+    private fun audioOwner(): MPVPlayer? = audio ?: video.takeUnless { splitLoad }
+    // <-- AM (A_SILENT_IS_NOT_THE_SAME_AS_OFF)
 
     /**
      * Stops both instances and forgets what they were playing, keeping them
@@ -1068,7 +1267,12 @@ class ClipPlayback(
             anime?.let { ScrollerFeedMedia.from(it) }?.loops == true
 
         private fun setLooping(player: MPVPlayer, looping: Boolean) {
-            player.mpv.setOptionString("loop-file", if (looping) LOOP_FOREVER else LOOP_OFF)
+            // AM (A_A_LOOP_IS_SET_AT_BOTH_SCOPES): the option is what the
+            // next file inherits, the property is the file open now, and
+            // this is called at both moments.
+            val value = if (looping) LOOP_FOREVER else LOOP_OFF
+            player.mpv.setOptionString("loop-file", value)
+            player.mpv.setPropertyString("loop-file", value)
         }
 
         /**
@@ -1085,6 +1289,7 @@ class ClipPlayback(
 
 
         private const val READY_POLL_INTERVAL_MS = 100L
+
     }
 }
 // <-- AM (CLIP_PLAYBACK)

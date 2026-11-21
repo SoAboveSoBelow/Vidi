@@ -15,6 +15,9 @@ import eu.kanade.tachiyomi.util.system.AuthenticatorUtil.authenticate
 import mihon.app.di.appGraph
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
+// AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS)
+import tachiyomi.i18n.animiru.AMMR
+import tachiyomi.i18n.aniyomi.AYMR
 import tachiyomi.presentation.core.i18n.pluralStringResource
 import tachiyomi.presentation.core.i18n.stringResource
 
@@ -42,6 +45,28 @@ object SettingsBrowseScreen : SearchableSettings {
                         preference = sourcePreferences.hideInLibraryItems,
                         title = stringResource(MR.strings.pref_hide_in_library_items),
                     ),
+                    // AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS) -->
+                    // A list of fractions rather than a slider, matching how
+                    // "at what point to mark as seen" is offered: the useful
+                    // values are a handful of percentages and the difference
+                    // between neighbouring ones matters, which is the case a
+                    // list serves and a drag does not. Reuses that setting's
+                    // percentage labels, which are plain numbers.
+                    Preference.PreferenceItem.ListPreference(
+                        preference = sourcePreferences.browsePageSkipThreshold,
+                        entries = mapOf(
+                            1.00F to stringResource(AYMR.strings.pref_progress_100),
+                            0.95F to stringResource(AYMR.strings.pref_progress_95),
+                            0.90F to stringResource(AYMR.strings.pref_progress_90),
+                            0.85F to stringResource(AYMR.strings.pref_progress_85),
+                            0.80F to stringResource(AYMR.strings.pref_progress_80),
+                            0.75F to stringResource(AYMR.strings.pref_progress_75),
+                            0.70F to stringResource(AYMR.strings.pref_progress_70),
+                        ),
+                        title = stringResource(AMMR.strings.am_pref_page_skip_threshold),
+                        subtitle = stringResource(AMMR.strings.am_pref_page_skip_threshold_summary),
+                    ),
+                    // <-- AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS)
                     Preference.PreferenceItem.TextPreference(
                         title = stringResource(MR.strings.extensionStores),
                         subtitle = pluralStringResource(MR.plurals.num_repos, reposCount.toInt(), reposCount),

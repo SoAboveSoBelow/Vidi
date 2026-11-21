@@ -1,0 +1,209 @@
+-- AM (A_SEASON_STATS_ARE_SCOPED_TO_SEASONS): bring the three library and
+-- season views in line with their .sq definitions.
+--
+-- Views live in the database, so a changed CREATE VIEW in a .sq file only
+-- reaches a fresh install; this project sets neither verifyMigrations nor
+-- deriveSchemaFromMigrations, so nothing fails the build when a .sq view and
+-- the migrations disagree. libraryView is here because of that: it was
+-- rewritten to scope its stats subqueries to favorites without a migration, so
+-- every existing install still holds the version that aggregates the whole
+-- episodes table. animeseasonstatsView and animeseasonsView are the same
+-- change applied to seasons.
+--
+-- Dropping and recreating a view rewrites no rows and holds no data, so this
+-- migration is as cheap as its text.
+--
+-- These statements are the CREATE VIEW bodies from
+-- view/libraryView.sq, view/animeseasonstatsView.sq and
+-- view/animeseasonsView.sq verbatim; the reasoning for each lives there.
+
+DROP VIEW IF EXISTS animeseasonstatsView;
+CREATE VIEW animeseasonstatsView AS
+SELECT
+    season.parent_id,
+    count(*) AS child_count,
+    sum(CASE WHEN season.fetch_type = 1 AND
+                 coalesce(ES.total, 0) = coalesce(ES.seenCount, 0)
+            THEN 1 ELSE 0 END) AS fully_seen_seasons,
+    max(coalesce(ES.latestUpload, 0)) AS max_latest_upload,
+    max(coalesce(ES.fetchedAt, 0)) AS max_fetched_at,
+    max(coalesce(HS.lastSeen, 0)) AS max_last_seen,
+    sum(coalesce(ES.bookmarkCount, 0)) AS total_bookmarks,
+    sum(coalesce(ES.fillermarkCount, 0)) AS total_fillermarks
+FROM animes season
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id
+        AND EP.scanlator = X.scanlator
+    WHERE SA.parent_id IS NOT NULL
+    AND X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) ES ON season._id = ES.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN history H ON EP._id = H.episode_id
+    WHERE SA.parent_id IS NOT NULL
+    GROUP BY EP.anime_id
+) HS ON season._id = HS.anime_id
+WHERE season.parent_id IS NOT NULL
+GROUP BY season.parent_id;
+
+DROP VIEW IF EXISTS libraryView;
+CREATE VIEW libraryView AS
+SELECT
+    A.*,
+
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.total, 0)
+        WHEN 0 THEN coalesce(ASS.child_count, 0)
+    END AS totalCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.seenCount, 0)
+        WHEN 0 THEN coalesce(ASS.fully_seen_seasons, 0)
+    END AS seenCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.latestUpload, 0)
+        WHEN 0 THEN coalesce(ASS.max_latest_upload, 0)
+    END AS latestUpload,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.fetchedAt, 0)
+        WHEN 0 THEN coalesce(ASS.max_fetched_at, 0)
+    END AS episodeFetchedAt,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(HS.lastSeen, 0)
+        WHEN 0 THEN coalesce(ASS.max_last_seen, 0)
+    END AS lastSeen,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.bookmarkCount, 0)
+        WHEN 0 THEN coalesce(ASS.total_bookmarks, 0)
+    END AS bookmarkCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.fillermarkCount, 0)
+        WHEN 0 THEN coalesce(ASS.total_fillermarks, 0)
+    END AS fillermarkCount,
+
+    coalesce(AC.categories, '0') AS categories
+FROM animes A
+
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM episodes EP
+    JOIN animes FA
+        ON FA._id = EP.anime_id AND FA.favorite = 1
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id AND EP.scanlator = X.scanlator
+    WHERE X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) AS ES
+ON A._id = ES.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM episodes EP
+    JOIN animes FA
+        ON FA._id = EP.anime_id AND FA.favorite = 1
+    LEFT JOIN history H
+        ON EP._id = H.episode_id
+    GROUP BY EP.anime_id
+) AS HS
+ON A._id = HS.anime_id
+
+LEFT JOIN (
+    SELECT anime_id, group_concat(category_id) AS categories
+    FROM animes_categories
+    GROUP BY anime_id
+) AS AC
+ON AC.anime_id = A._id
+
+LEFT JOIN animeseasonstatsView AS ASS ON A._id = ASS.parent_id
+
+WHERE A.favorite = 1;
+
+DROP VIEW IF EXISTS animeseasonsView;
+CREATE VIEW animeseasonsView AS
+SELECT
+    A.*,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.total, 0)
+        WHEN 0 THEN coalesce(ASS.child_count, 0)
+    END AS totalCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.seenCount, 0)
+        WHEN 0 THEN coalesce(ASS.fully_seen_seasons, 0)
+    END AS seenCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.latestUpload, 0)
+        WHEN 0 THEN coalesce(ASS.max_latest_upload, 0)
+    END AS latestUpload,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.fetchedAt, 0)
+        WHEN 0 THEN coalesce(ASS.max_fetched_at, 0)
+    END AS episodeFetchedAt,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(HS.lastSeen, 0)
+        WHEN 0 THEN coalesce(ASS.max_last_seen, 0)
+    END AS lastSeen,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.bookmarkCount, 0)
+        WHEN 0 THEN coalesce(ASS.total_bookmarks, 0)
+    END AS bookmarkCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.fillermarkCount, 0)
+        WHEN 0 THEN coalesce(ASS.total_fillermarks, 0)
+    END AS fillermarkCount
+FROM animes AS A
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id
+        AND EP.scanlator = X.scanlator
+    WHERE SA.parent_id IS NOT NULL
+    AND X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) AS ES
+ON A._id = ES.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN history H ON EP._id = H.episode_id
+    WHERE SA.parent_id IS NOT NULL
+    GROUP BY EP.anime_id
+) AS HS
+ON A._id = HS.anime_id
+LEFT JOIN animeseasonstatsView AS ASS
+ON A._id = ASS.parent_id
+WHERE A.parent_id IS NOT NULL;

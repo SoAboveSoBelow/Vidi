@@ -40,6 +40,23 @@ SELECT host_anime_id, episode_id, season_number, sort_key
 FROM episode_order
 WHERE host_anime_id = :hostAnimeId;
 
+-- AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP) -->
+-- Every entry's rows in one read, for a backup.
+--
+-- backupStructure ran getByHostAnimeId per entry, so a library-sized backup
+-- issued one query per entry against a table that holds rows for only the few
+-- entries the user has actually arranged. A guard on favorite would not do: an
+-- entry removed from the library keeps its structure for a while, so a
+-- non-favourite can still have rows worth backing up.
+--
+-- No WHERE, because the caller groups by host_anime_id and looks up the entries
+-- it is writing; rows belonging to entries outside the backup are simply never
+-- read out of the map.
+-- <-- AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP)
+getAll:
+SELECT host_anime_id, episode_id, season_number, sort_key
+FROM episode_order;
+
 upsert:
 INSERT OR REPLACE INTO episode_order(host_anime_id, episode_id, season_number, sort_key)
 VALUES (:hostAnimeId, :episodeId, :seasonNumber, :sortKey);

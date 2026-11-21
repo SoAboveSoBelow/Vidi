@@ -2,15 +2,16 @@ package aniyomi.data.anime
 
 import aniyomi.domain.anime.model.AnimeRelationGroup
 import aniyomi.domain.anime.repository.AnimeRelationRepository
-import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.data.Database
 import tachiyomi.data.anime.AnimeMapper
+import tachiyomi.data.awaitOneOrNull
 import tachiyomi.data.subscribeToList
 
 @Inject
@@ -21,7 +22,7 @@ class AnimeRelationRepositoryImpl(
 ) : AnimeRelationRepository {
 
     override suspend fun getLastFetchedAt(animeId: Long): Long? {
-        return database.anime_relationsQueries.getLastFetchedAt(animeId).awaitAsOneOrNull()
+        return database.anime_relationsQueries.getLastFetchedAt(animeId).awaitOneOrNull()
     }
 
     override suspend fun replaceRelations(
@@ -29,18 +30,24 @@ class AnimeRelationRepositoryImpl(
         groups: List<Pair<String, List<Long>>>,
         fetchedAt: Long,
     ) {
-        database.transaction {
-            database.anime_relationsQueries.deleteByAnimeId(animeId)
-            var sortOrder = 0L
-            groups.forEach { (name, relatedIds) ->
-                relatedIds.forEach { relatedId ->
-                    database.anime_relationsQueries.insert(
-                        animeId = animeId,
-                        relatedAnimeId = relatedId,
-                        name = name,
-                        sortOrder = sortOrder++,
-                        lastFetchedAt = fetchedAt,
-                    )
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                database.anime_relationsQueries.deleteByAnimeId(animeId)
+                var sortOrder = 0L
+                groups.forEach { (name, relatedIds) ->
+                    relatedIds.forEach { relatedId ->
+                        database.anime_relationsQueries.insert(
+                            animeId = animeId,
+                            relatedAnimeId = relatedId,
+                            name = name,
+                            sortOrder = sortOrder++,
+                            lastFetchedAt = fetchedAt,
+                        )
+                    }
                 }
             }
         }

@@ -64,6 +64,24 @@ object PlayerSettingsPlayerScreen : SearchableSettings {
                 preference = playerPreferences.preserveWatchingPosition,
                 title = stringResource(AYMR.strings.pref_preserve_watching_position),
             ),
+            // AM (A_HISTORY_HAS_A_THRESHOLD) -->
+            // Beside "at what point to mark as seen" rather than under browse,
+            // because the two are the same kind of statement - what counts as
+            // having watched something - and this one is not the feed's: the
+            // player obeys it too.
+            //
+            // A list, like the mark-as-seen point above it: the values that
+            // matter are a few whole seconds, which is a choice to pick from
+            // rather than a number to enter.
+            Preference.PreferenceItem.ListPreference(
+                preference = playerPreferences.historyThresholdSeconds,
+                entries = HISTORY_THRESHOLD_CHOICES.associateWith { seconds ->
+                    stringResource(AMMR.strings.am_history_min_seconds_choice, seconds)
+                },
+                title = stringResource(AMMR.strings.am_pref_history_threshold),
+                subtitle = stringResource(AMMR.strings.am_pref_history_threshold_summary),
+            ),
+            // <-- AM (A_HISTORY_HAS_A_THRESHOLD)
             // AM (RECENT_EPISODE_POSITIONS_PERSISTED) -->
             Preference.PreferenceItem.ListPreference(
                 preference = playerPreferences.recentEpisodePositionSlots,
@@ -520,3 +538,16 @@ val externalPlayers = listOf(
     X_PLAYER,
     WEB_VIDEO_CASTER,
 )
+
+// AM (A_HISTORY_HAS_A_THRESHOLD) -->
+/**
+ * The thresholds offered, in seconds.
+ *
+ * The same range the history screen's own filter offers, so the write side and
+ * the read side are chosen from the same set of numbers. What this separates is
+ * something opened by mistake from something actually started, and that
+ * boundary is a few seconds wide; a longer wait would start losing records of
+ * things genuinely watched, which no later filter can bring back.
+ */
+private val HISTORY_THRESHOLD_CHOICES = 1..10
+// <-- AM (A_HISTORY_HAS_A_THRESHOLD)

@@ -1,6 +1,7 @@
 package tachiyomi.domain.history.interactor
 
 import dev.zacsweers.metro.Inject
+import tachiyomi.domain.history.model.ViewedAnimeIds
 import tachiyomi.domain.history.repository.HistoryRepository
 
 // AM (BROWSE_HIDE_VIEWED) -->
@@ -20,7 +21,7 @@ class GetViewedAnimeIds(
     private val repository: HistoryRepository,
 ) {
 
-    suspend fun await(sourceId: Long): Set<Long> {
+    suspend fun await(sourceId: Long): ViewedAnimeIds {
         return repository.getViewedAnimeIdsBySource(sourceId)
     }
 }

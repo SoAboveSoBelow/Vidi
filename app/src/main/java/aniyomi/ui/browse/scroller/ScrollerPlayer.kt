@@ -67,11 +67,10 @@ class ScrollerPlayer(
     private var loadedKey: Long? = null
 
     init {
-        ScrollerSession.startObserving()
         // MPVPlayer's own init sets aid=no and lets PlayerViewModel pick an
         // audio track reactively. Nothing does that for this instance, so
         // without this a card plays silently however it is unmuted.
-        player.mpv.setOptionString("aid", "auto")
+        player.mpv.setPropertyString("aid", "auto")
         // Starts silent whatever the feed setting is: nothing is the active
         // card at construction, and only the active card makes sound.
         player.mpv.setPropertyBoolean("mute", true)

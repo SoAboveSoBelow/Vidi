@@ -1,9 +1,6 @@
 package tachiyomi.data.anime
 
 import aniyomi.domain.anime.model.SeasonAnime
-import app.cash.sqldelight.async.coroutines.awaitAsList
-import app.cash.sqldelight.async.coroutines.awaitAsOne
-import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
@@ -13,12 +10,16 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.toLocalDateTime
 import logcat.LogPriority
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.data.Database
 import tachiyomi.data.FetchTypeColumnAdapter
 import tachiyomi.data.MemoColumnAdapter
 import tachiyomi.data.StringListColumnAdapter
 import tachiyomi.data.UpdateStrategyColumnAdapter
+import tachiyomi.data.awaitList
+import tachiyomi.data.awaitOne
+import tachiyomi.data.awaitOneOrNull
 import tachiyomi.data.subscribeToList
 import tachiyomi.data.subscribeToOne
 import tachiyomi.data.subscribeToOneOrNull
@@ -38,7 +39,7 @@ class AnimeRepositoryImpl(
 ) : AnimeRepository {
 
     override suspend fun getAnimeById(id: Long): Anime {
-        return database.animesQueries.getAnimeById(id, AnimeMapper::mapAnime).awaitAsOne()
+        return database.animesQueries.getAnimeById(id, AnimeMapper::mapAnime).awaitOne()
     }
 
     override fun getAnimeByIdAsFlow(id: Long): Flow<Anime> {
@@ -50,7 +51,7 @@ class AnimeRepositoryImpl(
             url,
             sourceId,
             AnimeMapper::mapAnime,
-        ).awaitAsOneOrNull()
+        ).awaitOneOrNull()
     }
 
     override fun getAnimeByUrlAndSourceIdAsFlow(url: String, sourceId: Long): Flow<Anime?> {
@@ -62,15 +63,22 @@ class AnimeRepositoryImpl(
     }
 
     override suspend fun getFavorites(): List<Anime> {
-        return database.animesQueries.getFavorites(AnimeMapper::mapAnime).awaitAsList()
+        return database.animesQueries.getFavorites(AnimeMapper::mapAnime).awaitList()
     }
 
     override suspend fun getSeenAnimeNotInLibrary(): List<Anime> {
-        return database.animesQueries.getSeenAnimeNotInLibrary(AnimeMapper::mapAnime).awaitAsList()
+        return database.animesQueries.getSeenAnimeNotInLibrary(AnimeMapper::mapAnime).awaitList()
+    }
+
+    // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME)
+    override suspend fun getSeenAnimeNotInLibraryAfter(afterId: Long, limit: Long): List<Anime> {
+        return database.animesQueries
+            .getSeenAnimeNotInLibraryAfter(afterId, limit, AnimeMapper::mapAnime)
+            .awaitList()
     }
 
     override suspend fun getLibraryAnime(): List<LibraryAnime> {
-        return database.libraryViewQueries.library(AnimeMapper::mapLibraryAnime).awaitAsList()
+        return database.libraryViewQueries.library(AnimeMapper::mapLibraryAnime).awaitList()
     }
 
     override fun getLibraryAnimeAsFlow(): Flow<List<LibraryAnime>> {
@@ -91,7 +99,7 @@ class AnimeRepositoryImpl(
             id,
             title,
             AnimeMapper::mapAnimeWithEpisodeCount,
-        ).awaitAsList()
+        ).awaitList()
     }
 
     override suspend fun getUpcomingAnime(
@@ -117,7 +125,9 @@ class AnimeRepositoryImpl(
 
     override suspend fun resetViewerFlags(): Boolean {
         return try {
-            database.animesQueries.resetViewerFlags()
+            withIOContext {
+                database.animesQueries.resetViewerFlags()
+            }
             true
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, e)
@@ -126,10 +136,16 @@ class AnimeRepositoryImpl(
     }
 
     override suspend fun setAnimeCategories(animeId: Long, categoryIds: List<Long>) {
-        database.transaction {
-            database.animes_categoriesQueries.deleteAnimeCategoryByAnimeId(animeId)
-            categoryIds.forEach { categoryId ->
-                database.animes_categoriesQueries.insert(animeId, categoryId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a bulk write, and the
+        // whole transaction on one IO thread rather than each statement on
+        // the caller's - nothing inside suspends at a dispatch point, so the
+        // body does not move between threads mid-transaction.
+        withIOContext {
+            database.transaction {
+                database.animes_categoriesQueries.deleteAnimeCategoryByAnimeId(animeId)
+                categoryIds.forEach { categoryId ->
+                    database.animes_categoriesQueries.insert(animeId, categoryId)
+                }
             }
         }
     }
@@ -197,14 +213,14 @@ class AnimeRepositoryImpl(
                     updateDetails = it.initialized,
                     mapper = AnimeMapper::mapAnime,
                 )
-                    .awaitAsOne()
+                    .awaitOne()
             }
         }
     }
 
     // AY -->
     override suspend fun getAnimeSeasonsById(parentId: Long): List<SeasonAnime> {
-        return database.animeseasonsViewQueries.getAnimeSeasonsById(parentId, AnimeMapper::mapSeasonAnime).awaitAsList()
+        return database.animeseasonsViewQueries.getAnimeSeasonsById(parentId, AnimeMapper::mapSeasonAnime).awaitList()
     }
 
     override fun getAnimeSeasonsByIdAsFlow(parentId: Long): Flow<List<SeasonAnime>> {
@@ -216,7 +232,9 @@ class AnimeRepositoryImpl(
 
     override suspend fun removeParentIdByIds(animeIds: List<Long>) {
         try {
-            database.animesQueries.removeParentIdByIds(animeIds)
+            withIOContext {
+                database.animesQueries.removeParentIdByIds(animeIds)
+            }
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, e)
         }
@@ -227,53 +245,65 @@ class AnimeRepositoryImpl(
             .subscribeToList()
     }
 
+    // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+    override fun getLibraryParentAnime(): Flow<List<DeletableAnime>> {
+        return database.animesQueries.getLibraryParentAnime(AnimeMapper::mapDeletableAnime)
+            .subscribeToList()
+    }
+
     override suspend fun getChildrenByParentId(parentId: Long): List<Anime> {
-        return database.animesQueries.getChildrenByParentId(parentId, AnimeMapper::mapAnime).awaitAsList()
+        return database.animesQueries.getChildrenByParentId(parentId, AnimeMapper::mapAnime).awaitList()
     }
     // <-- AY
 
     private suspend fun partialUpdate(vararg animeUpdates: AnimeUpdate) {
-        database.transaction {
-            animeUpdates.forEach { value ->
-                database.animesQueries.update(
-                    source = value.source,
-                    url = value.url,
-                    artist = value.artist,
-                    author = value.author,
-                    description = value.description,
-                    genre = value.genre?.let(StringListColumnAdapter::encode),
-                    title = value.title,
-                    status = value.status,
-                    thumbnailUrl = value.thumbnailUrl,
-                    // AY -->
-                    backgroundUrl = value.backgroundUrl,
-                    // <-- AY
-                    favorite = value.favorite,
-                    lastUpdate = value.lastUpdate,
-                    nextUpdate = value.nextUpdate,
-                    calculateInterval = value.fetchInterval?.toLong(),
-                    initialized = value.initialized,
-                    viewer = value.viewerFlags,
-                    episodeFlags = value.episodeFlags,
-                    coverLastModified = value.coverLastModified,
-                    // AY -->
-                    backgroundLastModified = value.backgroundLastModified,
-                    // <-- AY
-                    dateAdded = value.dateAdded,
-                    animeId = value.id,
-                    updateStrategy = value.updateStrategy?.let(UpdateStrategyColumnAdapter::encode),
-                    version = value.version,
-                    isSyncing = 0,
-                    notes = value.notes,
-                    // AY -->
-                    fetchType = value.fetchType?.let(FetchTypeColumnAdapter::encode),
-                    parentId = value.parentId,
-                    seasonFlags = value.seasonFlags,
-                    seasonNumber = value.seasonNumber,
-                    seasonSourceOrder = value.seasonSourceOrder,
-                    // <-- AY
-                    memo = value.memo?.let(MemoColumnAdapter::encode),
-                )
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a bulk write, and the
+        // whole transaction on one IO thread rather than each statement on
+        // the caller's - nothing inside suspends at a dispatch point, so the
+        // body does not move between threads mid-transaction.
+        withIOContext {
+            database.transaction {
+                animeUpdates.forEach { value ->
+                    database.animesQueries.update(
+                        source = value.source,
+                        url = value.url,
+                        artist = value.artist,
+                        author = value.author,
+                        description = value.description,
+                        genre = value.genre?.let(StringListColumnAdapter::encode),
+                        title = value.title,
+                        status = value.status,
+                        thumbnailUrl = value.thumbnailUrl,
+                        // AY -->
+                        backgroundUrl = value.backgroundUrl,
+                        // <-- AY
+                        favorite = value.favorite,
+                        lastUpdate = value.lastUpdate,
+                        nextUpdate = value.nextUpdate,
+                        calculateInterval = value.fetchInterval?.toLong(),
+                        initialized = value.initialized,
+                        viewer = value.viewerFlags,
+                        episodeFlags = value.episodeFlags,
+                        coverLastModified = value.coverLastModified,
+                        // AY -->
+                        backgroundLastModified = value.backgroundLastModified,
+                        // <-- AY
+                        dateAdded = value.dateAdded,
+                        animeId = value.id,
+                        updateStrategy = value.updateStrategy?.let(UpdateStrategyColumnAdapter::encode),
+                        version = value.version,
+                        isSyncing = 0,
+                        notes = value.notes,
+                        // AY -->
+                        fetchType = value.fetchType?.let(FetchTypeColumnAdapter::encode),
+                        parentId = value.parentId,
+                        seasonFlags = value.seasonFlags,
+                        seasonNumber = value.seasonNumber,
+                        seasonSourceOrder = value.seasonSourceOrder,
+                        // <-- AY
+                        memo = value.memo?.let(MemoColumnAdapter::encode),
+                    )
+                }
             }
         }
     }

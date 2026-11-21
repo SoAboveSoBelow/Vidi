@@ -3,13 +3,15 @@ package eu.kanade.tachiyomi.data.backup.create.creators
 import animiru.domain.anime.repository.TagVisibilityRepository
 import animiru.domain.episode.repository.EpisodeTagRepository
 import aniyomi.domain.episode.repository.EpisodeNameRepository
+import aniyomi.domain.merge.model.MERGED_SOURCE_ID
 import aniyomi.domain.merge.repository.MergeChildRepository
 import aniyomi.domain.merge.repository.MergeEpisodeExclusionRepository
 import aniyomi.domain.merge.repository.MergeSettingsRepository
+import aniyomi.domain.order.model.EpisodeOrderOverride
 import aniyomi.domain.order.repository.EpisodeOrderRepository
+import aniyomi.domain.season.model.EntrySeason
 import aniyomi.domain.season.repository.EntrySeasonRepository
 import app.cash.sqldelight.async.coroutines.awaitAsList
-import app.cash.sqldelight.async.coroutines.awaitAsOne
 import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.data.backup.create.BackupOptions
@@ -33,20 +35,16 @@ import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.anime.model.CustomAnimeInfo
 import tachiyomi.domain.anime.repository.AnimeRepository
 import tachiyomi.domain.category.interactor.GetCategories
-import tachiyomi.domain.episode.interactor.GetEpisodesByAnimeId
-import tachiyomi.domain.history.interactor.GetHistory
 
 @Inject
 class AnimeBackupCreator(
     private val database: Database,
     private val getCategories: GetCategories,
-    private val getHistory: GetHistory,
     // AM (CUSTOM_INFORMATION) -->
     private val getCustomAnimeInfo: GetCustomAnimeInfo,
     // <-- AM (CUSTOM_INFORMATION)
     // AM -->
     private val animeRepository: AnimeRepository,
-    private val getEpisodesByAnimeId: GetEpisodesByAnimeId,
     private val tagVisibilityRepository: TagVisibilityRepository,
     private val entrySeasonRepository: EntrySeasonRepository,
     private val episodeNameRepository: EpisodeNameRepository,
@@ -61,23 +59,67 @@ class AnimeBackupCreator(
 ) {
 
     suspend operator fun invoke(animes: List<Anime>, options: BackupOptions): List<BackupAnime> {
+        val session = session(options)
+        return animes.map { session.create(it) }
+    }
+
+    // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME) -->
+    /**
+     * One backup's worth of entry conversion, entry at a time.
+     *
+     * The caller streams entries out as they are built rather than collecting
+     * them into a list (see BackupAnimeChunk), and the id cache below has to
+     * outlive each one, so it belongs to the session rather than to a call.
+     */
+    fun session(options: BackupOptions): Session = Session(options)
+
+    inner class Session internal constructor(private val options: BackupOptions) {
         // AM -->
         // Resolving an anime id to its (source, url) happens repeatedly - once per
         // merge child, per reordered episode, per exclusion - and the same ids
         // recur across the entries of one merge. Cached for the whole backup
         // rather than re-queried, since a library-sized walk would otherwise
         // issue thousands of single-row lookups.
-        val animeKeyCache = mutableMapOf<Long, AnimeKey?>()
+        private val animeKeyCache = mutableMapOf<Long, AnimeKey?>()
         // <-- AM
-        return animes.map {
-            backupAnime(it, options, animeKeyCache)
+
+        // AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP) -->
+        // The two structure tables, read once for the whole backup and grouped
+        // by the entry that hosts them, in place of two queries per entry.
+        //
+        // Both tables only hold rows for entries the user has actually arranged,
+        // so these maps are small whatever the library's size - but the queries
+        // they replace scaled with the library, not with the structure. Built on
+        // first use rather than in the constructor, so a backup with
+        // libraryEntries off reads neither table at all.
+        private var seasonsByHost: Map<Long, List<EntrySeason>>? = null
+        private var orderByHost: Map<Long, List<EpisodeOrderOverride>>? = null
+
+        private suspend fun seasons(hostAnimeId: Long): List<EntrySeason> {
+            val cached = seasonsByHost
+                ?: entrySeasonRepository.getAllByHostAnimeId().also { seasonsByHost = it }
+            return cached[hostAnimeId].orEmpty()
         }
+
+        private suspend fun order(hostAnimeId: Long): List<EpisodeOrderOverride> {
+            val cached = orderByHost
+                ?: episodeOrderRepository.getAllByHostAnimeId().also { orderByHost = it }
+            return cached[hostAnimeId].orEmpty()
+        }
+        // <-- AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP)
+
+        suspend fun create(anime: Anime): BackupAnime =
+            backupAnime(anime, options, animeKeyCache, ::seasons, ::order)
     }
+    // <-- AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME)
 
     private suspend fun backupAnime(
         anime: Anime,
         options: BackupOptions,
         animeKeyCache: MutableMap<Long, AnimeKey?>,
+        // AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP)
+        seasons: suspend (Long) -> List<EntrySeason>,
+        order: suspend (Long) -> List<EpisodeOrderOverride>,
     ): BackupAnime {
         // Entry for this anime
         val animeObject = anime.toBackupAnime(
@@ -117,15 +159,14 @@ class AnimeBackupCreator(
         }
 
         if (options.history) {
-            val historyByAnimeId = getHistory.await(anime.id)
-            if (historyByAnimeId.isNotEmpty()) {
-                val history = historyByAnimeId.map { history ->
-                    val episode = database.episodesQueries.getEpisodeById(history.episodeId).awaitAsOne()
-                    BackupHistory(episode.url, history.seenAt?.time ?: 0L)
-                }
-                if (history.isNotEmpty()) {
-                    animeObject.history = history
-                }
+            // AM (A_BACKUP_READS_HISTORY_IN_ONE_QUERY): one join instead of the
+            // entry's history rows plus a getEpisodeById per row.
+            val history = database.historyQueries.getBackupHistoryByAnimeId(anime.id) { url, lastSeen, origin ->
+                // AM (A_ORIGIN_SURVIVES_A_BACKUP)
+                BackupHistory(url, lastSeen?.time ?: 0L, origin)
+            }.awaitAsList()
+            if (history.isNotEmpty()) {
+                animeObject.history = history
             }
         }
 
@@ -138,7 +179,7 @@ class AnimeBackupCreator(
         }
 
         if (options.libraryEntries) {
-            backupStructure(anime, animeObject, animeKeyCache)
+            backupStructure(anime, animeObject, animeKeyCache, seasons, order)
         }
 
         if (options.episodes) {
@@ -160,8 +201,12 @@ class AnimeBackupCreator(
         anime: Anime,
         animeObject: BackupAnime,
         animeKeyCache: MutableMap<Long, AnimeKey?>,
+        // AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP): looked up in the session's
+        // maps rather than queried per entry.
+        seasons: suspend (Long) -> List<EntrySeason>,
+        order: suspend (Long) -> List<EpisodeOrderOverride>,
     ) {
-        animeObject.entrySeasons = entrySeasonRepository.getByHostAnimeId(anime.id)
+        animeObject.entrySeasons = seasons(anime.id)
             .map {
                 BackupEntrySeason(
                     number = it.number,
@@ -172,7 +217,7 @@ class AnimeBackupCreator(
                 )
             }
 
-        val orderOverrides = episodeOrderRepository.getByHostAnimeId(anime.id)
+        val orderOverrides = order(anime.id)
         if (orderOverrides.isNotEmpty()) {
             animeObject.episodeOrder = orderOverrides.mapNotNull { override ->
                 val episode = episodeKeyOf(override.episodeId, animeKeyCache) ?: return@mapNotNull null
@@ -185,6 +230,17 @@ class AnimeBackupCreator(
                 )
             }
         }
+
+        // AM (A_STRUCTURE_IS_ONLY_READ_WHERE_IT_CAN_EXIST) -->
+        // Merge membership can only exist for an entry on the merged source:
+        // MergeAnimeEntries creates a parent there, with a merge:// url, and a
+        // restored parent keeps that source. So for every ordinary entry the
+        // four reads below were guaranteed to find nothing - and two of them
+        // ran before the children.isEmpty() return could stop them, so a backup
+        // spent four queries per entry on a structure only a handful of entries
+        // can have.
+        if (anime.source != MERGED_SOURCE_ID) return
+        // <-- AM (A_STRUCTURE_IS_ONLY_READ_WHERE_IT_CAN_EXIST)
 
         val children = mergeChildRepository.getChildrenByMergeParentId(anime.id)
         if (children.isEmpty()) return
@@ -235,7 +291,16 @@ class AnimeBackupCreator(
     private suspend fun backupEpisodeExtras(anime: Anime, animeObject: BackupAnime) {
         if (animeObject.episodes.isEmpty()) return
 
-        val idByUrl = getEpisodesByAnimeId.await(anime.id).associate { it.url to it.id }
+        // AM (A_EXTRAS_READ_TWO_COLUMNS_NOT_EVERY_ONE): the url-to-id mapping is
+        // all this needs, and GetEpisodesByAnimeId was reading every column of
+        // every episode through a LEFT JOIN on excluded_scanlators and building a
+        // domain Episode for each - per entry, on top of the full episode read
+        // backupAnime has already done a few lines earlier. Two columns, no join,
+        // no objects.
+        val idByUrl = database.episodesQueries
+            .getEpisodeIdsAndUrlsByAnimeId(anime.id) { id, url -> url to id }
+            .awaitAsList()
+            .toMap()
         val customNames = episodeNameRepository.getByAnimeIds(listOf(anime.id))
         // AM (EPISODE_TAGS): the entry's own episodes only - a merged host's
         // children are backed up as the entries they are, carrying their own.

@@ -8,6 +8,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.paging.LoadState
+import androidx.paging.compose.collectAsLazyPagingItems
 import animiru.domain.player.service.PlayerPreferences
 import cafe.adriel.voyager.core.screen.Screen
 import cafe.adriel.voyager.navigator.LocalNavigator
@@ -15,6 +17,8 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.presentation.anime.DuplicateAnimeDialog
 import eu.kanade.presentation.category.components.ChangeCategoryDialog
 import eu.kanade.presentation.history.HistoryScreen
+// AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
+import eu.kanade.presentation.history.HistoryFilterDialog
 import eu.kanade.presentation.history.components.HistoryDeleteAllDialog
 import eu.kanade.presentation.history.components.HistoryDeleteDialog
 import eu.kanade.tachiyomi.ui.anime.AnimeScreen
@@ -43,13 +47,20 @@ fun Screen.HistoryHalfTab(
     val navigator = LocalNavigator.currentOrThrow
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    // AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME): hoisted, because the readiness
+    // effect below needs its load state too.
+    val history = viewModel.historyItems.collectAsLazyPagingItems()
+
     HistoryScreen(
         state = state,
+        history = history,
         onSearchQueryChange = viewModel::updateSearchQuery,
         onClickCover = { navigator.push(AnimeScreen(it)) },
         onClickResume = viewModel::getNextEpisodeForAnime,
         onDialogChange = viewModel::setDialog,
         onClickFavorite = viewModel::addFavorite,
+        // AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME)
+        onLoadError = viewModel::reportLoadError,
         contentPadding = contentPadding,
     )
     // <-- AM (RECENTS_FILTER_CHIP)
@@ -68,6 +79,17 @@ fun Screen.HistoryHalfTab(
                 },
             )
         }
+        // AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS) -->
+        is HistoryViewModel.Dialog.Filter -> {
+            HistoryFilterDialog(
+                state = state,
+                onToggleWatchedOnly = viewModel::toggleWatchedOnly,
+                onToggleDownloadedOnly = viewModel::toggleDownloadedOnly,
+                onMinSecondsSeenChange = viewModel::setMinSecondsSeen,
+                onDismissRequest = onDismissRequest,
+            )
+        }
+        // <-- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
         is HistoryViewModel.Dialog.DeleteAll -> {
             HistoryDeleteAllDialog(
                 onDismissRequest = onDismissRequest,
@@ -108,8 +130,12 @@ fun Screen.HistoryHalfTab(
         null -> {}
     }
 
-    LaunchedEffect(state.list) {
-        if (state.list != null) {
+    // AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME): was `state.list != null`, which
+    // meant the first emission had arrived - empty included. The equivalent for
+    // a pager is a refresh that is no longer running, and Error counts: the
+    // splash must not be held open by a load that failed.
+    LaunchedEffect(history.loadState.refresh) {
+        if (history.loadState.refresh !is LoadState.Loading) {
             (context as? MainActivity)?.ready = true
         }
     }

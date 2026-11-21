@@ -57,6 +57,17 @@ class ControlBindingPreferences(
     private val optionsMigrated by lazy {
         preferenceStore.getBoolean("pref_control_button_options_migrated", false)
     }
+
+    // AM (A_A_LOOP_IS_A_BUTTON_NOT_A_PROPERTY)
+    private val loopButtonPlaced by lazy {
+        // AM (A_A_A_BLANKED_SLOT_IS_NOT_A_CHOICE): a second key, so this runs
+        // once more on this build. The first pass placed the control while the
+        // resolution path was still turning it into None, and any layout saved
+        // in that window - opening the editor is enough - kept the blank.
+        // Those users are not people who removed it; they are people who never
+        // had it.
+        preferenceStore.getBoolean("pref_control_loop_button_placed_v2", false)
+    }
     private val storedButtonOptions by lazy {
         preferenceStore.getObjectFromString(
             key = "pref_control_button_options",
@@ -103,6 +114,43 @@ class ControlBindingPreferences(
 
     /** Shared tap, double-tap and hold behavior, keyed by the button placed in a slot. */
     fun buttonOptions(): Preference<Map<ControlAction, ControlBinding>> = ButtonOptionsPreference()
+
+    // AM (A_A_LOOP_IS_A_BUTTON_NOT_A_PROPERTY) -->
+    /**
+     * Puts the loop control on the player's top bar once, for a layout stored
+     * before the control existed.
+     *
+     * A new entry in the defaults only reaches an install that has no stored
+     * layout yet, and every existing one has had its layout written since
+     * first launch - so without this the control ships and nobody has it until
+     * they go looking in the editor for a button they have no reason to know
+     * about.
+     *
+     * Once, and recorded, so removing it afterwards sticks. Skipped where the
+     * action is already bound somewhere, and where the bar is already at its
+     * cap, since silently dropping one of the user's own buttons to make room
+     * would be worse than not placing it.
+     */
+    @Synchronized
+    private fun ensureLoopButtonPlaced() {
+        if (loopButtonPlaced.get()) return
+        loopButtonPlaced.set(true)
+
+        val source = rawLayout(ControlSurface.Player)
+        val layout = source.get()
+        val alreadyBound = layout.regions.values.flatten().any { entry ->
+            entry.tap == ControlAction.ToggleLoop || entry.button == ControlAction.ToggleLoop
+        }
+        if (alreadyBound) return
+
+        val topBar = layout.regions[ControlRegion.TopBar].orEmpty()
+        if (topBar.size >= ControlRegion.TopBar.hardCap) return
+        val autoPlayIndex = topBar.indexOfFirst { it.tap == ControlAction.ToggleAutoPlay }
+        val at = if (autoPlayIndex >= 0) autoPlayIndex + 1 else topBar.size
+        val placed = topBar.toMutableList().apply { add(at, ControlBinding(tap = ControlAction.ToggleLoop)) }
+        source.set(layout.withEntries(ControlRegion.TopBar, placed))
+    }
+    // <-- AM (A_A_LOOP_IS_A_BUTTON_NOT_A_PROPERTY)
 
     @Synchronized
     private fun ensureButtonOptionsMigrated() {
@@ -186,6 +234,8 @@ class ControlBindingPreferences(
 
         override fun get(): ControlLayout {
             ensureButtonOptionsMigrated()
+            // AM (A_A_LOOP_IS_A_BUTTON_NOT_A_PROPERTY)
+            ensureLoopButtonPlaced()
             return applyButtonOptions(source.get(), storedButtonOptions.get())
         }
 
@@ -407,6 +457,9 @@ class ControlBindingPreferences(
                 ControlRegion.TopBar,
                 listOf(
                     ControlBinding(tap = ControlAction.ToggleAutoPlay),
+                    // AM (A_A_LOOP_IS_A_BUTTON_NOT_A_PROPERTY): beside auto-play,
+                    // the other question about what happens when playback runs out.
+                    ControlBinding(tap = ControlAction.ToggleLoop),
                     ControlBinding(
                         tap = ControlAction.SubtitleTracks,
                         longPress = ControlAction.SubtitleSettings,

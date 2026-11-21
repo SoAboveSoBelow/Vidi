@@ -112,6 +112,16 @@ SELECT *
 FROM episodes
 WHERE url = :episodeUrl;
 
+-- AM (A_RESTORE_RESOLVES_HISTORY_IN_BULK): just the url-to-id mapping for one
+-- entry, for a caller resolving many episode urls at once. getEpisodesByAnimeId
+-- would do, but it reads every column and joins excluded_scanlators to apply a
+-- filter that is irrelevant when all that is wanted is which id a url belongs
+-- to.
+getEpisodeIdsAndUrlsByAnimeId:
+SELECT _id, url
+FROM episodes
+WHERE anime_id = :animeId;
+
 getEpisodeByUrlAndAnimeId:
 SELECT *
 FROM episodes

@@ -34,10 +34,62 @@ SELECT
     coalesce(AC.categories, '0') AS categories
 FROM animes A
 -- AY -->
-LEFT JOIN episodestatsView AS ES
+-- AM (A_LIBRARY_STATS_ARE_SCOPED_TO_THE_LIBRARY) -->
+-- These two are episodestatsView and historystatsView restricted to favorites,
+-- inlined rather than reused, and the duplication is deliberate.
+--
+-- Those views aggregate over the WHOLE episodes table. SQLite cannot push this
+-- view's `favorite = 1` through a LEFT JOIN into a grouped subquery, so every
+-- episode of every entry was grouped and then thrown away - and most entries
+-- are not in the library. The library screen's cost therefore scaled with the
+-- browse history rather than with the library: measured at 300 favorites
+-- throughout, 11ms at 11k episodes, 55ms at 36k, 159ms at 106k. It is also a
+-- subscribed query, so it re-runs on any write to animes, episodes or history -
+-- which browsing does per card it displays.
+--
+-- The shared views cannot simply be narrowed: animeseasonsView,
+-- animeseasonstatsView and getLibraryMergeChildAnime all read them for season
+-- children and merge children, which are routinely favorite = 0. So the scope
+-- lives here, where it is the only scope that applies.
+--
+-- Aliased EP, not E: SQLDelight's lexer reads a bare `E` as the start of a
+-- real-number exponent and rejects the subquery outright.
+--
+-- Equivalent to what it replaced: the join only changes WHICH anime_ids get
+-- aggregated, never how, and these two are read solely by the fetch_type = 1
+-- branches above - a seasons parent takes its numbers from ASS, which still
+-- aggregates over its children unrestricted.
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM episodes EP
+    JOIN animes FA
+        ON FA._id = EP.anime_id AND FA.favorite = 1
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id AND EP.scanlator = X.scanlator
+    WHERE X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) AS ES
 ON A._id = ES.anime_id
-LEFT JOIN historystatsView AS HS
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM episodes EP
+    JOIN animes FA
+        ON FA._id = EP.anime_id AND FA.favorite = 1
+    LEFT JOIN history H
+        ON EP._id = H.episode_id
+    GROUP BY EP.anime_id
+) AS HS
 ON A._id = HS.anime_id
+-- <-- AM (A_LIBRARY_STATS_ARE_SCOPED_TO_THE_LIBRARY)
 -- <-- AY
 LEFT JOIN (
     SELECT anime_id, group_concat(category_id) AS categories

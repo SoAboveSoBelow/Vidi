@@ -277,8 +277,29 @@ fun MpvSurface(
                             // AM (AN_OFFSCREEN_INSTANCE_FORCES_NO_WINDOW)
                             mpv.setOptionString("force-window", if (forceWindow) "yes" else "no")
                             mpv.setPropertyString("vo", videoOutput)
-                            mpv.setOptionString("vid", "auto")
-                            mpv.setOptionString(
+                            // AM (A_RUNTIME_CHANGE_IS_A_PROPERTY) -->
+                            // vid and hwdec were set here as OPTIONS while
+                            // android-surface-size and vo beside them were set as
+                            // properties - the same reconfiguration through two
+                            // interfaces. mpv semi-deprecated mpv_set_option_string
+                            // for runtime use in 0.21.0 and documents
+                            // mpv_set_property as the runtime interface, so the
+                            // property is the one to keep.
+                            //
+                            // No behaviour change was expected or observed: runtime
+                            // option writes do apply here (ADOPTED_SURFACE_KEEPS_HWDEC
+                            // records hwdec=no being read back on device after one),
+                            // and none of these names are in MPVPlayer's observed
+                            // property list, so the property-change event that an
+                            // option write would not raise has nothing listening for
+                            // it either. This is consistency, not a repair.
+                            //
+                            // force-window stays an option deliberately - upstream's
+                            // BaseMPVView sets it with setOptionString after init,
+                            // with the note that doing otherwise can disturb VO init
+                            // before surfaceCreated().
+                            mpv.setPropertyString("vid", "auto")
+                            mpv.setPropertyString(
                                 "hwdec",
                                 if (decoderPreferences.tryHWDecoding.get()) "mediacodec" else "no",
                             )

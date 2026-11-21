@@ -28,6 +28,7 @@ class LocalSourceFileSystem(
     }
 
     // AM (EXTRA_LOCAL_FOLDERS) -->
+
     /**
      * One entry directory the local source covers, with the url that addresses it.
      *
@@ -87,6 +88,7 @@ class LocalSourceFileSystem(
     }
 
     // AM (LOCAL_SOURCE_APP_FILTER) -->
+
     /**
      * Whether [dir] is an app group - a container of entries rather than an
      * entry itself.
@@ -103,6 +105,7 @@ class LocalSourceFileSystem(
     fun isAppGroup(dir: UniFile): Boolean = isAppGroup(visibleChildren(dir))
 
     // AM (LOCAL_SOURCE_SINGLE_LISTING) -->
+
     /**
      * The children of [dir] that the local source considers at all, listed once.
      *
@@ -161,6 +164,7 @@ class LocalSourceFileSystem(
     fun getEntryTitle(url: String): String = getEntryTitle(url, file = null)
 
     // AM (LOCAL_SOURCE_SINGLE_LISTING)
+
     /**
      * [getEntryTitle] against the directory [file] when the caller already holds
      * it, which is the only reason the url-only form has to resolve anything.

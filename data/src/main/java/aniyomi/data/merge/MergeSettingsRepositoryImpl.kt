@@ -4,14 +4,15 @@ package aniyomi.data.merge
 import aniyomi.domain.merge.model.DedupeMode
 import aniyomi.domain.merge.model.MergeSettings
 import aniyomi.domain.merge.repository.MergeSettingsRepository
-import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.data.Database
+import tachiyomi.data.awaitOneOrNull
 import tachiyomi.data.subscribeToList
 
 @Inject
@@ -23,7 +24,7 @@ class MergeSettingsRepositoryImpl(
 
     override suspend fun get(mergeParentId: Long): MergeSettings {
         return database.merge_settingsQueries.getByMergeParentId(mergeParentId, ::mapSettings)
-            .awaitAsOneOrNull() ?: MergeSettings()
+            .awaitOneOrNull() ?: MergeSettings()
     }
 
     override fun getAsFlow(mergeParentId: Long): Flow<MergeSettings> {
@@ -33,7 +34,10 @@ class MergeSettingsRepositoryImpl(
     }
 
     override suspend fun set(mergeParentId: Long, settings: MergeSettings) {
-        database.merge_settingsQueries.upsert(mergeParentId, settings.dedupeMode.value, settings.infoAnimeId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.merge_settingsQueries.upsert(mergeParentId, settings.dedupeMode.value, settings.infoAnimeId)
+        }
     }
 
     @Suppress("UNUSED_PARAMETER")

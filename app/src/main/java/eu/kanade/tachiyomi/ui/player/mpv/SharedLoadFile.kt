@@ -41,6 +41,9 @@ fun MPV.loadFileWithHwdecGuard(
     // only safe place to raise it: HWDEC_REATTACH_FIX records that changing
     // hwdec mid-stream tears MediaCodec down and can hang waiting for a
     // keyframe. A file boundary is not mid-stream.
+    // AM (A_RUNTIME_CHANGE_IS_A_PROPERTY): stays an option. This is the one
+    // hwdec write that is not a runtime change - it is set at a file boundary for
+    // the load that follows, which is what the comment above is about.
     setOptionString("hwdec", if (hasAttachedSurface) hwdec else "no")
     // <-- AM (ADOPTED_SURFACE_KEEPS_HWDEC)
     command("loadfile", url, "replace", "0", options)

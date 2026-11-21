@@ -146,6 +146,13 @@ class ScrollerPlaybackState internal constructor(
     var isMuted by mutableStateOf(ScrollerSession.isMuted)
         private set
 
+    init {
+        // AM (BROWSE_SCROLLER_RETENTION): started here rather than from a
+        // player instance, because the session needs an application context
+        // and this is the nearest owner that has one.
+        ScrollerSession.startObserving(context)
+    }
+
     /**
      * Each card's media aspect ratio, so the box is as tall as its content is
      * at the screen's width.
@@ -225,9 +232,30 @@ class ScrollerPlaybackState internal constructor(
         applyPlayState()
     }
 
+    // AM (A_A_FEED_BEHIND_A_SCREEN_IS_NOT_BEING_WATCHED) -->
+    /**
+     * Whether the feed's own screen is the one in front.
+     *
+     * A card keeps playing while something is layered over it otherwise - a
+     * video opened fullscreen from the feed has the feed still running
+     * underneath it, with two decoders live and the one nobody can see still
+     * holding audio focus. The feed's screen reports this from its own
+     * lifecycle, which is the only thing that knows.
+     */
+    private var screenInFront = true
+
+    fun setScreenInFront(inFront: Boolean) {
+        if (screenInFront == inFront) return
+        screenInFront = inFront
+        applyPlayState()
+    }
+    // <-- AM (A_A_FEED_BEHIND_A_SCREEN_IS_NOT_BEING_WATCHED)
+
     /** Exactly one instance plays: the card being looked at, if it is loaded. */
     private fun applyPlayState() {
-        val active = activeAnimeId
+        // AM (A_A_FEED_BEHIND_A_SCREEN_IS_NOT_BEING_WATCHED): nothing is the
+        // active card while the feed is not the screen in front.
+        val active = activeAnimeId.takeIf { screenInFront }
         pool.forEach { id, player ->
             // Mute state before play state: only the active card may hold
             // audio focus, and a non-active card holding it is what paused the
@@ -288,7 +316,11 @@ class ScrollerPlaybackState internal constructor(
             return
         }
 
-        val playable = resolver.resolve(anime, source) as? ClipVideoResolver.Result.Playable
+        // AM (A_SPECULATIVE_RESOLVES_YIELD_TO_REAL_ONES): nothing is waiting on
+        // an aspect ratio - the list draws and refines when one arrives - so
+        // this yields the source's request budget to loads that are.
+        val playable = resolver.resolve(anime, source, speculative = true)
+            as? ClipVideoResolver.Result.Playable
             ?: return
         if (isMeasured(anime.id)) return
         ScrollerAspectProbe.probe(playable.url, playable.headers, playable.httpSource?.client)
@@ -481,7 +513,10 @@ class ScrollerPlaybackState internal constructor(
         // AM (HISTORY_ORIGIN): history records that this was seen at all, which
         // is true whatever the position rules below decide. Once per card per
         // session - the store guards the repeat itself.
-        store.recordWatched()
+        // AM (A_HISTORY_HAS_A_THRESHOLD): null, because the feed applies its
+        // own threshold before reaching here (MIN_WATCHED_SECONDS) - there is
+        // no second one for the store to impose.
+        store.recordWatched(watchedSeconds = null)
 
         // AM (SCROLLER_MARKS_SEEN) -->
         // Position against the entry's length, the same measure the player
@@ -556,7 +591,7 @@ class ScrollerPlaybackState internal constructor(
     // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
 
     /**
-     * Fetches [animeId]'s episodes so its position has somewhere to live, then
+     * Finds [animeId]'s episodes so its position has somewhere to live, then
      * hands the key to the card.
      *
      * Uses the app's own episode fetch rather than inserting a row of its own:
@@ -567,22 +602,49 @@ class ScrollerPlaybackState internal constructor(
      * [ScrollerDetailsFetcher] still writes no episodes, and nothing here runs
      * for a card scrolled past - what changed is that a card actually watched
      * now produces the same episode rows opening the entry would have.
+     *
+     * AM (A_KNOWN_EPISODE_NEEDS_NO_REQUEST) -->
+     * The local rows are tried BEFORE the fetch, and the fetch happens only
+     * when there are none. All this needs is an episode id to key a position
+     * against, and an entry watched before already has one stored.
+     *
+     * This is what makes MIN_WATCHED_SECONDS affordable to lower. That constant
+     * gates this function as well as the progress write, and it has to: a
+     * history row needs an episode id, and the id used to arrive only by
+     * network. So every second shaved off the threshold used to buy coverage
+     * accuracy at the price of an episode-list request per card that newly
+     * crossed it - landing on the request budget, which is the cost that
+     * matters (see SourceRequestBudget). Measured on one 9-page walk of a
+     * heavily-viewed listing, roughly 63 cards sat below the old threshold;
+     * had they all been in the 3-5s band they would have been 63 requests
+     * against a 60-per-120s budget, enough to drain it on a single walk.
+     * Local-first leaves only genuinely new cards able to spend it.
+     *
+     * The trade, deliberately taken: a card watched briefly no longer refreshes
+     * that entry's episode list, so newly added episodes wait for whatever
+     * refreshes it next (opening the entry, or a library update). The scroller
+     * wants an id to write a position against, not a current list.
+     * <-- AM (A_KNOWN_EPISODE_NEEDS_NO_REQUEST)
      */
     private fun resolveSessionKey(animeId: Long, player: ScrollerPlayer) {
         if (animeId in resolvedCards) return
         if (sessionKeyJobs[animeId]?.isActive == true) return
         val (anime, source) = watchedCards[animeId] ?: return
         sessionKeyJobs[animeId] = scope.launch {
-            updateAnimeFromRemote.awaitEpisodesUpdate(
-                source = source,
-                anime = anime,
-                fetchEpisodes = true,
-            )
-            val episode = storedEpisode(animeId) ?: return@launch
+            // AM (A_KNOWN_EPISODE_NEEDS_NO_REQUEST)
+            val episode = storedEpisode(animeId) ?: run {
+                updateAnimeFromRemote.awaitEpisodesUpdate(
+                    source = source,
+                    anime = anime,
+                    fetchEpisodes = true,
+                )
+                storedEpisode(animeId)
+            } ?: return@launch
             resolvedCards += animeId
             val key = SessionKey.Library(animeId = animeId, episodeId = episode.id)
-            // The instance may have been reassigned while that fetched, in
-            // which case this key belongs to a card it is no longer playing.
+            // The instance may have been reassigned while the lookup above
+            // suspended - a local read suspends too, and a miss still fetches -
+            // in which case this key belongs to a card it is no longer playing.
             if (pool.get(animeId) !== player) return@launch
             player.sessionKey = key
             // AM (SCROLLER_WRITES_WATCH_PROGRESS)
@@ -1134,8 +1196,11 @@ fun rememberScrollerPlayback(source: AnimeSource?): ScrollerPlaybackState? {
                     resolver = ClipVideoResolver(
                         episodeLoader = graph.episodeLoader,
                         hosterLoader = graph.hosterLoader,
+                        // AM (A_SPECULATIVE_RESOLVES_YIELD_TO_REAL_ONES)
+                        requestBudget = graph.sourceRequestBudget,
                     ),
-                    detailsFetcher = ScrollerDetailsFetcher(graph.updateAnime),
+                    // AM (A_BROWSE_HAS_A_REQUEST_BUDGET)
+                    detailsFetcher = ScrollerDetailsFetcher(graph.updateAnime, graph.sourceRequestBudget),
                     // AM (SESSION_KEYED_TEMP_POSITIONS)
                     getEpisodesByAnimeId = graph.getEpisodesByAnimeId,
                     updateAnimeFromRemote = graph.updateAnimeFromRemote,
@@ -1164,7 +1229,14 @@ private const val PROGRESS_TICK_MS = 1_000L
 
 // AM (SESSION_KEYED_TEMP_POSITIONS)
 /** Below this many seconds watched, a card was scrolled past rather than watched. */
-private const val MIN_WATCHED_SECONDS = 5
+// AM (A_KNOWN_EPISODE_NEEDS_NO_REQUEST): 5 -> 3. Lowered because
+// resolveSessionKey no longer requests anything for an entry whose episodes are
+// already stored, so the threshold costs history rows rather than requests. The
+// measured reason to lower it: a 9-page walk of a heavily-viewed listing
+// recorded 0.71 of entries viewed at the median and 0.88 at best, never 0.90,
+// because a card held under this many seconds writes no history row at all - so
+// a page can be functionally exhausted and still read as 88% covered.
+private const val MIN_WATCHED_SECONDS = 3
 
 // AM (SCROLLER_MARKS_SEEN)
 /** How close to an end a sample counts as at it, when spotting a loop. */

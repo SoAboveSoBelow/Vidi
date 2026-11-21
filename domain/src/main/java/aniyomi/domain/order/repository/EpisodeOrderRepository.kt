@@ -9,6 +9,11 @@ interface EpisodeOrderRepository {
     /** Overrides for [hostAnimeId]. Empty for an entry the user hasn't reordered. */
     suspend fun getByHostAnimeId(hostAnimeId: Long): List<EpisodeOrderOverride>
 
+    // AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP): every entry's overrides in one
+    // read - see episode_order.sq. Keyed the same way as the season equivalent,
+    // so both structure reads hand the caller the same shape.
+    suspend fun getAllByHostAnimeId(): Map<Long, List<EpisodeOrderOverride>>
+
     fun getByHostAnimeIdAsFlow(hostAnimeId: Long): Flow<List<EpisodeOrderOverride>>
 
     suspend fun upsert(hostAnimeId: Long, episodeId: Long, seasonNumber: Long?, sortKey: Double?)

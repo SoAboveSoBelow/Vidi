@@ -3,6 +3,8 @@ package eu.kanade.presentation.webview
 import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.os.Message
+// AM (A_A_WEBVIEW_LOGIN_OUTLIVES_THE_PROCESS)
+import android.webkit.CookieManager
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.WebResourceRequest
@@ -34,6 +36,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
+// AM (A_A_LEFT_WEBVIEW_IS_NOT_A_PLAYING_ONE) -->
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
+// <-- AM (A_A_LEFT_WEBVIEW_IS_NOT_A_PLAYING_ONE)
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.dp
 import cafe.adriel.voyager.core.stack.mutableStateStackOf
@@ -50,6 +57,8 @@ import eu.kanade.presentation.components.WarningBanner
 import eu.kanade.tachiyomi.BuildConfig
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.util.system.getHtml
+// AM (A_A_LEFT_WEBVIEW_IS_NOT_A_PLAYING_ONE)
+import eu.kanade.tachiyomi.util.system.pauseMedia
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
 import eu.kanade.tachiyomi.util.system.setUserAgent
 import kotlinx.coroutines.launch
@@ -104,6 +113,69 @@ fun WebViewScreenContent(
     DisposableEffect(Unit) {
         onDispose { isActive = false }
     }
+
+    // AM (A_A_LEFT_WEBVIEW_IS_NOT_A_PLAYING_ONE) -->
+    // A WebView kept alive goes on playing whatever is in it, and the dispose
+    // below deliberately keeps them alive: a WebView whose window is still on
+    // the stack is only unmounted, so it can resume where it was when the
+    // composable comes back. Nothing ever paused them, so a page with a video
+    // in it carried on with its sound - and, for a live stream, carried on
+    // pulling data - after the screen was gone, until the garbage collector
+    // happened to take the object.
+    //
+    // Two separate questions, answered separately:
+    //
+    // Covered rather than closed - another activity in front, or the system
+    // backgrounding this one - pauses every WebView on the stack and resumes
+    // them on return. onPause is Android's own "stop what can be stopped
+    // safely" for a WebView, and the media pause is explicit because onPause
+    // makes no promise about HTML5 media; between them a video stops and stays
+    // stopped. Deliberately NOT pauseTimers(), which is process-wide: the
+    // network layer drives its own WebView for Cloudflare checks (see
+    // WebViewInterceptor), and freezing that one's timers from here would hang
+    // a request that has nothing to do with this screen.
+    //
+    // Closed is final teardown, and it is the composable that owns the stack
+    // that knows it: about:blank drops the page, which ends the media and the
+    // connection feeding it, before the instance is destroyed. Doing it here
+    // rather than in the WebView's own onDispose is what makes it reliable -
+    // that one cannot tell the screen being finished from the composable being
+    // unmounted, since the window it looks for is still on the stack either way.
+    val webViewLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(webViewLifecycleOwner, windowStack) {
+        val observer = object : DefaultLifecycleObserver {
+            override fun onResume(owner: LifecycleOwner) {
+                windowStack.items.forEach { it.webView?.onResume() }
+            }
+
+            override fun onPause(owner: LifecycleOwner) {
+                windowStack.items.forEach { window ->
+                    window.webView?.pauseMedia()
+                    window.webView?.onPause()
+                }
+            }
+        }
+        webViewLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            webViewLifecycleOwner.lifecycle.removeObserver(observer)
+            windowStack.items.forEach { window ->
+                window.webView?.let { webView ->
+                    window.webView = null
+                    webView.stopLoading()
+                    webView.loadUrl("about:blank")
+                    webView.onPause()
+                    webView.destroy()
+                }
+            }
+            // AM (A_A_WEBVIEW_LOGIN_OUTLIVES_THE_PROCESS): whatever was signed
+            // into here is written to disk now rather than whenever the WebView
+            // next gets round to it. Leaving the screen is the moment a login
+            // has just happened, and it is also the last moment this code is
+            // guaranteed to run before the process can be killed.
+            CookieManager.getInstance().flush()
+        }
+    }
+    // <-- AM (A_A_LEFT_WEBVIEW_IS_NOT_A_PLAYING_ONE)
 
     val webClient = remember {
         object : AccompanistWebViewClient() {

@@ -183,17 +183,33 @@ class UpdateAnimeFromRemote(
             // every ffmpeg extraction.
             if (fetchEpisodes && source is LocalSource) {
                 scope.launchNonCancellable {
+                    // AM (A_THUMBNAIL_FILL_IS_NOT_QUADRATIC) -->
+                    // Read once, keyed by url, outside the chunk callback.
+                    //
+                    // It used to re-query the entry's entire episode list for
+                    // every chunk and then scan that list linearly for each
+                    // episode in the chunk, so a folder of N files cost N/chunk
+                    // full episode reads and N^2 url comparisons - on the one
+                    // source where a single entry plausibly holds thousands of
+                    // episodes, since each file is one.
+                    //
+                    // Safe to hoist: the writes below set previewUrl only, which
+                    // changes neither an episode's id nor its url, so one
+                    // mapping is correct for every chunk. Nothing adds episodes
+                    // here either - sync has already run by this point.
+                    val dbEpisodeIdByUrl = episodeRepository.getEpisodeByAnimeId(anime.id)
+                        .associate { it.url to it.id }
                     source.generateMissingThumbnails(update.anime, update.episodes) { chunk ->
-                        val dbEpisodes = episodeRepository.getEpisodeByAnimeId(anime.id)
                         val thumbnailUpdates = chunk.mapNotNull { sEpisode ->
-                            dbEpisodes.find { it.url == sEpisode.url }?.let { dbEpisode ->
-                                EpisodeUpdate(id = dbEpisode.id, previewUrl = sEpisode.preview_url)
+                            dbEpisodeIdByUrl[sEpisode.url]?.let { dbEpisodeId ->
+                                EpisodeUpdate(id = dbEpisodeId, previewUrl = sEpisode.preview_url)
                             }
                         }
                         if (thumbnailUpdates.isNotEmpty()) {
                             episodeRepository.updateAll(thumbnailUpdates)
                         }
                     }
+                    // <-- AM (A_THUMBNAIL_FILL_IS_NOT_QUADRATIC)
                 }
             }
             // <-- AM (PARTIAL_EPISODE_SYNC)

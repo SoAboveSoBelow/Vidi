@@ -12,13 +12,16 @@ class SourcesBackupCreator(
 ) {
 
     operator fun invoke(animes: List<BackupAnime>): List<BackupSource> {
-        return animes
-            .asSequence()
-            .map(BackupAnime::source)
-            .distinct()
+        return invoke(animes.asSequence().map(BackupAnime::source).distinct().toSet())
+    }
+
+    // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME): the entries are streamed out
+    // one at a time and not kept, so the caller collects their source ids as it
+    // goes and hands over that set instead of the entry list.
+    operator fun invoke(sourceIds: Set<Long>): List<BackupSource> {
+        return sourceIds
             .map(sourceManager::getOrStub)
             .map { it.toBackupSource() }
-            .toList()
     }
 }
 

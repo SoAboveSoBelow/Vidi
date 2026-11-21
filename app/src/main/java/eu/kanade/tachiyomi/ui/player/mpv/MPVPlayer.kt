@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import logcat.LogPriority
 import logcat.logcat
+import java.util.concurrent.Executors
 
 @AssistedInject
 class MPVPlayer(
@@ -81,10 +82,12 @@ class MPVPlayer(
         private set
 
     var isForegroundSuspended = false
+
     // <-- AM (ISEXITING_SPLIT_FIX)
     private var httpError: String? = null
 
     // AM (HWDEC_REATTACH_FIX) -->
+
     /**
      * Tracks whether a real UI Surface has ever been attached to this MPVPlayer
      * instance, across every MpvSurface Composable that's ever wrapped it - not
@@ -103,6 +106,7 @@ class MPVPlayer(
     // <-- AM (HWDEC_REATTACH_FIX)
 
     // AM (ADOPTED_SURFACE_KEEPS_HWDEC) -->
+
     /**
      * What hwdec should be whenever there is a surface to decode into.
      *
@@ -138,6 +142,7 @@ class MPVPlayer(
     // <-- AM (ADOPTED_SURFACE_KEEPS_HWDEC)
 
     // AM (PERSISTENT_SURFACE_ARCHITECTURE) -->
+
     /**
      * The single SurfaceTexture mpv is ever attached to (via wid) for this player's
      * entire lifetime, regardless of how many Activity/Composable instances come
@@ -182,6 +187,7 @@ class MPVPlayer(
     }
 
     // AM (SCROLLER_PRELOAD_TIERS) -->
+
     /**
      * How much of an entry this instance may pull, by how close it is to being
      * watched.
@@ -207,23 +213,150 @@ class MPVPlayer(
         /** The entry being watched: the app's full playback buffer. */
         Playing,
 
-        /** Either side of it: enough to play through a short clip whole. */
+        // Either side of it: enough to play through a short clip whole.
         Near,
 
-        /** Beyond that: open, tracks known, a moment of content, no more. */
+        // Beyond that: open, tracks known, a moment of content, no more.
         Far,
     }
 
+    // AM (A_UNCHANGED_TIER_NEEDS_NO_ROUND_TRIP) -->
+
     /**
-     * Applies the feed's cache policy for [tier]. Cache duration and byte
-     * limits must change together: setting only readahead leaves mpv's real
-     * cache governed by its previous duration limit.
+     * The (tier, buffer seconds) this instance's options were last set to.
+     *
+     * Null until they have been set once. Per instance, so a freshly created
+     * player starts with nothing applied; these are mpv CORE options rather
+     * than per-file ones, so they survive a loadfile and the memo stays true
+     * across the files one pooled instance plays.
+     */
+    @Volatile
+    private var appliedCacheTier: Pair<CacheTier, String>? = null
+
+    // AM (A_THE_UI_THREAD_DOES_NOT_WAIT_ON_MPV) -->
+
+    /**
+     * Where this instance's cache writes run, one at a time, off the UI thread.
+     *
+     * mpv_set_option_string is a blocking call: it takes the mpv core lock, and
+     * cache-secs and the demuxer byte limits have to reach the demuxer, so it
+     * waits on a demuxer thread that may itself be waiting on the network. On
+     * the main thread that is an ANR, and it was one - main thread in
+     * pthread_cond_wait under setScrollerCache, "Input dispatching timed out
+     * ... Waited 10003ms for MotionEvent".
+     *
+     * A single thread rather than a pool, because order matters: the tiers are
+     * a sequence of states and the last one written has to be the one that
+     * sticks. An executor rather than a dispatcher so this needs no
+     * opt-in to experimental coroutine API in a file that has none.
+     */
+    private val cacheWrites = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "mpv-scroller-cache")
+    }
+
+    /**
+     * Guards the validity of the native handle, NOT anything inside mpv.
+     *
+     * Held across the whole of a queued write and across the teardown in
+     * [release], so a write either completes before the handle is closed or
+     * sees [nativeClosed] and does nothing. A flag on its own would not do:
+     * checking it and then calling into mpv leaves a window where the handle
+     * is freed in between, which is a native crash rather than an ANR - strictly
+     * worse than the problem being fixed.
+     *
+     * The cost is that [release] waits out one in-flight write, which can be
+     * the same multi-second wait described above. That is a bounded block on
+     * teardown instead of an unbounded one on every card change, and it cannot
+     * be avoided while the handle is freed synchronously: nothing may free a
+     * handle another thread is inside.
+     */
+    private val nativeLock = Any()
+
+    /** Set under [nativeLock] before the handle is closed; read there too. */
+    private var nativeClosed = false
+
+    private fun postCacheWrite(block: () -> Unit) {
+        val queued = runCatching {
+            cacheWrites.execute {
+                synchronized(nativeLock) {
+                    if (!nativeClosed) {
+                        runCatching(block).onFailure { error ->
+                            logcat(TAG, LogPriority.WARN) { "scroller cache write failed: $error" }
+                        }
+                    }
+                }
+            }
+        }
+        // Rejected once the executor is shut down, which only happens in
+        // release(); there is nothing left to configure at that point.
+        if (queued.isFailure) {
+            logcat(TAG, LogPriority.DEBUG) { "scroller cache write dropped after release" }
+        }
+    }
+    // <-- AM (A_THE_UI_THREAD_DOES_NOT_WAIT_ON_MPV)
+    // <-- AM (A_UNCHANGED_TIER_NEEDS_NO_ROUND_TRIP)
+
+    /**
+     * Queues the feed's cache policy for [tier]; see [applyScrollerCache] for
+     * the writes themselves and A_THE_UI_THREAD_DOES_NOT_WAIT_ON_MPV for why
+     * they are not made here. Cache duration and byte limits must change
+     * together: setting only readahead leaves mpv's real cache governed by its
+     * previous duration limit.
+     *
+     * AM (A_THE_BACK_BUFFER_IS_WHAT_PRELOADING_KEEPS): back bytes mirror the
+     * forward limit at every tier, and that is not slack to be reclaimed.
+     * Sizing them by "only the playing card can be seeked" was tried and
+     * reverted: the back buffer holds what the decoder has already CONSUMED,
+     * the preload path decodes a moment of content before pausing, and a card
+     * is promoted by seeking to its range start - which is behind that
+     * position. With no back buffer the promotion re-reads everything the
+     * preload had fetched, so every card arrived at reloads from the network.
+     * Clips are ranges inside a larger file (see MAX_SEEK_RANGES), so range
+     * changes are backward seeks too and pay the same cost.
+     *
+     * The ceiling this leaves is real - 224 MiB across a full pool, doubled
+     * when audio is a separate instance - but it is the price of preloading
+     * working, and the way to lower it is fewer live instances, not a smaller
+     * memory per instance.
      */
     fun setScrollerCache(tier: CacheTier) {
+        val bufferSecs = playerPreferences.networkBufferSeconds.get().toString()
+        // AM (A_UNCHANGED_TIER_NEEDS_NO_ROUND_TRIP) -->
+        // Nothing to do when the options already say this, and "nothing to do"
+        // is worth a guard because each set below is a blocking call into mpv:
+        // mpv_set_option_string takes the core lock, and cache-secs and the
+        // demuxer byte limits have to reach the demuxer, so one of them can
+        // wait on a demuxer thread that is itself stuck on network I/O.
+        //
+        // ScrollerPlaybackState.applyPlayState calls play() on the active
+        // player and pause() on every other one on EVERY card change, and both
+        // paths reach here through ClipPlayback.applyPlaybackBuffer - twice per
+        // playback, since video and audio are separate instances. At a pool
+        // capacity of 5 that was up to 70 of these calls per card change, of
+        // which only the instances whose tier actually changed needed any.
+        //
+        // Measured consequence of not having this guard: an ANR, main thread in
+        // pthread_cond_wait under mpv_set_option_string via setScrollerCache,
+        // "Input dispatching timed out ... Waited 10003ms for MotionEvent".
+        //
+        // Assigned only after every set below has run, so a throw part way
+        // through does not record a state the options are not actually in.
+        val desired = tier to bufferSecs
+        if (appliedCacheTier == desired) return
+        // <-- AM (A_UNCHANGED_TIER_NEEDS_NO_ROUND_TRIP)
+        // AM (A_THE_UI_THREAD_DOES_NOT_WAIT_ON_MPV): queued, not called. The
+        // caller is ScrollerPlaybackState.applyPlayState on the main thread.
+        postCacheWrite { applyScrollerCache(tier, bufferSecs, desired) }
+    }
+
+    // AM (A_THE_UI_THREAD_DOES_NOT_WAIT_ON_MPV): runs on the cache-write
+    // thread, under nativeLock. [desired] is recorded here rather than by the
+    // caller so a write that throws part way leaves the memo unset and the next
+    // call retries, instead of recording a state the options are not in.
+    private fun applyScrollerCache(tier: CacheTier, bufferSecs: String, desired: Pair<CacheTier, String>) {
         setSafeOptionString("cache", "yes")
         setSafeOptionString("cache-pause", "yes")
         setSafeOptionString("cache-pause-initial", "yes")
-        val bufferSecs = playerPreferences.networkBufferSeconds.get().toString()
         when (tier) {
             CacheTier.Playing -> {
                 setSafeOptionString("cache-secs", bufferSecs)
@@ -248,6 +381,8 @@ class MPVPlayer(
                 setSafeOptionString("demuxer-readahead-secs", "2")
             }
         }
+        // AM (A_UNCHANGED_TIER_NEEDS_NO_ROUND_TRIP)
+        appliedCacheTier = desired
     }
     // <-- AM (SCROLLER_PRELOAD_TIERS)
 
@@ -467,6 +602,7 @@ class MPVPlayer(
     }
 
     // AM (AUDIO_FOCUS_ORPHAN_FIX) -->
+
     /**
      * Deliberately NOT called automatically from init{} (unlike the rest of
      * setupAudio() above, which is - those are just mpv option config, harmless
@@ -750,6 +886,16 @@ class MPVPlayer(
         // load (which gets a fresh decoder session) sidesteps. Safe to call
         // unconditionally: detaching an already-detached/never-attached surface is
         // the same no-op MpvSurface's own surfaceDestroyed() already relies on.
+        // AM (A_THE_UI_THREAD_DOES_NOT_WAIT_ON_MPV) -->
+        // Pending cache writes are discarded and the handle is marked closed
+        // before anything frees it. shutdownNow only drops what has not started
+        // - a write already inside mpv cannot be interrupted out of a JNI call -
+        // so nativeLock below is what actually waits for it.
+        cacheWrites.shutdownNow()
+        synchronized(nativeLock) {
+            nativeClosed = true
+        }
+        // <-- AM (A_THE_UI_THREAD_DOES_NOT_WAIT_ON_MPV)
         mpv.detachSurface()
         // <-- AM (RELEASE_SURFACE_DETACH_FIX)
         mpv.close()
@@ -770,6 +916,7 @@ class MPVPlayer(
         data class TrackLoadFailure(val url: String) : Event
         data class EndFile(val node: MPVNode) : Event
         data class LuaEvent(val property: String, val value: String) : Event
+
         // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
         data class PauseChanged(val paused: Boolean) : Event
         data object PlaybackRestart : Event

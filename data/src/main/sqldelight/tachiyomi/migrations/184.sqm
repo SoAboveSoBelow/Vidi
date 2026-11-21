@@ -1,0 +1,9 @@
+-- AM (A_AN_UNVIEWED_TAIL_IS_A_STOPPING_POINT): see
+-- data/source_page_coverage.sq and SourcePageCoverage for why a page's last
+-- entry decides whether the page may be skipped at all.
+--
+-- Default 0 means every row recorded before this column existed reads as
+-- stopped-in and will not be skipped. Those rows are re-recorded on the next
+-- walk of their listing, so the default costs one walk per listing and never
+-- skips a page on the strength of an observation that could not answer this.
+ALTER TABLE source_page_coverage ADD COLUMN tail_viewed INTEGER NOT NULL DEFAULT 0;

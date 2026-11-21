@@ -1,4 +1,23 @@
 -- AY -->
+-- AM (A_SEASON_STATS_ARE_SCOPED_TO_SEASONS) -->
+-- ES and HS below are episodestatsView and historystatsView restricted to
+-- rows that are actually seasons, inlined rather than reused, for the same
+-- reason libraryView inlines its own pair: those views aggregate over the
+-- WHOLE episodes table, and SQLite cannot push this view's
+-- `season.parent_id IS NOT NULL` through a LEFT JOIN into a grouped subquery.
+-- Every episode of every entry was grouped and then discarded, so the cost of
+-- reading season stats scaled with the browse history instead of with the
+-- number of seasons.
+--
+-- CROSS JOIN, not JOIN: the join order is the whole point. Left to itself the
+-- planner scans episodes and seeks the anime row, which is the wrong way round
+-- when seasons are a small slice of animes. CROSS JOIN is SQLite's documented
+-- way to fix the outer table (it constrains ordering only, never the result),
+-- so the driver is the parent_id index and episodes is seeked per season.
+--
+-- Measured at 120k animes / 150k episodes / 102k history, 2k seasons under 200
+-- parents, identical rows: 203 -> 8.6 ms for the whole view, and libraryView's
+-- `library` (which joins this view) 196 -> 46 ms.
 CREATE VIEW animeseasonstatsView AS
 SELECT
     season.parent_id,
@@ -12,8 +31,35 @@ SELECT
     sum(coalesce(ES.bookmarkCount, 0)) AS total_bookmarks,
     sum(coalesce(ES.fillermarkCount, 0)) AS total_fillermarks
 FROM animes season
-LEFT JOIN episodestatsView ES ON season._id = ES.anime_id
-LEFT JOIN historystatsView HS ON season._id = HS.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id
+        AND EP.scanlator = X.scanlator
+    WHERE SA.parent_id IS NOT NULL
+    AND X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) ES ON season._id = ES.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN history H ON EP._id = H.episode_id
+    WHERE SA.parent_id IS NOT NULL
+    GROUP BY EP.anime_id
+) HS ON season._id = HS.anime_id
 WHERE season.parent_id IS NOT NULL
 GROUP BY season.parent_id;
+-- <-- AM (A_SEASON_STATS_ARE_SCOPED_TO_SEASONS)
 -- <-- AY

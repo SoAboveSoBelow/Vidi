@@ -37,6 +37,24 @@ fun BrowseSourceList(
 ) {
     // AY -->
     val sourceListState = rememberLazyListState()
+    // AM (A_THE_FEED_KEEPS_ITS_PLACE) -->
+    // The leading row is unconditional in this layout - it is drawn whether or
+    // not a prepend is loading - so every paging index sits one lazy index
+    // further down. See BrowseListingAnchor.
+    val leadingItemCount = { 1 }
+    val anchorTrail = rememberAnchorTrail(
+        animeList = animeList,
+        firstVisibleItemIndex = { sourceListState.firstVisibleItemIndex },
+        leadingItemCount = leadingItemCount,
+    )
+    RestoreListingAnchor(
+        animeList = animeList,
+        anchorTrail = anchorTrail,
+        firstVisibleItemIndex = { sourceListState.firstVisibleItemIndex },
+        leadingItemCount = leadingItemCount,
+        scrollToItem = { index -> sourceListState.scrollToItem(index) },
+    )
+    // <-- AM (A_THE_FEED_KEEPS_ITS_PLACE)
     BoxWithConstraints {
         val density = LocalDensity.current
         val containerHeightPx = with(density) { this@BoxWithConstraints.maxHeight.roundToPx() }

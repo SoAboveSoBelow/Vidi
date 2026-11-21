@@ -184,6 +184,8 @@ fun PlayerControls(
             ControlAction.VideoQuality -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.QualityTracks))
             ControlAction.VideoFilters -> onPlayerEvent(PlayerEvent.SetPanel(Panels.VideoFilters))
             ControlAction.Overflow -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.More))
+            // AM (A_LOOPING_IS_THE_USERS_CALL)
+            ControlAction.ToggleLoop -> onPlayerEvent(PlayerEvent.ToggleLoop)
             ControlAction.PrimaryCustomButton -> onPlayerEvent(PlayerEvent.ExecuteCustomButton(false))
             is ControlAction.CustomButton -> onPlayerEvent(
                 PlayerEvent.ExecuteCustomButtonById(action.id, action.input),

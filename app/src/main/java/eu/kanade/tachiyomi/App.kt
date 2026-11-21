@@ -10,6 +10,8 @@ import android.content.IntentFilter
 import android.os.Build
 import android.webkit.WebView
 import androidx.core.content.ContextCompat
+// AM (A_A_WEBVIEW_LOGIN_OUTLIVES_THE_PROCESS)
+import android.webkit.CookieManager
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -346,6 +348,17 @@ class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factor
 
     override fun onStop(owner: LifecycleOwner) {
         SecureActivityDelegate.onApplicationStopped(this)
+        // AM (A_A_WEBVIEW_LOGIN_OUTLIVES_THE_PROCESS) -->
+        // Cookies are the app's only record of being signed in to a source -
+        // AndroidCookieJar is a thin wrapper over the WebView's own store, so
+        // this is one set of cookies shared by the WebView and OkHttp - and
+        // nothing ever asked for them to be written to disk. CookieManager
+        // keeps them in memory and persists on a schedule of its own, so a
+        // process killed in the background before that happened came back
+        // signed out of whatever had just been signed into. Here because this
+        // is the last point the app is told about before it can be killed.
+        runCatching { CookieManager.getInstance().flush() }
+        // <-- AM (A_A_WEBVIEW_LOGIN_OUTLIVES_THE_PROCESS)
         // AM (DISCORD_RPC) -->
         DiscordRPCService.stop(applicationContext, 10000L)
         // <-- AM (DISCORD_RPC)

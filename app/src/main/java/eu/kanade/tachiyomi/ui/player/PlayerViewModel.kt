@@ -179,6 +179,8 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -453,6 +455,10 @@ class PlayerViewModel(
             video = player,
             audioFactory = { mpvFactory.create(videoOutput) },
             onEntryEnded = { eofReached(true, combinedTimelineEnded = true) },
+            // AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM)
+            onTimelineReady = { publishClipDuration() },
+            // AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED)
+            onAudioLoadFailed = { audioStreamFailed() },
         )
         var attempts = 0
         var fileLoaded = false
@@ -479,6 +485,11 @@ class PlayerViewModel(
 
     private fun qualityProxyOwner(player: MPVPlayer): String =
         "player-${System.identityHashCode(player)}"
+
+    /** Drops every proxy registration [player] holds. */
+    private fun releaseProxyOwner(player: MPVPlayer) {
+        MediaProxyServer.releaseOwner(qualityProxyOwner(player))
+    }
     // <-- AM (SEAMLESS_QUALITY_SWITCH)
 
     // AM (CLIP_PLAYBACK) -->
@@ -512,6 +523,46 @@ class PlayerViewModel(
         get() = mediaHolder?.instancePool { MpvInstancePool(mpvFactory, videoOutput) }
     // <-- AM (POOLED_PLAYER_INSTANCES)
 
+    // AM (A_LOOPING_IS_THE_USERS_CALL) -->
+    /**
+     * Whether the player repeats what it is playing. Off until the viewer says
+     * otherwise, and then for the rest of the session - across episodes and
+     * across quality switches, the way auto-play persists once set.
+     *
+     * AM (A_A_LOOP_IS_A_BUTTON_NOT_A_PROPERTY): nothing about the entry feeds
+     * into it. Two earlier versions of this let the content decide and both
+     * produced an episode that could not be made to advance: first any entry
+     * with a separate audio stream looped because it HAD two streams, then any
+     * entry whose listing carried a loops flag looped because the listing said
+     * so. A source describing its clip as a loop is describing how it was cut,
+     * not asking the player to never move on, and the feed - the surface those
+     * entries are meant to repeat in - prepares its own cards with looping on
+     * regardless of this.
+     */
+    private var loopEnabled: Boolean = false
+
+    private val loopCurrentEntry: Boolean get() = loopEnabled
+
+    /**
+     * Flips the loop for what is playing and for everything after it.
+     *
+     * Applied to the live playback as well as recorded, so it takes effect on
+     * the entry in hand rather than at the next load.
+     */
+    private fun toggleLoop() {
+        val enabled = !loopEnabled
+        loopEnabled = enabled
+        _clipPlayback?.setLoopEnabled(enabled)
+        updateUiData {
+            it.copy(
+                playerUpdate = PlayerUpdates.ShowTextResource(
+                    if (enabled) AMMR.strings.am_player_loop_on else AMMR.strings.am_player_loop_off,
+                ),
+            )
+        }
+    }
+    // <-- AM (A_LOOPING_IS_THE_USERS_CALL)
+
     private var _clipPlayback: ClipPlayback? = null
     private val clipPlayback: ClipPlayback
         get() = _clipPlayback?.takeIf { it.video === _player }
@@ -519,6 +570,10 @@ class PlayerViewModel(
                 video = _player,
                 audioFactory = { mpvFactory.create(videoOutput) },
                 onEntryEnded = { eofReached(true, combinedTimelineEnded = true) },
+                // AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM)
+                onTimelineReady = { publishClipDuration() },
+                // AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED)
+                onAudioLoadFailed = { audioStreamFailed() },
             )
                 .also {
                     _clipPlayback?.releaseCompanion()
@@ -762,6 +817,8 @@ class PlayerViewModel(
 
         // AM (PLAYBACK_QUEUE)
         observeQueue()
+        // AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED)
+        observePlaylistEntries()
         // AM (PLAYLIST_SWIPE_ACTIONS)
         observePlaylistDownloads()
         // AM (PREFETCH_FOLLOWS_THE_QUEUE)
@@ -1199,10 +1256,10 @@ class PlayerViewModel(
                 while (true) {
                     delay(1.seconds)
                     if (!clipPlayback.isSplit) continue
-                    val total = clipPlayback.durationSeconds.toInt()
-                    if (total > 0 && total != playbackData.value.duration) {
-                        updatePlaybackData { it.copy(duration = total) }
-                    }
+                    // AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM): published
+                    // by onTimelineReady the moment it is known; this is the
+                    // backstop, not the mechanism.
+                    publishClipDuration()
                     val position = clipPlayback.positionSeconds.toInt()
                     if (position != playbackData.value.position) onSecondReached(position)
                 }
@@ -1538,6 +1595,10 @@ class PlayerViewModel(
             }
             PlayerEvent.CycleRotation -> {
                 cycleRotations()
+            }
+            // AM (A_LOOPING_IS_THE_USERS_CALL)
+            PlayerEvent.ToggleLoop -> {
+                toggleLoop()
             }
             PlayerEvent.EnterPip -> {
                 viewModelScope.launch {
@@ -2560,6 +2621,56 @@ class PlayerViewModel(
         }
     }
     // <-- AM (PLAYBACK_QUEUE)
+
+    // AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED) -->
+    /**
+     * Keeps the row behind every entry the playlist names current.
+     *
+     * Derived rather than re-snapshotted, the same shape as
+     * [observePlaylistDownloads] below and for the same reason: the playlist
+     * is not rebuilt for a change to an entry, because rebuilding it is what
+     * decides play order, so a fact about an entry that the queue DISPLAYS has
+     * to reach it some other way. Adding a queued source to the library is the
+     * case that made this visible - the badge and the heart both read a
+     * snapshot taken when the source was queued, so neither moved.
+     *
+     * Scoped to the entries the playlist names rather than observing the
+     * library: the set is the queue's size, not the library's, so this costs
+     * one listener per queued source however large the library grows. The ids
+     * come off state, which is where both snapshots already live, so a queue
+     * change reaches this through the playlist rebuild it already causes.
+     *
+     * Published only when it differs, because the recompute reads state and
+     * writing unconditionally would feed itself.
+     */
+    private fun observePlaylistEntries() {
+        viewModelScope.launchIO {
+            stateData
+                .map { state ->
+                    buildSet {
+                        addAll(state.playlistOwnerByAnimeId.keys)
+                        state.playlistQueuedEntryByEpisodeId.values.forEach { add(it.id) }
+                        state.currentAnime?.id?.let { add(it) }
+                    }
+                }
+                .distinctUntilChanged()
+                .flatMapLatest { ids ->
+                    if (ids.isEmpty()) {
+                        flowOf(emptyMap<Long, Anime>())
+                    } else {
+                        combine(ids.map { id -> getAnime.subscribe(id) }) { entries ->
+                            entries.associateBy { it.id }
+                        }
+                    }
+                }
+                .collectLatest { live ->
+                    if (live != stateData.value.playlistLiveEntryByAnimeId) {
+                        updateStateData { it.copy(playlistLiveEntryByAnimeId = live) }
+                    }
+                }
+        }
+    }
+    // <-- AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED)
 
     // AM (PLAYLIST_SWIPE_ACTIONS) -->
     /**
@@ -4008,6 +4119,9 @@ class PlayerViewModel(
         // would never reach a backstop write.
         lastPersistedPositionSeconds = 0
         // <-- AM (PERSIST_ON_CADENCE)
+        // AM (A_HISTORY_HAS_A_THRESHOLD): a new episode has been watched for
+        // none of itself, whatever the one before it accumulated.
+        watchedSecondsThisEpisode = 0
         // AM (CUSTOM_EPISODE_ORDER) -->
         // Whatever made this episode current - confirming the prompt, a manual
         // next/previous, picking from the list, a playlist rehost - resolves
@@ -5284,9 +5398,9 @@ class PlayerViewModel(
                     val anime = stateData.value.currentAnime
                     val statedMedia = statedStreamsFor(anime, video)
                     val separateFiles = separateStreamFiles(video)
-                    pending.clipPlayback.prepare(
-                        ClipPlayback.declaredLooping(anime) || statedMedia != null || separateFiles != null,
-                    )
+                    // AM (A_LOOPING_IS_THE_USERS_CALL): the session's answer,
+                    // which a quality switch carries across unchanged.
+                    pending.clipPlayback.prepare(loopCurrentEntry)
                     pending.clipPlayback.onSurfaceAttachedChanged(true)
                     val episodeId = pending.episodeId
                     if (statedMedia != null && episodeId != null) {
@@ -5326,6 +5440,7 @@ class PlayerViewModel(
                             pending.player,
                         ) ?: video.videoUrl
                         val url = parseVideoUrl(playbackUrl) ?: throw Exception("Invalid quality URL")
+                        // AM (A_AN_OPTION_OUTLIVES_THE_FILE)
                         httpHeaderFieldsFor(video)?.let {
                             pending.player.mpv.setOptionString("http-header-fields", it)
                         }
@@ -5450,7 +5565,7 @@ class PlayerViewModel(
             if (!switched && _qualitySwitch.value === pending) {
                 _qualitySwitch.value = null
                 qualitySwitchJob = null
-                MediaProxyServer.releaseOwner(qualityProxyOwner(pending.player))
+                releaseProxyOwner(pending.player)
                 pending.clipPlayback.releaseCompanion()
                 instancePool.let { pool ->
                     if (pool != null) pool.release(pending.player) else pending.player.release()
@@ -5513,7 +5628,8 @@ class PlayerViewModel(
         val outgoingVideo = liveVideo
         val outgoingClip = _clipPlayback
         val outgoingClipLoad = liveClipLoad
-        val outgoingTracks = trackSnapshot()
+        // AM (A_RETAINED_SNAPSHOT_PREDATES_THE_CLEAR)
+        val outgoingTracks = outgoingTrackSnapshot(outgoingEpisodeId)
         val retains = pending.resumeOnly &&
             outgoingEpisodeId != null &&
             outgoingEpisodeId != pending.episodeId &&
@@ -5641,6 +5757,33 @@ class PlayerViewModel(
          */
         completeTheLoad: Boolean = true,
         // <-- AM (ONE_OWNER_FOR_THE_COMPLETION)
+        // AM (A_RESTORE_PRECEDES_THE_REWIRE) -->
+        /**
+         * The per-file track state [incoming] already has loaded, put in place
+         * as part of the swap rather than after it.
+         *
+         * Non-null only for a promotion of a RETAINED instance, whose file has
+         * been open since it was last live: there is nothing to re-derive, and
+         * the snapshot is what tells this view model so.
+         *
+         * It has to land before [wirePlayerFlows], not after the promote
+         * returns. wirePlayerFlows clears the prop-flow cache and re-observes
+         * `track-list` on the incoming instance, and mpv answers a fresh
+         * observe with the current value, so the incoming file's track list is
+         * delivered as part of the rewire - against whatever stateData holds at
+         * that moment. Held after the promote, that was the state changeEpisode
+         * had already cleared: hasLoadedTracks false, so onTrackListChanged took
+         * the first-load branch and ran preferred-track selection over a file
+         * that was already correctly selected. selectSubById is a toggle, so
+         * selecting the track that is already `sid` turns subtitles OFF; an
+         * external track took the other shape and was added a second time.
+         *
+         * Null for a PREPARED instance: its file is new, mpv has reported
+         * nothing about it to anything that was listening, and re-deriving is
+         * exactly what should happen there.
+         */
+        incomingTracks: TrackSnapshot? = null,
+        // <-- AM (A_RESTORE_PRECEDES_THE_REWIRE)
     ): Boolean {
         // AM (PROMOTE_RESTORES_MPV_VOLUME) -->
         // mpv's own volume, carried from the instance that is playing - not
@@ -5669,6 +5812,10 @@ class PlayerViewModel(
         val shouldPause = if (completeTheLoad) uiData.value.previousPauseState == true else true
         outgoing.mpv.setPropertyBoolean("pause", true)
         _player = incoming
+        // AM (A_RESTORE_PRECEDES_THE_REWIRE): ahead of wirePlayerFlows below,
+        // and ahead of the fileLoaded()/checkFileLoaded() pair, which read the
+        // very flags this puts back.
+        incomingTracks?.let { restoreTracks(it) }
         incoming.requestAudioFocus()
         // AM (PREPARED_EPISODE_SWITCH)
         if (driveIncomingClip) {
@@ -5712,7 +5859,7 @@ class PlayerViewModel(
         // still occupied. Releasing either is what makes coming back a reload.
         if (retainOutgoing) return true
         // <-- AM (PREPARED_EPISODE_SWITCH)
-        MediaProxyServer.releaseOwner(qualityProxyOwner(outgoing))
+        releaseProxyOwner(outgoing)
         // AM (POOLED_PLAYER_INSTANCES): handed back rather than closed. This ran
         // close() on an instance whose event threads were still unwinding, which
         // is the teardown the feed's pool exists to avoid; the pool adopts an
@@ -5907,6 +6054,57 @@ class PlayerViewModel(
     private var liveVideo: Video? = null
     private var liveClipLoad: Boolean = false
 
+    // AM (A_RETAINED_SNAPSHOT_PREDATES_THE_CLEAR) -->
+    /**
+     * The live session's track state, taken at the moment [clearTracks] is
+     * about to destroy it.
+     *
+     * A retained session has to carry the per-file track state of ITS file -
+     * that is what RetainedSession documents, and what restoring it on a
+     * promotion is for. Both retain sites took that snapshot at promote time
+     * instead, which is too late by the whole length of a switch: changeEpisode
+     * calls clearTracks() as its first step, so by then hasLoadedTracks /
+     * hasLoadedSubs / hasLoadedAudio are already false and the external track
+     * lists are already empty, while subtitleTracks/audioTracks hold whatever
+     * embedded list was last reported. A retained session therefore recorded a
+     * file that had never loaded its tracks, and promoting it back told this
+     * view model to load them again.
+     *
+     * The clear is exactly the boundary where the live state stops describing
+     * the live file, so it is where the snapshot belongs. Guarded on
+     * hasLoadedTracks so a second clear for the same change - setVideo's, after
+     * changeEpisode's - cannot overwrite a good snapshot with the cleared one it
+     * is clearing.
+     */
+    private var tracksBeforeClear: Pair<Long, TrackSnapshot>? = null
+
+    /**
+     * The snapshot taken for [episodeId], else the live state as it is.
+     *
+     * Matched on the episode rather than just taken, because neither caller can
+     * promise it will retain after reading this: handOffForEpisodeChange reads
+     * it above its own `retains` test, and the retained-promotion path returns
+     * early when it loses the holder race. Either route leaves the snapshot in
+     * place, so a LATER retain can reach it - and while the clear in between
+     * normally overwrites it, that clear is guarded on hasLoadedTracks, so an
+     * outgoing file that never finished loading its tracks overwrites nothing.
+     * Unkeyed, the retained session then carried the WRONG file's track lists
+     * with hasLoadedTracks already true, which is precisely the state that stops
+     * onTrackListChanged from rebuilding them: the same wrong-tracks-on-
+     * promotion bug this snapshot exists to fix, one episode further along.
+     *
+     * Keyed rather than consumed on read, which was the other way to close it.
+     * Consuming also loses the snapshot on the lost-race path, where it is still
+     * the right snapshot for that episode and is simply used a moment later -
+     * trading wrong tracks for a needless reload. The id makes a stale snapshot
+     * unusable without discarding a valid one.
+     */
+    private fun outgoingTrackSnapshot(episodeId: Long?): TrackSnapshot {
+        val (capturedFor, captured) = tracksBeforeClear ?: return trackSnapshot()
+        return if (episodeId != null && capturedFor == episodeId) captured else trackSnapshot()
+    }
+    // <-- AM (A_RETAINED_SNAPSHOT_PREDATES_THE_CLEAR)
+
     private fun trackSnapshot(): TrackSnapshot = stateData.value.let {
         TrackSnapshot(
             subtitleTracks = it.subtitleTracks,
@@ -5929,6 +6127,10 @@ class PlayerViewModel(
         clipLoad: Boolean,
         tracks: TrackSnapshot,
     ) {
+        // AM (A_RETAINED_SNAPSHOT_PREDATES_THE_CLEAR): nothing to release here.
+        // The snapshot is keyed to the episode it was taken for, so a leftover
+        // one cannot be mistaken for this episode's, and the next clear for a
+        // loaded file replaces it. See outgoingTrackSnapshot.
         retainedSessions.removeAll { it.episodeId == episodeId }
         retainedSessions += RetainedSession(
             player,
@@ -5964,7 +6166,7 @@ class PlayerViewModel(
         // eviction pass decide, and which is the only thing that makes the
         // registration useless.
         if (MediaCache.peek()?.holdsEpisode(session.episodeId) != true) {
-            MediaProxyServer.releaseOwner(qualityProxyOwner(session.player))
+            releaseProxyOwner(session.player)
         }
         // <-- AM (CACHED_BYTES_STAY_ADDRESSABLE)
         session.clipPlayback.releaseCompanion()
@@ -6063,8 +6265,14 @@ class PlayerViewModel(
         // AM (NOTHING_IS_PROMOTED_BEFORE_IT_IS_READY): no seek here. A retained
         // session is only used when it already sits at the resume point - see
         // sitsAt - so by this line there is nothing to move.
-        val outgoingTracks = trackSnapshot()
+        // AM (A_RETAINED_SNAPSHOT_PREDATES_THE_CLEAR)
+        val outgoingTracks = outgoingTrackSnapshot(outgoingEpisodeId)
         val outgoingClipLoad = liveClipLoad
+        // AM (A_RESTORE_PRECEDES_THE_REWIRE): the incoming file's own video, in
+        // place before the promote rather than after it, for the same reason the
+        // track snapshot is - onTracksLoaded reads currentVideo to rebuild the
+        // external track list, and the rewire can reach it during the swap.
+        updateStateData { it.copy(currentVideo = retained.video) }
         val promoted = promote(
             outgoing = outgoing,
             incoming = retained.player,
@@ -6074,9 +6282,11 @@ class PlayerViewModel(
             retainOutgoing = true,
             driveIncomingClip = retained.clipLoad,
             carryTrackSelection = false,
-            // AM (ONE_OWNER_FOR_THE_COMPLETION): restoreTracks() and the resume
-            // seek below come after this, so the completion does too.
+            // AM (ONE_OWNER_FOR_THE_COMPLETION): the resume seek below comes
+            // after this, so the completion does too.
             completeTheLoad = false,
+            // AM (A_RESTORE_PRECEDES_THE_REWIRE)
+            incomingTracks = retained.tracks,
         )
         if (!promoted) {
             // Lost the race for the holder: put it back and let the caller load
@@ -6088,8 +6298,8 @@ class PlayerViewModel(
         liveEpisodeId = targetEpisodeId
         liveVideo = retained.video
         liveClipLoad = retained.clipLoad
-        updateStateData { it.copy(currentVideo = retained.video) }
-        restoreTracks(retained.tracks)
+        // AM (A_RESTORE_PRECEDES_THE_REWIRE): currentVideo and the track state
+        // are both in place before the promote now, so nothing is applied here.
         // AM (ONE_OWNER_FOR_THE_COMPLETION) -->
         // The completion, now that the incoming session's state is in place.
         // No recorded intent means play, which is what the mid-swap form worked
@@ -6166,7 +6376,7 @@ class PlayerViewModel(
         qualitySwitchJob = null
         _qualitySwitch.value = null
         if (pending != null) {
-            MediaProxyServer.releaseOwner(qualityProxyOwner(pending.player))
+            releaseProxyOwner(pending.player)
             pending.clipPlayback.releaseCompanion()
             // AM (POOLED_PLAYER_INSTANCES): an abandoned switch gives its
             // instance back too - it was never promoted, so nothing has been
@@ -6357,19 +6567,23 @@ class PlayerViewModel(
         // loop left behind by a clip that declared one.
         val anime = stateData.value.currentAnime
         val statedMedia = statedStreamsFor(anime, video)
-        // Looping if the listing says so, or if this entry is a video with a
-        // separate audio stream - which is a looping clip by construction,
-        // whatever the flag says. The downloaded pair below decides the same
-        // way, off the files rather than off the listing.
-        // AM (SEPARATE_AUDIO_PLAYBACK): a video with a separate audio stream
-        // is a looping clip by construction, whether the two arrive as two
-        // urls or as two files - so the streams decide, not the listing,
-        // whose flag can be absent or overwritten.
         val separateFiles = separateStreamFiles(video)
-        val loops = ClipPlayback.declaredLooping(anime) ||
-            statedMedia != null ||
-            separateFiles != null
-        clipPlayback.prepare(loops)
+        // AM (A_LOOPING_IS_THE_USERS_CALL) -->
+        // Whether this entry repeats is the viewer's answer, carried on the
+        // session and bound to the ToggleLoop control - not a property read
+        // off the entry.
+        //
+        // It used to be `declaredLooping(anime) || statedMedia != null ||
+        // separateFiles != null`: a two-stream entry looped because it HAD two
+        // streams. That is a statement about how the thing was encoded, and
+        // the player has no control that could disagree with it, so an ordinary
+        // episode that happened to ship its audio separately could not be
+        // played through to the next one at all. The feed is the surface whose
+        // entries repeat by nature, and it still prepares its own cards that
+        // way; a session here plays an entry once unless the viewer says
+        // otherwise.
+        clipPlayback.prepare(loopCurrentEntry)
+        // <-- AM (A_LOOPING_IS_THE_USERS_CALL)
         // <-- AM (CLIP_PLAYBACK)
         // AM (CLIP_RESUME_FOLDS_ONTO_STREAMS) -->
         // Not for a pair. This is a global option that the next loadfile on
@@ -6700,6 +6914,9 @@ class PlayerViewModel(
         // Referer needs it on both streams or the second one fails its
         // handshake and the entry plays silent.
         val httpHeaderString = httpHeaderFieldsFor(video) ?: return
+        // AM (A_AN_OPTION_OUTLIVES_THE_FILE): the comment above says what a
+        // source needing a Referer costs when the second stream does not get
+        // it, and a property set before the load is how it stopped getting it.
         mpv.setOptionString("http-header-fields", httpHeaderString)
     }
 
@@ -6793,6 +7010,7 @@ class PlayerViewModel(
             ?: return null
         return stated.takeIf { !it.audioUrl.isNullOrBlank() }
     }
+
     // <-- AM (CLIP_PLAYBACK)
 
     // AM (EOF_REPLAY_NO_RELOAD) -->
@@ -6896,10 +7114,38 @@ class PlayerViewModel(
     }
     // <-- AM (COMPLETION_RUNS_ONCE)
 
+    // AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM) -->
+    /**
+     * Publishes a two-stream entry's length.
+     *
+     * Its own function because two things need it and neither is the mpv
+     * `duration` property: that one is the video instance's, which for a
+     * two-stream entry is one of the pair rather than the entry, so the
+     * property observer skips a split load entirely. Before this, the once-a-
+     * second ticker was the only thing that published it - so a split entry
+     * wore the PREVIOUS entry's duration for up to a second after it started,
+     * which is the wrong length flashing up as a video begins.
+     *
+     * Still guarded on isSplit: a single-stream entry's length is the video
+     * instance's own duration, which the property observer publishes, and two
+     * writers for one value is how they drift.
+     */
+    private fun publishClipDuration() {
+        if (!clipPlayback.isSplit) return
+        val total = clipPlayback.durationSeconds.toInt()
+        if (total > 0 && total != playbackData.value.duration) {
+            updatePlaybackData { it.copy(duration = total) }
+        }
+    }
+    // <-- AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM)
+
     private fun eofReached(eofReached: Boolean, combinedTimelineEnded: Boolean = false) {
         // AM (CLIP_PLAYBACK) -->
-        // Only the shorter video repeats. Its EOF is a lap, not completion;
-        // the longer stream's EOF below is the entry's actual ending.
+        // A repeating video's EOF is a lap, not completion; the entry's actual
+        // ending arrives as combinedTimelineEnded.
+        // AM (A_THE_LONGER_STREAM_IS_THE_ENTRY): which is a two-stream entry
+        // that loops, and one whose video is the shorter half - that half
+        // repeats underneath the longer one whether or not the entry loops.
         if (!combinedTimelineEnded && clipPlayback.videoIsRepeating) {
             // AM (EOF_BELONGS_TO_AN_INSTANCE)
             fileEndedOnInstance = null
@@ -7019,6 +7265,20 @@ class PlayerViewModel(
         }
         // <-- AM (EOF_REPLAY_NO_RELOAD)
 
+        failCurrentVideo()
+    }
+
+    // AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED) -->
+    /**
+     * Marks this video unplayable and does whatever the failure preference
+     * says, which is the tail [endFile] has always ended with.
+     *
+     * Extracted so the audio half of a two-stream entry can fail the entry the
+     * same way the video half does - see [audioStreamFailed]. A separate copy
+     * would be a second answer to "what happens when this entry cannot be
+     * played", and the two would drift.
+     */
+    private fun failCurrentVideo() {
         setCurrentVideoError()
 
         if (playerPreferences.switchOnFailure.get()) {
@@ -7029,6 +7289,35 @@ class PlayerViewModel(
             updateStateData { it.copy(isStopped = true) }
         }
     }
+
+    /**
+     * The companion instance could not open this entry's audio url.
+     *
+     * Treated as the entry failing, not as the entry playing silently. A
+     * separate audio stream is part of the same resolved video as the picture,
+     * so a url that will not open means the resolution is stale or the hoster
+     * is gone - the same condition [endFile] handles for the picture, and it
+     * has the same two answers: resolve it again, and failing that, move to
+     * another hoster.
+     *
+     * Bounded to one re-resolution per loaded video, by the episode and video
+     * the attempt was made for. A dead host would otherwise re-resolve on
+     * every attempt's own failure, and the entry would sit in a resolve loop
+     * instead of moving on.
+     */
+    private fun audioStreamFailed() {
+        // AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED): the resolution that
+        // produced this url is wrong, so it is dropped and the next attempt at
+        // this entry resolves again. Nothing more: ClipPlayback lets the entry
+        // through to play without its sound, and failing an entry that is
+        // already playing would be the louder of two wrong answers.
+        val episodeId = stateData.value.currentEpisode?.id
+        val videoTitle = stateData.value.currentVideo?.videoTitle.orEmpty()
+        // AM (SHARED_LINK_RESOLUTION): this link just failed, so the
+        // downloader must not pick it up either.
+        ResolvedVideoCache.invalidate(ResolvedVideoCache.key(episodeId, videoTitle))
+    }
+    // <-- AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED)
 
     fun setCurrentVideoError() {
         val (hosterIdx, videoIdx) = uiData.value.selectedHosterVideoIndex
@@ -7182,6 +7471,9 @@ class PlayerViewModel(
         //
         // The load has already happened by the time this runs, so clearing it
         // here leaves the resume intact and takes both of those with it.
+        // AM (A_RUNTIME_CHANGE_IS_A_PROPERTY): stays an option. start is read
+        // when a file is opened rather than applied to the running core, and the
+        // property of that name reports playback position semantics instead.
         mpv.setOptionString("start", "0")
         // <-- AM (LOOPING_CLIP_PLAYBACK)
 
@@ -7501,6 +7793,15 @@ class PlayerViewModel(
 
     fun clearTracks() {
         pendingNoAudioFallbackJob?.cancel()
+        // AM (A_RETAINED_SNAPSHOT_PREDATES_THE_CLEAR): the live file's track
+        // state, kept for a retain that happens later in this change - see
+        // tracksBeforeClear. Only when there is something loaded to keep.
+        // Keyed by the episode it describes; see outgoingTrackSnapshot.
+        liveEpisodeId?.let { episodeId ->
+            if (stateData.value.hasLoadedTracks) {
+                tracksBeforeClear = episodeId to trackSnapshot()
+            }
+        }
         updateStateData {
             it.copy(
                 externalSubtitleTracks = emptyList(),
@@ -9565,6 +9866,8 @@ class PlayerViewModel(
             ControlAction.AspectRatio -> setSheet(Sheets.Aspect)
             ControlAction.Cast -> Unit
             ControlAction.ToggleAutoPlay -> setAutoPlay(!playerPreferences.autoplayEnabled.get())
+            // AM (A_LOOPING_IS_THE_USERS_CALL)
+            ControlAction.ToggleLoop -> toggleLoop()
             ControlAction.SubtitleTracks -> setSheet(Sheets.SubtitleTracks)
             ControlAction.SubtitleSettings -> setPanel(Panels.SubtitleSettings)
             ControlAction.AudioTracks -> setSheet(Sheets.AudioTracks)
@@ -9742,6 +10045,22 @@ class PlayerViewModel(
     // AM (PERSIST_ON_CADENCE) -->
     /** Position, in seconds, at the last database write - see onSecondReached. */
     private var lastPersistedPositionSeconds = 0
+
+    // AM (A_HISTORY_HAS_A_THRESHOLD) -->
+    /**
+     * Seconds the current episode has actually been watched for this session.
+     *
+     * Counted rather than read off the playhead, because the playhead answers a
+     * different question: resuming an episode near its end starts at a high
+     * position having been watched for no time at all, and a seek moves it
+     * without anything having been watched. The threshold is about elapsed
+     * watching, so it needs a count of the ticks that happened - the same thing
+     * the browse feed counts for its cards.
+     *
+     * Reset per episode in setupEpisode, alongside the persist backstop.
+     */
+    private var watchedSecondsThisEpisode = 0
+    // <-- AM (A_HISTORY_HAS_A_THRESHOLD)
     private var pendingSeekPosition: Int? = null
     private var pendingSeekStartedAt = 0L
 
@@ -9978,6 +10297,10 @@ class PlayerViewModel(
         currentEpisode.total_seconds = duration.toLong() * 1000L
 
         episodePosition = position.toLong()
+        // AM (A_HISTORY_HAS_A_THRESHOLD): one tick of real playback, counted
+        // past every gate above so a stalled or wrong-episode tick does not
+        // count as watching. See watchedSecondsThisEpisode.
+        watchedSecondsThisEpisode++
         val shouldTrack = !stateData.value.incognitoMode || stateData.value.hasTrackers
         // AM (COMPLETION_RUNS_ONCE) -->
         // This condition stays true for every remaining tick of the episode once
@@ -10108,7 +10431,15 @@ class PlayerViewModel(
         val store = progressStoreFor(episode) ?: return
         viewModelScope.launchNonCancellable {
             store.savePosition(writeSeenState)
-            store.recordWatched()
+            // AM (A_HISTORY_HAS_A_THRESHOLD) -->
+            // The threshold applies to a session in progress, not to one that
+            // finished: writeSeenState = true is the episode naturally
+            // completing, which is a definite statement that it was watched
+            // however little of this session it took to get there - resuming at
+            // 99% and playing out is the case. Null is the interface's "no
+            // threshold to apply".
+            store.recordWatched(watchedSeconds = if (writeSeenState) null else watchedSecondsThisEpisode)
+            // <-- AM (A_HISTORY_HAS_A_THRESHOLD)
         }
     }
     // <-- AM (CONTENT_AGNOSTIC_SESSION)
@@ -11020,6 +11351,29 @@ class PlayerViewModel(
          */
         val playlistQueuedEntryByEpisodeId: Map<Long, Anime> = emptyMap(),
         // <-- AM (PLAYLIST_SOURCE_IDENTITY)
+        // AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED) -->
+        /**
+         * The current row for every entry the playlist names, by anime id.
+         *
+         * [playlistOwnerByAnimeId] and [playlistQueuedEntryByEpisodeId] are
+         * both snapshots, taken when the playlist is built and not taken again
+         * - the playlist is deliberately not rebuilt for a change to an entry,
+         * because rebuilding it is what decides play order. So everything the
+         * queue displays ABOUT an entry was frozen at the moment it was
+         * queued: adding a queued source to the library from the entry screen,
+         * from the player's own heart, or from anywhere else left the queue
+         * still drawing it as not in the library, and a renamed or
+         * re-display-moded entry the same.
+         *
+         * This is the live half of the pair: observed per entry the playlist
+         * names (see observePlaylistEntries) and read THROUGH by the accessors
+         * below, so what the queue shows follows the row while what the queue
+         * PLAYS still follows the snapshot it was built from. Absent for an id
+         * whose first emission has not landed, which is what the fallback to
+         * the snapshot is for - the queue reads as it did rather than blank.
+         */
+        val playlistLiveEntryByAnimeId: Map<Long, Anime> = emptyMap(),
+        // <-- AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED)
         val hasPreviousEpisode: Boolean = false,
         val hasNextEpisode: Boolean = false,
         // AM (EXTRA_LOCAL_FOLDERS) -->
@@ -11121,10 +11475,32 @@ class PlayerViewModel(
          * always did.
          */
         fun displayModeOf(episode: Episode): Long? {
-            val owner = episode.anime_id?.let { playlistOwnerByAnimeId[it] }
-            return owner?.displayMode ?: currentAnime?.displayMode
+            val owner = episode.anime_id?.let { ownerOf(it) }
+            return owner?.displayMode ?: live(currentAnime)?.displayMode
         }
         // <-- AM (PLAYBACK_QUEUE)
+
+        // AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED) -->
+        /**
+         * [anime] as the database now holds it, or as it was snapshotted where
+         * no emission has arrived for it yet.
+         *
+         * One place, so that every question the queue asks about an entry -
+         * which are all of the accessors below - gets the same answer from the
+         * same row. See [playlistLiveEntryByAnimeId].
+         */
+        private fun live(anime: Anime?): Anime? {
+            val snapshot = anime ?: return null
+            return playlistLiveEntryByAnimeId[snapshot.id] ?: snapshot
+        }
+
+        /** The owning entry for [animeId], live - see [live]. */
+        private fun ownerOf(animeId: Long): Anime? = live(playlistOwnerByAnimeId[animeId])
+
+        /** The entry [episodeId] was queued as, live - see [live]. */
+        private fun queuedEntryOf(episodeId: Long): Anime? =
+            live(playlistQueuedEntryByEpisodeId[episodeId])
+        // <-- AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED)
 
         // AM (PLAYLIST_SOURCE_IDENTITY) -->
         /**
@@ -11140,9 +11516,11 @@ class PlayerViewModel(
          * episode whose owner is not resolved yet reads as it always did.
          */
         fun sourceTitleOf(episode: Episode): String? {
-            return episode.anime_id?.let { playlistOwnerByAnimeId[it] }?.title
-                ?: episode.id?.let { playlistQueuedEntryByEpisodeId[it] }?.title
-                ?: currentAnime?.title
+            // AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED): through the live
+            // row, so a retitled entry is retitled here too.
+            return episode.anime_id?.let { ownerOf(it) }?.title
+                ?: episode.id?.let { queuedEntryOf(it) }?.title
+                ?: live(currentAnime)?.title
         }
 
         /**
@@ -11155,11 +11533,15 @@ class PlayerViewModel(
          * library episodes while something queued from Browse does not.
          */
         fun isFromLibraryEntry(episode: Episode): Boolean {
-            val owner = episode.anime_id?.let { playlistOwnerByAnimeId[it] }
+            // AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED): the same three
+            // questions in the same order, asked of the live row rather than
+            // the one the playlist was built from - which is what makes adding
+            // a queued source to the library show up in the queue.
+            val owner = episode.anime_id?.let { ownerOf(it) }
             if (owner?.favorite == true) return true
-            val queuedEntry = episode.id?.let { playlistQueuedEntryByEpisodeId[it] }
+            val queuedEntry = episode.id?.let { queuedEntryOf(it) }
             if (queuedEntry != null) return queuedEntry.favorite
-            return currentAnime?.favorite == true
+            return live(currentAnime)?.favorite == true
         }
         // <-- AM (PLAYLIST_SOURCE_IDENTITY)
 
@@ -11170,8 +11552,10 @@ class PlayerViewModel(
          * child's rather than the parent's.
          */
         fun searchFieldsOf(episode: Episode): EpisodeSearchFields? {
-            val host = currentAnime ?: return null
-            val owner = episode.anime_id?.let { playlistOwnerByAnimeId[it] } ?: host
+            // AM (A_QUEUED_ENTRY_IS_WATCHED_NOT_SNAPSHOTTED): live, so a search
+            // over the queue matches an entry's tags as they are now.
+            val host = live(currentAnime) ?: return null
+            val owner = episode.anime_id?.let { ownerOf(it) } ?: host
             return EpisodeSearchFields(
                 displayName = displayNameOf(episode),
                 episodeNumber = episode.episode_number.toDouble(),
@@ -11307,6 +11691,8 @@ class PlayerViewModel(
         data class ShowVolumeSlider(val show: Boolean) : PlayerEvent
         data object SkipIntro : PlayerEvent
         data object ToggleDurationTimer : PlayerEvent
+        // AM (A_LOOPING_IS_THE_USERS_CALL)
+        data object ToggleLoop : PlayerEvent
     }
 
     // AM (NEXT_EPISODE_PREFETCH) -->

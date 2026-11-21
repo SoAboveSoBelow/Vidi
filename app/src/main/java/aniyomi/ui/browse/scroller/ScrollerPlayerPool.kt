@@ -180,7 +180,17 @@ class ScrollerPlayerPool(
          * at high resolutions - so this is the knob to turn down if a card
          * stops being able to open its file at all.
          */
-        const val CAPACITY = 5
+        // AM (A_WINDOW_IS_WHAT_THE_POOL_IS_SIZED_FOR): the scroller's window
+        // (WINDOW_BEHIND..WINDOW_AHEAD in BrowseSourceScroller) plus one spare,
+        // so a step forward has somewhere to go without evicting a card still
+        // in the window. Five cards either side inclusive, so six.
+        //
+        // Each slot is TWO mpv instances - video and its audio companion - so
+        // this is the ceiling on live cores. What those cores cost is set by
+        // their tier, not by this number: the two outermost cards sit on Far,
+        // which is 8MiB forward and 8MiB back. Lower the limits before lowering
+        // this, because a card outside the pool does not exist at all.
+        const val CAPACITY = 6
     }
 }
 // <-- AM (BROWSE_SCROLLER)

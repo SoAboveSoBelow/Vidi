@@ -1,0 +1,124 @@
+import kotlin.Boolean;
+
+-- AM (A_COVERAGE_IS_OBSERVED_NOT_INFERRED) -->
+-- What a listing's pages actually held, recorded as they were loaded.
+--
+-- The point of this is to skip fetching pages that are entirely viewed, since a
+-- skipped page is a request not made - and requests, not milliseconds, are the
+-- constraint when a source rate limits or bans. But a skip has to be earned:
+-- it needs the page size the source really returns, where a page's entries sit
+-- relative to each other, and proof that a recorded region has not shifted
+-- under it. None of that is knowable without first watching ordinary browsing.
+--
+-- So this table records only observations, one row per page per listing, and
+-- nothing acts on them yet. Raw per-page counts rather than merged ranges, on
+-- purpose: the threshold at which a page counts as "covered" is a judgement
+-- (90%? 100%?) and so is whether contiguous runs form at all on real sources.
+-- Keeping the observations lets those be answered from data instead of picked.
+--
+-- Bounded by itself: the primary key is (source, listing_key, page), so
+-- re-loading a page overwrites its row rather than adding one. Size is
+-- therefore listings x deepest page reached, not something that grows with use.
+-- head_url and tail_url are what a later skip would verify a region against,
+-- and comparing them across updated_at is how you see whether a listing's
+-- ordering drifts.
+CREATE TABLE source_page_coverage(
+    source INTEGER NOT NULL,
+    listing_key TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    entry_count INTEGER NOT NULL,
+    viewed_count INTEGER NOT NULL,
+    head_url TEXT NOT NULL,
+    tail_url TEXT NOT NULL,
+    -- AM (A_AN_UNVIEWED_TAIL_IS_A_STOPPING_POINT): whether the LAST entry of
+    -- the page was viewed. Defaults to 0 so rows recorded before this column
+    -- existed are treated as stopped-in, which is the direction that declines
+    -- to skip. See SourcePageCoverage for what it decides.
+    tail_viewed INTEGER AS Boolean NOT NULL DEFAULT 0,
+    -- AM (A_SKIPPING_A_PAGE_MUST_NOT_LOSE_ITS_CONTINUATION): what the load of
+    -- this page reported for hasNextPage. A skip never calls the source, so
+    -- this is the only way it can report the same nextKey the load would have.
+    -- Defaults to 1, which is what a skip assumed before this column existed;
+    -- it is never read for an old row anyway, since tail_viewed defaults to 0
+    -- and a page is not skippable without it.
+    has_next INTEGER AS Boolean NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(source, listing_key, page)
+);
+
+upsert:
+INSERT INTO source_page_coverage(source, listing_key, page, entry_count, viewed_count, head_url, tail_url, tail_viewed, has_next, updated_at)
+VALUES (:source, :listingKey, :page, :entryCount, :viewedCount, :headUrl, :tailUrl, :tailViewed, :hasNext, :updatedAt)
+ON CONFLICT(source, listing_key, page)
+DO UPDATE
+SET
+    entry_count = :entryCount,
+    viewed_count = :viewedCount,
+    head_url = :headUrl,
+    tail_url = :tailUrl,
+    tail_viewed = :tailViewed,
+    has_next = :hasNext,
+    updated_at = :updatedAt;
+
+getByListing:
+SELECT *
+FROM source_page_coverage
+WHERE source = :source AND listing_key = :listingKey
+ORDER BY page;
+
+-- Coverage assumes viewed is monotonic - an entry never stops being viewed - so
+-- clearing history is the one event that invalidates every row rather than
+-- changing one. Rebuilding costs nothing: it happens again as a side effect of
+-- the next browse.
+-- AM (A_SHIFTED_LISTING_HAS_NO_HISTORY): the ordering these rows describe is
+-- gone, so every row describing it is wrong. Dropped per listing rather than
+-- per page because a shift moves entries ACROSS page boundaries - a record for
+-- page 7 is no more trustworthy than the page 3 that proved the shift.
+deleteByListing:
+DELETE FROM source_page_coverage
+WHERE source = :source
+AND listing_key = :listingKey;
+
+deleteAll:
+DELETE FROM source_page_coverage;
+-- <-- AM (A_COVERAGE_IS_OBSERVED_NOT_INFERRED)
+
+-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+-- What each source has recorded, so it can be shown and dropped per source.
+--
+-- The byte figure is the row payload, measured where it varies and allowed for
+-- where it does not: listing_key, head_url and tail_url are the text, and the
+-- remaining seven columns are integers that SQLite stores as varints of one to
+-- eight bytes each. 56 covers those plus the row header and the index entry at
+-- the pessimistic end, so the number is an over-estimate of payload rather than
+-- a guess either way.
+--
+-- It is NOT a statement about the file shrinking. Deleting rows returns their
+-- pages to SQLite's freelist for reuse; the file itself only shrinks on a
+-- vacuum. Saying so is the point of showing the number at all - this table is
+-- bounded by listings x deepest page reached, so a healthy install has very
+-- little here, and a figure that is suddenly large is the signal that
+-- something about the recording has broken rather than an invitation to clear
+-- it.
+getRecordedUsage:
+SELECT
+source,
+COUNT(*) AS pageCount,
+COUNT(DISTINCT listing_key) AS listingCount,
+SUM(length(listing_key) + length(head_url) + length(tail_url) + 56) AS estimatedBytes
+FROM source_page_coverage
+GROUP BY source
+ORDER BY estimatedBytes DESC;
+
+-- Per source rather than per listing, which is what the screen offers: every
+-- ordering of one source, dropped together.
+--
+-- source_listing_health is deliberately NOT touched alongside this. A health
+-- row is not a recorded sequence - it is the record that a listing reorders
+-- itself and must not be tracked - so dropping it would make the next walk
+-- re-learn that at the price of a page of requests per listing, which is the
+-- cost A_AN_UNSTABLE_LISTING_STOPS_BEING_TRACKED exists to stop paying.
+deleteBySource:
+DELETE FROM source_page_coverage
+WHERE source = :source;
+-- <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)

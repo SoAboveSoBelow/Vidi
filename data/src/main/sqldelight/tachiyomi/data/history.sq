@@ -15,11 +15,21 @@ CREATE TABLE history(
 CREATE INDEX history_history_episode_id_index ON history(episode_id);
 CREATE INDEX idx_history_last_seen ON history(last_seen);
 
+-- AM (A_THE_VIEWED_PROBE_READS_ONLY_INDEXES): lets getViewedAnimeIdsBySource
+-- read last_seen out of the index instead of the row. The UNIQUE(episode_id)
+-- autoindex already serves the join; this adds the column the predicate needs,
+-- which is what makes the whole three-table walk index-only.
+CREATE INDEX idx_history_episode_last_seen ON history(episode_id, last_seen);
+
 getHistoryByAnimeId:
 SELECT
 H._id,
 H.episode_id,
-H.last_seen
+H.last_seen,
+-- AM (A_ORIGIN_SURVIVES_A_BACKUP): read so a backup can record which of the two
+-- wrote the row. Without it every restored row became Player, which is the one
+-- distinction HISTORY_ORIGIN exists to keep.
+H.origin
 FROM history H
 JOIN episodes EP
 ON H.episode_id = EP._id
@@ -71,6 +81,37 @@ WHERE _id IN (
 --
 -- last_seen > 0 is the same "not reset" test the history list itself applies
 -- (see historyView.sq): clearing an entry from history un-views it.
+-- AM (A_COVERAGE_IS_OBSERVED_NOT_INFERRED): which of a specific set of entries
+-- are viewed, for the page that was just loaded. Scoped to the ids in hand
+-- rather than to a whole source, so recording a page's coverage costs one
+-- indexed lookup per page instead of re-reading the source's entire history.
+-- AM (A_BACKUP_READS_HISTORY_IN_ONE_QUERY): everything a BackupHistory needs for
+-- one entry, in one read. The creator used to fetch the entry's history rows and
+-- then issue getEpisodeById per row just to turn an episode id into its url - a
+-- query per watched episode, so an entry with two dozen watched episodes cost two
+-- dozen reads, and a library-sized backup cost one per history row in the
+-- database. The join does it once.
+--
+-- Unfiltered on last_seen, matching getHistoryByAnimeId: a reset row carries a
+-- null last_seen and is still written out as lastSeen = 0, which is what the
+-- previous path produced.
+getBackupHistoryByAnimeId:
+SELECT
+EP.url,
+H.last_seen,
+H.origin
+FROM history H
+JOIN episodes EP
+ON EP._id = H.episode_id
+WHERE EP.anime_id = :animeId;
+
+getViewedAnimeIdsAmong:
+SELECT DISTINCT EP.anime_id
+FROM episodes EP
+JOIN history H
+ON EP._id = H.episode_id
+WHERE EP.anime_id IN :animeIds AND H.last_seen > 0;
+
 getViewedAnimeIdsBySource:
 SELECT DISTINCT A._id
 FROM animes A
