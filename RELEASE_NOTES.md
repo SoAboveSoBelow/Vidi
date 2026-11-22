@@ -1,3 +1,43 @@
+## v0.21.0
+
+Scroller:
+- Scroller is now an episode view mode: inside an entry the episode list is drawn as the feed, beside Simplified and Preview in the view-mode picker and in Appearance as the default for new entries
+- The feed inside an entry is the browse scroller itself - the same card, the same controls, the same playback - with one card per episode rather than one per entry; long press selects as a row does, the title plays the episode, double tapping it renames, and the download indicator is the row's
+- An episode feed costs a source almost nothing: its episodes are already known, so there is no listing request per card, and a downloaded episode plays off disk without touching the source at all
+- Previous and next in the expanded view step the feed - through the entry's episodes, or through the cards in a source listing - and centre the card they land on
+
+Scroller fixes:
+- Expanded clips were stretched to the shape of the screen rather than their own, and the picture squashed on the way in and out of expanding: the card and the expanded view now draw one surface pinned to the clip's shape, so expanding is a change of scale and nothing else
+- Double tapping the middle to expand or collapse was swallowed by the play/pause button whenever the controls were showing
+- Control slots holding the seeded defaults (previous, next, seek) did nothing on the feed's own double-tap gestures - they were matched by the action they draw rather than the action they are
+
+Pairs and playback:
+- One loop rule for the player and the feed: the longer stream is the entry and the shorter always repeats; the entry ends when the longer stream's output has drained, so the queue advances
+- Last-loop freeze fixed (ao_drain no longer blocks the main thread), and feed temp positions carry their duration so returning to an entry resumes correctly
+- The audio companion mirrors the video's audio settings and loads no scripts
+- Stated entries skip hoster resolution and take the prefetched path: the next stated pair is prepared without network calls, its files' heads warmed into the cache, and its companion built ahead off the main thread
+- mpv instance creation is serialised, so concurrent builds cannot read a half-written mpv.conf
+
+Cache and throttle:
+- Buffer fill is measured against what is left, one rule for pairs and ordinary files; a held repeating half counts towards the entry's end, and signals are re-published on pause so downloads are no longer pinned at the floor
+- Entries a host has registered are protected from eviction, and the feed releases its registrations by owner
+
+Downloads:
+- Completeness compares exact seconds with a last-packet allowance, and the duration probe uses ffmpeg-kit's media information session instead of ffprobe -o, which failed on reused pool threads
+- Stated pairs download under the feed's content keys
+- Retry works while other downloads run, from the queue row and the entry screen, and the episode being watched goes next in its source's line
+- The progress notification can no longer be re-posted after Stop, and tapping a download error opens the failed entry
+
+History:
+- Filters for watched and downloaded entries, in the history screen's own top bar
+- A minimum-seconds threshold before anything is recorded at all
+
+Browse:
+- Listings keep your place when you come back to them
+- Hide viewed, per source, as a toggle that removes viewed entries from the listing rather than dimming them
+- A request budget per source, so one listing cannot spend a source's rate limit
+- Per-source data in the advanced clear-database screen: dump viewed sequences, and clear a source's sequences, its non-library entries or its library ones
+
 ## v0.20.1
 
 Player controls:
