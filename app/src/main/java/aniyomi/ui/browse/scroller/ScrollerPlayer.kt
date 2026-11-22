@@ -246,12 +246,23 @@ class ScrollerPlayer(
         positions.remember(
             key,
             positionMs = (clip.positionSeconds * 1000f).toLong(),
-            // Deliberately no duration. The store clears a slot whose position
-            // has reached the end of the entry, which is right for an episode
-            // that finished and wrong for a card: every card loops, so it sits
-            // within a second of its own end for much of every revolution and
-            // the slot was being wiped almost as fast as it was written.
-            durationMs = 0L,
+            // AM (A_CARD_WRITES_LIKE_AN_EPISODE) -->
+            // The entry's own length, so the store's end rule applies to a card
+            // exactly as it does to an episode.
+            //
+            // This passed no duration, on the grounds that a card loops and so
+            // sits near its end for much of every pass, and the slot was cleared
+            // nearly as fast as it was written. But the slot is not the feed's
+            // alone: it is keyed SessionKey.Library(anime, episode), the same key
+            // the player resumes from, and with the end rule switched off a card
+            // left in the closing second of a pass handed the player a resume
+            // point at the end of the entry. Opening it there started the pair at
+            // zero and then put it on its last loop (device trace: 6981,
+            // tempPositionMs=34000 of a 34.9s entry). A card in its final second
+            // has finished a pass; its start is the honest point to come back to,
+            // for the feed and the player alike.
+            durationMs = (clip.durationSeconds * 1000f).toLong(),
+            // <-- AM (A_CARD_WRITES_LIKE_AN_EPISODE)
         )
     }
     // <-- AM (SESSION_KEYED_TEMP_POSITIONS)

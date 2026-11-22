@@ -52,7 +52,7 @@ class MpvInstancePool(
             it.inUse = true
             return it.player
         }
-        val created = factory.create(videoOutput)
+        val created = factory.create(videoOutput, audioOnly = false)
         slots += Slot(created).also { it.inUse = true }
         return created
     }

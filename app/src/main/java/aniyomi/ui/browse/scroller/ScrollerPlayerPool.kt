@@ -114,8 +114,9 @@ class ScrollerPlayerPool(
             ?: if (slots.size < CAPACITY) {
                 Slot(
                     ScrollerPlayer(
-                        factory.create(videoOutput),
-                        factory.create(videoOutput),
+                        factory.create(videoOutput, audioOnly = false),
+                        // AM (A_COMPANION_IS_ONLY_A_SOUND): the slot's companion.
+                        factory.create(videoOutput, audioOnly = true),
                         positions,
                     ),
                 ).also { slots += it }

@@ -166,6 +166,17 @@ object MediaProxyServer {
         upstreams.remove(key)
     }
 
+    // AM (A_REGISTERED_ENTRY_IS_IN_USE) -->
+    /**
+     * Whether a live registration reads the cache entry [cacheKey] - its own
+     * key, or one of the segments a playlist registration derives from it.
+     */
+    fun isRegistered(cacheKey: String): Boolean = upstreams.values.any { upstream ->
+        val key = upstream.cacheKey ?: return@any false
+        cacheKey == key || cacheKey.startsWith("$key-s")
+    }
+    // <-- AM (A_REGISTERED_ENTRY_IS_IN_USE)
+
     /** Drops a consumer's live mapping only after its player can no longer reopen it. */
     @Synchronized
     fun releaseOwner(owner: String) {
@@ -935,6 +946,92 @@ object MediaProxyServer {
         }
     }.getOrDefault(0L)
 
+    // AM (PRELOAD_PROGRESSIVE_FILES) -->
+    /**
+     * Fetches the opening bytes of a progressive file into [MediaCache] under
+     * [cacheKey], so a load of it starts from disk.
+     *
+     * The progressive counterpart of [warmSegments], under the same rules: it
+     * waits for the active video to be comfortably ahead, yields the moment a
+     * player asks for the same entry, stops if playback starves, and is ranked
+     * below everything by the limiter. [warmPlaylists] returns for anything
+     * that is not a playlist, which left every plain file - a pair's two
+     * halves among them - fetched cold on the transition with the viewer
+     * waiting: the container header and the first seconds of both streams,
+     * on two connections, before the first frame.
+     *
+     * The head, not the file: [WARM_FILE_HEAD_BYTES] covers the header and the
+     * opening seconds the demuxer reads before it starts, and the rest is
+     * fetched by the player as it plays, from where the warm left off.
+     *
+     * Blocking: call it from an IO context. Failures are silent.
+     */
+    fun warmFileHead(url: String, headers: Headers, httpClient: OkHttpClient, cacheKey: String) {
+        if (!url.startsWith("http") || looksLikePlaylist(url, null)) return
+        val cache = mediaCache ?: return
+        val entry = cache.entryFor(cacheKey)
+        val wanted = entry.totalLength?.let { minOf(it, WARM_FILE_HEAD_BYTES) } ?: WARM_FILE_HEAD_BYTES
+        if (entry.availableAt(0) >= wanted) return
+        if (!awaitHealthyBuffer()) {
+            logcat(LogPriority.INFO) { "PRELOAD_PROGRESSIVE_FILES buffer never settled - skipping $cacheKey" }
+            return
+        }
+        warmingKeys.add(cacheKey)
+        try {
+            val written = streamHeadInto(entry, cacheKey, url, headers, httpClient)
+            logcat(LogPriority.INFO) { "PRELOAD_PROGRESSIVE_FILES warmed $cacheKey ($written bytes)" }
+        } finally {
+            warmingKeys.remove(cacheKey)
+        }
+    }
+
+    /**
+     * [streamSegmentInto] for the first [WARM_FILE_HEAD_BYTES] of a file: a
+     * ranged request, the total length taken from its Content-Range so the
+     * entry is framed for the reads that follow, and the same yields.
+     */
+    private fun streamHeadInto(
+        entry: MediaCache.Entry,
+        key: String,
+        url: String,
+        headers: Headers,
+        httpClient: OkHttpClient,
+    ): Long = runCatching {
+        val client = warmClientFrom(httpClient)
+        val request = Request.Builder()
+            .url(url)
+            .headers(headers)
+            .header("Range", "bytes=0-${WARM_FILE_HEAD_BYTES - 1}")
+            .build()
+        client.newCall(request).execute().use { response ->
+            val total = when (response.code) {
+                HTTP_PARTIAL_CONTENT -> response.header("Content-Range")
+                    ?.substringAfterLast('/')
+                    ?.toLongOrNull()
+                HTTP_OK -> response.header("Content-Length")?.toLongOrNull()
+                else -> return@use 0L
+            } ?: return@use 0L
+            entry.totalLength = total
+            var offset = 0L
+            val buffer = ByteArray(CHUNK_BYTES)
+            response.body.byteStream().use { stream ->
+                while (offset < WARM_FILE_HEAD_BYTES) {
+                    if (key !in warmingKeys) return@use offset
+                    if (PlayerMediaHolder.playbackStarved.value) return@use offset
+                    val want = minOf(buffer.size.toLong(), WARM_FILE_HEAD_BYTES - offset).toInt()
+                    val read = stream.read(buffer, 0, want)
+                    if (read == -1) break
+                    Throttle.acquire(read)
+                    Throttle.record(read)
+                    entry.write(offset, buffer, read)
+                    offset += read
+                }
+            }
+            offset
+        }
+    }.getOrDefault(0L)
+    // <-- AM (PRELOAD_PROGRESSIVE_FILES)
+
     /**
      * Blocks until the active session's buffer is comfortably ahead, or gives
      * up.
@@ -1308,6 +1405,14 @@ object MediaProxyServer {
      * object should not be pulled in whole on an episode nobody asked for yet.
      */
     private const val WARM_SEGMENT_MAX_BYTES = 24L * 1024 * 1024
+
+    // AM (PRELOAD_PROGRESSIVE_FILES)
+    /**
+     * How much of a progressive file is warmed: a faststart header and the
+     * opening seconds at the bitrates these entries run at, which is what the
+     * demuxer reads before it will start. Storage is the cheap side of this.
+     */
+    private const val WARM_FILE_HEAD_BYTES = 1024L * 1024
 
     /**
      * How long a warm waits for the active video's buffer to be comfortably

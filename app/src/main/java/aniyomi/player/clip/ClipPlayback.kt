@@ -8,8 +8,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
 import tachiyomi.domain.anime.model.Anime
 import kotlin.math.abs
@@ -35,8 +37,8 @@ import kotlin.math.abs
  *   states its streams, over the instance PlayerMediaHolder adopted - so
  *   MediaSession, PIP, background playback, position tracking and cast go on
  *   reading the same object while the load itself is this one. Its own pause
- *   and seek reach the companion by watching the instance's own pause
- *   property and through [mirrorCommand].
+ *   reaches the companion by watching the instance's own pause property, and
+ *   its seeks are folded onto both streams through [seekCommand].
  *
  * What both get:
  *
@@ -48,9 +50,14 @@ import kotlin.math.abs
  * has opened. Frame display is a separate host concern, so a short paused file
  * cannot deadlock the gate by waiting for a restart that never arrives.
  *
- * Only the shorter stream loops, once both lengths are known. The longer one
- * runs once and defines the entry's duration and completion; a single-stream
- * entry does not repeat merely because its source labels it a looping clip.
+ * One rule for what repeats, whichever host is playing (AM (ONE_ENTRY_RULE)).
+ * Once both lengths are known the longer stream is the entry: its clock is the
+ * position, its length the duration, its end the entry's end. The shorter one
+ * always repeats underneath it. Whether the ENTRY repeats is the one setting -
+ * the feed holds it on, the player's loop control sets it - and on, the longer
+ * stream wraps and the shorter one is put back to its own start with it, so the
+ * entry comes round as the same pairing each time. A single-stream entry does
+ * not repeat merely because its source labels it a looping clip.
  *
  * And the buffer that makes the loop seamless. A loop is a seek backwards to
  * the start; a seek outside what the demuxer still holds is a re-read, which
@@ -81,7 +88,11 @@ class ClipPlayback(
      * notes) and where starting muted meant an entry that played silently.
      */
     private val managesAudio: Boolean = false,
-    /** The longer stream finished, for a host whose normal EOF is on video. */
+    /**
+     * A two-stream entry reached its end: the longer stream finished with the
+     * entry not repeating. The host's own EOF cannot say this - its instance
+     * holds the video, which for most pairs is the shorter, repeating half.
+     */
     private val onEntryEnded: (() -> Unit)? = null,
     // AM (A_A_TIMELINE_IS_NOT_KNOWN_UNTIL_BOTH_HALVES_ARE): raised once both
     // halves have reported a length, which is the first moment a host can ask
@@ -92,6 +103,9 @@ class ClipPlayback(
     // so the host can drop the resolution that produced the url, which would
     // otherwise be handed back for the life of the session.
     private val onAudioLoadFailed: (() -> Unit)? = null,
+    // AM (A_PAIRS_BUFFER_IS_BOTH_HALVES): the companion's cache state changed -
+    // the host's own observers see only its own instance. See pairBufferFill.
+    private val onBufferChanged: (() -> Unit)? = null,
 ) {
 
     private var audio: MPVPlayer? = null
@@ -138,14 +152,35 @@ class ClipPlayback(
     /** What [prepare] last said, so a companion created later matches it. */
     private var looping = false
 
+    // AM (ONE_ENTRY_RULE) -->
     /**
-     * Whether the video is the shorter, repeating stream. Its EOF is a lap,
-     * not completion; the longer stream is the entry's single-play timeline.
+     * Whether a two-stream entry has played to its end and is holding there.
+     *
+     * Replaces videoIsRepeating, which asked the host to work out from its own
+     * instance's EOF whether that EOF was the entry's. It could only ever answer
+     * for the video half, and the entry's end belongs to whichever stream is
+     * longer - for most pairs the audio, whose end then reached nothing. Which
+     * stream ended the entry is decided here, where the lengths are, and the host
+     * reads the result rather than re-deriving it.
+     *
+     * Cleared by anything that moves the entry off its end: a seek, a load, a
+     * reset.
      */
-    // AM (A_THE_SHORTER_HALF_IS_A_BED): a video end is a lap when the entry
-    // loops and also when the video is the bed, which it is whenever the audio
-    // outlasts it - see applyStreamLooping.
-    val videoIsRepeating: Boolean get() = isSplit && (looping || audioIsLonger)
+    var entryEnded: Boolean = false
+        private set
+
+    /**
+     * The last remaining-file-loops value each instance reported for this load,
+     * so a drop - a wrap - can be told from a value merely being reported. See
+     * MPVPlayer.Event.RemainingFileLoops.
+     */
+    private var videoLoopsLeft: Long? = null
+    private var audioLoopsLeft: Long? = null
+
+    /** The files this load gave each instance, for [hasEnded]. */
+    private var videoPath: String? = null
+    private var audioPath: String? = null
+    // <-- AM (ONE_ENTRY_RULE)
 
     var isMuted: Boolean = managesAudio
         private set
@@ -181,8 +216,8 @@ class ClipPlayback(
 
     fun prepare(looping: Boolean) {
         this.looping = looping
-        setLooping(video, false)
-        audio?.let { setLooping(it, false) }
+        setLooping(video, LOOP_OFF)
+        audio?.let { setLooping(it, LOOP_OFF) }
         if (looping) applyPlaybackBuffer(preloading = false)
     }
 
@@ -232,6 +267,11 @@ class ClipPlayback(
         // it, no streams at all.
         created.mpv.setOptionString("aid", "auto")
         created.mpv.setOptionString("vid", "no")
+        // AM (A_STREAM_ENDS_WHEN_ITS_SOUND_DOES): the pause keep-open puts on a
+        // file once its output has drained is how this instance says its sound
+        // has finished - see outputFinished. Stated rather than inherited, so a
+        // user mpv.conf cannot take that signal away.
+        created.mpv.setOptionString("keep-open-pause", "yes")
         created.mpv.setPropertyBoolean("mute", true)
         // AM (SCROLLER_PRELOAD_TIERS): the same tier its video half is on - a
         // companion left at Far under a Near video is the audio stalling on an
@@ -293,9 +333,16 @@ class ClipPlayback(
         // running is the previous entry's audio still going under the new one.
         stopCompanion()
         // A reused instance may have repeated the previous entry's shorter
-        // stream. This load starts unlooped; onStreamReady enables only its
-        // own shorter stream once both lengths are known.
-        setLooping(video, false)
+        // stream. This load starts unlooped; onStreamReady applies the entry
+        // rule once both lengths are known.
+        setLooping(video, LOOP_OFF)
+        // AM (ONE_ENTRY_RULE): this load has not ended, and the loop counts the
+        // instances last reported belong to the file before it.
+        entryEnded = false
+        videoLoopsLeft = null
+        audioLoopsLeft = null
+        videoPath = url
+        audioPath = audioUrl
         // Before the gate, not inside the load below: the gate subscribes to
         // the companion's own event flow, and a companion that does not exist
         // yet when it does leaves that subscription watching nothing - the
@@ -314,6 +361,13 @@ class ClipPlayback(
         pendingResume = resumeAt?.toFloat()?.takeIf { it > 0f && audioUrl != null }
         awaitStreamsOpen(key, url, audioUrl)
         followHostPause(key, loadGeneration)
+        // AM (ONE_ENTRY_RULE)
+        followEntryEnd(key, loadGeneration)
+        // AM (A_PAIRS_BUFFER_IS_BOTH_HALVES): only a pair has a companion to
+        // follow - companion() above has made it, if this load needs one.
+        if (audioUrl != null) followCompanionCache(key, loadGeneration)
+        // AM (A_PAIRS_SOUND_FOLLOWS_THE_PLAYER)
+        if (audioUrl != null) followAudioSettings(key, loadGeneration)
 
         val issue = {
             // Set before the load, not after: mpv reads these when it opens
@@ -420,7 +474,7 @@ class ClipPlayback(
         val companion = companion() ?: return
         // AM (A_AN_OPTION_OUTLIVES_THE_FILE)
         companion.mpv.setOptionString("http-header-fields", httpHeaderFields ?: "")
-        setLooping(companion, false)
+        setLooping(companion, LOOP_OFF)
         val audioOptions = buildList {
             add("pause=yes")
             add("vid=no")
@@ -558,6 +612,8 @@ class ClipPlayback(
         // is a pair any more, whatever instance is still standing by.
         splitLoad = false
         latchedAudioLength = null
+        // AM (ONE_ENTRY_RULE): no pair, so no pair's end to be holding at.
+        entryEnded = false
         runCatching { audio?.mpv?.command("stop") }
     }
 
@@ -662,41 +718,129 @@ class ClipPlayback(
         if (audio == null || audioLength > 0f) latchedAudioLength = audioLength
     }
 
-    /** The feed repeats both streams; the player repeats only the shorter one. */
+    // AM (ONE_ENTRY_RULE) -->
+    /**
+     * What repeats, for every host - the feed and the player differ only in
+     * whether the entry loop is on, which the feed always holds and the player's
+     * control sets.
+     *
+     * There used to be a separate branch for the feed that put `loop-file=inf` on
+     * both streams. That is not a loop of the entry: mpv wraps each file on its
+     * own instance with no relation to the other, so the shorter stream is part
+     * way through a lap whenever the longer one wraps, and the pairing of picture
+     * and sound is only the same on every pass while one length divides the
+     * other. It is the player's rule with the loop on, minus the re-pairing.
+     *
+     * The shorter stream repeats underneath the longer one regardless - that is
+     * what a pair of different lengths is FOR; left unlooped it runs out part way
+     * and the rest of the entry is a frozen frame or silence. The loop setting
+     * decides only the longer stream: off, it plays once and its end ends the
+     * entry; on, it wraps on a finite count - gapless, mpv's own wrap seeks with
+     * MPSEEK_FLAG_NOFLUSH - and each wrap is reported, which is what lets the
+     * shorter one be put back to its start with it (see onStreamLooped).
+     */
     private fun applyStreamLooping() {
         if (!isSplit) {
-            // AM (A_LOOPING_IS_THE_USERS_CALL): the loop control decides an
-            // ordinary file, where this used to be scoped to the feed because
-            // nothing else could ask for it.
-            setLooping(video, looping)
-            audio?.let { setLooping(it, false) }
+            // AM (A_LOOPING_IS_THE_USERS_CALL): one stream has no partner to put
+            // back in step, so it needs no wrap reported and loops forever.
+            setLooping(video, if (looping) LOOP_FOREVER else LOOP_OFF)
+            audio?.let { setLooping(it, LOOP_OFF) }
             return
         }
-        if (managesAudio) {
-            // The feed loops the whole entry, so neither stream may stop.
-            setLooping(video, true)
-            audio?.let { setLooping(it, true) }
+        if (!pairLengthsDiffer) {
+            // No longer stream to define the entry by: the lengths are not known
+            // yet, or they are equal - which includes a same-file pair, whose two
+            // instances both report the one container's duration however long
+            // its tracks are. Each half then plays as itself: both repeat when
+            // the entry loops, as the feed always had them, and otherwise both
+            // play once and the entry ends when both have.
+            val value = if (looping) LOOP_FOREVER else LOOP_OFF
+            setLooping(video, value)
+            audio?.let { setLooping(it, value) }
             return
         }
-        // AM (A_THE_SHORTER_HALF_IS_A_BED) -->
-        // The player runs the longer stream once as the entry's timeline and
-        // the shorter one repeats underneath it - and that repeat is not
-        // conditional on the entry looping. It is what a pair of different
-        // lengths is FOR: a few seconds of picture under a whole track. Left
-        // unlooped it runs out partway and the rest of the entry is a frozen
-        // frame or silence.
-        //
-        // So the loop control decides the LONGER half only: off, it plays once
-        // and its end ends the entry; on, both come round and there is no
-        // natural end.
-        val videoLength = videoDurationSeconds
-        val audioLength = audioDurationSeconds
-        setLooping(video, looping || (videoLength > 0f && audioLength > 0f && videoLength < audioLength))
-        audio?.let {
-            setLooping(it, looping || (videoLength > 0f && audioLength > 0f && audioLength < videoLength))
-        }
-        // <-- AM (A_THE_SHORTER_HALF_IS_A_BED)
+        setLooping(longerStream(), if (looping) LOOP_ENTRY else LOOP_OFF)
+        otherStream()?.let { setLooping(it, LOOP_FOREVER) }
     }
+
+    /** True when a pair has a longer stream: both lengths known, and not equal. */
+    private val pairLengthsDiffer: Boolean
+        get() {
+            val videoLength = videoDurationSeconds
+            val audioLength = audioDurationSeconds
+            return videoLength > 0f && audioLength > 0f && videoLength != audioLength
+        }
+
+    /** The stream that is the entry. Meaningful only while [pairLengthsDiffer]. */
+    private fun longerStream(): MPVPlayer = if (audioIsLonger) audio ?: video else video
+
+    /** The stream that repeats underneath [longerStream]. */
+    private fun otherStream(): MPVPlayer? = if (audioIsLonger) video else audio
+
+    /**
+     * The streams whose ends the entry's end waits for: the longer one where
+     * there is one, otherwise every half - none of them repeats to outlast it.
+     */
+    private fun endingStreams(): List<MPVPlayer> =
+        if (pairLengthsDiffer) listOf(longerStream()) else listOfNotNull(video, audio)
+
+    /**
+     * Whether [instance] is held at the end of THIS load's file.
+     *
+     * Read off mpv's latched eof-reached, which keep-open holds true for as long
+     * as the file sits at its end, and checked against the path this load gave
+     * it: a companion is reused between entries rather than destroyed, so an end
+     * belonging to the previous entry's file must not count as this one's.
+     */
+    private fun hasEnded(instance: MPVPlayer): Boolean {
+        val path = if (instance === video) videoPath else audioPath
+        return path != null &&
+            instance.mpv.getPropertyBoolean("eof-reached") == true &&
+            instance.mpv.getPropertyString("path") == path
+    }
+    // <-- AM (ONE_ENTRY_RULE)
+
+    // AM (A_STREAM_ENDS_WHEN_ITS_SOUND_DOES) -->
+    /**
+     * Whether [instance] has finished what the viewer sees and hears, not just
+     * what it decodes.
+     *
+     * [hasEnded] is the decoder's end. For the companion that comes early: under
+     * mpv's default gapless audio, audio_status turns EOF the moment the last
+     * samples are handed to the output (player/audio.c, "In the gapless case, we
+     * trigger EOF immediately, and let it play asynchronously"), while the
+     * AudioTrack still holds them - measured on device at 1.08s. Ending the entry
+     * there paused the video on its last loop with that second of sound still to
+     * come, which is the frozen picture under audio that played out.
+     *
+     * The moment the sound actually stops is keep-open's own pause:
+     * handle_keep_open (player/playloop.c) holds back while the output is still
+     * playing and pauses the file only once it has drained - the companion has
+     * keep-open-pause set for exactly this. The video instance of a pair has no
+     * audio output (aid=no), so its decoder's end already is the last frame.
+     */
+    private fun outputFinished(instance: MPVPlayer): Boolean =
+        hasEnded(instance) && (instance !== audio || instance.mpv.getPropertyBoolean("pause") == true)
+
+    /**
+     * Pauses or resumes one instance - except that a pause is never written to
+     * an instance held at its end.
+     *
+     * mpv drains the output before pausing a file that has reached EOF
+     * (ao_set_paused, audio/out/buffer.c: "be sure to drain the ao first for
+     * gapless"), and that drain runs while the caller is inside
+     * mpv_set_property holding the core lock. Called from here that caller is the
+     * main thread: on device the companion's pause took from 16.677 to 17.760,
+     * the UI froze for the whole of it, and nothing the host shows could move.
+     * An instance at its end has nothing left to pause - keep-open pauses it
+     * itself once its sound has played out - so the write is skipped rather than
+     * made somewhere it cannot block.
+     */
+    private fun setPaused(instance: MPVPlayer, paused: Boolean) {
+        if (paused && hasEnded(instance)) return
+        instance.mpv.setPropertyBoolean("pause", paused)
+    }
+    // <-- AM (A_STREAM_ENDS_WHEN_ITS_SOUND_DOES)
     // <-- AM (CLIP_TIMELINE_LENGTHS_ARE_LATCHED)
 
     /**
@@ -728,6 +872,8 @@ class ClipPlayback(
      * for the rest of the clip.
      */
     fun seekTo(seconds: Float) {
+        // AM (ONE_ENTRY_RULE): wherever this lands, it is not the held end.
+        entryEnded = false
         val companion = audio
         if (companion == null) {
             video.mpv.command("seek", seconds.coerceAtLeast(0f).toString(), "absolute")
@@ -816,25 +962,33 @@ class ClipPlayback(
             val position = positionSeconds
             val duration = durationSeconds
             val source = if (audioIsLonger) audio ?: video else video
-            val companion = audio?.takeIf { splitLoad && it !== source }
+            // AM (ONE_ENTRY_RULE): the other half whichever instance it is. This
+            // took the companion and dropped it when it was the source, so for a
+            // pair whose audio is the longer stream - the usual shape - the
+            // repeating video's buffer was never counted at all.
+            val other = otherStream()?.takeIf { splitLoad && it !== source }
 
             var buffered = cachedThroughSeconds(source, position, duration, repeats = false)
-            if (companion != null) {
-                val companionBuffered =
-                    cachedThroughSeconds(companion, position, duration, repeats = shorterStreamRepeats)
-                buffered = minOf(buffered, companionBuffered)
+            if (other != null) {
+                val otherBuffered =
+                    cachedThroughSeconds(other, position, duration, repeats = otherStreamRepeats)
+                buffered = minOf(buffered, otherBuffered)
             }
             return buffered.coerceAtLeast(position)
                 .let { if (duration > 0f) it.coerceAtMost(duration) else it }
         }
 
-    /** True while the entry's shorter stream is looping under its longer one. */
-    private val shorterStreamRepeats: Boolean
-        get() {
-            val videoLength = videoDurationSeconds
-            val audioLength = audioDurationSeconds
-            return looping && videoLength > 0f && audioLength > 0f && videoLength != audioLength
-        }
+    /**
+     * True while [otherStream] is repeating under the longer one.
+     *
+     * AM (ONE_ENTRY_RULE): which is whenever a pair has a longer stream, loop
+     * or no loop - see applyStreamLooping - and otherwise only while the entry
+     * loops. This was keyed on the entry looping alone, so with the loop off a
+     * repeating companion's range end was read on a clock that keeps returning
+     * to zero, and the buffer drew to wherever its current lap was.
+     */
+    private val otherStreamRepeats: Boolean
+        get() = isSplit && (pairLengthsDiffer || looping)
 
     /** Where [player]'s cache runs out, on the entry's timeline. */
     private fun cachedThroughSeconds(
@@ -846,8 +1000,48 @@ class ClipPlayback(
         if (!repeats) {
             cachedRangeEndSeconds(player, position, duration)?.let { return it }
         }
+        // AM (A_HELD_REPEAT_LASTS_THE_ENTRY) -->
+        // A repeating half whose whole file is held repeats from memory for as
+        // long as the entry runs: every lap is a seek inside its own cache. Its
+        // forward queue says otherwise - it never runs past the current lap, so
+        // for an 8-second video under a song it read as a few seconds ahead
+        // however long the song, and the pair's buffer, and the fill the proxy
+        // ranks downloads by, sat near empty with nothing left to fetch. The
+        // limiter answered that by holding every download at its floor for as
+        // long as the pair played.
+        if (duration > 0f && holdsWholeFile(player)) return duration
+        // <-- AM (A_HELD_REPEAT_LASTS_THE_ENTRY)
         return position + readAheadSeconds(player)
     }
+
+    // AM (A_HELD_REPEAT_LASTS_THE_ENTRY) -->
+    /**
+     * Whether [player]'s demuxer holds its file from start to end in one
+     * seekable range: read to the end, and the range that reaches the end
+     * also starts at the file's beginning.
+     */
+    private fun holdsWholeFile(player: MPVPlayer): Boolean {
+        if (player.mpv.getPropertyBoolean("demuxer-cache-state/eof") != true) return false
+        val count = player.mpv.getPropertyInt("demuxer-cache-state/seekable-ranges/count")
+            ?.coerceAtMost(MAX_SEEK_RANGES)
+            ?: return false
+        val fileStart = player.mpv.getPropertyDouble("demuxer-start-time")?.toFloat()
+            ?.takeIf { it.isFinite() }
+            ?: 0f
+        var furthest = Float.NEGATIVE_INFINITY
+        var startOfFurthest = Float.POSITIVE_INFINITY
+        for (index in 0 until count) {
+            val path = "demuxer-cache-state/seekable-ranges/$index"
+            val start = player.mpv.getPropertyDouble("$path/start")?.toFloat()?.takeIf { it.isFinite() } ?: continue
+            val end = player.mpv.getPropertyDouble("$path/end")?.toFloat()?.takeIf { it.isFinite() } ?: continue
+            if (end > furthest) {
+                furthest = end
+                startOfFurthest = start
+            }
+        }
+        return startOfFurthest <= fileStart + RANGE_EDGE_EPSILON
+    }
+    // <-- AM (A_HELD_REPEAT_LASTS_THE_ENTRY)
 
     /**
      * The end of the cached range the playhead sits in, or null where this
@@ -891,6 +1085,117 @@ class ClipPlayback(
 
     val isBuffering: Boolean
         get() = video.isCacheStarved() || audio?.takeIf { splitLoad }?.isCacheStarved() == true
+
+    // AM (A_PAIRS_BUFFER_IS_BOTH_HALVES) -->
+    /**
+     * Whether either half of a pair has paused for cache - the proxy rate
+     * limiter's starved signal, for a pair.
+     *
+     * The host published its own instance's `paused-for-cache`, which is the
+     * video. The half that streams for the length of the entry is usually the
+     * audio, and its stalls never reached the limiter: downloads and warms kept
+     * their bandwidth while the sound stopped. The same property, from both.
+     */
+    val pairPausedForCache: Boolean
+        get() = isSplit && (video.pausedForCache() || audio?.pausedForCache() == true)
+
+    private fun MPVPlayer.pausedForCache(): Boolean = mpv.getPropertyBoolean("paused-for-cache") == true
+
+    /**
+     * How full a pair's buffer is, 0..1, against [targetSeconds] - the limiter's
+     * fill signal, for a pair - or null where there is no pair or no target.
+     *
+     * The host's version is its own instance's `demuxer-cache-duration` over the
+     * target, which a pair cannot answer with: the video of a pair is usually a
+     * few seconds long, so its readahead can never reach the target, and the
+     * limiter read an entry held whole as one that was starving. This is the
+     * entry's own buffer ahead - [bufferedPositionSeconds], which takes the
+     * lesser of the two halves and counts a fully demuxed file as reaching its
+     * end - against what is left to need: the target, or the rest of the entry
+     * where that is less.
+     */
+    fun pairBufferFill(targetSeconds: Float): Float? {
+        if (!isSplit || targetSeconds <= 0f) return null
+        val position = positionSeconds
+        val duration = durationSeconds
+        val ahead = (bufferedPositionSeconds - position).coerceAtLeast(0f)
+        return bufferFill(ahead, (duration - position).takeIf { duration > 0f }, targetSeconds)
+    }
+
+    // AM (A_PAIRS_SOUND_FOLLOWS_THE_PLAYER) -->
+    /**
+     * Copies the sound settings written to [video] onto the companion, for as
+     * long as this load lasts.
+     *
+     * Everything that adjusts sound writes to the host's own instance - the
+     * player's volume and boost, its speed control, the pitch setting, a custom
+     * button, a script, a conditional profile. For a pair that instance is the
+     * video, opened with aid=no, so none of it reached what was actually
+     * playing: volume did nothing, and a speed change ran the picture faster
+     * than the sound and pulled the two apart.
+     *
+     * Read off the properties rather than taken from each writer, because the
+     * property is where every one of those writers ends up - which is also what
+     * lets the companion run with no scripts of its own. Each flow hands over its
+     * current value on subscription, so the companion starts this load already
+     * matching.
+     *
+     * audio-delay is not among them: it moves audio against video inside one
+     * instance, and the companion has no video to move against. For a pair it
+     * would have to be an offset between the two instances' positions, which
+     * is behaviour of its own rather than a copy.
+     */
+    private fun followAudioSettings(key: Long, generation: Int) {
+        val companion = audio ?: return
+        // The types are the ones the player's own UI observes these as, and must
+        // stay so: the mpv lib caches one flow per property NAME, so a second
+        // type asked for the same name is handed the first one's flow cast to
+        // it - a ClassCastException on whichever side asked second.
+        follow(key, generation, video.mpv.propFlow<Int>("volume")) {
+            companion.mpv.setPropertyInt("volume", it)
+        }
+        follow(key, generation, video.mpv.propFlow<Float>("speed")) {
+            companion.mpv.setPropertyFloat("speed", it)
+        }
+        follow(key, generation, video.mpv.propFlow<Boolean>("audio-pitch-correction")) {
+            companion.mpv.setPropertyBoolean("audio-pitch-correction", it)
+        }
+        follow(key, generation, video.mpv.propFlow<String>("af")) {
+            companion.mpv.setPropertyString("af", it)
+        }
+    }
+
+    /** Collects [flow] for this load only, handing each value it has to [write]. */
+    private fun <T> follow(key: Long, generation: Int, flow: Flow<T?>, write: (T) -> Unit) {
+        loadScope.launch {
+            flow
+                .takeWhile { generation == loadGeneration && loadedKey == key }
+                .collect { value -> if (value != null) write(value) }
+        }
+    }
+    // <-- AM (A_PAIRS_SOUND_FOLLOWS_THE_PLAYER)
+
+    /**
+     * Tells the host whenever the companion's cache state moves, for as long as
+     * this load lasts - the counterpart of the host's own observers on its
+     * instance. The same two properties, from the other instance.
+     */
+    private fun followCompanionCache(key: Long, generation: Int) {
+        val notify = onBufferChanged ?: return
+        val companion = audio ?: return
+        val flows = listOf(
+            companion.mpv.propFlow<Boolean>("paused-for-cache"),
+            companion.mpv.propFlow<Float>("demuxer-cache-duration"),
+        )
+        for (flow in flows) {
+            loadScope.launch {
+                flow
+                    .takeWhile { generation == loadGeneration && loadedKey == key }
+                    .collect { notify() }
+            }
+        }
+    }
+    // <-- AM (A_PAIRS_BUFFER_IS_BOTH_HALVES)
 
     private fun MPVPlayer.isCacheStarved(): Boolean =
         mpv.getPropertyBoolean("paused-for-cache") == true ||
@@ -1007,24 +1312,8 @@ class ClipPlayback(
                     stopCompanion()
                 }
         }
-        // When audio is the longer stream its EOF, not the repeating video's,
-        // completes the entry. Start watching only after this load's audio is
-        // open so the previous file's replacement EndFile cannot finish it.
-        loadScope.launch {
-            val companion = audio ?: return@launch
-            while (generation == loadGeneration && loadedKey == key && !audioReady) {
-                delay(READY_POLL_INTERVAL_MS)
-            }
-            if (generation != loadGeneration || loadedKey != key || !audioReady) return@launch
-            companion.eventFlow
-                .filterIsInstance<MPVPlayer.Event.EndFile>()
-                .collect {
-                    if (generation != loadGeneration || loadedKey != key || !audioIsLonger) return@collect
-                    shouldPlay = false
-                    applyPlaybackState()
-                    onEntryEnded?.invoke()
-                }
-        }
+        // AM (ONE_ENTRY_RULE): the companion EndFile watcher that used to sit
+        // here is replaced by followEntryEnd - see there for why it never fired.
         loadScope.launch {
             video.eventFlow
                 .filterIsInstance<MPVPlayer.Event.PauseChanged>()
@@ -1034,6 +1323,21 @@ class ClipPlayback(
                     // must not be read back as the host wanting a pause.
                     val gated = !videoReady || !audioReady
                     if (gated && event.paused) return@collect
+                    // AM (ONE_ENTRY_RULE): nor keep-open's. mpv pauses a file it
+                    // holds at its end (player/playloop.c, handle_keep_open), and
+                    // that pause is the video's own file finishing, not the host
+                    // asking. Read as the host's, it paused the other half too -
+                    // a pair whose halves both play once froze there with its
+                    // audio part way through, and an entry waiting for both ends
+                    // would never have seen the second. Whether the entry is over
+                    // is onStreamEnded's to say.
+                    // AM (A_STREAM_ENDS_WHEN_ITS_SOUND_DOES): and only where the
+                    // video is a stream that ends. A repeating video never stops
+                    // at its end, so it is never keep-open's to pause - but its
+                    // eof-reached blinks true at every wrap, and a real pause
+                    // landing in that instant was swallowed here, freezing the
+                    // picture with the sound still playing.
+                    if (event.paused && video in endingStreams() && hasEnded(video)) return@collect
                     if (shouldPlay == !event.paused) return@collect
                     shouldPlay = !event.paused
                     applyPlaybackState()
@@ -1041,20 +1345,133 @@ class ClipPlayback(
         }
     }
 
+    // AM (ONE_ENTRY_RULE) -->
     /**
-     * The host issued a command to its own instance; the companion follows the
-     * ones that move the timeline.
+     * Watches both instances for the two moments the entry rule turns on: the
+     * longer stream ending, and the longer stream wrapping.
      *
-     * Seeks only. A command that loads, stops or configures the video belongs
-     * to the host's own file and would be wrong to replay against an audio
-     * stream that is not it - the companion's own load goes through
-     * [loadPaused].
+     * The watcher this replaces listened for EndFile on the companion, which
+     * never arrives at a natural end. Every instance is built with
+     * keep-open=yes, and under it mpv holds the file at its last frame, pauses
+     * it and latches eof-reached instead of ending the file
+     * (player/playloop.c, handle_keep_open). EndFile comes only when something
+     * else replaces or stops the file. So an entry whose audio outlasted its
+     * video had no ending at all: the audio stopped, the video went on lapping
+     * in silence, and nothing advanced. eof-reached is what mpv does report -
+     * re-notified as the core goes idle (MP_EVENT_CORE_IDLE in
+     * player/command.c) - and MPVPlayer already publishes it on every instance
+     * as Event.EOF.
+     *
+     * Bounded by the load: takeWhile ends each collector at the first event
+     * after a later [loadPaused] or [reset] has replaced this one, rather than
+     * keeping one alive per entry ever played. A host's own non-clip load in
+     * between does not move the generation, so they idle through it - inertly,
+     * since stopCompanion clears the split and every handler below starts by
+     * checking it.
      */
-    fun mirrorCommand(command: Array<out String>) {
-        val companion = audio ?: return
-        if (command.firstOrNull() != "seek") return
-        companion.mpv.command(*command)
+    private fun followEntryEnd(key: Long, generation: Int) {
+        for (instance in listOfNotNull(video, audio)) {
+            loadScope.launch {
+                instance.eventFlow
+                    .takeWhile { generation == loadGeneration && loadedKey == key }
+                    .collect { event ->
+                        when (event) {
+                            is MPVPlayer.Event.EOF -> if (event.value) onStreamEnded(instance)
+                            // AM (A_STREAM_ENDS_WHEN_ITS_SOUND_DOES): keep-open's
+                            // pause after the drain, which for the companion is
+                            // the later of the two and the one that counts.
+                            is MPVPlayer.Event.PauseChanged -> if (event.paused) onStreamEnded(instance)
+                            is MPVPlayer.Event.RemainingFileLoops -> onStreamLooped(instance, event.value)
+                            else -> Unit
+                        }
+                    }
+            }
+        }
     }
+
+    /**
+     * [instance] reached the end of its file.
+     *
+     * The entry is over once every stream in [endingStreams] has ended - the
+     * longer one, where there is one, since the shorter repeats and has no end of
+     * its own; otherwise both halves.
+     */
+    private fun onStreamEnded(instance: MPVPlayer) {
+        // AM (A_STREAM_ENDS_WHEN_ITS_SOUND_DOES): finished, not merely decoded -
+        // see outputFinished. Reached twice for the companion, at its decoder's
+        // end and again at keep-open's pause, and only the second passes.
+        if (!isSplit || entryEnded || !outputFinished(instance)) return
+        if (looping) {
+            // Only a counted longer stream can end while the entry loops, and
+            // only once mpv's ceiling of LOOP_ENTRY wraps has run out. Re-armed
+            // and started again, which is what one more wrap would have done.
+            if (!pairLengthsDiffer || instance !== longerStream()) return
+            setLooping(instance, LOOP_ENTRY)
+            seekTo(0f)
+            applyPlaybackState()
+            return
+        }
+        if (instance !in endingStreams() || endingStreams().any { !outputFinished(it) }) return
+        entryEnded = true
+        // keep-open paused only the instance that ended. Anything still running -
+        // the repeating half - is this rule's to stop: nothing else knows the
+        // entry is over.
+        shouldPlay = false
+        applyPlaybackState()
+        onEntryEnded?.invoke()
+    }
+
+    /**
+     * [instance] reported how many loops its file has left.
+     *
+     * A wrap of the longer stream while the entry loops puts the shorter one
+     * back to its own start with it, so every pass of the entry pairs the same
+     * picture with the same sound. Left alone, the shorter stream carries on
+     * through whatever lap it is in.
+     *
+     * A wrap is a drop of exactly one - mpv lowers the count by one per wrap.
+     * Every report is recorded so the next compares against the latest, and
+     * only that drop is acted on. The loop writes made here either raise the
+     * count or drop it to zero with the loop going off, and a stream whose loop
+     * is off cannot be wrapping, which is what the [looping] check says.
+     */
+    private fun onStreamLooped(instance: MPVPlayer, loopsLeft: Long) {
+        val previous = if (instance === video) videoLoopsLeft else audioLoopsLeft
+        if (instance === video) videoLoopsLeft = loopsLeft else audioLoopsLeft = loopsLeft
+        if (previous == null || previous - loopsLeft != 1L) return
+        if (!looping || !isSplit || !pairLengthsDiffer) return
+        if (instance !== longerStream()) return
+        otherStream()?.seekToMappedPosition(0f)
+    }
+
+    /**
+     * Carries out a host's `seek` command on a pair, folded onto both streams.
+     *
+     * Replaces mirrorCommand, which replayed the host's raw command against the
+     * companion after the host had already sent it to the video: an absolute
+     * target landed unfolded on both - the defect seekTo's fold exists to
+     * prevent - and a relative one was measured from each instance's own clock.
+     * Taking the command rather than following it makes it one seek, issued
+     * once, by the one thing that knows how a time maps onto two streams.
+     *
+     * Returns false for anything this does not handle - not a seek, not a pair,
+     * or a form it cannot read - which the host then issues as it always did.
+     */
+    fun seekCommand(command: Array<out String>): Boolean {
+        if (!isSplit || command.firstOrNull() != "seek") return false
+        val amount = command.getOrNull(1)?.toFloatOrNull() ?: return false
+        val flags = command.getOrNull(2).orEmpty()
+        val duration = durationSeconds
+        val target = when {
+            "absolute-percent" in flags -> duration * amount / 100f
+            "relative-percent" in flags -> positionSeconds + duration * amount / 100f
+            "absolute" in flags -> amount
+            else -> positionSeconds + amount
+        }
+        seekTo(target)
+        return true
+    }
+    // <-- AM (ONE_ENTRY_RULE)
 
     // AM (CLIP_RESUME_FOLDS_ONTO_STREAMS) -->
     /**
@@ -1080,6 +1497,13 @@ class ClipPlayback(
             latchLengths()
             measuredThisLoad = latchedVideoLength != null && latchedAudioLength != null
             applyStreamLooping()
+            // AM (ONE_ENTRY_RULE): the counts the rule just armed, read rather
+            // than waited for. mpv sends an observed property only when it
+            // differs from what it last sent, so an arm that lands on the value
+            // the previous entry was armed with is never reported - and the
+            // first wrap would then have nothing to be a drop from.
+            videoLoopsLeft = video.mpv.getPropertyInt("remaining-file-loops")?.toLong()
+            audioLoopsLeft = audio?.mpv?.getPropertyInt("remaining-file-loops")?.toLong()
             // AM (A_A_TIMELINE_IS_NOT_KNOWN_UNTIL_BOTH_HALVES_ARE)
             onTimelineReady?.invoke()
         }
@@ -1097,8 +1521,10 @@ class ClipPlayback(
         // Both instances, together: this only ever runs for an entry this
         // loaded, and the two streams of one entry start and stop as one. The
         // host's own intent reaches here through followHostPause.
-        video.mpv.setPropertyBoolean("pause", paused)
-        audio?.mpv?.setPropertyBoolean("pause", paused)
+        // AM (A_STREAM_ENDS_WHEN_ITS_SOUND_DOES): through setPaused, which never
+        // pauses an instance already held at its end.
+        setPaused(video, paused)
+        audio?.let { setPaused(it, paused) }
     }
 
     private fun applyMuteState(): Boolean {
@@ -1211,6 +1637,8 @@ class ClipPlayback(
         shouldPlay = false
         pendingLoad = null
         loadedKey = null
+        // AM (ONE_ENTRY_RULE)
+        entryEnded = false
         // AM (SCROLLER_PRELOAD_TIERS): this instance is about to hold a
         // different entry, and how close the previous one was to being watched
         // says nothing about the next.
@@ -1252,6 +1680,39 @@ class ClipPlayback(
     companion object {
         private const val LOOP_FOREVER = "inf"
         private const val LOOP_OFF = "no"
+
+        // AM (ONE_FILL_RULE) -->
+        /**
+         * How full a buffer [aheadSeconds] deep is, 0..1: against [targetSeconds],
+         * or against what is left of the media where that is less.
+         *
+         * One rule for a pair and for an ordinary file. The cap is what lets a
+         * short file, or the last stretch of a long one, ever read as full: a
+         * buffer cannot hold more than what remains, and measured against the
+         * whole target it read as behind for as long as it played - which the
+         * proxy's limiter answers by holding downloads at their floor.
+         * [remainingSeconds] is null where the length is unknown.
+         */
+        fun bufferFill(aheadSeconds: Float, remainingSeconds: Float?, targetSeconds: Float): Float {
+            val needed = remainingSeconds?.let { minOf(targetSeconds, it) } ?: targetSeconds
+            if (needed <= 0f) return 1f
+            return (aheadSeconds / needed).coerceIn(0f, 1f)
+        }
+        // <-- AM (ONE_FILL_RULE)
+
+        // AM (ONE_ENTRY_RULE) -->
+        /**
+         * The longer stream's loop while the entry repeats: mpv's largest finite
+         * loop-file count (options/options.c, M_RANGE(0, 10000)).
+         *
+         * Finite on purpose. Only a finite count is lowered at each wrap, and
+         * that lowering is what reports the wrap - `inf` wraps just as
+         * seamlessly but says nothing. Ten thousand passes of even a short
+         * track is hours of one entry; running out is handled in
+         * onStreamEnded by arming it again.
+         */
+        private const val LOOP_ENTRY = "10000"
+        // <-- AM (ONE_ENTRY_RULE)
         private const val SEEK_POSITION_EPSILON = 0.05f
         private const val RANGE_EDGE_EPSILON = 0.25f
         private const val MAX_SEEK_RANGES = 10
@@ -1266,11 +1727,12 @@ class ClipPlayback(
         fun declaredLooping(anime: Anime?): Boolean =
             anime?.let { ScrollerFeedMedia.from(it) }?.loops == true
 
-        private fun setLooping(player: MPVPlayer, looping: Boolean) {
+        // AM (ONE_ENTRY_RULE): takes the loop-file value itself - off, forever,
+        // or the entry's counted loop - since a yes/no can no longer say which.
+        private fun setLooping(player: MPVPlayer, value: String) {
             // AM (A_A_LOOP_IS_SET_AT_BOTH_SCOPES): the option is what the
             // next file inherits, the property is the file open now, and
             // this is called at both moments.
-            val value = if (looping) LOOP_FOREVER else LOOP_OFF
             player.mpv.setOptionString("loop-file", value)
             player.mpv.setPropertyString("loop-file", value)
         }

@@ -401,7 +401,8 @@ class ScrollerPlaybackState internal constructor(
         player.loadPaused(
             key = anime.id,
             url = cacheableUrl(anime.id, playable),
-            audioUrl = playable.audioUrl,
+            // AM (A_PAIRS_AUDIO_IS_CACHED_TOO)
+            audioUrl = cacheableAudioUrl(anime.id, playable),
             httpHeaderFields = playable.httpHeaderFields,
         )
         applyPlayState()
@@ -870,7 +871,7 @@ class ScrollerPlaybackState internal constructor(
         // <-- AM (SCROLLER_MARKS_SEEN)
         // <-- AM (SCROLLER_WRITES_WATCH_PROGRESS)
         framesReady.remove(animeId)
-        MediaProxyServer.release(proxyOwner(animeId))
+        releaseRegistrations(animeId)
         pool.release(animeId)
         poolRevision++
     }
@@ -1126,7 +1127,34 @@ class ScrollerPlaybackState internal constructor(
             owner = proxyOwner(animeId),
         )
 
+    // AM (A_PAIRS_AUDIO_IS_CACHED_TOO): the card's audio, under the same entry
+    // key family the player reads - see ClipVideoResolver.cacheableAudioUrl.
+    private fun cacheableAudioUrl(animeId: Long, result: ClipVideoResolver.Result.Playable): String? =
+        ClipVideoResolver.cacheableAudioUrl(
+            context = context,
+            retainMaxBytes = playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
+            animeId = animeId,
+            playable = result,
+            owner = proxyOwner(animeId),
+        )
+
     private fun proxyOwner(animeId: Long) = "browse-scroller-$animeId"
+
+    // AM (THE_FEED_RELEASES_BY_OWNER) -->
+    /**
+     * Drops the proxy registrations of [animeId]'s clip, its audio's with them.
+     *
+     * By owner. This called release() with the owner's name, but release()
+     * takes a registration's key - a random id the owner maps to - so it
+     * matched nothing and every clip the feed ever loaded stayed registered
+     * for the life of the process. That was harmless only while nothing asked
+     * what is registered; the cache now does, to know what is being played.
+     */
+    private fun releaseRegistrations(animeId: Long) {
+        MediaProxyServer.releaseOwner(proxyOwner(animeId))
+        MediaProxyServer.releaseOwner(ClipVideoResolver.audioOwner(proxyOwner(animeId)))
+    }
+    // <-- AM (THE_FEED_RELEASES_BY_OWNER)
 
     internal fun pauseAll() = pool.forEach { _, player -> player.pause() }
 
@@ -1156,7 +1184,7 @@ class ScrollerPlaybackState internal constructor(
         // AM (BROWSE_SCROLLER_CONTROLS)
         controlsPollJob?.cancel()
         scope.cancel()
-        pool.forEach { id, _ -> MediaProxyServer.release(proxyOwner(id)) }
+        pool.forEach { id, _ -> releaseRegistrations(id) }
         pool.releaseAll()
     }
 }

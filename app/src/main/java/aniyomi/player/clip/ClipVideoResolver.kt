@@ -243,26 +243,101 @@ class ClipVideoResolver(
             animeId: Long,
             playable: Result.Playable,
             owner: String,
+        ): String = proxied(context, retainMaxBytes, playable, playable.url, cacheKey(animeId), owner)
+
+        // AM (A_PAIRS_AUDIO_IS_CACHED_TOO) -->
+        /**
+         * Routes [playable]'s separate audio through the same cache, or null
+         * where it has none.
+         *
+         * Every host used to hand the audio url to mpv as it came, so the half
+         * of a pair that runs the length of the entry was the half with no
+         * cache: fetched cold on every play however recently the feed had
+         * pulled it, read again from the network on every replay or seek, and
+         * invisible to the proxy's rate limiter, which was left to share the
+         * connection out against a video that was usually already held whole.
+         *
+         * Its own content key, so its bytes are not mistaken for the video's -
+         * except for a same-file pair, where they ARE the video's and sharing
+         * the key reads one copy for both instances instead of fetching two.
+         * Its own owner as well: an owner holds one registration at a time and
+         * replaces it on the next, so registering the audio under the video's
+         * owner would drop the video's mapping, and mpv reopens that url on
+         * every seek and reconnect. [audioOwner] is how a host releases it.
+         */
+        fun cacheableAudioUrl(
+            context: Context,
+            retainMaxBytes: Long,
+            animeId: Long,
+            playable: Result.Playable,
+            owner: String,
+        ): String? {
+            val audioUrl = playable.audioUrl ?: return null
+            val key = audioCacheKey(animeId, playable) ?: return null
+            return proxied(context, retainMaxBytes, playable, audioUrl, key, audioOwner(owner))
+        }
+
+        /** The proxy owner a pair's audio is registered under, given its video's. */
+        fun audioOwner(owner: String) = "$owner-audio"
+
+        /**
+         * The content key of [playable]'s separate audio stream, or null where
+         * it has none: the video's own key for a same-file pair, otherwise one
+         * of its own. Public so a download of the entry reads and fills the
+         * same bytes as every host that plays it.
+         */
+        fun audioCacheKey(animeId: Long, playable: Result.Playable): String? {
+            val audioUrl = playable.audioUrl ?: return null
+            return if (audioUrl == playable.url) cacheKey(animeId) else "${cacheKey(animeId)}-audio"
+        }
+        // <-- AM (A_PAIRS_AUDIO_IS_CACHED_TOO)
+
+        private fun proxied(
+            context: Context,
+            retainMaxBytes: Long,
+            playable: Result.Playable,
+            url: String,
+            cacheKey: String,
+            owner: String,
         ): String {
-            val httpSource = playable.httpSource ?: return playable.url
-            if (!playable.url.startsWith("http")) return playable.url
-            if (playable.url.contains("127.0.0.1") || playable.url.contains("localhost")) return playable.url
+            val httpSource = playable.httpSource ?: return url
+            if (!url.startsWith("http")) return url
+            if (url.contains("127.0.0.1") || url.contains("localhost")) return url
 
             // Whether anything is retained at all is the "Episode cache limit"
             // preference's decision, not any one host's.
             MediaProxyServer.attachCache(MediaCache.get(context, retainMaxBytes > 0, retainMaxBytes))
 
             return MediaProxyServer.proxyUrlFor(
-                url = playable.url,
+                url = url,
                 headers = playable.headers ?: httpSource.headers,
                 httpClient = httpSource.client,
-                cacheKey = cacheKey(animeId),
+                cacheKey = cacheKey,
                 owner = owner,
-            )?.second ?: playable.url
+            )?.second ?: url
         }
 
         /** The entry's content key, which every host of it shares. */
         fun cacheKey(animeId: Long) = "scroller-a$animeId"
+
+        // AM (PRELOAD_PROGRESSIVE_FILES) -->
+        /**
+         * Warms the opening bytes of [playable]'s files under the keys every
+         * host of the entry reads them by, so the load that follows starts from
+         * disk. Blocking: call it from an IO context. Silent on failure, like
+         * every warm.
+         */
+        fun warm(context: Context, retainMaxBytes: Long, animeId: Long, playable: Result.Playable) {
+            val httpSource = playable.httpSource ?: return
+            MediaProxyServer.attachCache(MediaCache.get(context, retainMaxBytes > 0, retainMaxBytes))
+            val headers = playable.headers ?: httpSource.headers
+            val videoKey = cacheKey(animeId)
+            MediaProxyServer.warmFileHead(playable.url, headers, httpSource.client, videoKey)
+            val audioUrl = playable.audioUrl ?: return
+            val audioKey = audioCacheKey(animeId, playable)?.takeIf { it != videoKey } ?: return
+            MediaProxyServer.warmFileHead(audioUrl, headers, httpSource.client, audioKey)
+        }
+        // <-- AM (PRELOAD_PROGRESSIVE_FILES)
 
         /**
          * Generous enough that scrolling back through what was just watched is

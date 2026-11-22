@@ -41,6 +41,16 @@ import java.util.concurrent.Executors
 @AssistedInject
 class MPVPlayer(
     @Assisted videoOutput: String,
+    // AM (A_COMPANION_IS_ONLY_A_SOUND) -->
+    /**
+     * Whether this instance will only ever play the separate audio of a pair.
+     *
+     * Decided at construction because what it switches off is only reachable
+     * then: mpv loads scripts while it initialises, so a write after this
+     * constructor would be too late to keep them from running.
+     */
+    @Assisted audioOnly: Boolean,
+    // <-- AM (A_COMPANION_IS_ONLY_A_SOUND)
     context: Context,
     private val playerPreferences: PlayerPreferences,
     // AM (ADOPTED_SURFACE_KEEPS_HWDEC): held rather than read once in init, so
@@ -54,7 +64,8 @@ class MPVPlayer(
 
     @AssistedFactory
     fun interface Factory {
-        fun create(videoOutput: String): MPVPlayer
+        // AM (A_COMPANION_IS_ONLY_A_SOUND): [audioOnly] for a pair's companion.
+        fun create(videoOutput: String, audioOnly: Boolean): MPVPlayer
     }
 
     val mpv: MPV
@@ -389,20 +400,45 @@ class MPVPlayer(
     init {
         val cachePath: String = context.cacheDir.path
 
-        val mpvDir = UniFile.fromFile(context.filesDir)!!.createDirectory(MPV_DIR)!!
+        // AM (COMPANION_BUILT_AHEAD) -->
+        // One instance at a time from here to the end of mpv's own init. Each
+        // creation rewrites the config files that mpv then reads while it
+        // initialises, and a companion is now built off the main thread while
+        // another instance may be built on it: unserialised, one could read
+        // mpv.conf in the middle of the other truncating it and start with
+        // none of the user's settings.
+        mpv = synchronized(CREATION_LOCK) {
+            val mpvDir = UniFile.fromFile(context.filesDir)!!.createDirectory(MPV_DIR)!!
 
-        val mpvConfFile = mpvDir.createFile("mpv.conf")!!
-        advancedPreferences.mpvConf.get().let { mpvConfFile.writeText(it) }
-        val mpvInputFile = mpvDir.createFile("input.conf")!!
-        advancedPreferences.mpvInput.get().let { mpvInputFile.writeText(it) }
+            val mpvConfFile = mpvDir.createFile("mpv.conf")!!
+            advancedPreferences.mpvConf.get().let { mpvConfFile.writeText(it) }
+            val mpvInputFile = mpvDir.createFile("input.conf")!!
+            advancedPreferences.mpvInput.get().let { mpvInputFile.writeText(it) }
 
-        mpv = MPV(context) {
-            it.setOptionString("config", "yes")
-            it.setOptionString("config-dir", context.filesDir.resolve(MPV_DIR).toString())
-            it.setOptionString("gpu-shader-cache-dir", cachePath)
-            it.setOptionString("icc-cache-dir", cachePath)
-            it.setOptionString("keep-open", "yes")
+            MPV(context) {
+                it.setOptionString("config", "yes")
+                it.setOptionString("config-dir", context.filesDir.resolve(MPV_DIR).toString())
+                it.setOptionString("gpu-shader-cache-dir", cachePath)
+                it.setOptionString("icc-cache-dir", cachePath)
+                it.setOptionString("keep-open", "yes")
+                // AM (A_COMPANION_IS_ONLY_A_SOUND) -->
+                // A companion plays one direct audio stream and has no window, no
+                // input and no UI, so none of the scripts mpv would start for it
+                // have anything to do there: the scripts folder (aniyomi.lua, the
+                // custom-buttons script, the user's own) and every built-in one.
+                // Each was a Lua VM and a set of load hooks per companion - the
+                // ytdl and auto-profiles hooks ran on every one of its loads. What
+                // they would have done to its sound reaches it another way: the
+                // pair's audio settings are mirrored from the instance they are
+                // actually written to (ClipPlayback.followAudioSettings), and
+                // config=yes still applies mpv.conf to it directly.
+                if (audioOnly) {
+                    for (option in AUDIO_ONLY_DISABLED_SCRIPT_OPTIONS) it.setOptionString(option, "no")
+                }
+                // <-- AM (A_COMPANION_IS_ONLY_A_SOUND)
+            }
         }
+        // <-- AM (COMPANION_BUILT_AHEAD)
 
         mpvOptionNames = optionNameRegex.findAll(advancedPreferences.mpvConf.get()).map {
             it.groupValues[1].removePrefix("no-")
@@ -535,6 +571,9 @@ class MPVPlayer(
             // for or infer from their own state copies.
             "pause" to MPV.mpvFormat.MPV_FORMAT_FLAG,
             // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
+            // AM (ONE_ENTRY_RULE): a file wrapping on a finite loop-file count -
+            // see Event.RemainingFileLoops.
+            "remaining-file-loops" to MPV.mpvFormat.MPV_FORMAT_INT64,
 
             "user-data/aniyomi/show_text" to MPV.mpvFormat.MPV_FORMAT_STRING,
             "user-data/aniyomi/control_action" to MPV.mpvFormat.MPV_FORMAT_STRING,
@@ -685,6 +724,8 @@ class MPVPlayer(
     override fun eventProperty(property: String, value: Long) {
         handler.post {
             if (isReleased) return@post
+            // AM (ONE_ENTRY_RULE)
+            if (property == "remaining-file-loops") _eventFlow.tryEmit(Event.RemainingFileLoops(value))
         }
     }
 
@@ -917,6 +958,21 @@ class MPVPlayer(
         data class EndFile(val node: MPVNode) : Event
         data class LuaEvent(val property: String, val value: String) : Event
 
+        // AM (ONE_ENTRY_RULE) -->
+        /**
+         * mpv's own count of the loops the open file has left.
+         *
+         * mpv lowers it by exactly one at the moment a file wraps on a FINITE
+         * loop-file count (player/playloop.c, handle_loop_file); `inf` is never
+         * counted down, so it reports nothing. Everything else that changes it
+         * SETS it to the loop-file option's value rather than lowering it:
+         * writing loop-file (player/command.c) and loading a file
+         * (player/loadfile.c). A seek or a pause does not touch it. So within one
+         * file, a drop of exactly one is a wrap.
+         */
+        data class RemainingFileLoops(val value: Long) : Event
+        // <-- AM (ONE_ENTRY_RULE)
+
         // AM (MEDIASESSION_EVENT_DRIVEN_FIX) -->
         data class PauseChanged(val paused: Boolean) : Event
         data object PlaybackRestart : Event
@@ -924,8 +980,27 @@ class MPVPlayer(
     }
 
     companion object {
+        // AM (COMPANION_BUILT_AHEAD): see the creation block in init.
+        private val CREATION_LOCK = Any()
+
         private const val TAG = "mpv"
         private const val MPV_DIR = "mpv"
         const val TRACK_LOAD_FAILURE = "Can not open external file "
+
+        // AM (A_COMPANION_IS_ONLY_A_SOUND): load-scripts for the scripts folder,
+        // the rest for mpv's built-in scripts - option names as in mpv's
+        // options/options.c.
+        private val AUDIO_ONLY_DISABLED_SCRIPT_OPTIONS = listOf(
+            "load-scripts",
+            "osc",
+            "ytdl",
+            "load-stats-overlay",
+            "load-console",
+            "load-auto-profiles",
+            "load-select",
+            "load-positioning",
+            "load-commands",
+            "load-context-menu",
+        )
     }
 }

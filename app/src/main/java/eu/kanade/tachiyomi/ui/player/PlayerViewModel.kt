@@ -158,9 +158,11 @@ import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.system.workManager
 import `is`.xyz.mpv.MPVNode
 import `is`.xyz.mpv.Utils
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -188,10 +190,13 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import logcat.LogPriority
+import mihon.core.common.extensions.EMPTY
 import mihon.domain.anime.model.toDomainAnime
 import mihon.domain.source.interactor.UpdateAnimeFromRemote
 import mihon.domain.library.model.search.QueryNode
@@ -392,7 +397,7 @@ class PlayerViewModel(
     // before, whenever no live holder/adopted player exists yet - a true fresh
     // session, where there's nothing to reuse.
     private val reusableHolder = PlayerMediaHolder.current?.takeIf { it.hasAdoptedPlayer }
-    private var _player = reusableHolder?.player ?: mpvFactory.create(videoOutput)
+    private var _player = reusableHolder?.player ?: mpvFactory.create(videoOutput, audioOnly = false)
     // AM (REUSED_PLAYER_SYNC_FIX) -->
     // Exposed for PlayerActivity.onNewIntent() to check: this fresh ViewModel's
     // own local bookkeeping (currentPlaylist, etc.) starts empty regardless of
@@ -453,12 +458,15 @@ class PlayerViewModel(
         val surfaceAttached = MutableStateFlow(false)
         val clipPlayback = ClipPlayback(
             video = player,
-            audioFactory = { mpvFactory.create(videoOutput) },
+            // AM (COMPANION_BUILT_AHEAD)
+            audioFactory = { takeCompanion() },
             onEntryEnded = { eofReached(true, combinedTimelineEnded = true) },
             // AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM)
             onTimelineReady = { publishClipDuration() },
             // AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED)
             onAudioLoadFailed = { audioStreamFailed() },
+            // AM (A_PAIRS_BUFFER_IS_BOTH_HALVES)
+            onBufferChanged = { publishBufferSignals() },
         )
         var attempts = 0
         var fileLoaded = false
@@ -489,6 +497,9 @@ class PlayerViewModel(
     /** Drops every proxy registration [player] holds. */
     private fun releaseProxyOwner(player: MPVPlayer) {
         MediaProxyServer.releaseOwner(qualityProxyOwner(player))
+        // AM (A_PAIRS_AUDIO_IS_CACHED_TOO): and its pair's audio half, which is
+        // registered under an owner of its own - see cacheableAudioUrl.
+        MediaProxyServer.releaseOwner(ClipVideoResolver.audioOwner(qualityProxyOwner(player)))
     }
     // <-- AM (SEAMLESS_QUALITY_SWITCH)
 
@@ -568,12 +579,15 @@ class PlayerViewModel(
         get() = _clipPlayback?.takeIf { it.video === _player }
             ?: ClipPlayback(
                 video = _player,
-                audioFactory = { mpvFactory.create(videoOutput) },
+                // AM (COMPANION_BUILT_AHEAD)
+                audioFactory = { takeCompanion() },
                 onEntryEnded = { eofReached(true, combinedTimelineEnded = true) },
                 // AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM)
                 onTimelineReady = { publishClipDuration() },
                 // AM (A_AN_ENTRY_WITH_NO_SOUND_HAS_NOT_LOADED)
                 onAudioLoadFailed = { audioStreamFailed() },
+                // AM (A_PAIRS_BUFFER_IS_BOTH_HALVES)
+                onBufferChanged = { publishBufferSignals() },
             )
                 .also {
                     _clipPlayback?.releaseCompanion()
@@ -581,6 +595,48 @@ class PlayerViewModel(
                     mediaHolder?.setClipPlayback(it)
                 }
     // <-- AM (CLIP_PLAYBACK)
+
+    // AM (COMPANION_BUILT_AHEAD) -->
+    /**
+     * An audio instance built ahead of the pair that will need it.
+     *
+     * A pair's companion was created at its load, on the main thread, inside
+     * the wait for the first frame: the config files written, mpv created and
+     * initialised, every option set - for each entry, since each new clip
+     * session brings its own. None of that depends on the file, so it is done
+     * here, off the main thread, while the entry before is still playing.
+     *
+     * Not cancelled with the view model: a creation in flight cannot be
+     * stopped part way, so its result is released once it lands instead.
+     */
+    private var spareCompanion: Deferred<MPVPlayer>? = null
+
+    private val companionBuilder = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private fun buildSpareCompanion() {
+        if (spareCompanion != null) return
+        spareCompanion = companionBuilder.async { mpvFactory.create(videoOutput, audioOnly = true) }
+    }
+
+    /**
+     * The spare when there is one, waiting for it if it is still being built -
+     * never slower than building one here, which is the fallback.
+     */
+    private fun takeCompanion(): MPVPlayer {
+        val spare = spareCompanion
+        spareCompanion = null
+        val built = spare?.let {
+            runCatching { runBlocking { it.await() } }.getOrNull()
+        }
+        return built ?: mpvFactory.create(videoOutput, audioOnly = true)
+    }
+
+    private fun releaseSpareCompanion() {
+        val spare = spareCompanion ?: return
+        spareCompanion = null
+        companionBuilder.launch { runCatching { spare.await() }.getOrNull()?.release() }
+    }
+    // <-- AM (COMPANION_BUILT_AHEAD)
 
     // Prefs
     private val reduceMotion = playerPreferences.reduceMotion.get()
@@ -814,6 +870,21 @@ class PlayerViewModel(
         // AM (SHUFFLE_FOLLOWS_SEED) -->
         observeShuffleSeed()
         // <-- AM (SHUFFLE_FOLLOWS_SEED)
+
+        // AM (WATCHED_GOES_NEXT) -->
+        // The episode on screen goes next in its source's download line. A
+        // download of it reads the bytes this player has already fetched rather
+        // than fetching them again - which only helps if it runs while those
+        // bytes are still held; queued behind others, it waited its turn and
+        // by then they could be gone. Keyed on the current episode alone, so
+        // every way of arriving at an episode counts once.
+        viewModelScope.launchIO {
+            stateData.map { it.currentEpisode?.id }
+                .distinctUntilChanged()
+                .filterNotNull()
+                .collect { downloadManager.putNextInLine(it) }
+        }
+        // <-- AM (WATCHED_GOES_NEXT)
 
         // AM (PLAYBACK_QUEUE)
         observeQueue()
@@ -1361,8 +1432,10 @@ class PlayerViewModel(
             // the player is using the network, not that the player is in trouble.
             // This one says the player has run dry and is waiting, which is when a
             // download should get out of the way completely.
+            // AM (A_PAIRS_BUFFER_IS_BOTH_HALVES): published by one function for
+            // both signals, which also answers for a pair - see there.
             propFlow<Boolean>("paused-for-cache")
-                .onEach { PlayerMediaHolder.setPlaybackStarved(it == true) }
+                .onEach { publishBufferSignals() }
                 .launchIn(this)
 
             // AM (MEASURED_BANDWIDTH_SHARE) -->
@@ -1376,17 +1449,7 @@ class PlayerViewModel(
             // not a duration - so the fraction pinned at 1.0 a few seconds into
             // any file and the limiter stopped allocating to a starving player.
             propFlow<Float>("demuxer-cache-duration")
-                .onEach { readAhead ->
-                    val target = playerPreferences.networkBufferSeconds.get().toFloat()
-                    val streaming = PlayerMediaHolder.streamingPlaybackActive.value
-                    PlayerMediaHolder.setPlaybackBufferFill(
-                        if (!streaming || readAhead == null || target <= 0f) {
-                            null
-                        } else {
-                            (readAhead / target).coerceIn(0f, 1f)
-                        },
-                    )
-                }
+                .onEach { publishBufferSignals() }
                 .launchIn(this)
             // <-- AM (MEASURED_BANDWIDTH_SHARE)
             // <-- AM (PLAYBACK_STARVED_SIGNAL)
@@ -1509,11 +1572,11 @@ class PlayerViewModel(
     }
 
     fun mpvCommand(vararg command: String) {
+        // AM (ONE_ENTRY_RULE): a pair's seek is ClipPlayback's to carry out,
+        // folded onto both streams, rather than sent to the video and then
+        // replayed raw at the companion - see ClipPlayback.seekCommand.
+        if (clipPlayback.seekCommand(command)) return
         mpv.command(*command)
-        // AM (CLIP_PLAYBACK): seeks reach the companion audio the same way -
-        // a separate stream is its own timeline and would otherwise run apart
-        // from the video for the rest of the entry.
-        clipPlayback.mirrorCommand(command)
     }
 
     // AM (AUDIO_BLIP_FIX) -->
@@ -1707,6 +1770,9 @@ class PlayerViewModel(
             // <-- AM (MEDIASESSION_EVENT_DRIVEN_FIX)
             is MPVPlayer.Event.PauseChanged -> {}
             MPVPlayer.Event.PlaybackRestart -> {}
+            // AM (ONE_ENTRY_RULE): ClipPlayback's, which collects it off the
+            // instances directly to tell a pair's wraps apart.
+            is MPVPlayer.Event.RemainingFileLoops -> {}
         }
     }
 
@@ -2196,7 +2262,7 @@ class PlayerViewModel(
         if (wasPlayerReusedFromLiveHolder) {
             val liveState = PlayerMediaHolder.current?.state?.value
             if (liveState?.sessionKey != SessionKey.Library(animeId, initialEpisodeId)) {
-                _player = mpvFactory.create(videoOutput)
+                _player = mpvFactory.create(videoOutput, audioOnly = false)
                 wasPlayerReusedFromLiveHolder = false
             }
         }
@@ -4848,6 +4914,57 @@ class PlayerViewModel(
         }
     }
 
+    // AM (A_STATED_ENTRY_IS_ALREADY_RESOLVED) -->
+    /**
+     * [episode] as a ready prefetch, where its listing states its streams -
+     * paired with what it states - or null where it has to be resolved.
+     *
+     * The feed plays these entries straight from the listing; the player sent
+     * the same entry through the source's hosters, its video list and a url
+     * resolve before it reached the substitution in setVideo that played the
+     * listing's streams anyway. Every one of those round trips was spent on a
+     * result that was then thrown away, and they were the difference between
+     * a pair's load and an ordinary video's.
+     *
+     * A single quality, named for the source: the stated pair is the one
+     * thing these entries play, so the sheet offers what is there. Not for a
+     * downloaded episode, whose streams are its own files.
+     */
+    private fun statedPrefetch(
+        episode: Episode,
+        anime: Anime,
+        source: AnimeSource,
+    ): Pair<PrefetchedEpisode, ClipVideoResolver.Result.Playable>? {
+        val episodeId = episode.id ?: return null
+        if (source !is AnimeHttpSource) return null
+        val domainEpisode = episode.toDomainEpisode() ?: return null
+        if (episodeLoader.isDownload(domainEpisode, anime)) return null
+        val stated = ClipVideoResolver.statedBy(anime, source)
+            ?.takeIf { !it.audioUrl.isNullOrBlank() }
+            ?: return null
+        val video = Video(videoUrl = stated.url, videoTitle = source.name, headers = stated.headers)
+        // The shape a source with no hoster list hands back, so the sheet
+        // shows the one video without a hoster heading over it.
+        val hosterList = listOf(
+            Hoster(hosterName = Hoster.NO_HOSTER_LIST, videoList = listOf(video), memo = JsonObject.EMPTY),
+        )
+        val prefetch = PrefetchedEpisode(
+            episodeId = episodeId,
+            hosterList = hosterList,
+            hosterState = listOf(
+                HosterState.Ready(
+                    name = Hoster.NO_HOSTER_LIST,
+                    videoList = listOf(video),
+                    videoState = listOf(Video.State.READY),
+                ),
+            ),
+            selectedIndex = 0 to 0,
+            fetchedAt = System.currentTimeMillis(),
+        )
+        return prefetch to stated
+    }
+    // <-- AM (A_STATED_ENTRY_IS_ALREADY_RESOLVED)
+
     /**
      * One resolve of [nextId], or null if it could not be resolved.
      *
@@ -4871,6 +4988,21 @@ class PlayerViewModel(
         return try {
             val (episodeAnime, episodeSource) = resolveEpisodeAnimeAndSource(displayAnime, next)
                 ?: return null
+            // AM (A_STATED_ENTRY_IS_ALREADY_RESOLVED) -->
+            // A stated entry is ready as it stands, so its prefetch is the
+            // part a resolve never did: the opening bytes of both its files,
+            // and an audio instance built ahead for it.
+            statedPrefetch(next, episodeAnime, episodeSource)?.let { (prefetch, playable) ->
+                buildSpareCompanion()
+                ClipVideoResolver.warm(
+                    context = context,
+                    retainMaxBytes = playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
+                    animeId = next.anime_id ?: episodeAnime.id,
+                    playable = playable,
+                )
+                return prefetch
+            }
+            // <-- AM (A_STATED_ENTRY_IS_ALREADY_RESOLVED)
             val hosterList = episodeLoader.getHosters(next.toDomainEpisode()!!, episodeAnime, episodeSource)
             if (hosterList.isEmpty()) return null
 
@@ -5364,7 +5496,7 @@ class PlayerViewModel(
         // AM (POOLED_PLAYER_INSTANCES): a free instance where there is one. The
         // switch is the one place this session routinely wants a second live
         // instance, so it is also the place that keeps producing one to close.
-        val replacement = instancePool?.acquire() ?: mpvFactory.create(videoOutput)
+        val replacement = instancePool?.acquire() ?: mpvFactory.create(videoOutput, audioOnly = false)
         val pending = QualitySwitch(
             player = replacement,
             video = video,
@@ -5417,7 +5549,14 @@ class PlayerViewModel(
                                 playable = statedMedia,
                                 owner = qualityProxyOwner(pending.player),
                             ),
-                            audioUrl = statedMedia.audioUrl,
+                            // AM (A_PAIRS_AUDIO_IS_CACHED_TOO)
+                            audioUrl = ClipVideoResolver.cacheableAudioUrl(
+                                context = context,
+                                retainMaxBytes = playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
+                                animeId = entryId,
+                                playable = statedMedia,
+                                owner = qualityProxyOwner(pending.player),
+                            ),
                             httpHeaderFields = statedMedia.httpHeaderFields,
                             resumeAt = pending.syncPosition,
                             reload = true,
@@ -5941,7 +6080,15 @@ class PlayerViewModel(
          */
         fun sitsAt(resumeAt: Double?): Boolean {
             if (resumeAt == null) return true
-            val current = player.mpv.getPropertyDouble("time-pos") ?: return false
+            // AM (A_PAIR_SITS_AT_ITS_OWN_TIME): a pair's position is the entry's,
+            // off its longer stream. This instance's own time-pos is the video's,
+            // which for most pairs restarts with every lap of a few seconds, so it
+            // agreed with a resume point only by the coincidence of a lap.
+            val current = if (clipPlayback.isSplit) {
+                clipPlayback.positionSeconds.toDouble()
+            } else {
+                player.mpv.getPropertyDouble("time-pos") ?: return false
+            }
             return abs(current - resumeAt) <= RETAINED_RESUME_TOLERANCE_SECONDS
         }
         // <-- AM (NOTHING_IS_PROMOTED_BEFORE_IT_IS_READY)
@@ -6010,7 +6157,14 @@ class PlayerViewModel(
      * display caller peeks; everything else is the episode's own stored state.
      */
     private fun resumeSecondsFor(episode: Episode, tempPosition: Long?, preservePos: Boolean): Long = when {
-        tempPosition != null && tempPosition > 0 -> tempPosition / 1000L
+        // AM (A_FINISHED_POSITION_IS_NOT_A_RESUME_POINT): the temp row gets the
+        // same rule as the episode row below. It still wins outright when it is a
+        // real position, but one at the end of the episode is the episode having
+        // finished, and finished starts from the top. The store applies this rule
+        // as it writes, but only for a writer that hands it a duration; this is
+        // where every writer's rows are read, including ones already stored.
+        tempPosition != null && tempPosition > 0 ->
+            if (positionIsTheEnd(tempPosition, episode.total_seconds)) 0L else tempPosition / 1000L
         episode.seen && !preservePos -> 0L
         // AM (A_FINISHED_POSITION_IS_NOT_A_RESUME_POINT)
         storedPositionIsTheEnd(episode) -> 0L
@@ -6039,11 +6193,16 @@ class PlayerViewModel(
      * end-of-episode position are fixed by this too, where a write-time guard
      * would only stop new ones.
      */
-    private fun storedPositionIsTheEnd(episode: Episode): Boolean {
-        val duration = episode.total_seconds
-        if (duration <= 0L) return false
-        return episode.last_second_seen >= duration - 1000L
-    }
+    private fun storedPositionIsTheEnd(episode: Episode): Boolean =
+        positionIsTheEnd(episode.last_second_seen, episode.total_seconds)
+
+    /**
+     * Whether [positionMs] sits at the end of something [durationMs] long - the
+     * one-second rule above, for any stored position. An unknown length answers
+     * no, which leaves the position to be used as it is.
+     */
+    private fun positionIsTheEnd(positionMs: Long, durationMs: Long): Boolean =
+        durationMs > 0L && positionMs >= durationMs - 1000L
     // <-- AM (A_FINISHED_POSITION_IS_NOT_A_RESUME_POINT)
 
     private fun livePositionIsCurrentEpisode(): Boolean {
@@ -6676,7 +6835,15 @@ class PlayerViewModel(
                         playable = statedMedia,
                         owner = qualityProxyOwner(player),
                     ),
-                    audioUrl = statedMedia.audioUrl,
+                    // AM (A_PAIRS_AUDIO_IS_CACHED_TOO): the audio the same way,
+                    // which until now went to mpv uncached.
+                    audioUrl = ClipVideoResolver.cacheableAudioUrl(
+                        context = context,
+                        retainMaxBytes = playerPreferences.retainRecentEpisodeMediaMaxBytes.get(),
+                        animeId = entryId,
+                        playable = statedMedia,
+                        owner = qualityProxyOwner(player),
+                    ),
                     httpHeaderFields = statedMedia.httpHeaderFields,
                     resumeAt = resumePosition?.toDouble(),
                     // Every call here is a deliberate load - including coming
@@ -7028,7 +7195,13 @@ class PlayerViewModel(
     // which instance is live and touches neither, so asking whether the END of a
     // file belongs to the file now playing is the only form of this that stays
     // true across one.
-    private val currentFileReachedEof: Boolean get() = fileEndedOnInstance === player
+    // AM (ONE_ENTRY_RULE): a pair's end is the pair's, and ClipPlayback holds it.
+    // Read from there rather than latched here, because nothing on this
+    // instance clears the latch for a pair: for one whose audio is the longer
+    // half the video never reaches EOF, so no later EOF(false) ever arrives to
+    // say a seek or a replay has taken the entry off its end.
+    private val currentFileReachedEof: Boolean
+        get() = if (clipPlayback.isSplit) clipPlayback.entryEnded else fileEndedOnInstance === player
     // <-- AM (EOF_REPLAY_NO_RELOAD)
 
     // AM (EOF_BELONGS_TO_AN_INSTANCE) -->
@@ -7139,18 +7312,60 @@ class PlayerViewModel(
     }
     // <-- AM (A_AN_ENTRY_ENDS_WITH_ITS_SHORTER_STREAM)
 
+    // AM (A_PAIRS_BUFFER_IS_BOTH_HALVES) -->
+    /**
+     * Publishes the playback buffer's state for MediaProxyServer's rate limiter:
+     * whether playback has run dry, and how full it is against the buffer
+     * setting.
+     *
+     * Read from this instance's properties for an ordinary file, exactly as the
+     * two observers that call this used to compute it inline. For a pair, from
+     * ClipPlayback, which sees both halves: this instance holds only the video,
+     * usually the short repeating half, so its own readahead can never reach the
+     * target and its own cache says nothing about the audio's.
+     *
+     * Called from this instance's observers and from ClipPlayback when the
+     * companion's cache moves, and recomputed from current state each time, so
+     * whichever source changed last, the published value describes the entry as
+     * it is now - including across a pair giving way to an ordinary file, where
+     * the next readahead change on this instance replaces the pair's values.
+     */
+    private fun publishBufferSignals() {
+        val split = clipPlayback.isSplit
+        PlayerMediaHolder.setPlaybackStarved(
+            if (split) clipPlayback.pairPausedForCache else mpv.getPropertyBoolean("paused-for-cache") == true,
+        )
+        val target = playerPreferences.networkBufferSeconds.get().toFloat()
+        val streaming = PlayerMediaHolder.streamingPlaybackActive.value
+        PlayerMediaHolder.setPlaybackBufferFill(
+            when {
+                !streaming || target <= 0f -> null
+                split -> clipPlayback.pairBufferFill(target)
+                // AM (ONE_FILL_RULE): the pair's rule - against what is left
+                // where that is less than the target.
+                else -> mpv.getPropertyDouble("demuxer-cache-duration")?.toFloat()?.let { ahead ->
+                    val position = mpv.getPropertyDouble("time-pos")?.toFloat()?.takeIf { it.isFinite() }
+                    val length = mpv.getPropertyDouble("duration")?.toFloat()?.takeIf { it.isFinite() && it > 0f }
+                    val remaining = if (position != null && length != null) length - position else null
+                    ClipPlayback.bufferFill(ahead, remaining, target)
+                }
+            },
+        )
+    }
+    // <-- AM (A_PAIRS_BUFFER_IS_BOTH_HALVES)
+
     private fun eofReached(eofReached: Boolean, combinedTimelineEnded: Boolean = false) {
         // AM (CLIP_PLAYBACK) -->
-        // A repeating video's EOF is a lap, not completion; the entry's actual
-        // ending arrives as combinedTimelineEnded.
-        // AM (A_THE_LONGER_STREAM_IS_THE_ENTRY): which is a two-stream entry
-        // that loops, and one whose video is the shorter half - that half
-        // repeats underneath the longer one whether or not the entry loops.
-        if (!combinedTimelineEnded && clipPlayback.videoIsRepeating) {
-            // AM (EOF_BELONGS_TO_AN_INSTANCE)
-            fileEndedOnInstance = null
-            return
-        }
+        // AM (ONE_ENTRY_RULE): a pair ends only as combinedTimelineEnded.
+        //
+        // Was gated on videoIsRepeating, which had this handler work out from
+        // the VIDEO instance's EOF whether that EOF was the entry's - one half
+        // of the rule, here, while the other half lived in ClipPlayback's own
+        // watcher for the audio. Which stream ends a pair is decided in
+        // ClipPlayback, where the lengths are, and it reports the end itself
+        // whichever instance it came from. This instance's EOF says nothing
+        // about a pair either way.
+        if (!combinedTimelineEnded && clipPlayback.isSplit) return
         // <-- AM (CLIP_PLAYBACK)
         // AM (EOF_REPLAY_NO_RELOAD) -->
         // AM (EOF_BELONGS_TO_AN_INSTANCE): this event is the live instance's.
@@ -8405,6 +8620,10 @@ class PlayerViewModel(
             // around it, so "where does a stream come from" has one answer per
             // session instead of one per call site.
             // <-- AM (NEXT_EPISODE_PREFETCH)
+            // AM (A_STATED_ENTRY_IS_ALREADY_RESOLVED): an entry whose listing
+            // states its streams has nothing to resolve, so it takes the
+            // prefetched path whether or not anything prefetched it.
+            val stated = statedPrefetch(chosenEpisode, anime, source)?.first?.also { rememberResolved(it) }
             val playbackSource = librarySourceFor(
                 episode = chosenEpisode,
                 anime = anime,
@@ -8412,7 +8631,7 @@ class PlayerViewModel(
                 displayAnime = displayAnime,
                 // AM (PREFETCH_FOLLOWS_THE_QUEUE): awaits a resolve already in
                 // flight rather than starting a second copy of it beside one.
-                prefetched = awaitPrefetchedFor(chosenEpisode.id)?.hosterList,
+                prefetched = (stated ?: awaitPrefetchedFor(chosenEpisode.id))?.hosterList,
             )
             // <-- AM (CONTENT_AGNOSTIC_SESSION)
             val resolved = try {
@@ -9030,9 +9249,17 @@ class PlayerViewModel(
      */
     private fun restartIfAtEof(): Boolean {
         if (player.isReleased) return false
-        if (mpv.getPropertyBoolean("eof-reached") != true) return false
-
-        mpvCommand("seek", "0", "absolute")
+        // AM (ONE_ENTRY_RULE): for a pair, the end is the entry's, not this
+        // instance's - for one whose audio is longer, the video is part way
+        // through a lap when the entry ends, so its own eof-reached was false
+        // and replaying a finished pair did nothing.
+        if (clipPlayback.isSplit) {
+            if (!clipPlayback.entryEnded) return false
+            clipPlayback.seekTo(0f)
+        } else {
+            if (mpv.getPropertyBoolean("eof-reached") != true) return false
+            mpvCommand("seek", "0", "absolute")
+        }
         setPropertyBoolean("pause", false)
         updatePlaybackData { it.copy(paused = false, position = 0) }
         return true
@@ -9157,6 +9384,13 @@ class PlayerViewModel(
         PlayerMediaHolder.setStreamingPlaybackActive(
             !isLocalUrl(stateData.value.currentVideo?.videoUrl) && !playbackData.value.paused,
         )
+        // AM (ONE_FILL_RULE): the fill is published as null while nothing is
+        // streaming, so it has to be worked out again when that changes. It
+        // was only recomputed when the cache moved, and a buffer that has
+        // stopped moving - paused, or holding its file whole - kept whatever
+        // it last said while playing: a pause left downloads capped at a
+        // level computed for playback that was no longer running.
+        publishBufferSignals()
     }
 
     /**
@@ -10205,6 +10439,8 @@ class PlayerViewModel(
         _clipPlayback?.releaseCompanion()
         _clipPlayback = null
         // <-- AM (CLIP_PLAYBACK)
+        // AM (COMPANION_BUILT_AHEAD)
+        releaseSpareCompanion()
         // AM (ACTIVE_EPISODE_NEVER_EVICTED) -->
         // Nothing is playing once this view model is gone, so the exemption ends
         // with it - otherwise the last episode watched would hold its bytes

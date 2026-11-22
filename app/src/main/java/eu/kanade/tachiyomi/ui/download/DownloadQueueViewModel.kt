@@ -164,6 +164,16 @@ class DownloadQueueViewModel(
         cancel(listOf(download))
     }
 
+    // AM (QUEUE_ROW_ACTIONS) -->
+    fun retry(episodeId: Long) {
+        downloadManager.retryDownload(episodeId)
+    }
+
+    fun startNow(episodeId: Long) {
+        downloadManager.startDownloadNow(episodeId)
+    }
+    // <-- AM (QUEUE_ROW_ACTIONS)
+
     fun cancelSeries(animeId: Long) {
         val series = queued().filter { it.anime.id == animeId }
         if (series.isEmpty()) return
