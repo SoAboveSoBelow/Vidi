@@ -67,6 +67,7 @@ import eu.kanade.tachiyomi.ui.player.components.MpvSurface
 import eu.kanade.tachiyomi.ui.player.components.OrientationOverlay
 import eu.kanade.tachiyomi.ui.player.components.SystemAwakeOverlay
 import eu.kanade.tachiyomi.ui.player.components.SystemBarOverlay
+import eu.kanade.tachiyomi.ui.player.components.pinnedSurfaceGeometry
 import eu.kanade.tachiyomi.ui.player.controls.DoubleTapToSeekOvals
 import eu.kanade.tachiyomi.ui.player.controls.GestureHandler
 import eu.kanade.tachiyomi.ui.player.controls.LocalPlayerButtonsClickEvent
@@ -608,12 +609,21 @@ fun PlayerScreen(
                 // waiting a frame for the effect above.
                 val longEdgePx = maxOf(largestLongEdgePx.intValue, windowLongEdgePx)
                 // <-- AM (PINNED_SURFACE_SURVIVES_PIP)
-                val fixedWidthPx = remember(aspect, longEdgePx) { longEdgePx.toFloat() }
-                val fixedHeightPx = remember(aspect, longEdgePx) { longEdgePx / aspect }
-                val fitScale = minOf(
-                    windowWidthPx / fixedWidthPx,
-                    windowHeightPx / fixedHeightPx,
-                )
+                // AM (ENTRY_SCROLLER): the same three numbers, worked out
+                // where a feed's surface can read the rule too - see
+                // PinnedVideoSurface. The zoom layer below is still this
+                // screen's own.
+                val surfaceGeometry = remember(aspect, longEdgePx, windowWidthPx, windowHeightPx) {
+                    pinnedSurfaceGeometry(
+                        aspect = aspect,
+                        longEdgePx = longEdgePx,
+                        containerWidthPx = windowWidthPx,
+                        containerHeightPx = windowHeightPx,
+                    )
+                }
+                val fixedWidthPx = surfaceGeometry.widthPx
+                val fixedHeightPx = surfaceGeometry.heightPx
+                val fitScale = surfaceGeometry.fitScale
                 // AM (PINCH_ZOOM) -->
                 // The zoom rides on this layer rather than mpv's video-zoom: the
                 // surface is the video's own shape, so the bars are space around it

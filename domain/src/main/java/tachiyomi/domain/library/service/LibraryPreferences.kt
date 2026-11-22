@@ -241,7 +241,9 @@ class LibraryPreferences(
             if (anime.sortDescending()) Anime.EPISODE_SORT_DESC else Anime.EPISODE_SORT_ASC,
         )
         // AY -->
-        showEpisodeThumbnailPreviews.set(anime.showPreviewsRaw)
+        // AM (ENTRY_SCROLLER): the whole view-mode field, so "use as
+        // default" can carry the scroller view as well as the other two.
+        showEpisodeThumbnailPreviews.set(anime.episodeViewModeRaw)
         showEpisodeSummaries.set(anime.showSummariesRaw)
         // <-- AY
     }

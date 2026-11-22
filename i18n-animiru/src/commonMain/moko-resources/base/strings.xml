@@ -156,6 +156,7 @@
     <string name="am.pref_default_view">Default view</string>
     <string name="am.pref_default_view_simplified">Simplified</string>
     <string name="am.pref_default_view_preview">Preview</string>
+    <string name="am.pref_default_view_scroller">Scroller</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesTitle">Hide entries without newer episodes</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesSubtitle">Only show entry if the match has additional episodes</string>
     <string name="am.migrationConfigScreen.prioritizeByChaptersTitle">Match based on episode number</string>

@@ -340,6 +340,24 @@ sealed interface ControlAction {
             .takeIf { it > 0 }
             ?.let { -(it + 1).toLong() }
 
+        // AM (ENTRY_SCROLLER) -->
+        /**
+         * What a bound action actually is, with a seeded default resolved back
+         * to the action it stands for.
+         *
+         * A native default is stored as a [CustomButton] holding its Lua row's
+         * id, so anything that asks "which action is this slot" by matching on
+         * the stored value alone sees a custom button and not the previous or
+         * next it draws. Availability already resolved this for itself; it is
+         * here now because dispatchers have to ask the same question, and two
+         * answers to it is how a button comes to be drawn and do nothing.
+         */
+        fun identity(action: ControlAction): ControlAction = when (action) {
+            is CustomButton -> nativeActionForButtonId(action.id) ?: action
+            else -> action
+        }
+        // <-- AM (ENTRY_SCROLLER)
+
         /** Original presentation for a seeded default, or null for a user-created button. */
         fun nativeActionForButtonId(id: Long): ControlAction? = if (id <= -2L && id >= -nativeOrder.size) {
             nativeOrder.getOrNull((-id).toInt() - 1)

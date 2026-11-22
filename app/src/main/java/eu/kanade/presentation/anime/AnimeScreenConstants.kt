@@ -21,6 +21,10 @@ enum class AnimeScreenItem {
     EPISODE_HEADER,
     EPISODE,
 
+    // AM (ENTRY_SCROLLER): a card, not a row - its own content type so the
+    // two are never recycled into one another.
+    EPISODE_SCROLLER,
+
     // AY -->
     AIRING_TIME,
     // <-- AY

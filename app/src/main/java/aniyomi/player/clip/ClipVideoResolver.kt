@@ -1,6 +1,7 @@
 package aniyomi.player.clip
 
 import android.content.Context
+import aniyomi.ui.browse.scroller.ScrollerCardRef
 import aniyomi.ui.browse.scroller.ScrollerFeedMedia
 import eu.kanade.tachiyomi.data.media.MediaCache
 import eu.kanade.tachiyomi.data.media.MediaProxyServer
@@ -109,7 +110,11 @@ class ClipVideoResolver(
      * listing - cost no requests at all, and refusing those would spend the
      * budget's protection on work that was never going to touch the network.
      */
-    suspend fun resolve(anime: Anime, source: AnimeSource, speculative: Boolean = false): Result {
+    suspend fun resolve(anime: Anime, source: AnimeSource, speculative: Boolean = false): Result =
+        resolve(ScrollerCardRef.ofEntry(anime), source, speculative)
+
+    suspend fun resolve(card: ScrollerCardRef, source: AnimeSource, speculative: Boolean = false): Result {
+        val anime = card.anime
         // AM (CLIP_RESOLVE_ONLY_CACHES_SUCCESS) -->
         // Successes only. A failure used to be cached here for the life of
         // the feed, which is the whole reason a card could sit black while
@@ -118,15 +123,15 @@ class ClipVideoResolver(
         // walks every hoster and video on each call - so asking again IS the
         // retry, and it is the same retry the player gets. Caching the
         // failure meant the second ask never happened.
-        (cache[anime.id] as? Result.Playable)?.let { return it }
+        (cache[card.id] as? Result.Playable)?.let { return it }
         // <-- AM (CLIP_RESOLVE_ONLY_CACHES_SUCCESS)
 
         // A source that states its media in the listing needs none of what
         // follows - no details fetch, no episode list, no hoster, no video
         // list. See ScrollerFeedMedia for why that distinction is the whole
         // difference between a feed that keeps up and one that does not.
-        statedBy(anime, source)?.let { result ->
-            cache[anime.id] = result
+        statedBy(card, source)?.let { result ->
+            cache[card.id] = result
             return result
         }
 
@@ -140,10 +145,19 @@ class ClipVideoResolver(
 
         val result = try {
             withIOContext {
-                val episode = source.getEpisodeList(anime.toSAnime())
-                    .firstOrNull()
-                    ?.let { Episode.create().copyFromSEpisode(it).copy(animeId = anime.id) }
+                // AM (ENTRY_SCROLLER) -->
+                // An entry card already knows its episode, and it is a real
+                // row rather than a transient one: no episode-list request,
+                // and - for a downloaded episode - no request at all, since
+                // EpisodeLoader answers off disk before it looks at the
+                // source. That is the whole of what an episode feed costs a
+                // source: one video lookup per card actually reached.
+                val episode = card.episode
+                    ?: source.getEpisodeList(anime.toSAnime())
+                        .firstOrNull()
+                        ?.let { Episode.create().copyFromSEpisode(it).copy(animeId = anime.id) }
                     ?: return@withIOContext Result.Unresolved
+                // <-- AM (ENTRY_SCROLLER)
 
                 val hosters = episodeLoader.getHosters(episode, anime, source)
                 val video = hosterLoader.getBestVideo(source, hosters)
@@ -175,7 +189,7 @@ class ClipVideoResolver(
 
         // AM (CLIP_RESOLVE_ONLY_CACHES_SUCCESS)
         if (result is Result.Playable) {
-            cache[anime.id] = result
+            cache[card.id] = result
             if (cache.size > MAX_CACHED) {
                 cache.keys.firstOrNull()?.let { invalidate(it) }
             }
@@ -194,8 +208,25 @@ class ClipVideoResolver(
          * hoster or video list for the ones it does.
          */
 
-        fun statedBy(anime: Anime, source: AnimeSource?): Result.Playable? {
-            val feed = ScrollerFeedMedia.from(anime) ?: return null
+        fun statedBy(anime: Anime, source: AnimeSource?): Result.Playable? =
+            statedBy(ScrollerFeedMedia.from(anime), source)
+
+        // AM (ENTRY_SCROLLER) -->
+        /**
+         * The same, for a card that may be an episode.
+         *
+         * The episode's own memo first: a source that states its media per
+         * episode states it there, and that is the only statement that can be
+         * right for every card in a multi-episode feed. The entry's memo is
+         * taken only where the entry IS the clip - see
+         * [ScrollerCardRef.mayUseEntryMedia].
+         */
+        fun statedBy(card: ScrollerCardRef, source: AnimeSource?): Result.Playable? =
+            statedBy(card.statedMedia(), source)
+        // <-- AM (ENTRY_SCROLLER)
+
+        private fun statedBy(media: ScrollerFeedMedia?, source: AnimeSource?): Result.Playable? {
+            val feed = media ?: return null
             val httpSource = source as? AnimeHttpSource
             return Result.Playable(
                 url = feed.videoUrl,

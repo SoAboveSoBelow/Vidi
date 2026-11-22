@@ -183,6 +183,8 @@ object SettingsAppearanceScreen : SearchableSettings {
                     entries = persistentMapOf(
                         Anime.EPISODE_SHOW_NOT_PREVIEWS to stringResource(AMMR.strings.am_pref_default_view_simplified),
                         Anime.EPISODE_SHOW_PREVIEWS to stringResource(AMMR.strings.am_pref_default_view_preview),
+                        // AM (ENTRY_SCROLLER)
+                        Anime.EPISODE_SHOW_SCROLLER to stringResource(AMMR.strings.am_pref_default_view_scroller),
                     ),
                     title = stringResource(AMMR.strings.am_pref_default_view),
                 ),

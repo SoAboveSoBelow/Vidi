@@ -460,6 +460,8 @@ private fun EpisodeViewModeDialog(
     val entries = linkedMapOf(
         EpisodeViewMode.SIMPLIFIED to stringResource(AMMR.strings.am_pref_default_view_simplified),
         EpisodeViewMode.PREVIEW to stringResource(AMMR.strings.am_pref_default_view_preview),
+        // AM (ENTRY_SCROLLER)
+        EpisodeViewMode.SCROLLER to stringResource(AMMR.strings.am_pref_default_view_scroller),
     )
 
     AlertDialog(

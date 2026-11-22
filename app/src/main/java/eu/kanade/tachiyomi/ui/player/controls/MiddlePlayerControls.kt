@@ -7,7 +7,7 @@ import androidx.compose.animation.graphics.res.animatedVectorResource
 import androidx.compose.animation.graphics.res.rememberAnimatedVectorPainter
 import androidx.compose.animation.graphics.vector.AnimatedImageVector
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -88,6 +88,8 @@ fun MiddlePlayerControls(
     // AM (BROWSE_SCROLLER_CONTROLS): the feed draws no transport buttons, only the
     // centre, so the surrounding slots collapse rather than being bound to nothing.
     showMediaButtons: Boolean,
+    // AM (ENTRY_SCROLLER): a double tap on the centre button - see PlayPauseSlot.
+    onPlayPauseDoubleClick: (() -> Unit)? = null,
 
     /** Which bindings have something to act on for what is playing. */
     availability: ControlAvailability,
@@ -252,6 +254,8 @@ fun MiddlePlayerControls(
                     paused = paused,
                     gestureSeekAmount = gestureSeekAmount,
                     onClick = { onAction(ControlAction.PlayPause) },
+                    // AM (ENTRY_SCROLLER)
+                    onDoubleClick = onPlayPauseDoubleClick,
                     enter = enter,
                     exit = exit,
                 )
@@ -326,6 +330,17 @@ private fun PlayPauseSlot(
     paused: Boolean,
     gestureSeekAmount: Pair<Int, Int>?,
     onClick: () -> Unit,
+    // AM (ENTRY_SCROLLER) -->
+    /**
+     * A double tap on the button itself.
+     *
+     * The button sits in the middle of the surface, which is where a feed's
+     * expand and collapse gesture lives - so with the controls up it covered
+     * the gesture and the clip's own handler never saw it. Null for the real
+     * player, which keeps the immediate single tap a transport control wants.
+     */
+    onDoubleClick: (() -> Unit)?,
+    // <-- AM (ENTRY_SCROLLER)
     enter: EnterTransition,
     exit: ExitTransition,
 ) {
@@ -363,10 +378,12 @@ private fun PlayPauseSlot(
                     modifier = Modifier
                         .size(PLAY_PAUSE_SIZE)
                         .clip(CircleShape)
-                        .clickable(
+                        // AM (ENTRY_SCROLLER)
+                        .combinedClickable(
                             interaction,
                             ripple(),
                             onClick = onClick,
+                            onDoubleClick = onDoubleClick,
                         )
                         .padding(MaterialTheme.padding.medium),
                     contentDescription = null,

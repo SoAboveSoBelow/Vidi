@@ -44,11 +44,36 @@ object ScrollerSession {
      */
     var isMuted: Boolean = true
 
-    /** App-owned playback: navigation does not stop a feed's audio. */
-    private val playbackStates = mutableMapOf<Long, ScrollerPlaybackState>()
+    // AM (ENTRY_SCROLLER) -->
+    /**
+     * Which feed a state belongs to.
+     *
+     * Was the source's id alone, which is no longer enough to name a feed: a
+     * source's browse listing and an entry of that same source each have one,
+     * and the two key their cards by different things - the listing by entry
+     * id, the entry's by episode id. Sharing one state between them would have
+     * those two id spaces meet in every map here, where an episode id equal to
+     * some entry's id would hand a card another card's aspect ratio, its
+     * captured frame, or its mpv instance.
+     */
+    sealed interface FeedKey {
+        data class Source(val sourceId: Long) : FeedKey
+        data class Entry(val animeId: Long) : FeedKey
 
-    internal fun playback(sourceId: Long, create: () -> ScrollerPlaybackState): ScrollerPlaybackState =
-        playbackStates.getOrPut(sourceId, create)
+        /** Also the proxy-owner discriminator - see ScrollerPlaybackState. */
+        val tag: String
+            get() = when (this) {
+                is Source -> "source-$sourceId"
+                is Entry -> "entry-$animeId"
+            }
+    }
+    // <-- AM (ENTRY_SCROLLER)
+
+    /** App-owned playback: navigation does not stop a feed's audio. */
+    private val playbackStates = mutableMapOf<String, ScrollerPlaybackState>()
+
+    internal fun playback(key: FeedKey, create: () -> ScrollerPlaybackState): ScrollerPlaybackState =
+        playbackStates.getOrPut(key.tag, create)
 
     // AM (BROWSE_SCROLLER_SESSION_INVALIDATION) -->
     /**
@@ -71,8 +96,12 @@ object ScrollerSession {
         private set
     // <-- AM (BROWSE_SCROLLER_SESSION_INVALIDATION)
 
-    /** Learned media aspect ratios by entry id - see [ScrollerPlaybackState.aspectRatios]. */
-    val aspectRatios = mutableMapOf<Long, Float>()
+    // AM (ENTRY_SCROLLER): per feed, by card id - see [FeedKey].
+    /** Learned media aspect ratios by card id - see [ScrollerPlaybackState.aspectRatios]. */
+    private val aspectRatiosByFeed = mutableMapOf<String, MutableMap<Long, Float>>()
+
+    fun aspectRatios(feedTag: String): MutableMap<Long, Float> =
+        aspectRatiosByFeed.getOrPut(feedTag) { mutableMapOf() }
 
     /**
      * The first frame each card rendered, so a card outside the loaded window
@@ -81,13 +110,16 @@ object ScrollerSession {
      * Bounded, oldest dropped: these are decoded bitmaps and a long feed would
      * otherwise hold one for every card ever seen.
      */
-    private val firstFrames = LinkedHashMap<Long, ImageBitmap>()
+    private val firstFramesByFeed = mutableMapOf<String, LinkedHashMap<Long, ImageBitmap>>()
 
-    fun firstFrame(animeId: Long): ImageBitmap? = firstFrames[animeId]
+    private fun firstFrames(feedTag: String) = firstFramesByFeed.getOrPut(feedTag) { LinkedHashMap() }
 
-    fun putFirstFrame(animeId: Long, frame: ImageBitmap) {
-        firstFrames.remove(animeId)
-        firstFrames[animeId] = frame
+    fun firstFrame(feedTag: String, cardId: Long): ImageBitmap? = firstFrames(feedTag)[cardId]
+
+    fun putFirstFrame(feedTag: String, cardId: Long, frame: ImageBitmap) {
+        val firstFrames = firstFrames(feedTag)
+        firstFrames.remove(cardId)
+        firstFrames[cardId] = frame
         while (firstFrames.size > MAX_FIRST_FRAMES) {
             val oldest = firstFrames.keys.firstOrNull() ?: break
             firstFrames.remove(oldest)
@@ -214,7 +246,7 @@ object ScrollerSession {
         // store (RecentPositionManager), which is DB-backed and outlives the
         // process entirely, rather than in a map that could only ever be as
         // durable as this object.
-        firstFrames.clear()
+        firstFramesByFeed.clear()
         revision++
     }
 

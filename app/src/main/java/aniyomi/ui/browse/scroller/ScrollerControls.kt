@@ -41,6 +41,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel
 import eu.kanade.tachiyomi.ui.player.PlayerViewModel.PlayerEvent
+import eu.kanade.tachiyomi.ui.player.components.FeedVideoSurfaceBox
 import eu.kanade.tachiyomi.ui.player.components.MpvSurface
 import eu.kanade.tachiyomi.ui.player.controls.LocalPlayerButtonsClickEvent
 import eu.kanade.tachiyomi.ui.player.controls.MiddlePlayerControls
@@ -128,6 +129,13 @@ fun ScrollerCardControls(
                         // the feed binds play/pause and nothing else.
                         availability = ControlAvailability(),
                         onAction = { playback.togglePlayPause(animeId) },
+                        // AM (ENTRY_SCROLLER): the expand gesture, which the
+                        // button was covering once the controls were up - the
+                        // middle of a card is both the play/pause button and
+                        // where expanding is double-tapped.
+                        onPlayPauseDoubleClick = {
+                            playback.onDoubleTap(animeId, ScrollerPlaybackState.TapZone.Center)
+                        },
                         enter = fadeIn(),
                         exit = fadeOut(),
                         modifier = Modifier.align(Alignment.Center),
@@ -242,10 +250,22 @@ private fun ScrollerSeekbar(
 @Composable
 fun ScrollerFullscreenPlayer(
     playback: ScrollerPlaybackState,
-    player: ScrollerPlayer,
+    player: ScrollerPlayer?,
     animeId: Long,
     title: String,
     videoOutput: String,
+    // AM (ENTRY_SCROLLER) -->
+    /** The clip's shape, which the surface is pinned to - see FeedVideoSurfaceBox. */
+    aspect: Float,
+    /**
+     * Steps the feed one card, which is what the player's own previous/next
+     * buttons do here: through the entry's episodes in an episode feed, and
+     * through the cards in view in a listing feed. Null leaves the buttons out.
+     */
+    onStep: ((next: Boolean) -> Unit)? = null,
+    hasPrevious: Boolean = false,
+    hasNext: Boolean = false,
+    // <-- AM (ENTRY_SCROLLER)
 ) {
     var resetControls by remember { mutableStateOf(false) }
     // AM (BROWSE_SCROLLER_CONTROLS): hidden to begin with, as the real player
@@ -285,13 +305,27 @@ fun ScrollerFullscreenPlayer(
                 .fillMaxSize()
                 .background(Color.Black),
         ) {
-            MpvSurface(
-                player = player.player,
-                videoOutput = videoOutput,
-                onSurfaceAttachedChanged = player::onSurfaceAttachedChanged,
-                onViewAvailable = player::onViewAvailable,
-                modifier = Modifier.fillMaxSize(),
-            )
+            // AM (ENTRY_SCROLLER) -->
+            // Pinned to the clip's shape, exactly as the card draws it. It
+            // used to be a fillMaxSize surface, which is the container's shape
+            // rather than the video's: mpv drew into a buffer of the wrong
+            // proportions (stretched), and that buffer was a different size
+            // from the card's, so expanding and collapsing reallocated it and
+            // showed the old one squashed into the new bounds on the way.
+            // Same geometry both sides, so expanding is a change of scale and
+            // nothing else.
+            if (player != null) {
+                FeedVideoSurfaceBox(aspect = aspect) {
+                    MpvSurface(
+                        player = player.player,
+                        videoOutput = videoOutput,
+                        onSurfaceAttachedChanged = player::onSurfaceAttachedChanged,
+                        onViewAvailable = player::onViewAvailable,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+            // <-- AM (ENTRY_SCROLLER)
 
             Box(
                 modifier = Modifier
@@ -328,12 +362,18 @@ fun ScrollerFullscreenPlayer(
                         maxVolume = 0,
                         isEpisodeOnline = false,
                         isPipAvailable = false,
+                        // AM (ENTRY_SCROLLER)
+                        hasPreviousEpisode = hasPrevious,
+                        hasNextEpisode = hasNext,
                     ),
                     uiData = PlayerViewModel.PlayerUiData(
                         animeTitle = title,
                         controlsShown = controlsShown,
                         seekBarShown = controlsShown,
-                        showLoadingCircle = false,
+                        // AM (ENTRY_SCROLLER): stepping to a card whose
+                        // instance is not up yet shows the player's own
+                        // spinner rather than closing the expanded view.
+                        showLoadingCircle = player == null,
                         playerTimeToDisappearMs = playback.controlsTimeToDisappearMs,
                     ),
                     playbackData = PlayerViewModel.PlayerPlaybackData(
@@ -352,9 +392,34 @@ fun ScrollerFullscreenPlayer(
                             is PlayerEvent.Seek -> playback.onSeek(animeId, event.position.toFloat())
                             is PlayerEvent.SeekFinished ->
                                 playback.onSeekFinished(animeId, event.position.toFloat())
+                            // AM (ENTRY_SCROLLER) -->
+                            // The feed's own step: the player's previous/next,
+                            // over the cards the feed holds rather than a
+                            // session's playlist.
+                            is PlayerEvent.NextEpisode -> onStep?.invoke(event.next)
+                            /*
+                             * A slot holding one of the SEEDED defaults, which
+                             * is what the defaults are: stored as a custom
+                             * button carrying its Lua row's id, so the player
+                             * asks for it by id and not by the action it
+                             * draws. That is why previous and next appeared
+                             * here and did nothing - they never arrived as
+                             * NextEpisode at all.
+                             *
+                             * Resolved back to the action it stands for and
+                             * handed to the feed's own dispatcher, which is
+                             * also what the card's gestures use.
+                             */
+                            is PlayerEvent.ExecuteCustomButtonById -> playback.dispatchControl(
+                                cardId = animeId,
+                                action = ControlAction.nativeActionForButtonId(event.id)
+                                    ?: ControlAction.None,
+                                onStep = onStep,
+                            )
+                            // <-- AM (ENTRY_SCROLLER)
                             // Everything else addresses a player session -
-                            // episodes, sheets, panels, pip, casting - which a
-                            // feed card is not part of.
+                            // sheets, panels, pip, casting - which a feed card
+                            // is not part of.
                             else -> Unit
                         }
                     },
@@ -365,7 +430,13 @@ fun ScrollerFullscreenPlayer(
                         .toInt(),
                     playbackSpeed = null,
                     showTrackControls = false,
-                    showMediaButtons = false,
+                    // AM (ENTRY_SCROLLER) -->
+                    showMediaButtons = onStep != null,
+                    // Collapsing, for the same reason the card expands on it:
+                    // the centre of the surface is where the gesture lives and
+                    // the button is what sits on top of it.
+                    onPlayPauseDoubleClick = playback::exitFullscreen,
+                    // <-- AM (ENTRY_SCROLLER)
                 )
             }
         }

@@ -117,6 +117,11 @@ fun PlayerControls(
      * The buttons would otherwise be drawn permanently disabled.
      */
     showMediaButtons: Boolean = true,
+    /**
+     * AM (ENTRY_SCROLLER): a double tap on the centre play/pause button, for a
+     * surface whose expand gesture lives there - see PlayPauseSlot.
+     */
+    onPlayPauseDoubleClick: (() -> Unit)? = null,
     // <-- AM (BROWSE_SCROLLER_CONTROLS)
     // AM (CONTROL_BINDINGS) -->
     /**
@@ -524,6 +529,8 @@ fun PlayerControls(
                     hasNext = nextEnabled,
                     // AM (BROWSE_SCROLLER_CONTROLS)
                     showMediaButtons = showMediaButtons,
+                    // AM (ENTRY_SCROLLER)
+                    onPlayPauseDoubleClick = onPlayPauseDoubleClick,
                     availability = controlAvailability,
                     onAction = onControlAction,
                     isStopped = stateData.isStopped,

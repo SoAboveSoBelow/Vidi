@@ -47,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
@@ -77,6 +78,10 @@ import eu.kanade.presentation.anime.components.EpisodeReorderRow
 import eu.kanade.presentation.anime.components.EpisodeSeasonSwitcher
 // <-- AM (CUSTOM_EPISODE_ORDER)
 import eu.kanade.presentation.anime.components.EpisodeDownloadAction
+import eu.kanade.presentation.anime.components.EpisodeScrollerActiveCardEffect
+import eu.kanade.presentation.anime.components.EpisodeScrollerFullscreenHost
+import eu.kanade.presentation.anime.components.episodeScrollerItems
+import eu.kanade.presentation.anime.components.rememberEpisodeScrollerState
 import eu.kanade.presentation.anime.components.ExpandableAnimeDescription
 import eu.kanade.presentation.anime.components.ItemHeader
 import eu.kanade.presentation.anime.components.MIN_EPISODES_FOR_SEARCH
@@ -738,6 +743,29 @@ private fun AnimeScreenSmallImpl(
     }
     // <-- AM (CUSTOM_EPISODE_ORDER)
 
+    // AM (ENTRY_SCROLLER) -->
+    // The episode feed's own state, built only while the entry is in scroller
+    // view: in the other two views nothing here holds a player or starts
+    // anything. Reorder mode falls back to rows - dragging a card that is
+    // playing is not a gesture this view has.
+    val scrollerItems = remember(filteredListItem) { filteredListItem.filterIsInstance<EpisodeList.Item>() }
+    val episodeScroller = rememberEpisodeScrollerState(
+        enabled = state.anime.fetchType == FetchType.Episodes &&
+            state.anime.episodeViewMode() == EpisodeViewMode.SCROLLER &&
+            !state.isReordering,
+        anime = state.anime,
+        source = state.source,
+        gridState = itemListState,
+    )
+    if (episodeScroller != null) {
+        EpisodeScrollerActiveCardEffect(
+            state = episodeScroller,
+            gridState = itemListState,
+            items = scrollerItems,
+        )
+    }
+    // <-- AM (ENTRY_SCROLLER)
+
     // AY -->
     BoxWithConstraints {
         val density = LocalDensity.current
@@ -906,7 +934,11 @@ private fun AnimeScreenSmallImpl(
                 val layoutDirection = LocalLayoutDirection.current
                 // AY -->
                 FastScrollIrregularLazyVerticalGrid(
-                    modifier = Modifier.fillMaxHeight(),
+                    // AM (ENTRY_SCROLLER): the scroll deltas the grid consumed
+                    // are what the feed's speed gate reads.
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .then(episodeScroller?.let { Modifier.nestedScroll(it.speed) } ?: Modifier),
                     state = itemListState,
                     columns = if (gridSize == 0) GridCells.Adaptive(128.dp) else GridCells.Fixed(gridSize),
                     contentPadding = PaddingValues(
@@ -1117,61 +1149,94 @@ private fun AnimeScreenSmallImpl(
                             }
                             // <-- AY
 
-                            sharedEpisodeItems(
-                                anime = state.anime,
-                                // AM (FILE_SIZE) -->
-                                source = state.source,
-                                showFileSize = showFileSize,
-                                // <-- AM (FILE_SIZE)
-                                // AM (MINIMAL_EPISODE_LIST) -->
-                                // <-- AM (MINIMAL_EPISODE_LIST)
-                                // AM (CUSTOM_EPISODE_ORDER) -->
-                                episodes = if (reorderUi.row != null) reorderUi.items else filteredListItem,
-                                // <-- AM (CUSTOM_EPISODE_ORDER)
-                                // AM (CUSTOM_EPISODE_ORDER) -->
-                                // Reorder mode: a tap always selects, even with nothing selected yet.
-                                isAnyEpisodeSelected = state.isAnySelected || state.isReordering,
-                                // <-- AM (CUSTOM_EPISODE_ORDER)
-                                // AY -->
-                                showSummaries = state.showSummaries,
-                                showPreviews = state.showPreviews,
-                                // <-- AY
-                                // AM (NOW_PLAYING_INDICATOR) -->
-                                nowPlaying = nowPlaying,
-                                // <-- AM (NOW_PLAYING_INDICATOR)
-                                // AM (CUSTOM_EPISODE_ORDER) -->
-                                episodeSwipeStartAction = if (state.isReordering) {
-                                    LibraryPreferences.EpisodeSwipeAction.Disabled
-                                } else {
-                                    episodeSwipeStartAction
-                                },
-                                episodeSwipeEndAction = if (state.isReordering) {
-                                    LibraryPreferences.EpisodeSwipeAction.Disabled
-                                } else {
-                                    episodeSwipeEndAction
-                                },
-                                reorder = reorderUi.row,
-                                // <-- AM (CUSTOM_EPISODE_ORDER)
-                                onEpisodeClicked = onEpisodeClicked,
-                                onDownloadEpisode = onDownloadEpisode,
-                                onEpisodeSelected = onEpisodeSelected,
-                                onEpisodeSwipe = onEpisodeSwipe,
-                                // AM (EPISODE_NAMES) -->
-                                onEpisodeRenameRequest = onEpisodeRenameRequest,
-                                isDialogOpen = state.dialog != null,
-                                // <-- AM (EPISODE_NAMES)
-                                // AM (PLAYLIST_SEARCH_SCOPE) -->
-                                onSubmitEpisodeSearch = {
-                                    PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
-                                },
-                                // <-- AM (PLAYLIST_SEARCH_SCOPE)
-                                itemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
-                            )
+                            // AM (ENTRY_SCROLLER) -->
+                            if (episodeScroller != null) {
+                                episodeScrollerItems(
+                                    state = episodeScroller,
+                                    items = scrollerItems,
+                                    anime = state.anime,
+                                    isAnyEpisodeSelected = state.isAnySelected,
+                                    onEpisodeClicked = onEpisodeClicked,
+                                    onEpisodeSelected = onEpisodeSelected,
+                                    onDownloadEpisode = onDownloadEpisode,
+                                    onEpisodeRenameRequest = onEpisodeRenameRequest,
+                                    onSubmitEpisodeSearch = {
+                                        PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
+                                    },
+                                    isDialogOpen = state.dialog != null,
+                                    horizontalInset = GRID_PADDING,
+                                )
+                            } else {
+                                sharedEpisodeItems(
+                                    anime = state.anime,
+                                    // AM (FILE_SIZE) -->
+                                    source = state.source,
+                                    showFileSize = showFileSize,
+                                    // <-- AM (FILE_SIZE)
+                                    // AM (MINIMAL_EPISODE_LIST) -->
+                                    // <-- AM (MINIMAL_EPISODE_LIST)
+                                    // AM (CUSTOM_EPISODE_ORDER) -->
+                                    episodes = if (reorderUi.row != null) reorderUi.items else filteredListItem,
+                                    // <-- AM (CUSTOM_EPISODE_ORDER)
+                                    // AM (CUSTOM_EPISODE_ORDER) -->
+                                    // Reorder mode: a tap always selects, even with nothing selected yet.
+                                    isAnyEpisodeSelected = state.isAnySelected || state.isReordering,
+                                    // <-- AM (CUSTOM_EPISODE_ORDER)
+                                    // AY -->
+                                    showSummaries = state.showSummaries,
+                                    showPreviews = state.showPreviews,
+                                    // <-- AY
+                                    // AM (NOW_PLAYING_INDICATOR) -->
+                                    nowPlaying = nowPlaying,
+                                    // <-- AM (NOW_PLAYING_INDICATOR)
+                                    // AM (CUSTOM_EPISODE_ORDER) -->
+                                    episodeSwipeStartAction = if (state.isReordering) {
+                                        LibraryPreferences.EpisodeSwipeAction.Disabled
+                                    } else {
+                                        episodeSwipeStartAction
+                                    },
+                                    episodeSwipeEndAction = if (state.isReordering) {
+                                        LibraryPreferences.EpisodeSwipeAction.Disabled
+                                    } else {
+                                        episodeSwipeEndAction
+                                    },
+                                    reorder = reorderUi.row,
+                                    // <-- AM (CUSTOM_EPISODE_ORDER)
+                                    onEpisodeClicked = onEpisodeClicked,
+                                    onDownloadEpisode = onDownloadEpisode,
+                                    onEpisodeSelected = onEpisodeSelected,
+                                    onEpisodeSwipe = onEpisodeSwipe,
+                                    // AM (EPISODE_NAMES) -->
+                                    onEpisodeRenameRequest = onEpisodeRenameRequest,
+                                    isDialogOpen = state.dialog != null,
+                                    // <-- AM (EPISODE_NAMES)
+                                    // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                    onSubmitEpisodeSearch = {
+                                        PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
+                                    },
+                                    // <-- AM (PLAYLIST_SEARCH_SCOPE)
+                                    itemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
+                                )
+                            }
+                            // <-- AM (ENTRY_SCROLLER)
                         }
                     }
                 }
             }
         }
+
+        // AM (ENTRY_SCROLLER) -->
+        // Hosted here rather than by a card: a card is an item in a lazy grid
+        // and can be scrolled out of composition, which would take the
+        // expanded view down with it.
+        if (episodeScroller != null) {
+            EpisodeScrollerFullscreenHost(
+                state = episodeScroller,
+                items = scrollerItems,
+                gridState = itemListState,
+            )
+        }
+        // <-- AM (ENTRY_SCROLLER)
     }
 }
 
@@ -1431,6 +1496,29 @@ fun AnimeScreenLargeImpl(
     }
     // <-- AM (CUSTOM_EPISODE_ORDER)
 
+    // AM (ENTRY_SCROLLER) -->
+    // The episode feed's own state, built only while the entry is in scroller
+    // view: in the other two views nothing here holds a player or starts
+    // anything. Reorder mode falls back to rows - dragging a card that is
+    // playing is not a gesture this view has.
+    val scrollerItems = remember(filteredListItem) { filteredListItem.filterIsInstance<EpisodeList.Item>() }
+    val episodeScroller = rememberEpisodeScrollerState(
+        enabled = state.anime.fetchType == FetchType.Episodes &&
+            state.anime.episodeViewMode() == EpisodeViewMode.SCROLLER &&
+            !state.isReordering,
+        anime = state.anime,
+        source = state.source,
+        gridState = itemListState,
+    )
+    if (episodeScroller != null) {
+        EpisodeScrollerActiveCardEffect(
+            state = episodeScroller,
+            gridState = itemListState,
+            items = scrollerItems,
+        )
+    }
+    // <-- AM (ENTRY_SCROLLER)
+
     // AY -->
     BoxWithConstraints {
         val density = LocalDensity.current
@@ -1656,7 +1744,11 @@ fun AnimeScreenLargeImpl(
                     endContent = {
                         // AY -->
                         FastScrollIrregularLazyVerticalGrid(
-                            modifier = Modifier.fillMaxHeight(),
+                            // AM (ENTRY_SCROLLER): the scroll deltas the grid
+                            // consumed are what the feed's speed gate reads.
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .then(episodeScroller?.let { Modifier.nestedScroll(it.speed) } ?: Modifier),
                             state = itemListState,
                             columns = if (gridSize == 0) GridCells.Adaptive(128.dp) else GridCells.Fixed(gridSize),
                             contentPadding = PaddingValues(
@@ -1773,58 +1865,78 @@ fun AnimeScreenLargeImpl(
                                     }
                                     // <-- AY
 
-                                    sharedEpisodeItems(
-                                        anime = state.anime,
-                                        // AM (FILE_SIZE) -->
-                                        source = state.source,
-                                        showFileSize = showFileSize,
-                                        // <-- AM (FILE_SIZE)
-                                        // AM (MINIMAL_EPISODE_LIST) -->
-                                        // <-- AM (MINIMAL_EPISODE_LIST)
-                                        // AM (CUSTOM_EPISODE_ORDER) -->
-                                        episodes = if (reorderUi.row != null) reorderUi.items else filteredListItem,
-                                        // <-- AM (CUSTOM_EPISODE_ORDER)
-                                        // AM (CUSTOM_EPISODE_ORDER) -->
-                                        // Reorder mode: a tap always selects, even with nothing selected yet.
-                                        isAnyEpisodeSelected = state.isAnySelected || state.isReordering,
-                                        // <-- AM (CUSTOM_EPISODE_ORDER)
-                                        // AY -->
-                                        showSummaries = state.showSummaries,
-                                        showPreviews = state.showPreviews,
-                                        // <-- AY
-                                        // AM (NOW_PLAYING_INDICATOR) -->
-                                        nowPlaying = nowPlaying,
-                                        // <-- AM (NOW_PLAYING_INDICATOR)
-                                        // AM (CUSTOM_EPISODE_ORDER) -->
-                                        episodeSwipeStartAction = if (state.isReordering) {
-                                            LibraryPreferences.EpisodeSwipeAction.Disabled
-                                        } else {
-                                            episodeSwipeStartAction
-                                        },
-                                        episodeSwipeEndAction = if (state.isReordering) {
-                                            LibraryPreferences.EpisodeSwipeAction.Disabled
-                                        } else {
-                                            episodeSwipeEndAction
-                                        },
-                                        reorder = reorderUi.row,
-                                        // <-- AM (CUSTOM_EPISODE_ORDER)
-                                        onEpisodeClicked = onEpisodeClicked,
-                                        onDownloadEpisode = onDownloadEpisode,
-                                        onEpisodeSelected = onEpisodeSelected,
-                                        onEpisodeSwipe = onEpisodeSwipe,
-                                        // AM (EPISODE_NAMES) -->
-                                        onEpisodeRenameRequest = onEpisodeRenameRequest,
-                                        isDialogOpen = state.dialog != null,
-                                        // <-- AM (EPISODE_NAMES)
-                                        // AM (PLAYLIST_SEARCH_SCOPE) -->
-                                        onSubmitEpisodeSearch = {
-                                            PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
-                                        },
-                                        // <-- AM (PLAYLIST_SEARCH_SCOPE)
-                                        // AY -->
-                                        itemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
-                                        // <-- AY
-                                    )
+                                    // AM (ENTRY_SCROLLER) -->
+                                    if (episodeScroller != null) {
+                                        episodeScrollerItems(
+                                            state = episodeScroller,
+                                            items = scrollerItems,
+                                            anime = state.anime,
+                                            isAnyEpisodeSelected = state.isAnySelected,
+                                            onEpisodeClicked = onEpisodeClicked,
+                                            onEpisodeSelected = onEpisodeSelected,
+                                            onDownloadEpisode = onDownloadEpisode,
+                                            onEpisodeRenameRequest = onEpisodeRenameRequest,
+                                            onSubmitEpisodeSearch = {
+                                                PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
+                                            },
+                                            isDialogOpen = state.dialog != null,
+                                            horizontalInset = GRID_PADDING,
+                                        )
+                                    } else {
+                                        sharedEpisodeItems(
+                                            anime = state.anime,
+                                            // AM (FILE_SIZE) -->
+                                            source = state.source,
+                                            showFileSize = showFileSize,
+                                            // <-- AM (FILE_SIZE)
+                                            // AM (MINIMAL_EPISODE_LIST) -->
+                                            // <-- AM (MINIMAL_EPISODE_LIST)
+                                            // AM (CUSTOM_EPISODE_ORDER) -->
+                                            episodes = if (reorderUi.row != null) reorderUi.items else filteredListItem,
+                                            // <-- AM (CUSTOM_EPISODE_ORDER)
+                                            // AM (CUSTOM_EPISODE_ORDER) -->
+                                            // Reorder mode: a tap always selects, even with nothing selected yet.
+                                            isAnyEpisodeSelected = state.isAnySelected || state.isReordering,
+                                            // <-- AM (CUSTOM_EPISODE_ORDER)
+                                            // AY -->
+                                            showSummaries = state.showSummaries,
+                                            showPreviews = state.showPreviews,
+                                            // <-- AY
+                                            // AM (NOW_PLAYING_INDICATOR) -->
+                                            nowPlaying = nowPlaying,
+                                            // <-- AM (NOW_PLAYING_INDICATOR)
+                                            // AM (CUSTOM_EPISODE_ORDER) -->
+                                            episodeSwipeStartAction = if (state.isReordering) {
+                                                LibraryPreferences.EpisodeSwipeAction.Disabled
+                                            } else {
+                                                episodeSwipeStartAction
+                                            },
+                                            episodeSwipeEndAction = if (state.isReordering) {
+                                                LibraryPreferences.EpisodeSwipeAction.Disabled
+                                            } else {
+                                                episodeSwipeEndAction
+                                            },
+                                            reorder = reorderUi.row,
+                                            // <-- AM (CUSTOM_EPISODE_ORDER)
+                                            onEpisodeClicked = onEpisodeClicked,
+                                            onDownloadEpisode = onDownloadEpisode,
+                                            onEpisodeSelected = onEpisodeSelected,
+                                            onEpisodeSwipe = onEpisodeSwipe,
+                                            // AM (EPISODE_NAMES) -->
+                                            onEpisodeRenameRequest = onEpisodeRenameRequest,
+                                            isDialogOpen = state.dialog != null,
+                                            // <-- AM (EPISODE_NAMES)
+                                            // AM (PLAYLIST_SEARCH_SCOPE) -->
+                                            onSubmitEpisodeSearch = {
+                                                PlaylistSearchScope.submit(state.anime.id, episodeSearchQuery)
+                                            },
+                                            // <-- AM (PLAYLIST_SEARCH_SCOPE)
+                                            // AY -->
+                                            itemModifier = Modifier.ignorePadding(offsetGridPaddingPx),
+                                            // <-- AY
+                                        )
+                                    }
+                                    // <-- AM (ENTRY_SCROLLER)
                                 }
                             }
                         }
@@ -1832,6 +1944,19 @@ fun AnimeScreenLargeImpl(
                 )
             }
         }
+
+        // AM (ENTRY_SCROLLER) -->
+        // Hosted here rather than by a card: a card is an item in a lazy grid
+        // and can be scrolled out of composition, which would take the
+        // expanded view down with it.
+        if (episodeScroller != null) {
+            EpisodeScrollerFullscreenHost(
+                state = episodeScroller,
+                items = scrollerItems,
+                gridState = itemListState,
+            )
+        }
+        // <-- AM (ENTRY_SCROLLER)
     }
 }
 
