@@ -83,7 +83,13 @@ class DownloadManager(
      * Tells the downloader to begin downloads.
      */
     fun startDownloads() {
-        if (downloader.isRunning) return
+        // AM (RETRY_WHILE_RUNNING): a running downloader still has its errored
+        // downloads to requeue - see Downloader.start. Returning here was the
+        // other half of a retry that did nothing while anything else ran.
+        if (downloader.isRunning) {
+            downloader.start()
+            return
+        }
 
         if (DownloadJob.isRunning(context)) {
             downloader.start()
@@ -126,6 +132,46 @@ class DownloadManager(
     fun getQueuedDownloadOrNull(episodeId: Long): Download? {
         return queueState.value.find { it.episode.id == episodeId }
     }
+
+    // AM (WATCHED_GOES_NEXT) -->
+    /**
+     * Moves the queued download of [episodeId] to the front of its source's
+     * line without disturbing what is running: directly behind the source's
+     * download in progress, or ahead of its other queued ones when none is.
+     * Taking the running one's place would cancel it, and a cancelled download
+     * starts again from nothing.
+     */
+    fun putNextInLine(episodeId: Long) {
+        val queue = queueState.value
+        val download = queue.firstOrNull { it.episode.id == episodeId && it.localSourceTarget == null } ?: return
+        if (download.status != Download.State.QUEUE) return
+        val rest = queue - download
+        val running = rest.firstOrNull { it.source == download.source && it.status == Download.State.DOWNLOADING }
+        val index = if (running != null) {
+            rest.indexOf(running) + 1
+        } else {
+            rest.indexOfFirst { it.source == download.source && it.status == Download.State.QUEUE }
+                .takeIf { it >= 0 }
+                ?: return
+        }
+        val reordered = rest.toMutableList().apply { add(index, download) }
+        if (reordered != queue) reorderQueue(reordered)
+    }
+    // <-- AM (WATCHED_GOES_NEXT)
+
+    // AM (QUEUE_ROW_ACTIONS) -->
+    /**
+     * Retries one errored download where it stands in the queue.
+     *
+     * A running downloader takes it up as it is requeued - see
+     * Downloader.retry. A stopped one is started, which requeues everything
+     * pending, as starting always has.
+     */
+    fun retryDownload(episodeId: Long) {
+        val download = getQueuedDownloadOrNull(episodeId) ?: return
+        if (!downloader.retry(listOf(download)) || !downloader.isRunning) startDownloads()
+    }
+    // <-- AM (QUEUE_ROW_ACTIONS)
 
     fun startDownloadNow(episodeId: Long) {
         val existingDownload = getQueuedDownloadOrNull(episodeId)

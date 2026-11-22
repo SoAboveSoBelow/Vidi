@@ -8,6 +8,13 @@ interface EntrySeasonRepository {
 
     suspend fun getByHostAnimeId(hostAnimeId: Long): List<EntrySeason>
 
+    // AM (A_STRUCTURE_IS_READ_ONCE_FOR_A_BACKUP): every entry's seasons in one
+    // read, for a caller that needs all of them at once - see entry_seasons.sq.
+    // Grouped here rather than by the caller because EntrySeason deliberately
+    // carries no host id: a season is scoped by whoever asked for it, and the
+    // only layer that still has the column is the one that reads it.
+    suspend fun getAllByHostAnimeId(): Map<Long, List<EntrySeason>>
+
     fun getByHostAnimeIdAsFlow(hostAnimeId: Long): Flow<List<EntrySeason>>
 
     /**

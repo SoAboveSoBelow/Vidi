@@ -1,4 +1,12 @@
 -- AY -->
+-- AM (A_SEASON_STATS_ARE_SCOPED_TO_SEASONS) -->
+-- ES and HS are episodestatsView and historystatsView restricted to rows that
+-- are actually seasons, for the reason recorded in animeseasonstatsView.sq.
+-- Nothing reads this view any more - getAnimeSeasonsById below pushes its
+-- parameter all the way down instead - so the scoping here buys nothing today.
+-- It is applied anyway so that a later `SELECT * FROM animeseasonsView` does
+-- not quietly reintroduce a whole-table aggregate: scoped, the view is 69ms at
+-- the sizes below instead of 313ms.
 CREATE VIEW animeseasonsView AS
 SELECT
     A.*,
@@ -31,16 +39,168 @@ SELECT
         WHEN 0 THEN coalesce(ASS.total_fillermarks, 0)
     END AS fillermarkCount
 FROM animes AS A
-LEFT JOIN episodestatsView AS ES
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id
+        AND EP.scanlator = X.scanlator
+    WHERE SA.parent_id IS NOT NULL
+    AND X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) AS ES
 ON A._id = ES.anime_id
-LEFT JOIN historystatsView AS HS
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN history H ON EP._id = H.episode_id
+    WHERE SA.parent_id IS NOT NULL
+    GROUP BY EP.anime_id
+) AS HS
 ON A._id = HS.anime_id
 LEFT JOIN animeseasonstatsView AS ASS
 ON A._id = ASS.parent_id
 WHERE A.parent_id IS NOT NULL;
+-- <-- AM (A_SEASON_STATS_ARE_SCOPED_TO_SEASONS)
 
+-- AM (A_ONE_PARENT_IS_NOT_EVERY_PARENT) -->
+-- The seasons of ONE parent, with :parentId pushed into every aggregate rather
+-- than filtered after the fact.
+--
+-- Reading this from animeseasonsView meant the view's three stats tables were
+-- materialised in full first - episodestatsView and historystatsView twice
+-- each, once directly and once nested inside animeseasonstatsView - and the
+-- parent filter was applied to the result. Ten rows cost four whole-table
+-- aggregates. Scoping the view (above) fixes the table-sized part but still
+-- groups every season of every parent; only the parameter narrows it to this
+-- one. Hence the duplicated subqueries: each is the same aggregate the view
+-- computes, restricted to this parent's seasons - and, for ASS, to the seasons
+-- of those seasons, which is what `A._id = ASS.parent_id` selects there.
+--
+-- Column list is identical to `SELECT * FROM animeseasonsView`, in the same
+-- order, so AnimeMapper::mapSeasonAnime is unaffected.
+--
+-- Measured at 120k animes / 150k episodes / 102k history, 2k seasons under 200
+-- parents: 313 -> 0.08 ms, identical rows at every parent tried, including
+-- parents with no seasons.
 getAnimeSeasonsById:
-SELECT *
-FROM animeseasonsView
-WHERE parent_id = :parentId;
+SELECT
+    A.*,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.total, 0)
+        WHEN 0 THEN coalesce(ASS.child_count, 0)
+    END AS totalCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.seenCount, 0)
+        WHEN 0 THEN coalesce(ASS.fully_seen_seasons, 0)
+    END AS seenCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.latestUpload, 0)
+        WHEN 0 THEN coalesce(ASS.max_latest_upload, 0)
+    END AS latestUpload,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.fetchedAt, 0)
+        WHEN 0 THEN coalesce(ASS.max_fetched_at, 0)
+    END AS episodeFetchedAt,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(HS.lastSeen, 0)
+        WHEN 0 THEN coalesce(ASS.max_last_seen, 0)
+    END AS lastSeen,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.bookmarkCount, 0)
+        WHEN 0 THEN coalesce(ASS.total_bookmarks, 0)
+    END AS bookmarkCount,
+    CASE A.fetch_type
+        WHEN 1 THEN coalesce(ES.fillermarkCount, 0)
+        WHEN 0 THEN coalesce(ASS.total_fillermarks, 0)
+    END AS fillermarkCount
+FROM animes AS A
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id
+        AND EP.scanlator = X.scanlator
+    WHERE SA.parent_id = :parentId
+    AND X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) AS ES
+ON A._id = ES.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM animes SA
+    CROSS JOIN episodes EP ON EP.anime_id = SA._id
+    LEFT JOIN history H ON EP._id = H.episode_id
+    WHERE SA.parent_id = :parentId
+    GROUP BY EP.anime_id
+) AS HS
+ON A._id = HS.anime_id
+LEFT JOIN (
+    SELECT
+        season.parent_id,
+        count(*) AS child_count,
+        sum(CASE WHEN season.fetch_type = 1 AND
+                     coalesce(ES2.total, 0) = coalesce(ES2.seenCount, 0)
+                THEN 1 ELSE 0 END) AS fully_seen_seasons,
+        max(coalesce(ES2.latestUpload, 0)) AS max_latest_upload,
+        max(coalesce(ES2.fetchedAt, 0)) AS max_fetched_at,
+        max(coalesce(HS2.lastSeen, 0)) AS max_last_seen,
+        sum(coalesce(ES2.bookmarkCount, 0)) AS total_bookmarks,
+        sum(coalesce(ES2.fillermarkCount, 0)) AS total_fillermarks
+    FROM animes season
+    LEFT JOIN (
+        SELECT
+            EP.anime_id,
+            count(*) AS total,
+            sum(EP.seen) AS seenCount,
+            coalesce(max(EP.date_upload), 0) AS latestUpload,
+            coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+            sum(EP.bookmark) AS bookmarkCount,
+            sum(EP.fillermark) AS fillermarkCount
+        FROM animes SA2
+        CROSS JOIN episodes EP ON EP.anime_id = SA2._id
+        LEFT JOIN excluded_scanlators X
+            ON EP.anime_id = X.anime_id
+            AND EP.scanlator = X.scanlator
+        WHERE SA2.parent_id IN (SELECT _id FROM animes WHERE parent_id = :parentId)
+        AND X.scanlator IS NULL
+        GROUP BY EP.anime_id
+    ) ES2 ON season._id = ES2.anime_id
+    LEFT JOIN (
+        SELECT
+            EP.anime_id,
+            max(H.last_seen) AS lastSeen
+        FROM animes SA2
+        CROSS JOIN episodes EP ON EP.anime_id = SA2._id
+        LEFT JOIN history H ON EP._id = H.episode_id
+        WHERE SA2.parent_id IN (SELECT _id FROM animes WHERE parent_id = :parentId)
+        GROUP BY EP.anime_id
+    ) HS2 ON season._id = HS2.anime_id
+    WHERE season.parent_id IN (SELECT _id FROM animes WHERE parent_id = :parentId)
+    GROUP BY season.parent_id
+) AS ASS
+ON A._id = ASS.parent_id
+WHERE A.parent_id = :parentId;
+-- <-- AM (A_ONE_PARENT_IS_NOT_EVERY_PARENT)
 -- <-- AY

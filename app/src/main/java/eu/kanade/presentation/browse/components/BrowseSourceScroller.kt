@@ -1,38 +1,13 @@
 package eu.kanade.presentation.browse.components
 
-import android.widget.Toast
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.outlined.BookmarkBorder
-import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.Stable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -44,45 +19,26 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.painter.ColorPainter
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.PointerInputScope
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import aniyomi.ui.browse.scroller.ScrollerPlaybackState
+import aniyomi.ui.browse.scroller.centreItem
+import aniyomi.ui.browse.scroller.scrollerDrawAspect
 import aniyomi.source.js.JsProjectSource
-import aniyomi.ui.browse.scroller.ScrollerCardControls
-import aniyomi.ui.browse.scroller.ScrollerFeedAction
+import aniyomi.ui.browse.scroller.ScrollerCard
+import aniyomi.ui.browse.scroller.ScrollerCardSpacing
 import aniyomi.ui.browse.scroller.ScrollerFullscreenPlayer
-import aniyomi.ui.browse.scroller.ScrollerPlayer
+import aniyomi.ui.browse.scroller.rememberScrollSpeedTracker
 import aniyomi.ui.browse.scroller.rememberScrollerPlayback
-import coil3.compose.AsyncImage
-import eu.kanade.presentation.anime.components.TagActionsMenu
-import eu.kanade.presentation.anime.components.TagsChip
-import eu.kanade.presentation.util.rememberResourceBitmapPainter
-import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.animesource.AnimeSource
-import eu.kanade.tachiyomi.ui.player.components.MpvSurface
 import eu.kanade.tachiyomi.ui.player.mpv.MPVPlayer
-import eu.kanade.tachiyomi.util.system.copyToClipboard
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -90,8 +46,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import tachiyomi.domain.anime.model.Anime
-import tachiyomi.domain.anime.model.AnimeCover
-import kotlin.math.abs
 
 // AM (BROWSE_SCROLLER) -->
 /**
@@ -143,9 +97,73 @@ fun BrowseSourceScroller(
     onActiveIndexChange: (Int) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
-    var activeIndex by remember { mutableIntStateOf(-1) }
-
+    // AM (ENTRY_SCROLLER): for the expanded view's previous/next step.
+    val scope = rememberCoroutineScope()
+    var scrolledActiveIndex by remember { mutableIntStateOf(-1) }
     val playback = rememberScrollerPlayback(source = source)
+
+    // AM (ENTRY_SCROLLER) -->
+    // The expanded card is the one being watched, so it is the one the load
+    // window centres on - the same rule setActive already follows
+    // (AM (BROWSE_SCROLLER_FULLSCREEN_HOLDS_ACTIVE)), applied to loading too.
+    //
+    // Without it the window stays centred on whatever the viewport covers, so
+    // stepping to the card after the last visible one steps to a card that is
+    // not allowed to hold an instance: the expanded view sits on a spinner
+    // and the button looks dead.
+    val fullscreenIndex = remember(playback?.fullscreenAnimeId, animeList.itemCount) {
+        playback?.fullscreenAnimeId?.let { id ->
+            (0 until animeList.itemCount).firstOrNull { animeList.peek(it)?.value?.id == id }
+        } ?: -1
+    }
+    val activeIndex = if (fullscreenIndex >= 0) fullscreenIndex else scrolledActiveIndex
+    // <-- AM (ENTRY_SCROLLER)
+
+    // AM (A_FEED_PLAYS_ONLY_ON_A_SCREEN_IN_FRONT) -->
+    // Whether anything is in front of the feed, which only an activity change
+    // answers: in-app navigation leaves this activity resumed, so a feed's
+    // audio still survives a trip to an entry screen, while the player opened
+    // over it - or any other app - stops it. Registering the observer reports
+    // the lifecycle's current state immediately, so a composition that comes
+    // back while covered starts out knowing it is.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(playback, lifecycleOwner) {
+        val observer = object : DefaultLifecycleObserver {
+            override fun onResume(owner: LifecycleOwner) {
+                playback?.setScreenInFront(true)
+            }
+
+            override fun onPause(owner: LifecycleOwner) {
+                playback?.setScreenInFront(false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        // Only the observer is removed. Leaving composition is in-app
+        // navigation, which is deliberately not a reason to stop the feed.
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    // <-- AM (A_FEED_PLAYS_ONLY_ON_A_SCREEN_IN_FRONT)
+
+    // AM (A_THE_FEED_KEEPS_ITS_PLACE) -->
+    /**
+     * The entry being looked at, and the entries just after it, as of the last
+     * time the active card settled.
+     *
+     * The feed supplies its own anchor rather than taking the top of the
+     * viewport like the other layouts: it already knows which card is being
+     * watched, and that is a better answer than whichever card the viewport
+     * happens to start on. See BrowseListingAnchor for what is done with it.
+     */
+    var anchorTrail by remember { mutableStateOf<List<Long>>(emptyList()) }
+
+    RestoreListingAnchor(
+        animeList = animeList,
+        anchorTrail = anchorTrail,
+        firstVisibleItemIndex = { listState.firstVisibleItemIndex },
+        leadingItemCount = { if (animeList.loadState.prepend is LoadState.Loading) 1 else 0 },
+        scrollToItem = { index -> listState.scrollToItem(index) },
+    )
+    // <-- AM (A_THE_FEED_KEEPS_ITS_PLACE)
 
     // AM (SCROLLER_SPEED_GATE): how fast the feed is moving right now, which is
     // what decides whether anything new may be started - see the tracker.
@@ -169,6 +187,28 @@ fun BrowseSourceScroller(
                 // At the exact top, the first card is active even when a later
                 // or taller card currently occupies more of the viewport.
                 0.takeIf { animeList.itemCount > 0 }
+            } else if (!listState.canScrollForward && animeList.itemCount > 0) {
+                // AM (A_FEED_HAS_A_BOTTOM_AS_WELL_AS_A_TOP) -->
+                // The same at the other end, which it did not have.
+                //
+                // The rule below is whichever card covers the most visible
+                // pixels, and the last card in the feed is the one card that
+                // can be prevented from ever winning it: the scroll stops with
+                // it still sharing the viewport with the card above, so if it
+                // is the shorter of the two - a portrait card under a landscape
+                // one, which is most of them - no amount of scrolling can make
+                // it dominant. It therefore never became active and never
+                // played, however deliberately the user stopped on it.
+                //
+                // Keyed on the list being unable to scroll any further rather
+                // than on a visibility fraction, for the same reason the top
+                // case is: being at the end IS the statement that this is the
+                // card the user stopped on, and a fraction only moves the
+                // threshold that cannot be reached. An append still loading
+                // leaves the feed scrollable, so this is the end of the
+                // listing, not a pause part way down it.
+                animeList.itemCount - 1
+                // <-- AM (A_FEED_HAS_A_BOTTOM_AS_WELL_AS_A_TOP)
             } else {
                 layoutInfo.visibleItemsInfo
                     // Visible pixels, not fraction of the viewport: the old
@@ -206,8 +246,12 @@ fun BrowseSourceScroller(
                 // cancels the wait outright if a different card takes over.
                 snapshotFlow { speed.isFast }.first { !it }
                 // <-- AM (SCROLLER_SPEED_GATE)
-                activeIndex = index
+                scrolledActiveIndex = index
                 playback?.setActive(animeId)
+                // AM (A_THE_FEED_KEEPS_ITS_PLACE): where the user is, recorded
+                // where the feed already works that out. Peeked rather than
+                // read, so capturing it does not ask the pager for a page.
+                anchorTrail = anchorTrailFrom(animeList, index)
                 currentOnActiveIndexChange(index)
             }
     }
@@ -387,15 +431,22 @@ fun BrowseSourceScroller(
     val fullscreenId = playback?.fullscreenAnimeId
     if (playback != null && fullscreenId != null) {
         val fullscreenPlayer = playback.playerFor(fullscreenId)
-        val fullscreenTitle = remember(fullscreenId, animeList.itemCount) {
-            (0 until animeList.itemCount)
-                .firstNotNullOfOrNull { animeList.peek(it)?.value?.takeIf { a -> a.id == fullscreenId } }
-                ?.title
-                .orEmpty()
+        // AM (ENTRY_SCROLLER): the expanded card's index, worked out above -
+        // the player's previous/next step through the listing, which here is
+        // simply the next and previous card in the feed.
+        val fullscreenTitle = remember(fullscreenIndex) {
+            animeList.peek(fullscreenIndex.coerceAtLeast(0))?.value?.title.orEmpty()
         }
-        if (fullscreenPlayer == null) {
-            // Its instance went away underneath it - there is nothing left to
-            // show at full size.
+        fun stepTarget(next: Boolean): Int? = (fullscreenIndex + if (next) 1 else -1)
+            .takeIf { fullscreenIndex >= 0 && it >= 0 && it < animeList.itemCount }
+        // <-- AM (ENTRY_SCROLLER)
+        // AM (ENTRY_SCROLLER): closed when the card is no longer in the feed,
+        // not when it is momentarily without an instance. Those used to be the
+        // same test, which is why stepping to the next card closed the whole
+        // expanded view: the step arrives before the card it moved to has been
+        // given a player. A card still in the feed gets one back through its
+        // own effects, and the expanded view shows the spinner until it does.
+        if (fullscreenIndex < 0) {
             LaunchedEffect(fullscreenId) { playback.exitFullscreen() }
         } else {
             ScrollerFullscreenPlayer(
@@ -404,610 +455,36 @@ fun BrowseSourceScroller(
                 animeId = fullscreenId,
                 title = fullscreenTitle,
                 videoOutput = playback.videoOutput,
+                // AM (ENTRY_SCROLLER) -->
+                aspect = scrollerDrawAspect(playback.aspectRatios[fullscreenId]),
+                onStep = { next ->
+                    val targetIndex = stepTarget(next) ?: return@ScrollerFullscreenPlayer
+                    val targetId = animeList.peek(targetIndex)?.value?.id
+                        ?: return@ScrollerFullscreenPlayer
+                    // The step itself first, and NOT inside the coroutine: a
+                    // scroll is a suspending, cancellable mutation, and with
+                    // the move behind it a scroll that never settled was a
+                    // button that did nothing at all. The scroll follows, to
+                    // leave the feed where the user now is when the expanded
+                    // view closes - and if it is cancelled, only that is lost.
+                    playback.moveFullscreenTo(targetId)
+                    // The list's own index, which is the paging index plus the
+                    // prepend loading item when there is one - the same
+                    // leadingItemCount the anchor restore uses. Scrolling to
+                    // the paging index while that item is up lands a card
+                    // short, which leaves the feed showing one card while
+                    // another is the one playing.
+                    val leading = if (animeList.loadState.prepend is LoadState.Loading) 1 else 0
+                    scope.launch { listState.centreItem(targetIndex + leading) }
+                },
+                hasPrevious = stepTarget(next = false) != null,
+                hasNext = stepTarget(next = true) != null,
+                // <-- AM (ENTRY_SCROLLER)
             )
         }
     }
     // <-- AM (BROWSE_SCROLLER_CONTROLS)
 }
-
-/**
- * One card: creator and title at the top, its clip, tags at the bottom.
- *
- * The header and footer are generously padded on purpose. Action buttons are
- * going into this card next, and laying it out tight now would mean re-spacing
- * the whole thing when they arrive.
- *
- * [player] is this card's own mpv instance when the card is near enough to be
- * loaded, and null otherwise. The clip box hosts that instance's surface
- * directly, so the card draws its own video and never borrows another card's.
- */
-@Composable
-private fun ScrollerCard(
-    anime: Anime,
-    // AM (MERGED_SOURCES)
-    inMerge: Boolean,
-    // AM (BROWSE_SELECTION)
-    isSelected: Boolean,
-    player: ScrollerPlayer?,
-    videoOutput: String?,
-    // AM (BROWSE_SCROLLER_CONTROLS)
-    playback: ScrollerPlaybackState?,
-    isFullscreen: Boolean,
-    // AM (BROWSE_SCROLLER_FRAME_WATCH)
-    hasFrame: Boolean,
-    aspectRatio: Float?,
-    onCoverAspectRatio: (Float) -> Unit,
-    onTitleClick: () -> Unit,
-    onTitleDoubleClick: (() -> Unit)?,
-    onFavoriteClick: (() -> Unit)?,
-    // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
-    onFavoriteLongClick: (() -> Unit)?,
-    onTagSearch: ((String) -> Unit)?,
-    onTagGlobalSearch: ((String) -> Unit)?,
-    onCreatorSearch: ((String) -> Unit)?,
-    // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
-    feedActionSource: JsProjectSource?,
-    /** True when the tap landed where the play/pause button sits. */
-    onClipTap: (Boolean) -> Unit,
-    onClipLongClick: () -> Unit,
-    onClipDoubleTap: ((ScrollerPlaybackState.TapZone) -> Unit)?,
-) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        ScrollerCardHeader(
-            anime = anime,
-            // AM (MERGED_SOURCES)
-            inMerge = inMerge,
-            onTitleClick = onTitleClick,
-            onTitleDoubleClick = onTitleDoubleClick,
-            onFavoriteClick = onFavoriteClick,
-            // AM (BROWSE_SCROLLER_CARD_ACTIONS)
-            onFavoriteLongClick = onFavoriteLongClick,
-            onCreatorSearch = onCreatorSearch,
-        )
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = ScrollerCardPadding)
-                // The width is the screen's, so the ratio is what decides how
-                // tall this card's video is. Read off this card's own instance
-                // as soon as its file is open - which happens while the card
-                // is still being approached - from the cover before that, and
-                // from a landscape default until the cover has loaded.
-                // Clamped: a card taller than a few screens is unusable
-                // however the media is shaped, and a zero or non-finite ratio
-                // is an exception out of aspectRatio() rather than a layout.
-                .aspectRatio(
-                    aspectRatio
-                        ?.takeIf { it.isFinite() && it > 0f }
-                        ?.coerceIn(ScrollerMinAspectRatio, ScrollerMaxAspectRatio)
-                        ?: ScrollerFallbackAspectRatio,
-                )
-                .clip(RoundedCornerShape(ScrollerClipCorner))
-                .background(ScrollerDeadSpaceColor)
-                // Not combinedClickable: a tap here has to know WHERE it
-                // landed, which that gives no way to see. A double tap is
-                // dispatched by thirds, the same zones the real player's own
-                // double-tap gestures use; a single tap only asks whether it
-                // landed on the play/pause button's own spot.
-                .pointerInput(onClipDoubleTap, onClipTap, onClipLongClick) {
-                    detectTapGestures(
-                        onTap = { offset ->
-                            onClipTap(isOnPlayPauseSpot(offset, size.width, size.height))
-                        },
-                        onLongPress = { onClipLongClick() },
-                        onDoubleTap = { offset ->
-                            val handler = onClipDoubleTap ?: return@detectTapGestures
-                            handler(tapZoneAt(offset.x, size.width))
-                        },
-                    )
-                },
-        ) {
-            // AM (BROWSE_SCROLLER_CONTROLS): not while this card is expanded -
-            // the fullscreen host is drawing this instance.
-            if (player != null && videoOutput != null && !isFullscreen) {
-                MpvSurface(
-                    player = player.player,
-                    videoOutput = videoOutput,
-                    // Tells this card's instance when it can load with
-                    // hardware decoding - see ScrollerPlayer.loadPaused.
-                    onSurfaceAttachedChanged = player::onSurfaceAttachedChanged,
-                    // Lets the instance read its own displayed frame, for use
-                    // as this card's placeholder later.
-                    onViewAvailable = player::onViewAvailable,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-
-            // The placeholder is drawn OVER the surface, and only while this
-            // card has no frame of its own.
-            //
-            // Under the surface was wrong in a way that looks like a stale
-            // thumbnail: the surface fills the box but mpv letterboxes the
-            // video inside it, so whatever sat behind showed through the bars
-            // and stayed there for as long as the card was playing. Over the
-            // surface, and simply not emitted once there is a frame, there is
-            // nothing left to show through.
-            // AM (BROWSE_SCROLLER_NO_FLASH) -->
-            // Only for a card too far away to be loaded at all. A card in the
-            // load window shows black until its own video is there.
-            //
-            // It used to show its cover, then its captured first frame, then
-            // the video - which on a fast scroll is three different images in
-            // quick succession per card, the grey placeholder behind a cover
-            // still loading among them. Black and then the video is one
-            // change instead of four.
-            if (player == null) {
-            // <-- AM (BROWSE_SCROLLER_NO_FLASH)
-                AsyncImage(
-                    model = AnimeCover(
-                        animeId = anime.id,
-                        sourceId = anime.source,
-                        isAnimeFavorite = anime.favorite,
-                        url = anime.thumbnailUrl,
-                        lastModified = anime.coverLastModified,
-                    ),
-                    placeholder = ColorPainter(ScrollerPlaceholderColor),
-                    error = rememberResourceBitmapPainter(id = R.drawable.cover_error),
-                    contentDescription = anime.title,
-                    // Fit, not Crop: the dead space inside the box is the honest
-                    // result for content that is not this shape, and cropping a
-                    // portrait cover into a landscape box throws most of it away.
-                    contentScale = ContentScale.Fit,
-                    onSuccess = { state ->
-                        val image = state.result.image
-                        if (image.height > 0) {
-                            onCoverAspectRatio(image.width.toFloat() / image.height.toFloat())
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .alpha(if (isSelected) SelectedItemAlpha else 1f),
-                )
-            }
-
-            // AM (BROWSE_SCROLLER_FRAME_WATCH) -->
-            // A card with an instance but no frame of its own yet is covered,
-            // and this is what BROWSE_SCROLLER_NO_FLASH above assumed was
-            // already happening: "a card in the load window shows black until
-            // its own video is there". Nothing made it black. The surface was
-            // composed the moment the card had a player, and a surface with
-            // nothing of this card's decoded into it is not empty - the pool
-            // reassigns instances between cards and MPVPlayer keeps ONE
-            // SurfaceTexture for its whole life (PERSISTENT_SURFACE_ARCHITECTURE,
-            // handed on to each new TextureView by MpvSurface), so what it still
-            // holds is the last frame of whatever card had the instance before
-            // this one. That is the frozen frame: not a stall in this card's
-            // playback, another card's picture sitting in the texture it
-            // inherited.
-            //
-            // The state behind this has existed since FRAME_WATCH - framesReady,
-            // fed by PlaybackRestart with a poll behind it - and nothing outside
-            // ScrollerPlaybackState ever read it. This is the reader.
-            //
-            // Black rather than the cover or the captured first frame, for the
-            // reason NO_FLASH gives: black and then the video is one change
-            // instead of several.
-            if (player != null && !hasFrame) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(ScrollerDeadSpaceColor),
-                )
-            }
-            // <-- AM (BROWSE_SCROLLER_FRAME_WATCH)
-            // AM (BROWSE_SCROLLER_CONTROLS): raised by a tap on the clip, and
-            // only on a card that has an instance to control.
-            if (playback != null && player != null && !isFullscreen) {
-                ScrollerCardControls(
-                    playback = playback,
-                    animeId = anime.id,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-        }
-
-        ScrollerCardFooter(
-            anime = anime,
-            feedActionSource = feedActionSource,
-            // AM (BROWSE_SCROLLER_CARD_ACTIONS)
-            onTagSearch = onTagSearch,
-            onTagGlobalSearch = onTagGlobalSearch,
-        )
-    }
-}
-
-/**
- * Creator above, title below. Both come off the entry as the source already
- * gives them - author, falling back to artist, is what a source fills in for
- * the person who made the thing.
- */
-@Composable
-private fun ScrollerCardHeader(
-    anime: Anime,
-    // AM (MERGED_SOURCES)
-    inMerge: Boolean,
-    onTitleClick: () -> Unit,
-    onTitleDoubleClick: (() -> Unit)?,
-    onFavoriteClick: (() -> Unit)?,
-    // AM (BROWSE_SCROLLER_CARD_ACTIONS)
-    onFavoriteLongClick: (() -> Unit)?,
-    onCreatorSearch: ((String) -> Unit)?,
-) {
-    val context = LocalContext.current
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(ScrollerHeaderGap),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(
-                start = ScrollerCardPadding,
-                end = ScrollerCardPadding,
-                top = ScrollerHeaderTopPadding,
-                bottom = ScrollerHeaderBottomPadding,
-            ),
-    ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(ScrollerCreatorGap),
-            modifier = Modifier.weight(1f),
-        ) {
-            val creator = anime.author?.takeIf { it.isNotBlank() }
-                ?: anime.artist?.takeIf { it.isNotBlank() }
-            if (creator != null) {
-                Text(
-                    text = creator,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    // AM (BROWSE_SCROLLER_CARD_ACTIONS): the entry screen's
-                    // own author behaviour - a tap searches everywhere for
-                    // them, a long press copies the name.
-                    modifier = if (onCreatorSearch == null) {
-                        Modifier
-                    } else {
-                        Modifier.combinedClickable(
-                            onClick = { onCreatorSearch(creator) },
-                            onLongClick = { context.copyToClipboard(creator, creator) },
-                        )
-                    },
-                )
-            }
-
-            Text(
-                text = anime.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                // Underlined so it reads as the link it is, now that tapping
-                // the clip does not navigate.
-                textDecoration = TextDecoration.Underline,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.pointerInput(onTitleClick, onTitleDoubleClick) {
-                    detectTapGestures(
-                        onTap = { onTitleClick() },
-                        onDoubleTap = onTitleDoubleClick?.let { handler -> { handler() } },
-                    )
-                },
-            )
-        }
-
-        // AM (MERGED_SOURCES): still a badge, because being a merge child is
-        // a state rather than an action.
-        InMergeBadge(enabled = !anime.favorite && inMerge)
-
-        if (onFavoriteClick != null) {
-            // AM (BROWSE_SCROLLER_CARD_ACTIONS): long press opens the category
-            // dialog, the same one the selection bar's action opens - a tap
-            // still adds or removes outright.
-            Box(
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .combinedClickable(
-                        onClick = onFavoriteClick,
-                        onLongClick = onFavoriteLongClick ?: onFavoriteClick,
-                    )
-                    .padding(ScrollerFavoriteButtonPadding),
-            ) {
-                Icon(
-                    imageVector = if (anime.favorite) {
-                        Icons.Filled.Favorite
-                    } else {
-                        Icons.Outlined.FavoriteBorder
-                    },
-                    contentDescription = null,
-                    tint = if (anime.favorite) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-            }
-        }
-    }
-}
-
-/**
- * The entry's own genres, which is what a source fills in for tags. Scrolled
- * horizontally rather than wrapped so a heavily tagged entry cannot push the
- * next card off the screen, and so every card in the feed is the same height.
- */
-@Composable
-private fun ScrollerCardFooter(
-    anime: Anime,
-    feedActionSource: JsProjectSource?,
-    // AM (BROWSE_SCROLLER_CARD_ACTIONS)
-    onTagSearch: ((String) -> Unit)?,
-    onTagGlobalSearch: ((String) -> Unit)?,
-) {
-    val actions = remember(anime.memo) { ScrollerFeedAction.from(anime) }
-    val like = actions.firstOrNull { it.icon == "favorite" }
-    val bookmark = actions.firstOrNull { it.icon == "bookmark" }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = ScrollerTagsVerticalPadding),
-    ) {
-        val tags = anime.genre?.filter { it.isNotBlank() }.orEmpty()
-        // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
-        // The entry screen's own tag menu, not a feed copy of it: tapping a
-        // tag here offers exactly what tapping it in the entry offers, minus
-        // the playlist search, which needs an episode list a feed card has
-        // not got.
-        val context = LocalContext.current
-        var tagMenuShown by remember { mutableStateOf(false) }
-        var tagSelected by remember { mutableStateOf("") }
-        val tagsActionable = onTagSearch != null || onTagGlobalSearch != null
-        // Boxed with the chips, as the entry screen boxes it with its own:
-        // a DropdownMenu anchors to its parent, and anchored to the whole
-        // footer it would open away from the tag that was tapped.
-        Box {
-            if (tagsActionable) {
-                TagActionsMenu(
-                    expanded = tagMenuShown,
-                    canSearchPlaylist = false,
-                    onDismissRequest = { tagMenuShown = false },
-                    onSearch = { onTagSearch?.invoke(tagSelected) },
-                    onGlobalSearch = { onTagGlobalSearch?.invoke(tagSelected) },
-                    onEpisodeSearch = {},
-                    onCopyToClipboard = { context.copyToClipboard(tagSelected, tagSelected) },
-                )
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(ScrollerTagGap),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(32.dp)
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = ScrollerCardPadding),
-            ) {
-                tags.forEach { tag ->
-                    TagsChip(
-                        text = tag,
-                        onClick = {
-                            if (tagsActionable) {
-                                tagSelected = tag
-                                tagMenuShown = true
-                            }
-                        },
-                    )
-                }
-            }
-        }
-        // <-- AM (BROWSE_SCROLLER_CARD_ACTIONS)
-
-        Row(
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(ScrollerTagsRowHeight)
-                .padding(horizontal = ScrollerCardPadding),
-        ) {
-            Box {
-                if (like != null && feedActionSource != null) {
-                    ScrollerFeedActionButton(anime, like, feedActionSource)
-                }
-            }
-            Box {
-                if (bookmark != null && feedActionSource != null) {
-                    ScrollerFeedActionButton(anime, bookmark, feedActionSource)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ScrollerFeedActionButton(
-    anime: Anime,
-    action: ScrollerFeedAction,
-    source: JsProjectSource,
-) {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    var active by remember(anime.id, action.id, action.initiallyActive) {
-        mutableStateOf(action.initiallyActive)
-    }
-    var pending by remember(anime.id, action.id) { mutableStateOf(false) }
-
-    IconButton(
-        enabled = !pending,
-        onClick = {
-            pending = true
-            scope.launch {
-                try {
-                    active = source.performFeedAction(
-                        url = anime.url,
-                        action = action.id,
-                        active = active,
-                        target = action.target,
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Toast.makeText(
-                        context,
-                        action.label.ifBlank { "Action" } + " failed: " + e.message,
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                } finally {
-                    pending = false
-                }
-            }
-        },
-    ) {
-        Icon(
-            imageVector = when (action.icon) {
-                "bookmark" -> if (active) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder
-                else -> if (active) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder
-            },
-            contentDescription = action.label,
-            tint = if (active) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
-    }
-}
-
-/**
- * Whether [offset] landed on the play/pause button's own spot - the middle of
- * the clip, within [ScrollerPlayPauseSpotRadius] of it.
- *
- * AM (BROWSE_SCROLLER_CONTROLS): the single tap used to pause anywhere in the
- * middle third, which took the whole band across the card with it - including
- * the seekbar's own height, where a tap is someone wanting to see where they
- * are rather than to stop the clip. A radius around where the button actually
- * sits is the smallest region that still makes pausing a one-tap gesture.
- *
- * In pixels against the card's own size, because this is answering a question
- * about a touch on that card rather than laying anything out.
- */
-private fun PointerInputScope.isOnPlayPauseSpot(offset: Offset, width: Int, height: Int): Boolean {
-    val radius = ScrollerPlayPauseSpotRadius.toPx()
-    val dx = offset.x - width / 2f
-    val dy = offset.y - height / 2f
-    return dx * dx + dy * dy <= radius * radius
-}
-
-/**
- * Which third of a card's clip [x] fell in, the same split the real player's
- * double-tap gestures use.
- */
-private fun tapZoneAt(x: Float, width: Int): ScrollerPlaybackState.TapZone {
-    val third = width / 3f
-    return when {
-        x < third -> ScrollerPlaybackState.TapZone.Left
-        x > third * 2f -> ScrollerPlaybackState.TapZone.Right
-        else -> ScrollerPlaybackState.TapZone.Center
-    }
-}
-
-// AM (SCROLLER_SPEED_GATE) -->
-/**
- * How fast the feed is being scrolled, as a state the composition can read.
- *
- * Measured from the deltas the list actually consumed rather than from item
- * indices: cards are not all the same height - the whole point of the aspect
- * work above - so an index rate says different things about the same gesture
- * on a feed of portrait clips and a feed of landscape ones. Pixels per second,
- * converted from a dp threshold so the answer is the same on every density.
- *
- * Two thresholds, not one. A single one chatters around its own value as a
- * fling decays, and every crossing restarts the effects keyed on it; engaging
- * high and releasing low means the gate opens once, when the feed has genuinely
- * slowed, and the smoothing below keeps a single jittery sample from opening it
- * early.
- */
-@Stable
-private class ScrollSpeedTracker(
-    private val engagePxPerSecond: Float,
-    private val releasePxPerSecond: Float,
-) : NestedScrollConnection {
-
-    /** True while the feed is moving too fast for anything new to be worth starting. */
-    var isFast by mutableStateOf(false)
-        private set
-
-    private var smoothed = 0f
-    private var lastSampleNanos = 0L
-
-    override fun onPostScroll(
-        consumed: Offset,
-        available: Offset,
-        source: NestedScrollSource,
-    ): Offset {
-        val now = System.nanoTime()
-        val elapsed = (now - lastSampleNanos) / NANOS_PER_SECOND
-        lastSampleNanos = now
-        // A first sample has no interval, and a long gap is two gestures rather
-        // than one slow one - neither says anything about the current speed.
-        if (elapsed > 0f && elapsed <= MAX_SAMPLE_SECONDS) {
-            val instant = abs(consumed.y) / elapsed
-            smoothed += (instant - smoothed) * SPEED_SMOOTHING
-            isFast = smoothed > if (isFast) releasePxPerSecond else engagePxPerSecond
-        }
-        return Offset.Zero
-    }
-
-    /** The feed has come to rest, whatever the last sample happened to read. */
-    fun onScrollStopped() {
-        smoothed = 0f
-        lastSampleNanos = 0L
-        isFast = false
-    }
-}
-
-@Composable
-private fun rememberScrollSpeedTracker(listState: LazyListState): ScrollSpeedTracker {
-    val density = LocalDensity.current
-    val tracker = remember(density) {
-        with(density) {
-            ScrollSpeedTracker(
-                engagePxPerSecond = FastScrollEngageSpeed.toPx(),
-                releasePxPerSecond = FastScrollReleaseSpeed.toPx(),
-            )
-        }
-    }
-    // The deltas stop arriving when the scroll does, so without this the last
-    // sample of a fling would stand as the feed's speed for as long as it sat
-    // still - which is the gate stuck shut.
-    LaunchedEffect(tracker, listState) {
-        snapshotFlow { listState.isScrollInProgress }
-            .collectLatest { scrolling -> if (!scrolling) tracker.onScrollStopped() }
-    }
-    return tracker
-}
-
-/**
- * Above this the feed is being flung past rather than read, so nothing new is
- * started. Derived rather than felt: a card is around 600dp tall on a phone, and
- * a card passing in under a quarter of a second is one nobody is looking at.
- */
-private val FastScrollEngageSpeed = 2_400.dp
-
-/** And below this it is being read again - see ScrollSpeedTracker on the pair. */
-private val FastScrollReleaseSpeed = 800.dp
-
-/** How much of each new sample the running speed takes. */
-private const val SPEED_SMOOTHING = 0.3f
-
-/** Longer than this between samples is a new gesture, not a slow one. */
-private const val MAX_SAMPLE_SECONDS = 0.25f
-
-private const val NANOS_PER_SECOND = 1_000_000_000f
-// <-- AM (SCROLLER_SPEED_GATE)
-
-/** Used only until a card's cover has loaded and can be measured. */
-private const val ScrollerFallbackAspectRatio = 16f / 9f
-
-/** Tallest and widest a card may be, whatever the media says. */
-private const val ScrollerMinAspectRatio = 0.4f
-private const val ScrollerMaxAspectRatio = 3f
 
 /**
  * How long a card has to stay the dominant one before it is loaded. Long
@@ -1016,13 +493,37 @@ private const val ScrollerMaxAspectRatio = 3f
  */
 private const val ACTIVE_CARD_SETTLE_MS = 120L
 
+// AM (A_WINDOW_IS_WHAT_THE_POOL_IS_SIZED_FOR) -->
 /**
- * Cards kept loaded behind and ahead of the one being looked at. Three decoder
- * sessions in total, which is modest enough to be safe on real hardware while
- * still meaning both directions of a scroll land on something already loaded.
+ * Cards kept loaded behind and ahead of the one being looked at.
+ *
+ * FIVE cards, and the count is load-bearing rather than descriptive:
+ * ScrollerPlayerPool.CAPACITY has to be at least this window plus one, because
+ * a pool smaller than the window evicts a card that is still inside it on every
+ * step. The two constants move together or not at all.
+ *
+ * Symmetric at 2, tried at 1 and put back: two cards out is far enough that a
+ * scroll of any pace lands on a card that already exists, and reaching one that
+ * does not is noticeable in a way the saved memory did not pay for.
+ *
+ * Cheap rather than few is the bargain. The outer ring is not held at the same
+ * cost as the inner one - the tier ladder above puts distance -1..1 on Near and
+ * everything past it on Far, which is 8MiB either way and two seconds of
+ * readahead (see MPVPlayer.applyScrollerCache). So widening the window by a
+ * card adds a card that EXISTS, with a player and an open file, rather than one
+ * holding content. That is what the ladder is for, and it is why the answer to
+ * memory pressure here is the Far tier's byte limits rather than this number.
+ *
+ * Not for url resolution, which this is sometimes mistaken for: the 20-30s a
+ * source can take to hand over a video url is covered by ClipVideoResolver,
+ * which caches 128 resolved links and is driven speculatively across
+ * GEOMETRY_BEHIND..GEOMETRY_AHEAD below - six cards ahead, further than any
+ * pool reaches, and needing no decoder. What the window buys is a decoded first
+ * frame.
  */
-private const val WINDOW_BEHIND = 1
+private const val WINDOW_BEHIND = 2
 private const val WINDOW_AHEAD = 2
+// <-- AM (A_WINDOW_IS_WHAT_THE_POOL_IS_SIZED_FOR)
 
 /**
  * How far ahead and behind card heights are worked out. Far wider than the
@@ -1033,42 +534,4 @@ private const val WINDOW_AHEAD = 2
 private const val GEOMETRY_BEHIND = 3
 private const val GEOMETRY_AHEAD = 6
 
-/**
- * How far from the middle of a card a tap still counts as the play/pause
- * button's.
- *
- * Comfortably larger than the 96.dp button the controls draw there, so the
- * gesture does not demand precision, and far short of the seekbar along the
- * bottom or the sound button in the corner.
- */
-private val ScrollerPlayPauseSpotRadius = 72.dp
-
-/** The dead space between cards. */
-private val ScrollerCardSpacing = 24.dp
-
-private val ScrollerCardPadding = 16.dp
-private val ScrollerHeaderTopPadding = 16.dp
-private val ScrollerHeaderBottomPadding = 12.dp
-private val ScrollerHeaderGap = 12.dp
-private val ScrollerCreatorGap = 2.dp
-private val ScrollerClipCorner = 12.dp
-// AM (BROWSE_SCROLLER_CARD_ACTIONS): the add-to-library button is a Box with
-// its own clickable now rather than an IconButton, so its touch target is
-// padded here instead of by IconButton's own minimum size.
-private val ScrollerFavoriteButtonPadding = 12.dp
-private val ScrollerTagsVerticalPadding = 12.dp
-private val ScrollerTagGap = 8.dp
-
-/**
- * Reserved whether or not the entry has tags, so every card is the same height
- * and the feed does not jump as tagged and untagged entries scroll past. It is
- * also where the action buttons are going.
- */
-private val ScrollerTagsRowHeight = 48.dp
-
-private const val SelectedItemAlpha = 0.76f
-
-/** Behind the clip, where content of another shape leaves a gap. */
-private val ScrollerDeadSpaceColor = Color.Black
-private val ScrollerPlaceholderColor = Color(0x1F888888)
 // <-- AM (BROWSE_SCROLLER)

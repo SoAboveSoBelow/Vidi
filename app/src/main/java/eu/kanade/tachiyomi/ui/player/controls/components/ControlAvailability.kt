@@ -64,8 +64,7 @@ data class ControlAvailability(
  * (see ControlBindingPreferences.applyButtonOptions), so matching on the action
  * objects alone would never match these four again.
  */
-private fun ControlAction.nativeIdentity(): ControlAction = when (this) {
-    is ControlAction.CustomButton -> ControlAction.nativeActionForButtonId(id) ?: this
-    else -> this
-}
+// AM (ENTRY_SCROLLER): the model's own answer now, so a dispatcher asking the
+// same question cannot get a different one.
+private fun ControlAction.nativeIdentity(): ControlAction = ControlAction.identity(this)
 // <-- AM (CONTROL_BINDINGS)

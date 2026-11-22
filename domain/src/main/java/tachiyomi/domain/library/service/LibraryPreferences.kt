@@ -241,7 +241,9 @@ class LibraryPreferences(
             if (anime.sortDescending()) Anime.EPISODE_SORT_DESC else Anime.EPISODE_SORT_ASC,
         )
         // AY -->
-        showEpisodeThumbnailPreviews.set(anime.showPreviewsRaw)
+        // AM (ENTRY_SCROLLER): the whole view-mode field, so "use as
+        // default" can carry the scroller view as well as the other two.
+        showEpisodeThumbnailPreviews.set(anime.episodeViewModeRaw)
         showEpisodeSummaries.set(anime.showSummariesRaw)
         // <-- AY
     }
@@ -427,6 +429,49 @@ class LibraryPreferences(
 
     val groupLibraryBy: Preference<Int> = preferenceStore.getInt("group_library_by", LibraryGroup.BY_DEFAULT)
     // <-- AM (GROUPING)
+
+    // AM (A_A_GLANCE_IS_NOT_A_VIEWING) -->
+    /**
+     * Seconds an episode must have been watched for to appear in the history
+     * list. 0 shows everything, which is the default.
+     *
+     * A reading filter, not a writing rule: the rows are still recorded, and
+     * everything else that reads history - coverage, hide-viewed, resume -
+     * still sees them. That is the distinction from
+     * PlayerPreferences.historyThresholdSeconds, which decides whether a row is
+     * written at all. The two are useful together and neither replaces the
+     * other: raising the write threshold loses the record, raising this one
+     * only stops it cluttering the screen.
+     *
+     * Persisted, unlike the player-only toggle on the history screen, because
+     * the point of it is to stay out of the way rather than to be a way of
+     * looking at the list for a moment.
+     *
+     * See historyView.sq for what counts as watched, which is not simply the
+     * stored position: a finished episode's position is zero and a looping feed
+     * card's never exceeds its own length.
+     */
+    val historyMinSecondsSeen: Preference<Int> = preferenceStore.getInt("history_min_seconds_seen", 0)
+    // <-- AM (A_A_GLANCE_IS_NOT_A_VIEWING)
+
+    // AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS) -->
+    /**
+     * Show only episodes that reached the watched threshold.
+     *
+     * Narrower than the list itself, not a synonym for it: everything in
+     * history is viewed, and watched is the state past the threshold.
+     */
+    val historyWatchedOnly: Preference<Boolean> = preferenceStore.getBoolean("history_watched_only", false)
+
+    /**
+     * Show only episodes that are downloaded.
+     *
+     * Applied outside the query, unlike the others: a download is a folder on
+     * disk, so the database has nothing to filter on. See HistoryViewModel.
+     */
+    val historyDownloadedOnly: Preference<Boolean> =
+        preferenceStore.getBoolean("history_downloaded_only", false)
+    // <-- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
 
     companion object {
         const val DEVICE_ONLY_ON_WIFI = "wifi"

@@ -1,6 +1,5 @@
 package tachiyomi.data.updates
 
-import app.cash.sqldelight.async.coroutines.awaitAsList
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
@@ -8,6 +7,7 @@ import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
 import tachiyomi.core.common.util.lang.toLong
 import tachiyomi.data.Database
+import tachiyomi.data.awaitList
 import tachiyomi.data.subscribeToList
 import tachiyomi.domain.anime.model.AnimeCover
 import tachiyomi.domain.updates.model.UpdatesWithRelations
@@ -30,7 +30,7 @@ class UpdatesRepositoryImpl(
             after = after,
             limit = limit,
             mapper = ::mapUpdatesWithRelations,
-        ).awaitAsList()
+        ).awaitList()
     }
 
     override fun subscribeAll(

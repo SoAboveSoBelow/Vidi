@@ -96,14 +96,58 @@ SELECT *
 FROM animes
 WHERE favorite = 1;
 
+-- AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME): the same selection, walked by
+-- id instead of returned whole. A backup streams its entries out one at a time,
+-- so materialising every non-library entry first would reintroduce the
+-- allocation the streaming exists to avoid - on a heavily browsed source this
+-- side of it is a hundred thousand rows.
+-- AM (A_PROGRESS_IS_A_PER_ENTRY_QUESTION) -->
+-- EXISTS per candidate entry, not one DISTINCT list of every entry with
+-- progress. The list form was built from scratch on each call - a full walk of
+-- episodes_anime_id_index, since `seen = 1 OR last_second_seen != 0` indexes
+-- no better than that - which made the id walk below quadratic in the thing it
+-- exists to page through: every batch paid for the whole episodes table again.
+-- Correlated, it is one index seek per entry examined and it stops at the
+-- first episode with progress.
+--
+-- Measured at 120k animes / 150k episodes / 102k history, 38k entries with
+-- progress outside the library, identical rows at every offset: 24-31 ms per
+-- 200-row batch -> 0.5-1.1 ms, and the complete 192-batch walk 5,626 -> 122 ms.
+--
+-- getSeenAnimeNotInLibrary, which wants the whole set rather than a page of it,
+-- measured FLAT either way (153 vs 153 ms, same 38,333 rows): asked for every
+-- row, the DISTINCT list is built once and is no worse than the correlated
+-- probe. It is rewritten anyway so one predicate has one spelling, not for
+-- speed - the quadratic cost was never in this query, only in paging with it.
+--
+-- A partial index on (anime_id) WHERE seen = 1 OR last_second_seen != 0 was
+-- tried and rejected: SQLite does match it against this predicate, but it only
+-- took the batch from 0.65 to 0.55 ms - under perception either way - for
+-- 560 KB and another index to maintain on every episode write.
+getSeenAnimeNotInLibraryAfter:
+SELECT *
+FROM animes
+WHERE favorite = 0 AND _id > :afterId
+AND EXISTS (
+    SELECT 1
+    FROM episodes
+    WHERE episodes.anime_id = animes._id
+    AND (episodes.seen = 1 OR episodes.last_second_seen != 0)
+)
+ORDER BY _id
+LIMIT :limit;
+
 getSeenAnimeNotInLibrary:
 SELECT *
 FROM animes
-WHERE favorite = 0 AND _id IN (
-    SELECT DISTINCT episodes.anime_id
+WHERE favorite = 0
+AND EXISTS (
+    SELECT 1
     FROM episodes
-    WHERE seen = 1 OR last_second_seen != 0
+    WHERE episodes.anime_id = animes._id
+    AND (episodes.seen = 1 OR episodes.last_second_seen != 0)
 );
+-- <-- AM (A_PROGRESS_IS_A_PER_ENTRY_QUESTION)
 
 getAllAnime:
 SELECT *
@@ -298,29 +342,65 @@ WHERE _id = :animeId;
 -- silently drop a fully watched merged entry. Its watch progress lives on its
 -- children, so protect it when any child has progress.
 -- <-- AM (MERGED_SOURCES)
+-- AM (A_PROGRESS_IS_A_PER_ENTRY_QUESTION): both guards as NOT EXISTS, for the
+-- reason above. The id list bounds the delete to a handful of rows, but each
+-- DISTINCT subquery was still built over the whole episodes table - twice when
+-- both guards were on. Safe as NOT EXISTS because episodes.anime_id and
+-- merge_children.merge_parent_id are both NOT NULL, so there is no NOT IN
+-- null-propagation to preserve. Measured with 50 ids at the sizes above, same
+-- rows deleted for all four flag combinations: 46 -> 0.05 ms.
+-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+-- The library side of animedeletableView, which is deliberately favorite = 0
+-- only: nothing could previously ask what a source holds IN the library, so
+-- clearing a source's data meant clearing the half of it the user had not kept.
+--
+-- The same two guards as that view, for the same reasons. parent_id IS NULL
+-- keeps a child out of a list whose rows are deleted whole - a parent's delete
+-- takes its children with it - and the merge_children exclusion keeps a delete
+-- from cascading a merge_children row away and gutting a merge that is still in
+-- the library (see MERGED_SOURCES on that view).
+getLibraryParentAnime:
+SELECT _id, source, fetch_type
+FROM animes
+WHERE favorite = 1
+AND parent_id IS NULL
+AND _id NOT IN (SELECT anime_id FROM merge_children);
+
+-- Unconditional, unlike deleteAnimesNotInLibraryByAnimeIds below: the ids come
+-- from a list the user has been shown and a confirmation that names what is
+-- about to go, so a favorite guard here would silently do nothing rather than
+-- what was asked. Being the one query in this file that will delete a library
+-- entry, it is reached from exactly one place - the per-source dialog, behind
+-- its own warning.
+deleteAnimesByAnimeIds:
+DELETE FROM animes
+WHERE _id IN :animeIds;
+-- <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+
 deleteAnimesNotInLibraryByAnimeIds:
 DELETE FROM animes
 WHERE favorite = 0
 AND _id IN :animeIds
 AND (
     :keepSeenAnime = 0
-    OR _id NOT IN (
-        SELECT DISTINCT anime_id
+    OR NOT EXISTS (
+        SELECT 1
         FROM episodes
-        WHERE seen = 1
-        OR last_second_seen != 0
+        WHERE episodes.anime_id = animes._id
+        AND (episodes.seen = 1 OR episodes.last_second_seen != 0)
     )
 )
 AND (
     :keepSeenAnime = 0
-    OR _id NOT IN (
-        SELECT merge_parent_id
-        FROM merge_children
-        WHERE anime_id IN (
-            SELECT DISTINCT anime_id
+    OR NOT EXISTS (
+        SELECT 1
+        FROM merge_children MC
+        WHERE MC.merge_parent_id = animes._id
+        AND EXISTS (
+            SELECT 1
             FROM episodes
-            WHERE seen = 1
-            OR last_second_seen != 0
+            WHERE episodes.anime_id = MC.anime_id
+            AND (episodes.seen = 1 OR episodes.last_second_seen != 0)
         )
     )
 );

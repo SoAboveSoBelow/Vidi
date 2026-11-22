@@ -65,6 +65,21 @@ WHERE merge_parent_id = :mergeParentId;
 -- Children with the same per-entry stats animeseasonsView computes for real
 -- seasons, so a merged entry's seasons render exactly like native ones.
 -- Column order must match AnimeMapper.mapSeasonAnime.
+--
+-- AM (A_ONE_PARENT_IS_NOT_EVERY_PARENT) -->
+-- ES and HS are episodestatsView and historystatsView with :mergeParentId
+-- pushed into them, not joined and then filtered. Those views aggregate over
+-- the whole episodes table and SQLite materialises them before applying the
+-- WHERE, so reading one merged entry's children grouped every episode in the
+-- database twice. The subqueries below compute the same two aggregates over
+-- this parent's children only.
+--
+-- CROSS JOIN fixes the driver as merge_children rather than episodes; see
+-- animeseasonstatsView.sq for why that matters.
+--
+-- Measured at 120k animes / 150k episodes / 102k history, 2k children under
+-- 200 parents: 173 -> 0.08 ms, same rows in the same order at every parent
+-- tried, including parents with no children.
 getSeasonsByMergeParentId:
 SELECT A.*,
     coalesce(ES.total, 0) AS totalCount,
@@ -76,10 +91,37 @@ SELECT A.*,
     coalesce(ES.fillermarkCount, 0) AS fillermarkCount
 FROM animes A
 JOIN merge_children MC ON MC.anime_id = A._id
-LEFT JOIN episodestatsView AS ES ON A._id = ES.anime_id
-LEFT JOIN historystatsView AS HS ON A._id = HS.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        count(*) AS total,
+        sum(EP.seen) AS seenCount,
+        coalesce(max(EP.date_upload), 0) AS latestUpload,
+        coalesce(max(EP.date_fetch), 0) AS fetchedAt,
+        sum(EP.bookmark) AS bookmarkCount,
+        sum(EP.fillermark) AS fillermarkCount
+    FROM merge_children MC2
+    CROSS JOIN episodes EP ON EP.anime_id = MC2.anime_id
+    LEFT JOIN excluded_scanlators X
+        ON EP.anime_id = X.anime_id
+        AND EP.scanlator = X.scanlator
+    WHERE MC2.merge_parent_id = :mergeParentId
+    AND X.scanlator IS NULL
+    GROUP BY EP.anime_id
+) AS ES ON A._id = ES.anime_id
+LEFT JOIN (
+    SELECT
+        EP.anime_id,
+        max(H.last_seen) AS lastSeen
+    FROM merge_children MC2
+    CROSS JOIN episodes EP ON EP.anime_id = MC2.anime_id
+    LEFT JOIN history H ON EP._id = H.episode_id
+    WHERE MC2.merge_parent_id = :mergeParentId
+    GROUP BY EP.anime_id
+) AS HS ON A._id = HS.anime_id
 WHERE MC.merge_parent_id = :mergeParentId
 ORDER BY MC.season_number ASC, MC.priority ASC;
+-- <-- AM (A_ONE_PARENT_IS_NOT_EVERY_PARENT)
 
 insert:
 INSERT INTO merge_children(merge_parent_id, anime_id, priority, season_number)

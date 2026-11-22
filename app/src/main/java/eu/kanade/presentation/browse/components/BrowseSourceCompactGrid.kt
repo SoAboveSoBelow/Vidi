@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+// AM (A_THE_FEED_KEEPS_ITS_PLACE)
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -32,7 +34,29 @@ fun BrowseSourceCompactGrid(
     // AM (BROWSE_SELECTION)
     selection: Set<Long> = emptySet(),
 ) {
+    // AM (A_THE_FEED_KEEPS_ITS_PLACE) -->
+    // Hoisted so the grid keeps its place when the entries beneath it change -
+    // see BrowseListingAnchor. The anchor is the top of the viewport here: a
+    // grid has no notion of the entry being looked at the way the scroller
+    // does.
+    val gridState = rememberLazyGridState()
+    val leadingItemCount = { if (animeList.loadState.prepend is LoadState.Loading) 1 else 0 }
+    val anchorTrail = rememberAnchorTrail(
+        animeList = animeList,
+        firstVisibleItemIndex = { gridState.firstVisibleItemIndex },
+        leadingItemCount = leadingItemCount,
+    )
+    RestoreListingAnchor(
+        animeList = animeList,
+        anchorTrail = anchorTrail,
+        firstVisibleItemIndex = { gridState.firstVisibleItemIndex },
+        leadingItemCount = leadingItemCount,
+        scrollToItem = { index -> gridState.scrollToItem(index) },
+    )
+    // <-- AM (A_THE_FEED_KEEPS_ITS_PLACE)
+
     LazyVerticalGrid(
+        state = gridState,
         columns = columns,
         contentPadding = contentPadding + PaddingValues(8.dp),
         verticalArrangement = Arrangement.spacedBy(CommonAnimeItemDefaults.GridVerticalSpacer),

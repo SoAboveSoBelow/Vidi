@@ -23,6 +23,10 @@ internal class HistoryWithRelationsProvider : PreviewParameterProvider<HistoryWi
             url = "https://example.com/cover.png",
             lastModified = 5L,
         ),
+        // AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
+        episodeName = "Test Episode",
+        scanlator = null,
+        episodeUrl = "/episode/1",
     )
 
     private val historyWithoutSeenAt = HistoryWithRelations(
@@ -41,6 +45,10 @@ internal class HistoryWithRelationsProvider : PreviewParameterProvider<HistoryWi
             url = "https://example.com/cover.png",
             lastModified = 5L,
         ),
+        // AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
+        episodeName = "Test Episode",
+        scanlator = null,
+        episodeUrl = "/episode/1",
     )
 
     private val historyWithNegativeEpisodeNumber = HistoryWithRelations(
@@ -59,6 +67,10 @@ internal class HistoryWithRelationsProvider : PreviewParameterProvider<HistoryWi
             url = "https://example.com/cover.png",
             lastModified = 5L,
         ),
+        // AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
+        episodeName = "Test Episode",
+        scanlator = null,
+        episodeUrl = "/episode/1",
     )
 
     override val values: Sequence<HistoryWithRelations>

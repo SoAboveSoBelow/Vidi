@@ -52,6 +52,7 @@ import eu.kanade.tachiyomi.extension.ExtensionManager
 import eu.kanade.tachiyomi.extension.util.ExtensionInstallActivity
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.network.NetworkPreferences
+import eu.kanade.tachiyomi.network.SourceRequestBudget
 import eu.kanade.tachiyomi.ui.base.delegate.SecureActivityDelegateImpl
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.player.ExternalIntents
@@ -172,6 +173,9 @@ interface AppGraph : ViewModelGraph {
 
     val json: Json
     val networkHelper: NetworkHelper
+
+    // AM (A_BROWSE_HAS_A_REQUEST_BUDGET)
+    val sourceRequestBudget: SourceRequestBudget
 
     val getFavorites: GetFavorites
     val getCategories: GetCategories

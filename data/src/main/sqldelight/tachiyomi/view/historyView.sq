@@ -34,47 +34,217 @@ ON episodes.anime_id = max_last_seen.anime_id;
 -- an entry whose newest row is a feed view would match no row at all once the
 -- filter removed it, and would vanish from the list instead of falling back to
 -- the last episode actually watched.
-history:
-SELECT
-H.id,
-H.animeId,
-H.episodeId,
-H.title,
-H.thumbnailUrl,
-H.source,
-H.favorite,
-H.cover_last_modified,
-H.episodeNumber,
-H.seenAt
-FROM historyView H
-WHERE H.seenAt > 0
-AND lower(H.title) LIKE ('%' || :query || '%')
-AND (:playerOnly = 0 OR H.origin = 0)
-AND H.episodeId = (
-    SELECT N.episodeId
-    FROM historyView N
-    WHERE N.animeId = H.animeId
-    AND N.seenAt > 0
-    AND (:playerOnly = 0 OR N.origin = 0)
-    ORDER BY N.seenAt DESC, N.episodeId DESC
-    LIMIT 1
+-- AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME) -->
+-- Was `history:`, selecting the whole list. SQLDelight notifies on every write
+-- to the tables a query reads, and watching an episode writes a history row
+-- continuously, so each progress save re-ran this query over the entire table
+-- and rebuilt the screen's whole list. At the 102k rows measured below that is
+-- 132 ms and a full re-materialisation per save, in a loop for as long as
+-- playback runs - the cost is the repetition, not any single run.
+--
+-- Same query, with LIMIT and OFFSET so QueryPagingSource can ask for one page.
+-- The ROW_NUMBER pass and everything recorded about it below is unchanged; the
+-- ORDER BY has to stay for the window pick to mean anything, and it is what
+-- makes the offset stable between pages.
+-- <-- AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME)
+historyPaged:
+-- AM (A_HISTORY_PICKS_THE_LATEST_IN_ONE_PASS): one window-function pass instead
+-- of a correlated subquery over historyView.
+--
+-- The entry's most recent episode is still picked here rather than taken from
+-- the view's maxSeenAtEpisodeId, for the reason above: that column is computed
+-- across both origins, so an entry whose newest row is a feed view would match
+-- no row once :playerOnly removed it, and would vanish instead of falling back
+-- to the last episode actually watched.
+--
+-- What changed is how it is picked. It used to re-enter historyView once per
+-- candidate row - and that view carries a GROUP BY aggregate over the whole
+-- history table - so the per-anime "latest" was recomputed for every row that
+-- reached the filter. ROW_NUMBER partitions by entry and orders by the same
+-- (last_seen, episode_id) the subquery did, so the pick is made once for every
+-- entry in a single pass, and the view is not involved at all.
+--
+-- Measured against the same data, identical result sets (both :playerOnly
+-- values, with and without a :query): 5.9 -> 4.3 ms at 3k history rows,
+-- 62 -> 37 ms at 32k, 197 -> 132 ms at 102k.
+--
+-- The view itself is now referenced by nothing - getLatestHistory below reads
+-- the base tables too - so its max_last_seen aggregate is never evaluated.
+-- Left in place because an unreferenced view costs nothing until something
+-- selects from it, while dropping it needs a migration.
+--
+-- Worth recording why it was not simply slimmed earlier: nothing reads
+-- maxSeenAt or maxSeenAtEpisodeId, so the join looked like free weight, but
+-- removing it while the view was still in the query path measured SLOWER (261
+-- vs 197 ms at 102k) - the aggregate gave the planner a per-entry table it used
+-- to drive the join. The columns were unused; the join was not.
+WITH latest AS (
+    SELECT
+    EP.anime_id AS animeId,
+    H._id AS id,
+    H.episode_id AS episodeId,
+    H.last_seen AS seenAt,
+    EP.episode_number AS episodeNumber,
+    -- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS): carried for the downloaded
+    -- filter, which cannot be expressed here - a download is a folder on disk,
+    -- not a row - so it is applied in Kotlin against the download cache, and
+    -- that cache is keyed by episode name, scanlator, entry title and source.
+    EP.name AS episodeName,
+    EP.scanlator,
+    EP.url AS episodeUrl,
+    ROW_NUMBER() OVER (
+        PARTITION BY EP.anime_id
+        ORDER BY H.last_seen DESC, H.episode_id DESC
+    ) AS rn
+    FROM history H
+    JOIN episodes EP
+    ON EP._id = H.episode_id
+    WHERE H.last_seen > 0
+    AND (:playerOnly = 0 OR H.origin = 0)
+    -- AM (A_A_GLANCE_IS_NOT_A_VIEWING) -->
+    -- :minSecondsSeen drops rows whose episode was barely watched. 0 is off,
+    -- which is also the default, so the predicate collapses to true and the
+    -- query is the one it was.
+    --
+    -- Two escapes, and both are needed rather than being belt and braces.
+    --
+    -- EP.seen: a finished episode's stored position is ZERO, because finishing
+    -- it resets last_second_seen (see updateEpisodeProgressOnComplete). A
+    -- filter on position alone would therefore hide precisely the episodes
+    -- watched all the way through, which is the opposite of what it is for.
+    --
+    -- The position test is a floor on a scroller card too, not a measure of it:
+    -- a feed card loops, so a five-second clip watched for two minutes never
+    -- reports a position above five seconds. Those are caught by EP.seen as
+    -- well - a card that laps is marked seen (SCROLLER_MARKS_SEEN) - so what
+    -- the position test is left deciding is the case it is good at: something
+    -- opened, held briefly and abandoned, which is neither seen nor far in.
+    --
+    -- Applied in the CTE, before the ROW_NUMBER pick, for the same reason
+    -- :playerOnly is: an entry whose newest row is a glance should fall back to
+    -- the last episode genuinely watched rather than disappear from the list.
+    AND (:minSecondsSeen = 0 OR EP.seen = 1 OR EP.last_second_seen >= :minSecondsSeen * 1000)
+    -- <-- AM (A_A_GLANCE_IS_NOT_A_VIEWING)
+    -- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS) -->
+    -- :watchedOnly = 1 keeps only episodes that reached the watched threshold.
+    -- "Watched" and "viewed" are different states here: everything in this list
+    -- is viewed by definition, and seen is the narrower one.
+    --
+    -- In the CTE with the others, so an entry whose newest row is unwatched
+    -- falls back to its last watched episode rather than leaving the list.
+    AND (:watchedOnly = 0 OR EP.seen = 1)
+    -- <-- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
 )
-ORDER BY H.seenAt DESC;
+SELECT
+L.id,
+L.animeId,
+L.episodeId,
+A.title,
+A.thumbnail_url AS thumbnailUrl,
+A.source,
+A.favorite,
+A.cover_last_modified,
+L.episodeNumber,
+L.seenAt,
+-- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
+L.episodeName,
+L.scanlator,
+L.episodeUrl
+FROM latest L
+JOIN animes A
+ON A._id = L.animeId
+WHERE L.rn = 1
+AND lower(A.title) LIKE ('%' || :query || '%')
+-- AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME): L.id breaks ties. seenAt alone is
+-- not a total order - two entries watched in the same second compare equal, and
+-- SQLite leaves the order of equal sort keys undefined. That did not matter when
+-- one query returned the whole list; with OFFSET it means two separate
+-- executions could order a tied pair differently and drop or repeat a row across
+-- a page boundary. Not reproduced on this schema (the planner picks the same
+-- plan for both pages, so the order is stable in practice), but stability by
+-- coincidence of plan is not a guarantee. L.id is the history row id and the
+-- rn = 1 pick leaves one per entry, so this makes the order total, and it only
+-- orders pairs whose relative order was unspecified before.
+ORDER BY L.seenAt DESC, L.id DESC
+LIMIT :limit OFFSET :offset;
+
+-- AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME) -->
+-- How many rows historyPaged would return, for the paging source's bounds.
+--
+-- Not the same query wrapped in COUNT(*). historyPaged picks one row per entry
+-- with ROW_NUMBER, so its row count is just the number of entries that have a
+-- qualifying history row and a matching title - which EXISTS answers without
+-- the window function, without the join to episodes in the outer query, and
+-- without the sort. Same filters, in the same order, so the two cannot drift on
+-- what qualifies: last_seen > 0, the origin filter, and the title LIKE.
+--
+-- EXISTS rather than a join or IN (SELECT DISTINCT ...) for the reason recorded
+-- on getSeenAnimeNotInLibraryAfter in animes.sq: it stops at the first matching
+-- row per entry instead of building the whole set.
+-- <-- AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME)
+historyCount:
+SELECT COUNT(*)
+FROM animes A
+WHERE lower(A.title) LIKE ('%' || :query || '%')
+AND EXISTS (
+    SELECT 1
+    FROM history H
+    JOIN episodes EP
+    ON EP._id = H.episode_id
+    WHERE EP.anime_id = A._id
+    AND H.last_seen > 0
+    AND (:playerOnly = 0 OR H.origin = 0)
+    -- AM (A_A_GLANCE_IS_NOT_A_VIEWING): the same predicate as historyPaged's,
+    -- so the count cannot disagree with the list about what qualifies.
+    AND (:minSecondsSeen = 0 OR EP.seen = 1 OR EP.last_second_seen >= :minSecondsSeen * 1000)
+    -- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS): the same predicate as
+    -- historyPaged's. The downloaded filter is absent from both, so the count
+    -- is the count before it - which is what enablePlaceholders = false makes
+    -- harmless, and the reason that filter cannot live in this layer.
+    AND (:watchedOnly = 0 OR EP.seen = 1)
+);
+
 -- <-- AM (HISTORY_ORIGIN)
 
+-- AM (A_LATEST_HISTORY_READS_ONE_ROW): the newest row, read as one row.
+--
+-- It used to come through historyView, which carries a GROUP BY aggregate over
+-- the whole history table (see max_last_seen above) - so answering "what was
+-- watched last" grouped every history row in the database and then took one.
+-- Reading the three tables directly lets idx_history_last_seen walk last_seen
+-- descending and stop at the first match.
+--
+-- Same row set as the view: its max_last_seen join is one row per anime_id, so
+-- it never multiplied or dropped a history row. Ties on last_seen were resolved
+-- arbitrarily before and still are - there is no tiebreak either way.
+--
+-- This is what GetNextEpisodes and GetQueueResumePoint ask for, so it is on the
+-- history screen's path rather than a background one.
 getLatestHistory:
 SELECT
-id,
-animeId,
-episodeId,
-title,
-thumbnailUrl,
-source,
-favorite,
-cover_last_modified,
-episodeNumber,
-seenAt
-FROM historyView
-WHERE historyView.seenAt > 0
-ORDER BY seenAt DESC
+H._id AS id,
+EP.anime_id AS animeId,
+H.episode_id AS episodeId,
+A.title,
+A.thumbnail_url AS thumbnailUrl,
+A.source,
+A.favorite,
+A.cover_last_modified,
+EP.episode_number AS episodeNumber,
+H.last_seen AS seenAt,
+-- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS): the same three columns historyPaged
+-- carries, in the same order, because both queries are read by the same mapper
+-- - HistoryMapper.mapHistoryWithRelations - and a mapper is shaped by the
+-- columns, so adding them to one query without the other stops this one
+-- compiling. Unused here: nothing asks whether the newest row is downloaded.
+EP.name AS episodeName,
+EP.scanlator,
+EP.url AS episodeUrl
+FROM history H
+JOIN episodes EP
+ON EP._id = H.episode_id
+JOIN animes A
+ON A._id = EP.anime_id
+WHERE H.last_seen > 0
+ORDER BY H.last_seen DESC
 LIMIT 1;

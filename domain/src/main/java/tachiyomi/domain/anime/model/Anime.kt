@@ -189,13 +189,33 @@ data class Anime(
 
     // AM (EPISODE_VIEW_MODE) -->
     /**
-     * The two mutually-exclusive episode list display modes, both derived from
-     * the single previews bit: SIMPLIFIED is the no-thumbnail row, PREVIEW is
-     * the thumbnail row with file size/date/download marker hidden.
+     * The mutually-exclusive episode list display modes.
+     *
+     * SIMPLIFIED is the no-thumbnail row and PREVIEW the thumbnail row, which
+     * differ only in the previews bit; AM (ENTRY_SCROLLER) SCROLLER replaces
+     * the rows with the feed and has a bit of its own, which wins where it is
+     * set.
+     *
+     * Two bits rather than a widened previews field, deliberately: every flag
+     * already stored keeps its meaning, so no migration is needed and an entry
+     * saved before the scroller existed reads as the view it was left in.
      */
-    fun episodeViewMode(): EpisodeViewMode {
-        return if (showPreviews()) EpisodeViewMode.PREVIEW else EpisodeViewMode.SIMPLIFIED
+    fun episodeViewMode(): EpisodeViewMode = when {
+        // AM (ENTRY_SCROLLER)
+        showScroller() -> EpisodeViewMode.SCROLLER
+        showPreviews() -> EpisodeViewMode.PREVIEW
+        else -> EpisodeViewMode.SIMPLIFIED
     }
+
+    // AM (ENTRY_SCROLLER) -->
+    fun showScroller(): Boolean {
+        return episodeFlags and EPISODE_SCROLLER_MASK == EPISODE_SHOW_SCROLLER
+    }
+
+    /** Both view-mode bits together, which is what a default is stored as. */
+    val episodeViewModeRaw: Long
+        get() = episodeFlags and EPISODE_VIEW_MODE_MASK
+    // <-- AM (ENTRY_SCROLLER)
     // <-- AM (EPISODE_VIEW_MODE)
 
     val seasonDownloadedFilterRaw: Long
@@ -329,6 +349,15 @@ data class Anime(
         const val EPISODE_SHOW_NOT_SUMMARIES = 0x00001000L
         const val EPISODE_SUMMARIES_MASK = 0x00001000L
         // <-- AY
+
+        // AM (ENTRY_SCROLLER) -->
+        const val EPISODE_SHOW_NOT_SCROLLER = 0x00000000L
+        const val EPISODE_SHOW_SCROLLER = 0x00002000L
+        const val EPISODE_SCROLLER_MASK = 0x00002000L
+
+        /** The view mode as one value - see [Anime.episodeViewMode]. */
+        const val EPISODE_VIEW_MODE_MASK = EPISODE_PREVIEWS_MASK or EPISODE_SCROLLER_MASK
+        // <-- AM (ENTRY_SCROLLER)
 
         const val EPISODE_DISPLAY_NAME = 0x00000000L
         const val EPISODE_DISPLAY_NUMBER = 0x00100000L
@@ -470,5 +499,8 @@ data class Anime(
 enum class EpisodeViewMode {
     SIMPLIFIED,
     PREVIEW,
+
+    // AM (ENTRY_SCROLLER)
+    SCROLLER,
 }
 // <-- AM (EPISODE_VIEW_MODE)

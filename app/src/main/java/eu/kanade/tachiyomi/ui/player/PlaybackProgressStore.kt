@@ -45,8 +45,17 @@ interface PlaybackProgressStore {
      */
     suspend fun savePosition(writeSeenState: Boolean)
 
-    /** Records that this was watched, at most once per session. */
-    suspend fun recordWatched()
+    /**
+     * Records that this was watched, at most once per session.
+     *
+     * AM (A_HISTORY_HAS_A_THRESHOLD): [watchedSeconds] is how long this
+     * session has actually been watched for - not the playhead's position,
+     * which a loop or a seek makes no statement about elapsed watching. A
+     * caller that cannot count it passes null, which means "no threshold to
+     * apply": the write is as unconditional as it was before the threshold
+     * existed.
+     */
+    suspend fun recordWatched(watchedSeconds: Int?)
 }
 
 /**
@@ -188,8 +197,17 @@ class LibraryProgressStore(
     }
 
     /** Saves last-seen history if not in incognito mode. */
-    override suspend fun recordWatched() {
+    override suspend fun recordWatched(watchedSeconds: Int?) {
         if (isIncognito()) return
+        // AM (A_HISTORY_HAS_A_THRESHOLD) -->
+        // The one place the threshold is applied, because this is the one place
+        // a history row is written: the player and the browse feed both arrive
+        // here, and a rule about what counts as watched cannot mean two
+        // different things depending on which of them played it. Checked before
+        // the once-per-session latch below, so a session that has not yet
+        // reached the threshold is not recorded as having been written.
+        if (watchedSeconds != null && watchedSeconds < playerPreferences.historyThresholdSeconds.get()) return
+        // <-- AM (A_HISTORY_HAS_A_THRESHOLD)
         // AM (PERSIST_ON_CADENCE) -->
         // History records WHEN an episode was last watched, which changes once
         // per viewing, not continuously - but this ran on every progress save,

@@ -82,6 +82,28 @@ suspend fun WebView.getHtml(): String = suspendCancellableCoroutine {
 }
 
 @SuppressLint("SetJavaScriptEnabled")
+// AM (A_A_LEFT_WEBVIEW_IS_NOT_A_PLAYING_ONE) -->
+/**
+ * Pauses every media element on the page.
+ *
+ * WebView.onPause() is documented as a best-effort pause of what can be paused
+ * safely and says nothing about HTML5 media, so on its own it is not a promise
+ * that a video stops. Asking the page itself is: the elements are paused
+ * through the same API the page's own controls use, which also stops a live
+ * stream pulling data it is no longer showing anyone.
+ *
+ * Pauses rather than clearing src, because the page is expected to be resumed
+ * where it was when the screen comes back.
+ */
+fun WebView.pauseMedia() {
+    evaluateJavascript(PAUSE_MEDIA_SCRIPT, null)
+}
+
+private const val PAUSE_MEDIA_SCRIPT =
+    "(function(){var m=document.querySelectorAll('video,audio');" +
+        "for(var i=0;i<m.length;i++){try{m[i].pause();}catch(e){}}})();"
+// <-- AM (A_A_LEFT_WEBVIEW_IS_NOT_A_PLAYING_ONE)
+
 fun WebView.setDefaultSettings() {
     with(settings) {
         javaScriptEnabled = true

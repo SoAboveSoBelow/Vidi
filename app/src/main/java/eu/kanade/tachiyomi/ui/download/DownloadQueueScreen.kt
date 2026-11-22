@@ -318,6 +318,9 @@ object DownloadQueueScreen : Screen() {
                                 onCancel = { viewModel.cancel(it.episodeId) },
                                 onCancelSeries = { viewModel.cancelSeries(it.animeId) },
                                 onOpenEntry = { navigator.push(AnimeScreen(it.animeId)) },
+                                // AM (QUEUE_ROW_ACTIONS)
+                                onRetry = { viewModel.retry(it.episodeId) },
+                                onStartNow = { viewModel.startNow(it.episodeId) },
                                 modifier = Modifier.nestedScroll(nestedScrollConnection),
                             )
                         }

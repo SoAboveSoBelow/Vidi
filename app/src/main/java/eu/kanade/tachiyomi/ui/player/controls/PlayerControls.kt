@@ -117,6 +117,11 @@ fun PlayerControls(
      * The buttons would otherwise be drawn permanently disabled.
      */
     showMediaButtons: Boolean = true,
+    /**
+     * AM (ENTRY_SCROLLER): a double tap on the centre play/pause button, for a
+     * surface whose expand gesture lives there - see PlayPauseSlot.
+     */
+    onPlayPauseDoubleClick: (() -> Unit)? = null,
     // <-- AM (BROWSE_SCROLLER_CONTROLS)
     // AM (CONTROL_BINDINGS) -->
     /**
@@ -184,6 +189,8 @@ fun PlayerControls(
             ControlAction.VideoQuality -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.QualityTracks))
             ControlAction.VideoFilters -> onPlayerEvent(PlayerEvent.SetPanel(Panels.VideoFilters))
             ControlAction.Overflow -> onPlayerEvent(PlayerEvent.SetSheet(Sheets.More))
+            // AM (A_LOOPING_IS_THE_USERS_CALL)
+            ControlAction.ToggleLoop -> onPlayerEvent(PlayerEvent.ToggleLoop)
             ControlAction.PrimaryCustomButton -> onPlayerEvent(PlayerEvent.ExecuteCustomButton(false))
             is ControlAction.CustomButton -> onPlayerEvent(
                 PlayerEvent.ExecuteCustomButtonById(action.id, action.input),
@@ -522,6 +529,8 @@ fun PlayerControls(
                     hasNext = nextEnabled,
                     // AM (BROWSE_SCROLLER_CONTROLS)
                     showMediaButtons = showMediaButtons,
+                    // AM (ENTRY_SCROLLER)
+                    onPlayPauseDoubleClick = onPlayPauseDoubleClick,
                     availability = controlAvailability,
                     onAction = onControlAction,
                     isStopped = stateData.isStopped,

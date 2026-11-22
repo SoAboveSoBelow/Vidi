@@ -88,7 +88,11 @@ class SetAnimeEpisodeFlags(
         return animeRepository.update(
             AnimeUpdate(
                 id = anime.id,
-                episodeFlags = anime.episodeFlags.setFlag(flag, Anime.EPISODE_PREVIEWS_MASK),
+                // AM (ENTRY_SCROLLER): the whole view-mode field, not the
+                // previews bit alone. Choosing previews IS choosing a view, so
+                // leaving the scroller bit set would have the switch report a
+                // change the list never made.
+                episodeFlags = anime.episodeFlags.setFlag(flag, Anime.EPISODE_VIEW_MODE_MASK),
             ),
         )
     }
@@ -106,18 +110,17 @@ class SetAnimeEpisodeFlags(
     // AM (EPISODE_VIEW_MODE) -->
 
     /**
-     * Applies one of the 2 named episode view modes, which differ only in the
-     * previews bit.
+     * Applies one of the named episode view modes.
+     *
+     * AM (ENTRY_SCROLLER): two bits rather than one - see
+     * [Anime.episodeViewMode]. Written as one masked field so every mode
+     * clears the others, whichever one is being left.
      */
     suspend fun awaitSetEpisodeViewMode(anime: Anime, viewMode: EpisodeViewMode): Boolean {
-        val previews = when (viewMode) {
-            EpisodeViewMode.SIMPLIFIED -> Anime.EPISODE_SHOW_NOT_PREVIEWS
-            EpisodeViewMode.PREVIEW -> Anime.EPISODE_SHOW_PREVIEWS
-        }
         return animeRepository.update(
             AnimeUpdate(
                 id = anime.id,
-                episodeFlags = anime.episodeFlags.setFlag(previews, Anime.EPISODE_PREVIEWS_MASK),
+                episodeFlags = anime.episodeFlags.setFlag(viewMode.flag(), Anime.EPISODE_VIEW_MODE_MASK),
             ),
         )
     }
@@ -152,12 +155,22 @@ class SetAnimeEpisodeFlags(
                     .setFlag(sortingDirection, Anime.EPISODE_SORT_DIR_MASK)
                     .setFlag(displayMode, Anime.EPISODE_DISPLAY_MASK)
                     // AY -->
-                    .setFlag(showPreviews, Anime.EPISODE_PREVIEWS_MASK)
+                    // AM (ENTRY_SCROLLER): the whole view-mode field.
+                    .setFlag(showPreviews, Anime.EPISODE_VIEW_MODE_MASK)
                     .setFlag(showSummaries, Anime.EPISODE_SUMMARIES_MASK),
                 // <-- AY
             ),
         )
     }
+
+    // AM (ENTRY_SCROLLER) -->
+    /** A view mode as the pair of bits that stores it. */
+    private fun EpisodeViewMode.flag(): Long = when (this) {
+        EpisodeViewMode.SIMPLIFIED -> Anime.EPISODE_SHOW_NOT_PREVIEWS or Anime.EPISODE_SHOW_NOT_SCROLLER
+        EpisodeViewMode.PREVIEW -> Anime.EPISODE_SHOW_PREVIEWS or Anime.EPISODE_SHOW_NOT_SCROLLER
+        EpisodeViewMode.SCROLLER -> Anime.EPISODE_SHOW_SCROLLER
+    }
+    // <-- AM (ENTRY_SCROLLER)
 
     private fun Long.setFlag(flag: Long, mask: Long): Long {
         return this and mask.inv() or (flag and mask)

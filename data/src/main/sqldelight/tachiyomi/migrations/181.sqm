@@ -1,0 +1,12 @@
+-- AM (A_COVERAGE_IS_OBSERVED_NOT_INFERRED): see source_page_coverage.sq.
+CREATE TABLE source_page_coverage(
+    source INTEGER NOT NULL,
+    listing_key TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    entry_count INTEGER NOT NULL,
+    viewed_count INTEGER NOT NULL,
+    head_url TEXT NOT NULL,
+    tail_url TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(source, listing_key, page)
+);

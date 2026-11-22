@@ -440,6 +440,9 @@
     <string name="label_cant_migrate_episode">Unable to migrate episode to season, select season to continue</string>
     <string name="label_cant_migrate_season">Unable to migrate season to episode</string>
     <string name="label_show_seasons">Show seasons</string>
+    <!-- AM (A_BROWSE_HAS_A_REQUEST_BUDGET) -->
+    <string name="exception_source_request_budget">Paused to avoid rate limiting this source. Try again in %1$s.</string>
+
     <!-- Torrent Service -->
     <string name="torrserver_disabled">TorrServer is not running</string>
     <string name="torrentserver_is_running">Torrent Server is running</string>

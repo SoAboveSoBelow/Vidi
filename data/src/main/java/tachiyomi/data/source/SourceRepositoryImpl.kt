@@ -7,6 +7,7 @@ import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.animesource.AnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
+import eu.kanade.tachiyomi.network.SourceRequestBudget
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
@@ -14,6 +15,7 @@ import tachiyomi.data.Database
 import tachiyomi.data.subscribeToList
 import tachiyomi.domain.anime.interactor.NetworkToLocalAnime
 import tachiyomi.domain.source.model.StubSource
+import tachiyomi.domain.source.repository.SourceCoverageRepository
 import tachiyomi.domain.source.repository.SourcePagingSource
 import tachiyomi.domain.source.repository.SourceRepository
 import tachiyomi.domain.source.service.SourceManager
@@ -26,6 +28,10 @@ class SourceRepositoryImpl(
     private val sourceManager: SourceManager,
     private val database: Database,
     private val networkToLocalAnime: NetworkToLocalAnime,
+    // AM (A_BROWSE_HAS_A_REQUEST_BUDGET)
+    private val requestBudget: SourceRequestBudget,
+    // AM (A_COVERAGE_IS_OBSERVED_NOT_INFERRED)
+    private val coverage: SourceCoverageRepository,
 ) : SourceRepository {
 
     override fun getSources(): Flow<List<DomainSource>> {
@@ -70,16 +76,55 @@ class SourceRepositoryImpl(
         sourceId: Long,
         query: String,
         filterList: AnimeFilterList,
+        listingKey: String?,
+        skipCovered: () -> Boolean,
+        coveredFraction: () -> Float,
     ): SourcePagingSource {
-        return SourceSearchPagingSource(sourceManager.getOrStub(sourceId), query, filterList, networkToLocalAnime)
+        return SourceSearchPagingSource(
+            sourceManager.getOrStub(sourceId),
+            query,
+            filterList,
+            networkToLocalAnime,
+            requestBudget,
+            coverage,
+            listingKey,
+            skipCovered,
+            coveredFraction,
+        )
     }
 
-    override fun getPopular(sourceId: Long): SourcePagingSource {
-        return SourcePopularPagingSource(sourceManager.getOrStub(sourceId), networkToLocalAnime)
+    override fun getPopular(
+        sourceId: Long,
+        listingKey: String?,
+        skipCovered: () -> Boolean,
+        coveredFraction: () -> Float,
+    ): SourcePagingSource {
+        return SourcePopularPagingSource(
+            sourceManager.getOrStub(sourceId),
+            networkToLocalAnime,
+            requestBudget,
+            coverage,
+            listingKey,
+            skipCovered,
+            coveredFraction,
+        )
     }
 
-    override fun getLatest(sourceId: Long): SourcePagingSource {
-        return SourceLatestPagingSource(sourceManager.getOrStub(sourceId), networkToLocalAnime)
+    override fun getLatest(
+        sourceId: Long,
+        listingKey: String?,
+        skipCovered: () -> Boolean,
+        coveredFraction: () -> Float,
+    ): SourcePagingSource {
+        return SourceLatestPagingSource(
+            sourceManager.getOrStub(sourceId),
+            networkToLocalAnime,
+            requestBudget,
+            coverage,
+            listingKey,
+            skipCovered,
+            coveredFraction,
+        )
     }
 }
 

@@ -66,11 +66,18 @@ import tachiyomi.domain.category.interactor.SetAnimeCategories
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.episode.interactor.SetAnimeDefaultEpisodeFlags
 import tachiyomi.domain.history.interactor.GetViewedAnimeIds
+import tachiyomi.domain.history.model.ViewedAnimeIds
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.source.interactor.GetRemoteAnime
+import tachiyomi.domain.source.model.listingKeyOf
 import tachiyomi.domain.source.service.SourceManager
 import kotlin.time.Clock
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter as SourceModelFilter
+
+// AM (A_CARD_OBSERVES_ONLY_WHILE_IT_IS_WATCHED): how long a card's row observer
+// outlives its last collector, so scrolling and configuration changes do not
+// tear every visible card's listener down and immediately rebuild it.
+private const val CARD_OBSERVER_KEEPALIVE_MS = 5_000L
 
 @AssistedInject
 class BrowseSourceViewModel(
@@ -229,7 +236,7 @@ class BrowseSourceViewModel(
      * re-collection reaches every entry's same verdict and the listing comes
      * back as it was left.
      */
-    private val viewedTrim: Flow<Set<Long>?> = combine(
+    private val viewedTrim: Flow<ViewedAnimeIds?> = combine(
         state.map { it.listing }.distinctUntilChanged(),
         hideViewedPreference.changes().distinctUntilChanged(),
     ) { _, trimViewed -> trimViewed }
@@ -241,13 +248,71 @@ class BrowseSourceViewModel(
         .distinctUntilChanged()
         .map { listing ->
             val pager = Pager(PagingConfig(pageSize = 25)) {
-                getRemoteAnime(sourceId, listing.query ?: "", listing.filters)
+                // AM (A_COVERAGE_IS_OBSERVED_NOT_INFERRED): the ordering this
+                // listing's page observations belong to. Filters are part of it,
+                // so a filtered listing records separately and one listing's
+                // coverage can never be read against another's.
+                getRemoteAnime(
+                    sourceId,
+                    listing.query ?: "",
+                    listing.filters,
+                    listingKeyOf(listing.query, listing.filters),
+                    // AM (A_SKIP_SERVES_THE_TRIM_ONLY): read per load, so
+                    // turning the trim off stops pages being skipped without
+                    // waiting for the pager to be rebuilt.
+                    skipCovered = { hideViewedPreference.get() },
+                    // AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS): read per load for
+                    // the same reason as skipCovered above - changing the
+                    // setting must reach a walk already in progress.
+                    coveredFraction = { sourcePreferences.browsePageSkipThreshold.get() },
+                )
             }.flow.map { pagingData ->
+                // AM (A_CARD_OBSERVES_ONLY_WHILE_IT_IS_WATCHED) -->
+                // One live row observer per card, started when something is
+                // actually collecting it and stopped shortly after it is not.
+                //
+                // It used to be stateIn(viewModelScope) - the suspending
+                // overload with eager, permanent sharing - which cost two
+                // things per card, both of them unbounded:
+                //
+                //  - A DB QUERY BEFORE THE PAGE COULD BE PRESENTED. That
+                //    overload suspends until the first emission, and this
+                //    transform runs per item, so a page of N cards did N
+                //    serial round trips to the animes table before any of it
+                //    reached the screen. The three-argument overload does not
+                //    suspend: the entry the PagingSource already read through
+                //    NetworkToLocalAnime IS the persisted row, so it is the
+                //    initial value rather than something to go and fetch.
+                //  - A LISTENER THAT NEVER STOPPED. Eager sharing in
+                //    viewModelScope collects forever, so every card ever
+                //    scrolled past kept a SQLDelight listener on `animes`, and
+                //    a listing change dropped the cached pages while leaving
+                //    their listeners behind. Any write to that table re-runs
+                //    every one of them, and browse writes a row per card it
+                //    displays - so a scrolling session re-queried the table
+                //    roughly in proportion to the square of the cards seen.
+                //    WhileSubscribed bounds that to the cards on screen.
+                //
+                // distinctUntilChanged because the listener fires on every
+                // write to `animes`, not just writes to this row; without it
+                // each unrelated write recomposed every visible card with an
+                // identical value.
+                //
+                // Compose drops and re-adds collectors across recomposition and
+                // configuration changes, so the keepalive is what stops a
+                // scroll from tearing listeners down and standing them back up;
+                // it is sharing hysteresis, not a wait anything depends on.
                 pagingData.map { anime ->
                     getAnime.subscribe(anime.url, anime.source)
                         .map { it ?: anime }
-                        .stateIn(viewModelScope)
+                        .distinctUntilChanged()
+                        .stateIn(
+                            viewModelScope,
+                            SharingStarted.WhileSubscribed(CARD_OBSERVER_KEEPALIVE_MS),
+                            anime,
+                        )
                 }
+                    // <-- AM (A_CARD_OBSERVES_ONLY_WHILE_IT_IS_WATCHED)
                     .filter { !hideInLibraryItems || !it.value.favorite }
             }
                 .cachedIn(viewModelScope)
@@ -529,6 +594,7 @@ class BrowseSourceViewModel(
     }
 
     // AM (QUEUE_WATCH_FILTER) -->
+
     /** Applies the one answer to the whole selection, in selection order. */
     fun addQueueChoice(
         sources: List<QueueSource>,
@@ -630,6 +696,7 @@ class BrowseSourceViewModel(
     }
 
     // AM (BROWSE_SCROLLER_CARD_ACTIONS) -->
+
     /**
      * The same dialog for one entry that was never selected - the scroller
      * card's add-to-library button under a long press.
@@ -789,6 +856,7 @@ class BrowseSourceViewModel(
         data object Filter : Dialog
 
         data class AddDuplicateAnime(val anime: Anime, val duplicates: List<AnimeWithEpisodeCount>) : Dialog
+
         // AM (QUEUE_WATCH_FILTER)
         // AM (QUEUE_RESOLVE_ONCE)
         data class AddToQueue(val sources: List<QueueSource>) : Dialog

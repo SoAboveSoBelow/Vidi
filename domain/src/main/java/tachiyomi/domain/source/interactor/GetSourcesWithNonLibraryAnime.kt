@@ -20,4 +20,17 @@ class GetSourcesWithNonLibraryAnime(
         return repository.getChildrenByParentId(parentId)
     }
     // <-- AY
+
+    // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+    /**
+     * What each source holds IN the library.
+     *
+     * On this interactor rather than one of its own: it is the same question
+     * this already answers, asked of the other half of the table, and the one
+     * screen that wants it wants both together.
+     */
+    fun subscribeLibrary(): Flow<List<DeletableAnime>> {
+        return repository.getLibraryParentAnime()
+    }
+    // <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
 }

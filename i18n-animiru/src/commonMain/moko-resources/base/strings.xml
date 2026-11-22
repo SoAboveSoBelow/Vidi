@@ -156,6 +156,7 @@
     <string name="am.pref_default_view">Default view</string>
     <string name="am.pref_default_view_simplified">Simplified</string>
     <string name="am.pref_default_view_preview">Preview</string>
+    <string name="am.pref_default_view_scroller">Scroller</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesTitle">Hide entries without newer episodes</string>
     <string name="am.migrationConfigScreen.hideWithoutUpdatesSubtitle">Only show entry if the match has additional episodes</string>
     <string name="am.migrationConfigScreen.prioritizeByChaptersTitle">Match based on episode number</string>
@@ -439,4 +440,38 @@
 
     <!-- AM (BROWSE_HIDE_VIEWED) -->
     <string name="action_hide_viewed">Hide viewed</string>
+
+    <!-- AM (A_THE_SKIP_THRESHOLD_IS_THE_USERS) -->
+    <string name="am_pref_page_skip_threshold">Page skip threshold</string>
+    <string name="am_pref_page_skip_threshold_summary">How much of a page must already be viewed before Hide viewed passes over it instead of requesting it. Lower skips more pages and makes fewer requests, at the cost of passing over entries you never saw.</string>
+
+    <!-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+    <string name="am_action_dump_viewed_sequences">Dump recorded sequences</string>
+    <string name="am_viewed_sequences_source_detail">%1$s pages recorded across %2$s listings · %3$s</string>
+    <string name="am_viewed_sequences_dumped">Sequences dumped</string>
+    <string name="am_viewed_sequences_dumped_detail">Removed %1$s recorded pages, freeing about %2$s inside the database.</string>
+    <string name="am_viewed_sequences_database_size">The database file is %1$s and will not shrink until it is vacuumed; the space is reused instead.</string>
+
+    <!-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+    <string name="am_clear_source_sequences">Recorded sequences (%1$s pages)</string>
+    <string name="am_clear_source_non_library">Entries not in your library (%1$s)</string>
+    <string name="am_clear_source_library">Entries in your library (%1$s)</string>
+    <string name="am_clear_source_library_warning">This removes entries you added to your library, along with their episodes and watch history. It cannot be undone.</string>
+
+    <!-- AM (A_A_GLANCE_IS_NOT_A_VIEWING) -->
+    <string name="am_pref_history_min_seconds">Hide brief views</string>
+    <string name="am_history_min_seconds_off">Off</string>
+    <string name="am_control_action_loop">Loop</string>
+    <string name="am_player_loop_on">Looping</string>
+    <string name="am_player_loop_off">Loop off</string>
+    <string name="am_player_audio_stream_failed">This video\'s audio stream could not be opened</string>
+    <string name="am_history_min_seconds_choice">%1$s seconds</string>
+
+    <!-- AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS) -->
+    <string name="am_history_filter_watched">Watched only</string>
+    <string name="am_history_filter_downloaded">Downloaded only</string>
+
+    <!-- AM (A_HISTORY_HAS_A_THRESHOLD) -->
+    <string name="am_pref_history_threshold">Viewed threshold</string>
+    <string name="am_pref_history_threshold_summary">Watched for %s before it is added to history, in the player and the scroller</string>
 </resources>

@@ -1,13 +1,14 @@
 package tachiyomi.data.track
 
-import app.cash.sqldelight.async.coroutines.awaitAsList
-import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.data.Database
+import tachiyomi.data.awaitList
+import tachiyomi.data.awaitOneOrNull
 import tachiyomi.data.subscribeToList
 import tachiyomi.data.track.TrackMapper.mapTrack
 import tachiyomi.domain.track.model.Track
@@ -21,11 +22,11 @@ class TrackRepositoryImpl(
 ) : TrackRepository {
 
     override suspend fun getTrackById(id: Long): Track? {
-        return database.anime_syncQueries.getTrackById(id, TrackMapper::mapTrack).awaitAsOneOrNull()
+        return database.anime_syncQueries.getTrackById(id, TrackMapper::mapTrack).awaitOneOrNull()
     }
 
     override suspend fun getTracksByAnimeId(animeId: Long): List<Track> {
-        return database.anime_syncQueries.getTracksByAnimeId(animeId, TrackMapper::mapTrack).awaitAsList()
+        return database.anime_syncQueries.getTracksByAnimeId(animeId, TrackMapper::mapTrack).awaitList()
     }
 
     override fun getTracksAsFlow(): Flow<List<Track>> {
@@ -39,10 +40,13 @@ class TrackRepositoryImpl(
     }
 
     override suspend fun delete(animeId: Long, trackerId: Long) {
-        database.anime_syncQueries.delete(
-            animeId = animeId,
-            syncId = trackerId,
-        )
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.anime_syncQueries.delete(
+                animeId = animeId,
+                syncId = trackerId,
+            )
+        }
     }
 
     override suspend fun insert(track: Track) {
@@ -54,23 +58,29 @@ class TrackRepositoryImpl(
     }
 
     private suspend fun insertValues(vararg tracks: Track) {
-        database.transaction {
-            tracks.forEach { animeTrack ->
-                database.anime_syncQueries.insert(
-                    animeId = animeTrack.animeId,
-                    syncId = animeTrack.trackerId,
-                    remoteId = animeTrack.remoteId,
-                    libraryId = animeTrack.libraryId,
-                    title = animeTrack.title,
-                    lastEpisodeSeen = animeTrack.lastEpisodeSeen,
-                    totalEpisodes = animeTrack.totalEpisodes,
-                    status = animeTrack.status,
-                    score = animeTrack.score,
-                    remoteUrl = animeTrack.remoteUrl,
-                    startDate = animeTrack.startDate,
-                    finishDate = animeTrack.finishDate,
-                    private = animeTrack.private,
-                )
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a bulk write, and the
+        // whole transaction on one IO thread rather than each statement on
+        // the caller's - nothing inside suspends at a dispatch point, so the
+        // body does not move between threads mid-transaction.
+        withIOContext {
+            database.transaction {
+                tracks.forEach { animeTrack ->
+                    database.anime_syncQueries.insert(
+                        animeId = animeTrack.animeId,
+                        syncId = animeTrack.trackerId,
+                        remoteId = animeTrack.remoteId,
+                        libraryId = animeTrack.libraryId,
+                        title = animeTrack.title,
+                        lastEpisodeSeen = animeTrack.lastEpisodeSeen,
+                        totalEpisodes = animeTrack.totalEpisodes,
+                        status = animeTrack.status,
+                        score = animeTrack.score,
+                        remoteUrl = animeTrack.remoteUrl,
+                        startDate = animeTrack.startDate,
+                        finishDate = animeTrack.finishDate,
+                        private = animeTrack.private,
+                    )
+                }
             }
         }
     }
@@ -78,7 +88,7 @@ class TrackRepositoryImpl(
     // AM (GROUPING) -->
     override suspend fun getTracks(): List<Track> {
         return database.anime_syncQueries.getTracks(::mapTrack)
-            .awaitAsList()
+            .awaitList()
     }
     // <-- AM (GROUPING)
 }

@@ -1,13 +1,14 @@
 package tachiyomi.data.category
 
-import app.cash.sqldelight.async.coroutines.awaitAsList
-import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.data.Database
+import tachiyomi.data.awaitList
+import tachiyomi.data.awaitOneOrNull
 import tachiyomi.data.subscribeToList
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.category.repository.CategoryRepository
@@ -20,11 +21,11 @@ class CategoryRepositoryImpl(
 ) : CategoryRepository {
 
     override suspend fun get(id: Long): Category? {
-        return database.categoriesQueries.getCategory(id, ::mapCategory).awaitAsOneOrNull()
+        return database.categoriesQueries.getCategory(id, ::mapCategory).awaitOneOrNull()
     }
 
     override suspend fun getAll(): List<Category> {
-        return database.categoriesQueries.getCategories(::mapCategory).awaitAsList()
+        return database.categoriesQueries.getCategories(::mapCategory).awaitList()
     }
 
     override fun getAllAsFlow(): Flow<List<Category>> {
@@ -32,7 +33,7 @@ class CategoryRepositoryImpl(
     }
 
     override suspend fun getCategoriesByAnimeId(animeId: Long): List<Category> {
-        return database.categoriesQueries.getCategoriesByAnimeId(animeId, ::mapCategory).awaitAsList()
+        return database.categoriesQueries.getCategoriesByAnimeId(animeId, ::mapCategory).awaitList()
     }
 
     override fun getCategoriesByAnimeIdAsFlow(animeId: Long): Flow<List<Category>> {
@@ -41,7 +42,7 @@ class CategoryRepositoryImpl(
 
     // AY -->
     override suspend fun getAllVisible(): List<Category> {
-        return database.categoriesQueries.getVisibleCategories(::mapCategory).awaitAsList()
+        return database.categoriesQueries.getVisibleCategories(::mapCategory).awaitList()
     }
 
     override fun getAllVisibleAsFlow(): Flow<List<Category>> {
@@ -49,7 +50,7 @@ class CategoryRepositoryImpl(
     }
 
     override suspend fun getVisibleCategoriesByAnimeId(animeId: Long): List<Category> {
-        return database.categoriesQueries.getVisibleCategoriesByAnimeId(animeId, ::mapCategory).awaitAsList()
+        return database.categoriesQueries.getVisibleCategoriesByAnimeId(animeId, ::mapCategory).awaitList()
     }
 
     override fun getVisibleCategoriesByAnimeIdAsFlow(animeId: Long): Flow<List<Category>> {
@@ -58,41 +59,65 @@ class CategoryRepositoryImpl(
     // <-- AY
 
     override suspend fun insert(category: Category) {
-        database.categoriesQueries.insert(
-            name = category.name,
-            order = category.order,
-            flags = category.flags,
-        )
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.categoriesQueries.insert(
+                name = category.name,
+                order = category.order,
+                flags = category.flags,
+            )
+        }
     }
 
     override suspend fun updateName(categoryId: Long, name: String) {
-        database.categoriesQueries.updateName(name = name, categoryId = categoryId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.categoriesQueries.updateName(name = name, categoryId = categoryId)
+        }
     }
 
     override suspend fun updateFlags(categoryId: Long, flags: Long) {
-        database.categoriesQueries.updateFlags(flags = flags, categoryId = categoryId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.categoriesQueries.updateFlags(flags = flags, categoryId = categoryId)
+        }
     }
 
     // AY -->
     override suspend fun updateHidden(categoryId: Long, hidden: Boolean) {
-        database.categoriesQueries.updateHidden(hidden = if (hidden) 1 else 0, categoryId = categoryId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.categoriesQueries.updateHidden(hidden = if (hidden) 1 else 0, categoryId = categoryId)
+        }
     }
     // <-- AY
 
     override suspend fun updateAllFlags(flags: Long?) {
-        database.categoriesQueries.updateAllFlags(flags = flags)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.categoriesQueries.updateAllFlags(flags = flags)
+        }
     }
 
     override suspend fun updateAllOrders(orderedIds: List<Long>) {
-        database.transaction {
-            orderedIds.forEachIndexed { index, categoryId ->
-                database.categoriesQueries.updateOrder(order = index.toLong(), categoryId = categoryId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a bulk write, and the
+        // whole transaction on one IO thread rather than each statement on
+        // the caller's - nothing inside suspends at a dispatch point, so the
+        // body does not move between threads mid-transaction.
+        withIOContext {
+            database.transaction {
+                orderedIds.forEachIndexed { index, categoryId ->
+                    database.categoriesQueries.updateOrder(order = index.toLong(), categoryId = categoryId)
+                }
             }
         }
     }
 
     override suspend fun delete(categoryId: Long) {
-        database.categoriesQueries.delete(categoryId = categoryId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.categoriesQueries.delete(categoryId = categoryId)
+        }
     }
 
     private fun mapCategory(

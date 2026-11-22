@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayCircleOutline
+import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.SkipNext
@@ -51,6 +52,8 @@ fun controlActionIcon(action: ControlAction): ImageVector? = when (action) {
     ControlAction.PictureInPicture -> Icons.Filled.PictureInPictureAlt
     ControlAction.AspectRatio -> Icons.Filled.AspectRatio
     ControlAction.Cast -> Icons.Filled.Cast
+    // AM (A_LOOPING_IS_THE_USERS_CALL)
+    ControlAction.ToggleLoop -> Icons.Filled.Repeat
     ControlAction.SubtitleTracks -> Icons.Filled.Subtitles
     ControlAction.SubtitleSettings -> Icons.Filled.Subtitles
     ControlAction.AudioTracks -> Icons.Filled.Audiotrack

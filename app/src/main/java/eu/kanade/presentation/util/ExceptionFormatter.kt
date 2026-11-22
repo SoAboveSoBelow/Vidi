@@ -3,6 +3,7 @@ package eu.kanade.presentation.util
 import android.content.Context
 import aniyomi.core.common.torrent.DisabledTorrServerException
 import eu.kanade.tachiyomi.network.HttpException
+import eu.kanade.tachiyomi.network.SourceBudgetExceededException
 import eu.kanade.tachiyomi.util.system.isOnline
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.data.source.NoResultsException
@@ -26,6 +27,12 @@ val Throwable.formattedMessage: String
             }
 
             is NoResultsException -> return context.stringResource(MR.strings.no_results_found)
+            // AM (A_BROWSE_HAS_A_REQUEST_BUDGET): a request that was never made,
+            // so it says so rather than reading as a source failure.
+            is SourceBudgetExceededException -> return context.stringResource(
+                AYMR.strings.exception_source_request_budget,
+                retryIn.toString(),
+            )
             is SourceNotInstalledException -> return context.stringResource(MR.strings.loader_not_implemented_error)
         }
         return when (val className = this::class.simpleName) {

@@ -633,9 +633,17 @@ class MediaCache(private val cacheDir: File) {
         activeEpisodeId = episodeId
     }
 
-    /** Whether [entry] belongs to the playing episode or to a transfer in flight. */
+    /** Whether [entry] belongs to the playing episode, a live registration or a transfer in flight. */
     private fun isProtected(entry: Entry): Boolean {
         if (entry.inUse) return true
+        // AM (A_REGISTERED_ENTRY_IS_IN_USE) -->
+        // An entry a host has registered is one it will read: the player's
+        // current file, a prepared next one, the feed's pooled clips. The
+        // episode test below cannot see most of them - a pair is keyed by its
+        // entry, not its episode, so a pair being watched was evicted as soon
+        // as mpv had read it, and a download of it then fetched it again.
+        if (MediaProxyServer.isRegistered(entry.key)) return true
+        // <-- AM (A_REGISTERED_ENTRY_IS_IN_USE)
         val active = activeEpisodeId ?: return false
         return episodeIdOf(entry.key) == active
     }

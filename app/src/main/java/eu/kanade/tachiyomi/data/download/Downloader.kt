@@ -11,6 +11,7 @@ import aniyomi.core.common.torrent.TorrentPreferences
 import aniyomi.core.common.torrent.TorrentServerApi
 import aniyomi.core.common.torrent.TorrentServerUtils
 import aniyomi.player.clip.ClipVideoResolver
+import com.arthenica.ffmpegkit.AbstractSession
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFprobeKit
@@ -59,7 +60,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -79,7 +79,6 @@ import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchNow
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.lang.withUIContext
-import tachiyomi.core.common.util.system.createFileInCacheDir
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.anime.model.Anime
 import tachiyomi.domain.download.service.DownloadPreferences
@@ -88,7 +87,7 @@ import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
 import tachiyomi.i18n.aniyomi.AYMR
-import java.io.BufferedReader
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.time.Duration.Companion.milliseconds
@@ -183,9 +182,23 @@ class Downloader(
      * @return true if the downloader is started, false otherwise.
      */
     fun start(): Boolean {
-        if (isRunning || queueState.value.isEmpty()) {
+        if (queueState.value.isEmpty()) {
             return false
         }
+        // AM (RETRY_WHILE_RUNNING) -->
+        // A retry asked of a running downloader. start() is what a retry calls,
+        // and it returned here without touching anything, so an errored
+        // download stayed errored for as long as any other was still going -
+        // with parallel sources that is most of the time, and the retry icon
+        // did nothing. Only the errored ones are requeued: a DOWNLOADING entry
+        // of a running downloader is live, not stale. The selection below
+        // picks them up because it now follows every status in the queue.
+        if (isRunning) {
+            val errored = queueState.value.filter { it.status == Download.State.ERROR }
+            errored.forEach { it.status = Download.State.QUEUE }
+            return errored.isNotEmpty()
+        }
+        // <-- AM (RETRY_WHILE_RUNNING)
 
         val pending = queueState.value.filter { it.status != Download.State.DOWNLOADED }
         pending.forEach { if (it.status != Download.State.QUEUE) it.status = Download.State.QUEUE }
@@ -196,6 +209,21 @@ class Downloader(
 
         return pending.isNotEmpty()
     }
+
+    // AM (QUEUE_ROW_ACTIONS) -->
+    /**
+     * Requeues [downloads] that errored, leaving the rest as they are. A
+     * running downloader picks them up on its own, since its selection follows
+     * every status in the queue.
+     *
+     * @return whether any was requeued.
+     */
+    fun retry(downloads: List<Download>): Boolean {
+        val errored = downloads.filter { it.status == Download.State.ERROR }
+        errored.forEach { it.status = Download.State.QUEUE }
+        return errored.isNotEmpty()
+    }
+    // <-- AM (QUEUE_ROW_ACTIONS)
 
     /**
      * Stops the downloader.
@@ -269,15 +297,26 @@ class Downloader(
                         .toList()
                         .take(parallelCount)
                         .map { (_, downloads) -> downloads.first() }
+                    // AM (RETRY_WHILE_RUNNING): the statuses this selection was
+                    // made from, so a change made while it was being emitted is
+                    // still seen below rather than taken as the starting point.
+                    val selectedFrom = queue.map { it.status }
                     emit(activeDownloads)
 
-                    if (activeDownloads.isEmpty()) break
-                    // Suspend until a download enters the ERROR state
-                    val activeDownloadsErroredFlow =
-                        combine(activeDownloads.map(Download::statusFlow)) { states ->
-                            states.contains(Download.State.ERROR)
-                        }.filter { it }
-                    activeDownloadsErroredFlow.first()
+                    // AM (RETRY_WHILE_RUNNING) -->
+                    // Suspend until any download's status moves, not only until
+                    // an active one errors. Waiting on the active ones alone
+                    // meant nothing could ever join the selection while the
+                    // queue stood still: a requeued download sat in QUEUE until
+                    // something unrelated changed the queue, and once every
+                    // active one had errored the loop ended outright. A change
+                    // that leaves the selection as it was is dropped by
+                    // distinctUntilChanged below, so following them all costs
+                    // no restarted jobs.
+                    if (queue.isEmpty()) break
+                    combine(queue.map(Download::statusFlow)) { it.toList() }
+                        .first { it != selectedFrom }
+                    // <-- AM (RETRY_WHILE_RUNNING)
                 }
             }
                 .distinctUntilChanged()
@@ -682,10 +721,11 @@ class Downloader(
             val file = when {
                 videoFile != null -> videoFile
                 else -> {
-                    notifier.onProgressChange(download)
-
                     download.status = Download.State.DOWNLOADING
                     download.progress = 0
+                    // AM (PROGRESS_ONLY_WHILE_DOWNLOADING): after the status, which
+                    // the notifier now requires.
+                    notifier.onProgressChange(download)
 
                     // If videoFile is not existing then download it
                     if (downloadPreferences.useExternalDownloader.get() == download.changeDownloader) {
@@ -950,10 +990,25 @@ class Downloader(
         // Keyed on the episode and quality, which is what lets a player watching
         // this same episode read the bytes this download is pulling instead of
         // fetching its own copy over the same connection.
-        val cacheKey = MediaProxyServer.cacheKeyFor(download.episode.id, video.videoTitle)
         // AM (CLIP_PLAYLIST): the listing's own video where it states one -
-        // see statedVideoUrl.
-        val fetchUrl = statedVideoUrl(download.anime, video) ?: video.videoUrl
+        // see statedPair.
+        val stated = statedPair(download.anime, video)
+        val fetchUrl = stated?.url ?: video.videoUrl
+        // AM (A_STATED_PAIR_IS_THE_FEEDS_CONTENT) -->
+        // A stated pair is read under the key every host of that entry uses -
+        // the feed and the player both register its files under it - not the
+        // episode's. The episode's key names the source's own pick, and for an
+        // entry like a Coub that is a different file: the download fetched the
+        // stated video under a key whose bytes could already be the source's
+        // file, served from disk as though they were the same content. The
+        // entry's key is also what makes a download of a clip just watched a
+        // read of the bytes already held rather than a second fetch.
+        val cacheKey = if (stated != null) {
+            ClipVideoResolver.cacheKey(download.anime.id)
+        } else {
+            MediaProxyServer.cacheKeyFor(download.episode.id, video.videoTitle)
+        }
+        // <-- AM (A_STATED_PAIR_IS_THE_FEEDS_CONTENT)
         val proxied = proxiedVideoUrl(fetchUrl, headers, cacheKey)
         // <-- AM (MEDIA_CACHE)
         val sourceUrl = proxied?.second ?: fetchUrl
@@ -974,7 +1029,9 @@ class Downloader(
             // on its own length under the track. A container cannot say "this
             // video repeats under this audio", so the file does not try to:
             // the thing that knows is the player.
-            val extraAudioTracks = feedAudioTracks(download.anime, video)
+            val extraAudioTracks = stated?.audioUrl
+                ?.let { listOf(Track(it, "Audio")) }
+                .orEmpty()
             val audioTracks = video.audioTracks + extraAudioTracks
             // The decision is the presence of a separate audio stream, not a
             // comparison of durations. Probing both lengths over the network
@@ -1014,12 +1071,14 @@ class Downloader(
             // are muxed into one file. Measuring one against the other is
             // what made the bar stall at a few percent and then fail its own
             // completeness check as a truncated transfer.
-            val duration = if (asTwoStreams) {
-                videoDuration.toLong()
+            // AM (COMPLETENESS_IN_EXACT_SECONDS): kept exact for the check;
+            // the whole-second figure is only the progress bar's.
+            val expectedSeconds = if (asTwoStreams) {
+                videoDuration
             } else {
-                val audioDuration = longestAudioDuration(audioTracks, headerOptions).toDouble()
-                maxOf(videoDuration, audioDuration).toLong()
+                maxOf(videoDuration, longestAudioDuration(audioTracks, headerOptions))
             }
+            val duration = expectedSeconds.toLong()
             // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
 
             val ffmpegOptions = if (asTwoStreams) {
@@ -1049,7 +1108,8 @@ class Downloader(
             }
 
             // AM (VERIFY_FROM_STATS_NOT_PROBE) -->
-            var lastOutTime = 0L
+            // AM (COMPLETENESS_IN_EXACT_SECONDS): exact, not whole seconds.
+            var lastOutSeconds = 0.0
             // <-- AM (VERIFY_FROM_STATS_NOT_PROBE)
             val statCallback = StatisticsCallback { s ->
                 val outTime = (s.time / 1000.0).toLong()
@@ -1064,7 +1124,8 @@ class Downloader(
                 }
                 // <-- AM (DOWNLOAD_PROGRESS_BY_BYTES)
                 // AM (VERIFY_FROM_STATS_NOT_PROBE) -->
-                if (outTime > lastOutTime) lastOutTime = outTime
+                val outSeconds = s.time / 1000.0
+                if (outSeconds > lastOutSeconds) lastOutSeconds = outSeconds
                 // <-- AM (VERIFY_FROM_STATS_NOT_PROBE)
             }
 
@@ -1099,7 +1160,7 @@ class Downloader(
             // so comparing it against what actually landed is nearly free. Throwing
             // here puts the download through downloadVideo()'s existing retry and
             // cleanup rather than leaving a broken file that looks finished.
-            verifyDownloadedDuration(lastOutTime, duration)
+            verifyDownloadedDuration(lastOutSeconds, expectedSeconds)
             // AM (SEPARATE_AUDIO_DOWNLOAD) -->
             if (asTwoStreams) {
                 writeSeparateAudio(
@@ -1107,6 +1168,10 @@ class Downloader(
                     tmpDir = tmpDir,
                     filename = filename,
                     audioTrack = audioTracks.first(),
+                    // AM (A_STATED_PAIR_IS_THE_FEEDS_CONTENT): the entry's own
+                    // audio key for a stated pair; a source's own track has no
+                    // content key and stays uncached, as before.
+                    audioCacheKey = stated?.let { ClipVideoResolver.audioCacheKey(download.anime.id, it) },
                     headers = headers,
                     headerOptions = headerOptions,
                     // AM (DOWNLOAD_PROGRESS_BY_BYTES): the bar carries on from
@@ -1140,8 +1205,8 @@ class Downloader(
      * fragment can leave a remux marginally shorter than its source without
      * anything being wrong. A truncated transfer is not marginal.
      */
-    private fun verifyDownloadedDuration(writtenSeconds: Long, expectedDurationSeconds: Long) {
-        if (expectedDurationSeconds <= 0L) return
+    private fun verifyDownloadedDuration(writtenSeconds: Double, expectedDurationSeconds: Double) {
+        if (expectedDurationSeconds <= 0.0) return
         // AM (VERIFY_FROM_STATS_NOT_PROBE) -->
         // Taken from ffmpeg's own statistics - how far through the media it had
         // written when the session ended - rather than by probing the file after.
@@ -1157,11 +1222,28 @@ class Downloader(
         // The statistics are already being collected for the progress bar, need no
         // second pass over the file, and answer exactly the question being asked:
         // how much of the media actually made it through.
-        if (writtenSeconds <= 0L) return
+        if (writtenSeconds <= 0.0) return
         // <-- AM (VERIFY_FROM_STATS_NOT_PROBE)
-        if (writtenSeconds < expectedDurationSeconds * MIN_COMPLETE_DURATION_RATIO) {
-            throw Exception("Download incomplete: ${writtenSeconds}s of ${expectedDurationSeconds}s")
+        // AM (COMPLETENESS_IN_EXACT_SECONDS) -->
+        // Compared exactly. Both figures were floored to whole seconds, so a
+        // file whose last frame starts at 9.96s against a probed 10.04s read as
+        // 9 of 10 - 90%, under the ratio - and failed every retry the same way.
+        // That was always there for short media, and became every download of
+        // a stated pair once that path measured its video alone: an 8-second
+        // clip has one second to lose, against the whole song it was measured
+        // with before.
+        //
+        // And allowed one final packet short. ffmpeg's time is where the last
+        // packet it wrote begins - by decode order, which trails presentation
+        // by the reordered frames - so even a complete remux reports a few
+        // frames under the probed length. That is a fixed amount, not a share,
+        // which is why a ratio alone cannot express it on a short file.
+        if (writtenSeconds + LAST_PACKETS_SECONDS < expectedDurationSeconds * MIN_COMPLETE_DURATION_RATIO) {
+            throw Exception(
+                "Download incomplete: %.2fs of %.2fs".format(Locale.ROOT, writtenSeconds, expectedDurationSeconds),
+            )
         }
+        // <-- AM (COMPLETENESS_IN_EXACT_SECONDS)
     }
     // <-- AM (VERIFY_DOWNLOAD_COMPLETE)
 
@@ -1329,6 +1411,8 @@ class Downloader(
         tmpDir: UniFile,
         filename: String,
         audioTrack: Track,
+        // AM (A_STATED_PAIR_IS_THE_FEEDS_CONTENT)
+        audioCacheKey: String?,
         headers: Headers,
         headerOptions: String,
         // AM (DOWNLOAD_PROGRESS_BY_BYTES)
@@ -1339,7 +1423,7 @@ class Downloader(
         val output = tmpDir.createFile(filename + AUDIO_SCRATCH)
             ?: throw Exception("Separate audio: could not create the scratch file")
 
-        val proxied = proxiedVideoUrl(audioTrack.url, headers, null)
+        val proxied = proxiedVideoUrl(audioTrack.url, headers, audioCacheKey)
         try {
             suspendCancellableCoroutine { continuation ->
                 val session = FFmpegKit.executeWithArgumentsAsync(
@@ -1411,42 +1495,27 @@ class Downloader(
     // <-- AM (DOWNLOAD_PROGRESS_BY_BYTES)
 
     /**
-     * The entry's own separate audio, for a video that arrived without it.
+     * The pair this entry's own listing states, for a video that arrived
+     * without its audio - or null where the download is the source's own file.
      *
      * A listing that states its media states the audio with it (see
      * ClipVideoResolver.statedBy, read from the browse memo, which is where the feed
      * gets it). The episode path does not carry it: a source hands back a url
      * per stream, so an entry whose site serves video and audio apart gives
-     * either a pre-muxed file - Coub's share file, which needs none of this -
-     * or the bare video, which downloads silent.
+     * either a pre-muxed file - Coub's share file, whose audio runs only as
+     * long as its video - or the bare video, which downloads silent.
      *
-     * Guarded on the urls matching. The memo describes the raw video; when
-     * the source resolved to something else it resolved to a file that
-     * carries its own audio, and attaching this would mux a second audio
-     * track over it.
+     * AM (A_STATED_PAIR_IS_THE_FEEDS_CONTENT): one answer for the video, the
+     * audio and the cache keys alike. These were two lookups of the same memo,
+     * and the key was then chosen without either, so the three could describe
+     * different files.
      */
-    private fun feedAudioTracks(anime: Anime, video: Video): List<Track> {
-        if (video.audioTracks.isNotEmpty()) return emptyList()
-        // AM (CLIP_PLAYLIST): through the resolver the player uses, so a
-        // download of one of these entries is the pair its listing states -
-        // not the source's pre-muxed pick, whose audio runs only as long as
-        // its video and so would download exactly the truncated track the
-        // player no longer plays.
-        val stated = ClipVideoResolver.statedBy(anime, null) ?: return emptyList()
-        val audioUrl = stated.audioUrl?.takeIf { it.isNotBlank() } ?: return emptyList()
-        return listOf(Track(audioUrl, "Audio"))
-    }
-
-    /**
-     * The video this entry's own listing states, where it states one.
-     *
-     * Same reason as above: the download should hold what the player plays.
-     */
-    private fun statedVideoUrl(anime: Anime, video: Video): String? {
+    private fun statedPair(anime: Anime, video: Video): ClipVideoResolver.Result.Playable? {
         if (video.audioTracks.isNotEmpty()) return null
+        // AM (CLIP_PLAYLIST): through the resolver the player uses, so a
+        // download of one of these entries is the pair its listing states.
         val stated = ClipVideoResolver.statedBy(anime, null) ?: return null
-        if (stated.audioUrl.isNullOrBlank()) return null
-        return stated.url.takeIf { it != video.videoUrl }
+        return stated.takeUnless { it.audioUrl.isNullOrBlank() }
     }
 
     /**
@@ -1457,45 +1526,62 @@ class Downloader(
      * probed counts as 0 and simply does not trigger the loop - the download
      * then behaves exactly as it did before this existed.
      */
-    private suspend fun longestAudioDuration(tracks: List<Track>, headerOptions: String): Long {
-        if (tracks.isEmpty()) return 0L
+    private suspend fun longestAudioDuration(tracks: List<Track>, headerOptions: String): Double {
+        if (tracks.isEmpty()) return 0.0
         return tracks.maxOf { track ->
             try {
-                getDuration(track.url, headerOptions)?.toLong() ?: 0L
+                getDuration(track.url, headerOptions)?.toDouble() ?: 0.0
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                0L
+                0.0
             }
         }
     }
     // <-- AM (SEPARATE_AUDIO_DOWNLOAD)
 
     private suspend fun getDuration(videoUrl: String, headerOptions: String): Float? {
-        val durationFile = context.createFileInCacheDir("ffprobe_duration.txt")
-        val durationFilePath = durationFile.toUri().toFFmpegString(context)
+        // AM (A_PROBE_SAYS_WHY) -->
+        // Through ffmpeg-kit's media information session, which reads ffprobe's
+        // JSON from the session itself, rather than ffprobe's -o into a file.
+        //
+        // -o is what failed. ffmpeg-kit runs each async probe on one of a fixed
+        // pool of threads and resets ffprobe's per-thread globals at the start
+        // of every run, but output_filename is not among them (fftools_ffprobe.c,
+        // ffprobe_execute's reset block, jmir1/ffmpeg-kit 1.18). So the first
+        // probe on each pool thread worked and every later one on that thread
+        // refused its -o - "provided as output filename, but '...' was already
+        // specified", the '...' being a pointer into the previous run's freed
+        // arguments. Which probes failed depended only on which thread they
+        // landed on: early downloads worked, later ones failed on every retry,
+        // and under -v quiet they failed with no reason at all.
+        //
+        // Errors only: the reason a probe fails is thrown with it, and the JSON
+        // is read from the session's stderr-level output, which -v error leaves
+        // as the only thing there.
+        val command = listOf(
+            headerOptions,
+            "-v error -hide_banner -print_format json -show_format",
+            "-i \"$videoUrl\"",
+        ).joinToString(" ")
 
-        val ffprobeCommand = FFmpegKitConfig.parseArguments(
-            listOf(
-                headerOptions,
-                "-v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1",
-                "-o \"$durationFilePath\"",
-                "\"$videoUrl\"",
-            ).joinToString(" "),
-        )
-
-        suspendCancellableCoroutine { continuation ->
-            val session = FFprobeKit.executeWithArgumentsAsync(ffprobeCommand) {
-                if (it.returnCode.isValueSuccess) {
-                    continuation.resume(it)
-                } else {
-                    continuation.resumeWithException(Exception(it.output))
-                }
-            }
+        return suspendCancellableCoroutine<String?> { continuation ->
+            val session = FFprobeKit.getMediaInformationFromCommandAsync(
+                command,
+                {
+                    if (it.returnCode.isValueSuccess) {
+                        continuation.resume(it.mediaInformation?.duration)
+                    } else {
+                        val reason = it.output?.trim().orEmpty().ifEmpty { "return code ${it.returnCode}" }
+                        continuation.resumeWithException(Exception("Duration probe failed: $reason"))
+                    }
+                },
+                null,
+                AbstractSession.DEFAULT_TIMEOUT_FOR_ASYNCHRONOUS_MESSAGES_IN_TRANSMIT,
+            )
             continuation.invokeOnCancellation { session.cancel() }
-        }
-
-        return durationFile.bufferedReader().use(BufferedReader::readText).trim().toFloatOrNull()
+        }?.toFloatOrNull()
+        // <-- AM (A_PROBE_SAYS_WHY)
     }
 
     /**
@@ -1734,6 +1820,10 @@ class Downloader(
         // AM (VERIFY_DOWNLOAD_COMPLETE) -->
         /** How much of the expected duration a finished download must cover. */
         private const val MIN_COMPLETE_DURATION_RATIO = 0.98
+
+        // AM (COMPLETENESS_IN_EXACT_SECONDS)
+        /** How far short of the probed length a complete remux's last packet can start. */
+        private const val LAST_PACKETS_SECONDS = 0.25
         // <-- AM (VERIFY_DOWNLOAD_COMPLETE)
 
         const val TMP_DIR_SUFFIX = "_tmp"

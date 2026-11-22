@@ -1,6 +1,9 @@
 package eu.kanade.presentation.history
 
 import androidx.compose.ui.tooling.preview.PreviewParameterProvider
+import androidx.paging.LoadState
+import androidx.paging.LoadStates
+import androidx.paging.PagingData
 import eu.kanade.tachiyomi.ui.history.HistoryViewModel
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -13,57 +16,68 @@ import kotlin.time.Duration.Companion.days
 import kotlin.time.Instant
 import kotlin.time.toJavaInstant
 
-class HistoryViewModelStateProvider : PreviewParameterProvider<HistoryViewModel.State> {
+internal class HistoryViewModelStateProvider : PreviewParameterProvider<HistoryPreview> {
 
-    private val multiPage = HistoryViewModel.State(
-        searchQuery = null,
-        list =
-        listOf(HistoryUiModelExamples.headerToday)
-            .asSequence()
-            .plus(HistoryUiModelExamples.items().take(3))
-            .plus(HistoryUiModelExamples.header { it.minus(1.days) })
-            .plus(HistoryUiModelExamples.items().take(1))
-            .plus(HistoryUiModelExamples.header { it.minus(2.days) })
-            .plus(HistoryUiModelExamples.items().take(7))
-            .toList(),
-        dialog = null,
-    )
-
-    private val shortRecent = HistoryViewModel.State(
-        searchQuery = null,
-        list = listOf(
-            HistoryUiModelExamples.headerToday,
-            HistoryUiModelExamples.items().first(),
+    private val multiPage = HistoryPreview(
+        state = HistoryViewModel.State(searchQuery = null, dialog = null),
+        items = PagingData.from(
+            listOf(HistoryUiModelExamples.headerToday)
+                .asSequence()
+                .plus(HistoryUiModelExamples.items().take(3))
+                .plus(HistoryUiModelExamples.header { it.minus(1.days) })
+                .plus(HistoryUiModelExamples.items().take(1))
+                .plus(HistoryUiModelExamples.header { it.minus(2.days) })
+                .plus(HistoryUiModelExamples.items().take(7))
+                .toList(),
         ),
-        dialog = null,
     )
 
-    private val shortFuture = HistoryViewModel.State(
-        searchQuery = null,
-        list = listOf(
-            HistoryUiModelExamples.headerTomorrow,
-            HistoryUiModelExamples.items().first(),
+    private val shortRecent = HistoryPreview(
+        state = HistoryViewModel.State(searchQuery = null, dialog = null),
+        items = PagingData.from(
+            listOf(
+                HistoryUiModelExamples.headerToday,
+                HistoryUiModelExamples.items().first(),
+            ),
         ),
-        dialog = null,
     )
 
-    private val empty = HistoryViewModel.State(
-        searchQuery = null,
-        list = listOf(),
-        dialog = null,
+    private val shortFuture = HistoryPreview(
+        state = HistoryViewModel.State(searchQuery = null, dialog = null),
+        items = PagingData.from(
+            listOf(
+                HistoryUiModelExamples.headerTomorrow,
+                HistoryUiModelExamples.items().first(),
+            ),
+        ),
     )
 
-    private val loadingWithSearchQuery = HistoryViewModel.State(
-        searchQuery = "Example Search Query",
+    private val empty = HistoryPreview(
+        state = HistoryViewModel.State(searchQuery = null, dialog = null),
+        items = PagingData.from(emptyList()),
     )
 
-    private val loading = HistoryViewModel.State(
-        searchQuery = null,
-        list = null,
-        dialog = null,
+    private val loadingWithSearchQuery = HistoryPreview(
+        state = HistoryViewModel.State(searchQuery = "Example Search Query"),
+        items = PagingData.empty(LOADING),
     )
 
-    override val values: Sequence<HistoryViewModel.State> = sequenceOf(
+    private val loading = HistoryPreview(
+        state = HistoryViewModel.State(searchQuery = null, dialog = null),
+        items = PagingData.empty(LOADING),
+    )
+
+    private companion object {
+        // AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME): a refresh that has not
+        // finished, which is what the nullable list used to stand for.
+        val LOADING = LoadStates(
+            refresh = LoadState.Loading,
+            prepend = LoadState.NotLoading(endOfPaginationReached = false),
+            append = LoadState.NotLoading(endOfPaginationReached = false),
+        )
+    }
+
+    override val values: Sequence<HistoryPreview> = sequenceOf(
         multiPage,
         shortRecent,
         shortFuture,
@@ -111,6 +125,10 @@ class HistoryViewModelStateProvider : PreviewParameterProvider<HistoryViewModel.
                             url = "https://example.com/cover.png",
                             lastModified = Random.nextLong(),
                         ),
+                        // AM (A_HISTORY_FILTERS_ON_WHAT_IT_KNOWS)
+                        episodeName = "Test Episode",
+                        scanlator = null,
+                        episodeUrl = "/episode/1",
                     ),
                 ),
             )

@@ -1,12 +1,13 @@
 package tachiyomi.data.source
 
-import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.data.Database
+import tachiyomi.data.awaitOneOrNull
 import tachiyomi.data.subscribeToList
 import tachiyomi.domain.source.model.StubSource
 import tachiyomi.domain.source.repository.StubSourceRepository
@@ -23,11 +24,14 @@ class StubSourceRepositoryImpl(
     }
 
     override suspend fun getStubSource(id: Long): StubSource? {
-        return database.sourcesQueries.findOne(id, ::mapStubSource).awaitAsOneOrNull()
+        return database.sourcesQueries.findOne(id, ::mapStubSource).awaitOneOrNull()
     }
 
     override suspend fun upsertStubSource(id: Long, lang: String, name: String) {
-        database.sourcesQueries.upsert(id, lang, name)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.sourcesQueries.upsert(id, lang, name)
+        }
     }
 
     private fun mapStubSource(

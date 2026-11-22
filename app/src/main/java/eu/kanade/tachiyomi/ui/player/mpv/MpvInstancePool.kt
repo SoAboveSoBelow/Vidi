@@ -52,7 +52,7 @@ class MpvInstancePool(
             it.inUse = true
             return it.player
         }
-        val created = factory.create(videoOutput)
+        val created = factory.create(videoOutput, audioOnly = false)
         slots += Slot(created).also { it.inUse = true }
         return created
     }
@@ -83,6 +83,9 @@ class MpvInstancePool(
         runCatching { player.mpv.setPropertyBoolean("pause", true) }
         // A stale Referer or user agent from the last file fails the next one's
         // handshake, and a caller with no headers of its own never overwrites it.
+        // AM (A_AN_OPTION_OUTLIVES_THE_FILE): clears the option the next
+        // tenant would otherwise inherit; as a property it cleared nothing a
+        // later load would read.
         runCatching { player.mpv.setOptionString("http-header-fields", "") }
         slot.inUse = false
     }

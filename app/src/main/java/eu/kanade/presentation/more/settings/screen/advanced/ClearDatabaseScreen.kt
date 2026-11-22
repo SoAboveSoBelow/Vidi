@@ -1,6 +1,8 @@
 package eu.kanade.presentation.more.settings.screen.advanced
 
+// AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,6 +31,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastMap
+// AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 // AM (MERGED_SOURCES) -->
@@ -49,10 +53,14 @@ import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.animesource.model.FetchType
+// AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+import eu.kanade.tachiyomi.util.storage.toSize
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
+// AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchUI
@@ -62,8 +70,12 @@ import tachiyomi.data.Database
 import tachiyomi.data.source.mapSourceToDomainSource
 import tachiyomi.domain.source.interactor.GetSourcesWithNonLibraryAnime
 import tachiyomi.domain.source.model.Source
+// AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+import tachiyomi.domain.source.model.SourceCoverageUsage
 import tachiyomi.domain.source.model.SourceWithIds
 import tachiyomi.domain.source.model.StubSource
+// AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+import tachiyomi.domain.source.repository.SourceCoverageRepository
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.i18n.MR
 import tachiyomi.i18n.animiru.AMMR
@@ -145,6 +157,135 @@ class ClearDatabaseScreen : Screen() {
                     )
                 }
 
+                // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+                // What the dump actually did. Shown rather than toasted,
+                // because the figures are the reason for doing it: this table
+                // is bounded by listings x deepest page reached, so a healthy
+                // install holds very little, and a number that is suddenly
+                // large is the signal that the recording has broken.
+                s.dumpResult?.let { result ->
+                    AlertDialog(
+                        title = { Text(text = stringResource(AMMR.strings.am_viewed_sequences_dumped)) },
+                        text = {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
+                            ) {
+                                Text(
+                                    text = stringResource(
+                                        AMMR.strings.am_viewed_sequences_dumped_detail,
+                                        result.pages,
+                                        result.bytes.toSize(),
+                                    ),
+                                )
+                                // Said plainly rather than left to be inferred
+                                // from a file size that did not move: deleting
+                                // rows returns their pages to SQLite's freelist
+                                // for reuse, and the file shrinks on a vacuum.
+                                Text(
+                                    text = stringResource(
+                                        AMMR.strings.am_viewed_sequences_database_size,
+                                        result.databaseSize.toSize(),
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        },
+                        onDismissRequest = model::dismissDumpResult,
+                        confirmButton = {
+                            TextButton(onClick = model::dismissDumpResult) {
+                                Text(text = stringResource(MR.strings.action_ok))
+                            }
+                        },
+                    )
+                }
+                // <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+
+                // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+                // What one source holds, and which of it to delete.
+                //
+                // Tapping a row used to toggle it into the selection, which
+                // made the one gesture the list answers to the bulk one - and
+                // the bulk action deletes a single fixed thing. A source holds
+                // three separable kinds of data and only one of them was ever
+                // reachable.
+                s.perSource?.let { perSource ->
+                    val source = s.items.find { it.id == perSource.sourceId } ?: return@let
+                    val coverage = s.coverageBySourceId[perSource.sourceId]
+                    val libraryCount = s.libraryIdsBySourceId[perSource.sourceId]?.size ?: 0
+                    AlertDialog(
+                        title = { Text(text = source.source.visualName) },
+                        text = {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall),
+                            ) {
+                                PerSourceToggle(
+                                    label = stringResource(
+                                        AMMR.strings.am_clear_source_sequences,
+                                        coverage?.pageCount ?: 0L,
+                                    ),
+                                    checked = perSource.sequences,
+                                    // Nothing recorded is not a choice to
+                                    // offer; the row says so too.
+                                    enabled = coverage != null,
+                                    onCheckedChange = model::togglePerSourceSequences,
+                                )
+                                PerSourceToggle(
+                                    label = stringResource(
+                                        AMMR.strings.am_clear_source_non_library,
+                                        source.count,
+                                    ),
+                                    checked = perSource.nonLibrary,
+                                    enabled = source.count > 0,
+                                    onCheckedChange = model::togglePerSourceNonLibrary,
+                                )
+                                PerSourceToggle(
+                                    label = stringResource(
+                                        AMMR.strings.am_clear_source_library,
+                                        libraryCount,
+                                    ),
+                                    checked = perSource.library,
+                                    enabled = libraryCount > 0,
+                                    onCheckedChange = model::togglePerSourceLibrary,
+                                )
+                                // Shown only once the destructive choice is
+                                // actually made, rather than standing in the
+                                // dialog as boilerplate nobody reads. This is
+                                // the one path in the app that deletes entries
+                                // the user chose to keep.
+                                if (perSource.library) {
+                                    Text(
+                                        text = stringResource(AMMR.strings.am_clear_source_library_warning),
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        },
+                        onDismissRequest = model::dismissPerSource,
+                        confirmButton = {
+                            // Absent rather than disabled until something is
+                            // chosen: a dialog whose only live control is
+                            // Cancel is clearer without a button that looks
+                            // like the way forward.
+                            if (perSource.hasSelection) {
+                                TextButton(
+                                    onClick = {
+                                        scope.launchUI { model.runPerSource() }
+                                    },
+                                ) {
+                                    Text(text = stringResource(MR.strings.action_ok))
+                                }
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = model::dismissPerSource) {
+                                Text(text = stringResource(MR.strings.action_cancel))
+                            }
+                        },
+                    )
+                }
+                // <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+
                 Scaffold(
                     topBar = { scrollBehavior ->
                         AppBar(
@@ -153,18 +294,56 @@ class ClearDatabaseScreen : Screen() {
                             actions = {
                                 if (s.items.isNotEmpty()) {
                                     AppBarActions(
-                                        actions = listOf(
-                                            AppBar.Action(
-                                                title = stringResource(MR.strings.action_select_all),
-                                                icon = Icons.Outlined.SelectAll,
-                                                onClick = model::selectAll,
-                                            ),
-                                            AppBar.Action(
-                                                title = stringResource(MR.strings.action_select_inverse),
-                                                icon = Icons.Outlined.FlipToBack,
-                                                onClick = model::invertSelection,
-                                            ),
-                                        ),
+                                        actions = buildList {
+                                            add(
+                                                AppBar.Action(
+                                                    title = stringResource(MR.strings.action_select_all),
+                                                    icon = Icons.Outlined.SelectAll,
+                                                    onClick = model::selectAll,
+                                                ),
+                                            )
+                                            add(
+                                                AppBar.Action(
+                                                    title = stringResource(MR.strings.action_select_inverse),
+                                                    icon = Icons.Outlined.FlipToBack,
+                                                    onClick = model::invertSelection,
+                                                ),
+                                            )
+                                            // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+                                            // A second verb over the same list
+                                            // and the same selection, rather
+                                            // than a screen of its own: these
+                                            // rows are per-source app data, so
+                                            // the place that deletes per-source
+                                            // app data is where they belong.
+                                            // In the overflow because it is the
+                                            // lesser of the two actions - what
+                                            // it drops is re-learned by
+                                            // browsing, at the price of the
+                                            // requests that browsing could
+                                            // otherwise have skipped.
+                                            //
+                                            // Offered only when the selection
+                                            // actually has something recorded,
+                                            // so the entry is never a tap that
+                                            // does nothing.
+                                            if (s.selection.any { it in s.coverageBySourceId }) {
+                                                add(
+                                                    AppBar.OverflowAction(
+                                                        title = stringResource(
+                                                            AMMR.strings.am_action_dump_viewed_sequences,
+                                                        ),
+                                                        onClick = {
+                                                            scope.launchUI {
+                                                                model.dumpSequences()
+                                                                model.clearSelection()
+                                                            }
+                                                        },
+                                                    ),
+                                                )
+                                            }
+                                            // <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+                                        },
                                     )
                                 }
                             },
@@ -188,8 +367,12 @@ class ClearDatabaseScreen : Screen() {
                                 ClearDatabaseItem(
                                     source = sourceWithCount.source,
                                     count = sourceWithCount.count,
+                                    // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+                                    coverage = s.coverageBySourceId[sourceWithCount.id],
                                     isSelected = s.selection.contains(sourceWithCount.id),
-                                    onClickSelect = { model.toggleSelection(sourceWithCount.source) },
+                                    // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+                                    onClick = { model.showPerSource(sourceWithCount.id) },
+                                    onLongClick = { model.toggleSelection(sourceWithCount.source) },
                                 )
                             }
                         }
@@ -199,19 +382,60 @@ class ClearDatabaseScreen : Screen() {
         }
     }
 
+    // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+    /** One of the three kinds of data a source holds. */
+    @Composable
+    private fun PerSourceToggle(
+        label: String,
+        checked: Boolean,
+        enabled: Boolean,
+        onCheckedChange: (Boolean) -> Unit,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = enabled) { onCheckedChange(!checked) },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(
+                checked = checked,
+                enabled = enabled,
+                onCheckedChange = onCheckedChange,
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+    }
+    // <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+
     @Composable
     private fun ClearDatabaseItem(
         source: Source,
         count: Long,
+        // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED): null where this source has
+        // recorded nothing, which is most of them.
+        coverage: SourceCoverageUsage?,
         isSelected: Boolean,
-        onClickSelect: () -> Unit,
+        // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO): a tap asks what to delete, a
+        // hold selects for the bulk action, which is what the tap used to do.
+        onClick: () -> Unit,
+        onLongClick: () -> Unit,
     ) {
         Row(
             modifier = Modifier
                 .selectedBackground(isSelected)
-                .clickable(onClick = onClickSelect)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(horizontal = 8.dp)
-                .height(56.dp),
+                // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED): room for the second
+                // line where there is one.
+                .height(if (coverage == null) 56.dp else 72.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             SourceIcon(source = source)
@@ -225,10 +449,25 @@ class ClearDatabaseScreen : Screen() {
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(text = stringResource(MR.strings.clear_database_source_item_count, count))
+                // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+                if (coverage != null) {
+                    Text(
+                        text = stringResource(
+                            AMMR.strings.am_viewed_sequences_source_detail,
+                            coverage.pageCount,
+                            coverage.listingCount,
+                            coverage.estimatedBytes.toSize(),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             Checkbox(
                 checked = isSelected,
-                onCheckedChange = { onClickSelect() },
+                // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO): the checkbox is the
+                // selection's own control, so it still toggles it directly -
+                // the row around it no longer does.
+                onCheckedChange = { onLongClick() },
             )
         }
     }
@@ -246,6 +485,9 @@ class ClearDatabaseViewModel(
     // <-- AM (MERGED_SOURCES)
     // AM (PLAYBACK_QUEUE)
     private val queueRepository: QueueRepository,
+    // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+    private val coverageRepository: SourceCoverageRepository,
+    private val context: Context,
     private val database: Database,
     private val sourceManager: SourceManager,
 ) : ViewModel() {
@@ -255,8 +497,21 @@ class ClearDatabaseViewModel(
 
     init {
         viewModelScope.launchIO {
-            getSourcesWithNonLibraryAnime.subscribe()
-                .collectLatest { list ->
+            // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+            // Combined rather than collected separately, so the list and the
+            // library counts the dialog reads are always from the same moment -
+            // two collectors would let a dialog open on a count that the other
+            // half of the screen had already moved past.
+            combine(
+                getSourcesWithNonLibraryAnime.subscribe(),
+                getSourcesWithNonLibraryAnime.subscribeLibrary(),
+                ::Pair,
+            )
+                .collectLatest { (list, libraryList) ->
+                    val libraryIdsBySourceId = libraryList
+                        .groupBy { it.sourceId }
+                        .mapValues { (_, anime) -> anime.map { it.animeId } }
+                    // <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
                     // AM (MERGED_SOURCES) -->
                     // animedeletableView already excludes merge children, but
                     // the season recursion below walks parent_id and reaches
@@ -305,11 +560,47 @@ class ClearDatabaseViewModel(
                         }
                     // <-- AY
 
+                    // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+                    // Read per emission rather than subscribed: these rows
+                    // change when something browses, which cannot be happening
+                    // while this screen is in front, and when this screen drops
+                    // them, which refreshes the list itself.
+                    //
+                    // A source with recorded pages but nothing deletable is
+                    // added rather than left out. It is rare - browsing writes a
+                    // row for every card it displays, and those rows are exactly
+                    // what this screen deletes - but a source whose entries are
+                    // all in the library would otherwise have sequences that
+                    // nothing could reach.
+                    val coverage = coverageRepository.getRecordedUsage().associateBy { it.sourceId }
+                    val listed = items.map { it.id }.toSet()
+                    val coverageOnly = coverage.keys
+                        .filterNot { it in listed }
+                        .map { sourceId ->
+                            val source = sourceManager.getOrStub(sourceId)
+                            SourceWithIds(
+                                mapSourceToDomainSource(source).copy(isStub = source is StubSource),
+                                emptyList(),
+                                emptyList(),
+                            )
+                        }
+                    // <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+
                     state.update { old ->
-                        val items = items.sortedBy { it.name }
+                        val items = (items + coverageOnly).sortedBy { it.name }
                         when (old) {
-                            State.Loading -> State.Ready(items)
-                            is State.Ready -> old.copy(items = items)
+                            State.Loading -> State.Ready(
+                                items,
+                                coverageBySourceId = coverage,
+                                // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+                                libraryIdsBySourceId = libraryIdsBySourceId,
+                            )
+                            is State.Ready -> old.copy(
+                                items = items,
+                                coverageBySourceId = coverage,
+                                // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+                                libraryIdsBySourceId = libraryIdsBySourceId,
+                            )
                         }
                     }
                 }
@@ -378,7 +669,129 @@ class ClearDatabaseViewModel(
         database.animesQueries.removeParentIdByIds(orphaned)
         // <-- AY
         database.historyQueries.removeResettedHistory()
+        // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+        // The selected sources' recorded pages go with their entries, and this
+        // is a correctness matter rather than tidiness: a record says how much
+        // of a page was VIEWED, and viewedness is read from history. Deleting
+        // these entries takes their history with them, so every record of a page
+        // they were on now overstates it - which is the same reason a history
+        // clear voids all of it (see SourceCoverageRepository.deleteAll).
+        selected.forEach { coverageRepository.deleteBySource(it.id) }
+        // <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
     }
+
+    // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+    /**
+     * Drops the selected sources' recorded pages, leaving their entries alone.
+     *
+     * Their listing-health rows are deliberately kept: a health row is not a
+     * recorded sequence, it is the record that a listing reorders itself and
+     * must not be tracked, and dropping it would make the next walk re-learn
+     * that at a page of requests per listing.
+     */
+    suspend fun dumpSequences() = withNonCancellableContext {
+        val current = state.value as? State.Ready ?: return@withNonCancellableContext
+        val selected = current.selection.mapNotNull { current.coverageBySourceId[it] }
+        if (selected.isEmpty()) return@withNonCancellableContext
+        selected.forEach { coverageRepository.deleteBySource(it.sourceId) }
+        val result = DumpResult(
+            pages = selected.sumOf { it.pageCount },
+            bytes = selected.sumOf { it.estimatedBytes },
+            // Read after the delete, so the figure above can be read against
+            // something real.
+            databaseSize = context.getDatabasePath(DATABASE_NAME).length(),
+        )
+        state.update { old ->
+            if (old !is State.Ready) return@update old
+            val remaining = old.coverageBySourceId.filterKeys { it !in current.selection }
+            old.copy(
+                dumpResult = result,
+                coverageBySourceId = remaining,
+                // A row that was only here for its sequences has nothing left to
+                // show, so it goes with them rather than sitting as an empty
+                // line until the screen is reopened.
+                items = old.items.filterNot { it.ids.isEmpty() && it.id !in remaining },
+            )
+        }
+    }
+
+    fun dismissDumpResult() = state.update { state ->
+        if (state !is State.Ready) return@update state
+        state.copy(dumpResult = null)
+    }
+    // <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+
+    // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+    fun showPerSource(sourceId: Long) = state.update { state ->
+        if (state !is State.Ready) return@update state
+        state.copy(perSource = PerSource(sourceId = sourceId))
+    }
+
+    fun dismissPerSource() = state.update { state ->
+        if (state !is State.Ready) return@update state
+        state.copy(perSource = null)
+    }
+
+    fun togglePerSourceSequences(checked: Boolean) = updatePerSource { it.copy(sequences = checked) }
+
+    fun togglePerSourceNonLibrary(checked: Boolean) = updatePerSource { it.copy(nonLibrary = checked) }
+
+    fun togglePerSourceLibrary(checked: Boolean) = updatePerSource { it.copy(library = checked) }
+
+    private fun updatePerSource(transform: (PerSource) -> PerSource) = state.update { state ->
+        if (state !is State.Ready) return@update state
+        val perSource = state.perSource ?: return@update state
+        state.copy(perSource = transform(perSource))
+    }
+
+    /**
+     * Deletes what the dialog was told to, for its one source.
+     *
+     * Order matters. The sequences go first, because the entry deletes below
+     * take their history with them and a recorded page's viewed fraction is
+     * read FROM history - so a record left behind would overstate pages those
+     * entries were on, which is the same reason a history clear voids all of it
+     * (SourceCoverageRepository.deleteAll). Deleting them first also means a
+     * failure part way through cannot leave records describing rows that are
+     * already gone.
+     *
+     * No keep-seen guard on the non-library delete, unlike the bulk action's:
+     * the dialog states a count and the user ticked it. The bulk action keeps
+     * its switch.
+     */
+    suspend fun runPerSource() = withNonCancellableContext {
+        val current = state.value as? State.Ready ?: return@withNonCancellableContext
+        val perSource = current.perSource ?: return@withNonCancellableContext
+        val sourceId = perSource.sourceId
+        val item = current.items.find { it.id == sourceId }
+
+        if (perSource.sequences) {
+            coverageRepository.deleteBySource(sourceId)
+        }
+        if (perSource.nonLibrary && item != null) {
+            database.animesQueries.deleteAnimesNotInLibraryByAnimeIds(item.ids, 0L)
+            database.animesQueries.removeParentIdByIds(item.orphaned)
+        }
+        if (perSource.library) {
+            current.libraryIdsBySourceId[sourceId]
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { database.animesQueries.deleteAnimesByAnimeIds(it) }
+        }
+        database.historyQueries.removeResettedHistory()
+
+        state.update { old ->
+            if (old !is State.Ready) return@update old
+            old.copy(
+                perSource = null,
+                coverageBySourceId = if (perSource.sequences) {
+                    old.coverageBySourceId - sourceId
+                } else {
+                    old.coverageBySourceId
+                },
+            )
+        }
+    }
+    // <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
 
     fun toggleSelection(source: Source) = state.update { state ->
         if (state !is State.Ready) return@update state
@@ -429,6 +842,45 @@ class ClearDatabaseViewModel(
             val items: List<SourceWithIds>,
             val selection: List<Long> = emptyList(),
             val showConfirmation: Boolean = false,
+            // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+            /** What each source has recorded, for the sources that have. */
+            val coverageBySourceId: Map<Long, SourceCoverageUsage> = emptyMap(),
+            val dumpResult: DumpResult? = null,
+            // <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
+            // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+            /** Library entry ids per source - what the library toggle deletes. */
+            val libraryIdsBySourceId: Map<Long, List<Long>> = emptyMap(),
+            /** The open per-source dialog, if one is open. */
+            val perSource: PerSource? = null,
+            // <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
         ) : State
     }
+
+    // AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED) -->
+    /** What one dump did, which is what the user asked it for. */
+    @Immutable
+    data class DumpResult(
+        val pages: Long,
+        val bytes: Long,
+        val databaseSize: Long,
+    )
+
+    // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO) -->
+    /** Which of one source's three kinds of data to delete. */
+    @Immutable
+    data class PerSource(
+        val sourceId: Long,
+        val sequences: Boolean = false,
+        val nonLibrary: Boolean = false,
+        val library: Boolean = false,
+    ) {
+        val hasSelection: Boolean get() = sequences || nonLibrary || library
+    }
+    // <-- AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO)
+
+    private companion object {
+        /** As AppBindings names it to the SQLDelight driver. */
+        const val DATABASE_NAME = "tachiyomi.animedb"
+    }
+    // <-- AM (A_RECORDED_SEQUENCES_CAN_BE_DUMPED)
 }

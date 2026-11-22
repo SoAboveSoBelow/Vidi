@@ -3,6 +3,7 @@ package aniyomi.ui.browse.scroller
 import eu.kanade.domain.anime.interactor.UpdateAnime
 import eu.kanade.domain.anime.model.toSAnime
 import eu.kanade.tachiyomi.animesource.AnimeSource
+import eu.kanade.tachiyomi.network.SourceRequestBudget
 import kotlinx.coroutines.CancellationException
 import logcat.LogPriority
 import tachiyomi.core.common.util.lang.withIOContext
@@ -38,6 +39,8 @@ import java.util.Collections
  */
 class ScrollerDetailsFetcher(
     private val updateAnime: UpdateAnime,
+    // AM (A_BROWSE_HAS_A_REQUEST_BUDGET)
+    private val requestBudget: SourceRequestBudget,
 ) {
 
     /**
@@ -54,6 +57,20 @@ class ScrollerDetailsFetcher(
         // tags there too, so a details round trip per card would buy nothing.
         if (ScrollerFeedMedia.from(anime) != null) return
         if (!fetched.add(anime.id)) return
+
+        // AM (A_BROWSE_HAS_A_REQUEST_BUDGET) -->
+        // One request per card displayed, with nothing pacing them but how fast
+        // the user scrolls - the largest burst browse produces, and larger than
+        // the paging chain. Unlike a listing load this is optional enrichment:
+        // the card draws from the listing data either way, so a refusal just
+        // means it draws without creator and tags rather than telling the user
+        // anything. Forgotten rather than marked fetched, so scrolling back
+        // past it once the window has room tries again.
+        if (!requestBudget.tryAcquire(source.id)) {
+            fetched.remove(anime.id)
+            return
+        }
+        // <-- AM (A_BROWSE_HAS_A_REQUEST_BUDGET)
 
         try {
             val details = withIOContext { source.getAnimeDetails(anime.toSAnime()) }

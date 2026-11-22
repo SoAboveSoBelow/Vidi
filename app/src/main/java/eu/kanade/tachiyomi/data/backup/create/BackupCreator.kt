@@ -18,6 +18,7 @@ import eu.kanade.tachiyomi.data.backup.create.creators.PreferenceBackupCreator
 import eu.kanade.tachiyomi.data.backup.create.creators.SourcesBackupCreator
 import eu.kanade.tachiyomi.data.backup.models.Backup
 import eu.kanade.tachiyomi.data.backup.models.BackupAnime
+import eu.kanade.tachiyomi.data.backup.models.BackupAnimeChunk
 import eu.kanade.tachiyomi.data.backup.models.BackupCategory
 import eu.kanade.tachiyomi.data.backup.models.BackupCustomButtons
 import eu.kanade.tachiyomi.data.backup.models.BackupExtension
@@ -95,40 +96,93 @@ class BackupCreator(
                 throw IllegalStateException(context.stringResource(MR.strings.create_backup_file_error))
             }
 
-            val nonFavoriteAnime = if (options.seenEntries) animeRepository.getSeenAnimeNotInLibrary() else emptyList()
-            val backupAnime = backupAnimes(getFavorites.await() + nonFavoriteAnime, options)
-
-            val backup = Backup(
-                backupPreferences = backupAppPreferences(options),
-                backupSourcePreferences = backupSourcePreferences(options),
-
-                // AY -->
-                isLegacy = false,
-                backupAnime = backupAnime,
-                backupCategories = backupCategories(options),
-                backupSources = backupSources(backupAnime),
-                backupExtensions = backupExtensions(options),
-                backupExtensionStores = backupExtensionStores(options),
-                backupCustomButton = backupCustomButtons(options),
-                // <-- AY
-                // AM (JS_PROJECT_SOURCES) -->
-                backupJsProjects = backupJsProjects(options),
-                // <-- AM (JS_PROJECT_SOURCES)
-            )
-
-            val byteArray = parser.encodeToByteArray(Backup.serializer(), backup)
-            if (byteArray.isEmpty()) {
-                throw IllegalStateException(context.stringResource(MR.strings.empty_backup_error))
-            }
+            // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME) -->
+            // Entries are encoded and written one at a time, straight into the
+            // gzip sink, rather than built into a list and handed whole to
+            // encodeToByteArray - which held the entire object graph and a
+            // complete second copy of it as bytes, and is what a large library
+            // runs out of memory on. See BackupAnimeChunk for why concatenating
+            // the records is equivalent to the single-shot encode.
+            //
+            // The source ids are collected as the entries go past, because
+            // backupSources() used to derive them from the entry list that no
+            // longer exists by the time it is needed.
+            var bytesWritten = 0L
+            val sourceIds = linkedSetOf<Long>()
 
             file.openOutputStream()
                 .also {
                     // Force overwrite old file
                     (it as? FileOutputStream)?.channel?.truncate(0)
                 }
-                .sink().gzip().buffer().use {
-                    it.write(byteArray)
+                .sink().gzip().buffer().use { sink ->
+                    if (options.libraryEntries) {
+                        val session = animeBackupCreator.session(options)
+
+                        suspend fun write(anime: Anime) {
+                            val entry = session.create(anime)
+                            sourceIds += entry.source
+                            val bytes = parser.encodeToByteArray(
+                                BackupAnimeChunk.serializer(),
+                                BackupAnimeChunk(listOf(entry)),
+                            )
+                            sink.write(bytes)
+                            bytesWritten += bytes.size
+                        }
+
+                        getFavorites.await().forEach { write(it) }
+
+                        if (options.seenEntries) {
+                            // Walked by id so the whole non-library side is
+                            // never resident at once.
+                            var afterId = 0L
+                            while (true) {
+                                val batch = animeRepository.getSeenAnimeNotInLibraryAfter(
+                                    afterId,
+                                    SEEN_ENTRY_BATCH_SIZE,
+                                )
+                                if (batch.isEmpty()) break
+                                batch.forEach { write(it) }
+                                afterId = batch.last().id
+                            }
+                        }
+                    }
+
+                    // Everything that is not an entry, as one message. Written
+                    // last because the source ids are only known once the
+                    // entries have been walked; proto fields carry their own
+                    // numbers, so order on the wire does not matter - which
+                    // BackupDetector already relies on to read a file whose
+                    // entry field it does not declare.
+                    val backup = Backup(
+                        backupPreferences = backupAppPreferences(options),
+                        backupSourcePreferences = backupSourcePreferences(options),
+
+                        // AY -->
+                        isLegacy = false,
+                        backupAnime = emptyList(),
+                        backupCategories = backupCategories(options),
+                        backupSources = backupSources(sourceIds),
+                        backupExtensions = backupExtensions(options),
+                        backupExtensionStores = backupExtensionStores(options),
+                        backupCustomButton = backupCustomButtons(options),
+                        // <-- AY
+                        // AM (JS_PROJECT_SOURCES) -->
+                        backupJsProjects = backupJsProjects(options),
+                        // <-- AM (JS_PROJECT_SOURCES)
+                    )
+                    val metaBytes = parser.encodeToByteArray(Backup.serializer(), backup)
+                    sink.write(metaBytes)
+                    bytesWritten += metaBytes.size
                 }
+
+            // The emptiness guard can only run after the write now, where it
+            // used to run before it. A failure below still deletes the file, and
+            // backupFileValidator decodes what was written either way.
+            if (bytesWritten == 0L) {
+                throw IllegalStateException(context.stringResource(MR.strings.empty_backup_error))
+            }
+            // <-- AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME)
             val fileUri = file.uri
 
             // Make sure it's a valid backup file
@@ -160,6 +214,14 @@ class BackupCreator(
 
     internal fun backupSources(animes: List<BackupAnime>): List<BackupSource> {
         return sourcesBackupCreator(animes)
+    }
+
+    // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME): from the ids collected while
+    // streaming, since the entry list no longer outlives the write. The list
+    // overload above stays for callers that do hold one - SyncManager builds a
+    // Backup in memory for a sync payload, which is bounded by the library.
+    internal fun backupSources(sourceIds: Set<Long>): List<BackupSource> {
+        return sourcesBackupCreator(sourceIds)
     }
 
     internal fun backupAppPreferences(options: BackupOptions): List<BackupPreference> {
@@ -221,6 +283,12 @@ class BackupCreator(
 
     companion object {
         private const val MAX_AUTO_BACKUPS: Int = 4
+
+        // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME): how many non-library
+        // entries are read per step of the id walk. Large enough that the walk
+        // is not a query per entry, small enough that a batch is never the
+        // allocation the streaming exists to avoid.
+        private const val SEEN_ENTRY_BATCH_SIZE: Long = 200
         private val FILENAME_REGEX = """${BuildConfig.APPLICATION_ID}_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}.tachibk""".toRegex()
 
         fun getFilename(): String {

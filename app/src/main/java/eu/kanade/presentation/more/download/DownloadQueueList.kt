@@ -68,6 +68,9 @@ fun DownloadQueueList(
     onCancel: (QueuedDownloadRow) -> Unit,
     onCancelSeries: (QueuedDownloadRow) -> Unit,
     onOpenEntry: (QueuedDownloadRow) -> Unit,
+    // AM (QUEUE_ROW_ACTIONS)
+    onRetry: (QueuedDownloadRow) -> Unit,
+    onStartNow: (QueuedDownloadRow) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val lazyListState = rememberLazyListState()
@@ -147,6 +150,9 @@ fun DownloadQueueList(
                         onCancel = { onCancel(item.row) },
                         onCancelSeries = { onCancelSeries(item.row) },
                         onOpenEntry = { onOpenEntry(item.row) },
+                        // AM (QUEUE_ROW_ACTIONS)
+                        onRetry = { onRetry(item.row) },
+                        onStartNow = { onStartNow(item.row) },
                     )
                 }
             }
@@ -167,6 +173,9 @@ private fun QueueRow(
     onCancel: () -> Unit,
     onCancelSeries: () -> Unit,
     onOpenEntry: () -> Unit,
+    // AM (QUEUE_ROW_ACTIONS)
+    onRetry: () -> Unit,
+    onStartNow: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -205,9 +214,21 @@ private fun QueueRow(
                 episodeSwipeEndAction = LibraryPreferences.EpisodeSwipeAction.Disabled,
                 onLongClick = { menuExpanded = true },
                 onClick = onOpenEntry,
+                // AM (QUEUE_ROW_ACTIONS) -->
+                // Every action the indicator offers here. Only CANCEL was
+                // answered, so the errored row's retry and the queued row's
+                // start-now were drawn and tapped and went nowhere. A retry
+                // requeues the row where it stands; start-now moves it to the
+                // front, as it does everywhere else.
                 onDownloadClick = { action ->
-                    if (action == EpisodeDownloadAction.CANCEL) onCancel()
+                    when (action) {
+                        EpisodeDownloadAction.CANCEL -> onCancel()
+                        EpisodeDownloadAction.START -> onRetry()
+                        EpisodeDownloadAction.START_NOW -> onStartNow()
+                        else -> Unit
+                    }
                 },
+                // <-- AM (QUEUE_ROW_ACTIONS)
                 onEpisodeSwipe = {},
                 fileSize = null,
                 minimalView = true,

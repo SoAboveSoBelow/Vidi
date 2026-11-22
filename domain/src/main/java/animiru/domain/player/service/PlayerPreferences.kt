@@ -82,6 +82,40 @@ class PlayerPreferences(
     )
     val progressPreference: Preference<Float> = preferenceStore.getFloat("pref_progress_preference", 0.85F)
 
+    // AM (A_HISTORY_HAS_A_THRESHOLD) -->
+    /**
+     * How many seconds something has to be watched for before it is added to
+     * history.
+     *
+     * One setting for every surface that writes a history row, because there
+     * is one question: history is the record of what was actually watched, and
+     * what counts as watched does not depend on where it was played. Enforced
+     * in LibraryProgressStore.recordWatched, which is the single writer the
+     * player and the browse feed share.
+     *
+     * 3 is the feed's old hardcoded MIN_WATCHED_SECONDS, measured rather than
+     * picked: a 9-page walk of a heavily-viewed listing recorded 0.71 of
+     * entries viewed at the median and 0.88 at best, because a card held under
+     * the threshold writes no row and so reads as unviewed however deliberately
+     * it was dismissed. The player had no threshold at all and wrote a row on
+     * its first save, which is why opening something by mistake put it in
+     * history.
+     *
+     * Lowering it is not free in the feed. The threshold also gates resolving
+     * what a card is playing, and an entry whose episodes are not stored yet
+     * costs a source request to find out - so a low value on a listing full of
+     * unseen entries spends the source's request budget (see
+     * A_KNOWN_EPISODE_NEEDS_NO_REQUEST, and SourceRequestBudget for what
+     * running it down costs). It also moves what coverage means: the page-skip
+     * threshold was chosen against 3 seconds, so the two settings are read
+     * together.
+     */
+    val historyThresholdSeconds: Preference<Int> = preferenceStore.getInt(
+        "pref_history_threshold_seconds",
+        3,
+    )
+    // <-- AM (A_HISTORY_HAS_A_THRESHOLD)
+
     // AM (PLAYBACK_QUEUE) -->
     val queueCleaning: Preference<QueueCleaning> = preferenceStore.getEnum(
         "pref_queue_cleaning",

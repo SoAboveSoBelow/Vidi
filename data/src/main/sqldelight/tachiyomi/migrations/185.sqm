@@ -1,0 +1,13 @@
+-- AM (A_SKIPPING_A_PAGE_MUST_NOT_LOSE_ITS_CONTINUATION): see
+-- data/source_page_coverage.sq.
+--
+-- A skipped page used to report nextKey = page + 1 always, because it never
+-- loaded and so never learned hasNextPage. On a listing whose last page is
+-- FULL - the short-page rule does not catch that one - Paging then asked for a
+-- page past the end, the source answered empty, and the load turned that into
+-- LoadResult.Error: a retry prompt where the listing should simply have ended.
+--
+-- Default 1 matches what a skip assumed before, so nothing regresses. It is
+-- never actually read for a pre-existing row, because tail_viewed defaults to 0
+-- and no page is skippable without it.
+ALTER TABLE source_page_coverage ADD COLUMN has_next INTEGER NOT NULL DEFAULT 1;

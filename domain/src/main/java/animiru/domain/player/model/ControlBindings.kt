@@ -161,6 +161,20 @@ sealed interface ControlAction {
         override val stringRes = AYMR.strings.control_action_auto_play
     }
 
+    // AM (A_LOOPING_IS_THE_USERS_CALL) -->
+    /**
+     * Repeats what is playing instead of moving on at its end.
+     *
+     * Bindable rather than implied by the entry: a two-stream entry used to
+     * loop because it had two streams, which is a statement about how it was
+     * encoded, not about what the viewer wants it to do.
+     */
+    data object ToggleLoop : ControlAction {
+        override val key = "toggle_loop"
+        override val stringRes = AMMR.strings.am_control_action_loop
+    }
+    // <-- AM (A_LOOPING_IS_THE_USERS_CALL)
+
     data object SubtitleTracks : ControlAction {
         override val key = "subtitle_tracks"
         override val stringRes = AYMR.strings.pref_player_subtitle
@@ -247,6 +261,8 @@ sealed interface ControlAction {
             AspectRatio,
             Cast,
             ToggleAutoPlay,
+            // AM (A_LOOPING_IS_THE_USERS_CALL)
+            ToggleLoop,
             SubtitleTracks,
             SubtitleSettings,
             AudioTracks,
@@ -257,14 +273,94 @@ sealed interface ControlAction {
             PrimaryCustomButton,
         )
 
+        // AM (A_LOOPING_IS_THE_USERS_CALL) -->
+        /**
+         * The order the seeded button IDs are derived from, which is not the
+         * order they are shown in.
+         *
+         * A native default's Lua row ID is its position, negated, and that row
+         * is written to the database the first time the defaults are seeded -
+         * so the positions are persisted whether or not anything says so.
+         * [selectable] was serving as both, which made its order frozen: every
+         * entry added anywhere but the end, and every reordering for the sake
+         * of the picker, would have renumbered the actions after it and pointed
+         * existing installs' stored slots at the wrong ones.
+         *
+         * So the two are separated. This list is append-only and must never be
+         * reordered; [selectable] is free to read however it should read.
+         */
+        private val nativeOrder: List<ControlAction> = listOf(
+            None,
+            PlayPause,
+            SeekBackward,
+            SeekForward,
+            PreviousEpisode,
+            NextEpisode,
+            PreviousSource,
+            NextSource,
+            Screenshot,
+            Lock,
+            CycleRotation,
+            PlaybackSpeed,
+            Chapters,
+            PictureInPicture,
+            AspectRatio,
+            Cast,
+            ToggleAutoPlay,
+            SubtitleTracks,
+            SubtitleSettings,
+            AudioTracks,
+            AudioDelay,
+            VideoQuality,
+            VideoFilters,
+            Overflow,
+            PrimaryCustomButton,
+        )
+
+        /**
+         * AM (A_A_LOOP_IS_NOT_A_SEEDED_BUTTON): [ToggleLoop] is deliberately
+         * absent, and must stay absent.
+         *
+         * Being in this list is not a registration - it is a claim that the
+         * action has a seeded Lua row whose id is its position here. Those
+         * rows were written once, at the migration that introduced them, and
+         * an action added to the list afterwards has no row to resolve to. The
+         * resolution path treats that as a button the user DELETED and binds
+         * the slot to None, which is how the loop control came to exist, sit
+         * in the top bar, and do nothing with no icon to show for it.
+         *
+         * The loop is an app action, performed by the view model the moment
+         * the slot reports it - like seeking, which is not here either. It
+         * needs no Lua row, so it needs no id.
+         */
+        // <-- AM (A_LOOPING_IS_THE_USERS_CALL)
+
         /** Stable seeded Lua row for a native default button; user buttons use positive IDs. */
-        fun nativeButtonId(action: ControlAction): Long? = selectable.indexOf(action)
+        fun nativeButtonId(action: ControlAction): Long? = nativeOrder.indexOf(action)
             .takeIf { it > 0 }
             ?.let { -(it + 1).toLong() }
 
+        // AM (ENTRY_SCROLLER) -->
+        /**
+         * What a bound action actually is, with a seeded default resolved back
+         * to the action it stands for.
+         *
+         * A native default is stored as a [CustomButton] holding its Lua row's
+         * id, so anything that asks "which action is this slot" by matching on
+         * the stored value alone sees a custom button and not the previous or
+         * next it draws. Availability already resolved this for itself; it is
+         * here now because dispatchers have to ask the same question, and two
+         * answers to it is how a button comes to be drawn and do nothing.
+         */
+        fun identity(action: ControlAction): ControlAction = when (action) {
+            is CustomButton -> nativeActionForButtonId(action.id) ?: action
+            else -> action
+        }
+        // <-- AM (ENTRY_SCROLLER)
+
         /** Original presentation for a seeded default, or null for a user-created button. */
-        fun nativeActionForButtonId(id: Long): ControlAction? = if (id <= -2L && id >= -25L) {
-            selectable.getOrNull((-id).toInt() - 1)
+        fun nativeActionForButtonId(id: Long): ControlAction? = if (id <= -2L && id >= -nativeOrder.size) {
+            nativeOrder.getOrNull((-id).toInt() - 1)
         } else {
             null
         }

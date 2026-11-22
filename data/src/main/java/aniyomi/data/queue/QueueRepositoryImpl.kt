@@ -5,15 +5,16 @@ import aniyomi.domain.queue.model.QueueBlock
 import aniyomi.domain.queue.model.QueueFillState
 import aniyomi.domain.queue.model.QueueItem
 import aniyomi.domain.queue.repository.QueueRepository
-import app.cash.sqldelight.async.coroutines.awaitAsList
-import app.cash.sqldelight.async.coroutines.awaitAsOne
-import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.flow.Flow
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.data.Database
+import tachiyomi.data.awaitList
+import tachiyomi.data.awaitOne
+import tachiyomi.data.awaitOneOrNull
 import tachiyomi.data.subscribeToList
 
 @Inject
@@ -24,7 +25,7 @@ class QueueRepositoryImpl(
 ) : QueueRepository {
 
     override suspend fun getItems(): List<QueueItem> {
-        return database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
+        return database.queue_itemsQueries.getAllItems(::mapItem).awaitList()
     }
 
     override fun getItemsAsFlow(): Flow<List<QueueItem>> {
@@ -32,11 +33,11 @@ class QueueRepositoryImpl(
     }
 
     override suspend fun getItemsByBlockId(blockId: Long): List<QueueItem> {
-        return database.queue_itemsQueries.getItemsByBlockId(blockId, ::mapItem).awaitAsList()
+        return database.queue_itemsQueries.getItemsByBlockId(blockId, ::mapItem).awaitList()
     }
 
     override suspend fun getBlocks(): List<QueueBlock> {
-        return database.queue_blocksQueries.getAllBlocks(::mapBlock).awaitAsList()
+        return database.queue_blocksQueries.getAllBlocks(::mapBlock).awaitList()
     }
 
     override fun getBlocksAsFlow(): Flow<List<QueueBlock>> {
@@ -44,13 +45,13 @@ class QueueRepositoryImpl(
     }
 
     override suspend fun getBlock(blockId: Long): QueueBlock? {
-        return database.queue_blocksQueries.getBlockById(blockId, ::mapBlock).awaitAsOneOrNull()
+        return database.queue_blocksQueries.getBlockById(blockId, ::mapBlock).awaitOneOrNull()
     }
 
     override suspend fun getBlocksByFillState(fillState: QueueFillState): List<QueueBlock> {
         return database.queue_blocksQueries
             .getBlocksByFillState(fillState.value, ::mapBlock)
-            .awaitAsList()
+            .awaitList()
     }
 
     /**
@@ -67,8 +68,8 @@ class QueueRepositoryImpl(
             val position = nextBlockPosition()
             val blockId = database.queue_blocksQueries
                 .insertReturningId(position, animeId, fillState.value)
-                .awaitAsOne()
-            val itemCount = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList().size
+                .awaitOne()
+            val itemCount = database.queue_itemsQueries.getAllItems(::mapItem).awaitList().size
             insertItemsAt(blockId, insertAt = itemCount, items = items)
             blockId
         }
@@ -76,79 +77,112 @@ class QueueRepositoryImpl(
 
     override suspend fun addItems(blockId: Long, items: List<QueueItem.New>) {
         if (items.isEmpty()) return
-        database.transaction {
-            val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
-            insertItemsAt(
-                blockId = blockId,
-                insertAt = blockInsertionIndex(all, blockId, appendToExisting = true),
-                items = items,
-            )
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitList()
+                insertItemsAt(
+                    blockId = blockId,
+                    insertAt = blockInsertionIndex(all, blockId, appendToExisting = true),
+                    items = items,
+                )
+            }
         }
     }
 
     override suspend fun replaceBlockItems(blockId: Long, items: List<QueueItem.New>) {
-        database.transaction {
-            val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
-            val insertAt = blockInsertionIndex(all, blockId, appendToExisting = false)
-            database.queue_itemsQueries.deleteByBlockId(blockId)
-            insertItemsAt(blockId, insertAt = insertAt, items = items)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitList()
+                val insertAt = blockInsertionIndex(all, blockId, appendToExisting = false)
+                database.queue_itemsQueries.deleteByBlockId(blockId)
+                insertItemsAt(blockId, insertAt = insertAt, items = items)
+            }
         }
     }
 
     override suspend fun setBlockFillState(blockId: Long, fillState: QueueFillState) {
-        database.queue_blocksQueries.setFillState(fillState.value, blockId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.queue_blocksQueries.setFillState(fillState.value, blockId)
+        }
     }
 
     // AM (QUEUE_BLOCK_PROGRESS)
     override suspend fun setBlockLastPlayedEpisode(blockId: Long, episodeId: Long?) {
-        database.queue_blocksQueries.setLastPlayedEpisode(episodeId, blockId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.queue_blocksQueries.setLastPlayedEpisode(episodeId, blockId)
+        }
     }
 
     // AM (QUEUE_BLOCK_PROGRESS)
     override suspend fun setBlockLastPlayedCompleted(blockId: Long, episodeId: Long) {
-        database.queue_blocksQueries.setLastPlayedCompleted(blockId, episodeId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.queue_blocksQueries.setLastPlayedCompleted(blockId, episodeId)
+        }
     }
 
     override suspend fun setBlockOrder(orderedBlockIds: List<Long>) {
-        database.transaction {
-            val blocks = database.queue_blocksQueries.getAllBlocks(::mapBlock).awaitAsList()
-            val requested = orderedBlockIds.distinct().filter { id -> blocks.any { it.id == id } }
-            val orderedIds = requested + blocks.map { it.id }.filterNot { it in requested }
-            orderedIds.forEachIndexed { index, blockId ->
-                database.queue_blocksQueries.setPosition(index.toLong() * POSITION_STEP, blockId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                val blocks = database.queue_blocksQueries.getAllBlocks(::mapBlock).awaitList()
+                val requested = orderedBlockIds.distinct().filter { id -> blocks.any { it.id == id } }
+                val orderedIds = requested + blocks.map { it.id }.filterNot { it in requested }
+                orderedIds.forEachIndexed { index, blockId ->
+                    database.queue_blocksQueries.setPosition(index.toLong() * POSITION_STEP, blockId)
+                }
+                // AM (QUEUE_SOURCE_INTERLEAVE) -->
+                // Block positions only. This used to gather every source's items
+                // into its new coarse slot, which is why a source could never sit
+                // inside another one: any reorder flattened the queue back into
+                // one contiguous run per source. Moving a source is an item move
+                // now (see PlaylistReorder), so this is left to do the one thing
+                // only a block position can express - where a block with no items
+                // yet sits while it waits for its fetch (see blockInsertionIndex).
+                // <-- AM (QUEUE_SOURCE_INTERLEAVE)
             }
-            // AM (QUEUE_SOURCE_INTERLEAVE) -->
-            // Block positions only. This used to gather every source's items
-            // into its new coarse slot, which is why a source could never sit
-            // inside another one: any reorder flattened the queue back into
-            // one contiguous run per source. Moving a source is an item move
-            // now (see PlaylistReorder), so this is left to do the one thing
-            // only a block position can express - where a block with no items
-            // yet sits while it waits for its fetch (see blockInsertionIndex).
-            // <-- AM (QUEUE_SOURCE_INTERLEAVE)
         }
     }
 
     // AM (QUEUE_REORDER) -->
     override suspend fun moveItems(itemIds: List<Long>, afterItemId: Long?) {
         if (itemIds.isEmpty()) return
-        database.transaction {
-            val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
-            val movingIds = itemIds.toSet()
-            val moving = all.filter { it.id in movingIds }
-            if (moving.isEmpty()) return@transaction
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitList()
+                val movingIds = itemIds.toSet()
+                val moving = all.filter { it.id in movingIds }
+                if (moving.isEmpty()) return@transaction
 
-            val remaining = all.filterNot { it.id in movingIds }
-            val anchorIndex = afterItemId?.let { anchor ->
-                remaining.indexOfFirst { it.id == anchor }
-                    .also { if (it == -1) return@transaction }
-            } ?: -1
-            // AM (QUEUE_SPARSE_POSITIONS): only the moved rows are rewritten,
-            // into the gap after the anchor; the rest of the queue is left
-            // alone unless that gap has run out.
-            val positions = placeItems(remaining, anchorIndex + 1, moving.size)
-            moving.forEachIndexed { index, item ->
-                database.queue_itemsQueries.setPosition(positions[index], item.id)
+                val remaining = all.filterNot { it.id in movingIds }
+                val anchorIndex = afterItemId?.let { anchor ->
+                    remaining.indexOfFirst { it.id == anchor }
+                        .also { if (it == -1) return@transaction }
+                } ?: -1
+                // AM (QUEUE_SPARSE_POSITIONS): only the moved rows are rewritten,
+                // into the gap after the anchor; the rest of the queue is left
+                // alone unless that gap has run out.
+                val positions = placeItems(remaining, anchorIndex + 1, moving.size)
+                moving.forEachIndexed { index, item ->
+                    database.queue_itemsQueries.setPosition(positions[index], item.id)
+                }
             }
         }
     }
@@ -157,73 +191,109 @@ class QueueRepositoryImpl(
     // AM (QUEUE_REBUILD_READ_ONLY)
     override suspend fun reorderItems(orderedItemIds: List<Long>) {
         if (orderedItemIds.size < 2) return
-        database.transaction {
-            val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
-            val byId = all.associateBy { it.id }
-            val moving = orderedItemIds.mapNotNull(byId::get)
-            if (moving.size < 2) return@transaction
-            // The positions this set already holds, handed back out in the new
-            // order: nothing outside the set moves, and the set as a whole
-            // stays exactly where it was in the queue.
-            val slots = moving.map { it.position }.sorted()
-            moving.forEachIndexed { index, item ->
-                val position = slots[index]
-                if (item.position != position) {
-                    database.queue_itemsQueries.setPosition(position, item.id)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitList()
+                val byId = all.associateBy { it.id }
+                val moving = orderedItemIds.mapNotNull(byId::get)
+                if (moving.size < 2) return@transaction
+                // The positions this set already holds, handed back out in the new
+                // order: nothing outside the set moves, and the set as a whole
+                // stays exactly where it was in the queue.
+                val slots = moving.map { it.position }.sorted()
+                moving.forEachIndexed { index, item ->
+                    val position = slots[index]
+                    if (item.position != position) {
+                        database.queue_itemsQueries.setPosition(position, item.id)
+                    }
                 }
             }
         }
     }
 
     override suspend fun removeItem(itemId: Long) {
-        database.queue_itemsQueries.delete(itemId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            database.queue_itemsQueries.delete(itemId)
+        }
     }
 
     // AM (QUEUE_TRIM_BY_POSITION)
     override suspend fun removeItems(itemIds: List<Long>) {
         if (itemIds.isEmpty()) return
-        database.transaction {
-            database.queue_itemsQueries.deleteByItemIds(itemIds)
-            database.queue_blocksQueries.deleteEmptyComplete()
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                database.queue_itemsQueries.deleteByItemIds(itemIds)
+                database.queue_blocksQueries.deleteEmptyComplete()
+            }
         }
     }
 
     override suspend fun removeItemsByEpisodeIds(episodeIds: List<Long>) {
         if (episodeIds.isEmpty()) return
-        database.transaction {
-            database.queue_itemsQueries.deleteByEpisodeIds(episodeIds)
-            database.queue_blocksQueries.deleteEmptyComplete()
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                database.queue_itemsQueries.deleteByEpisodeIds(episodeIds)
+                database.queue_blocksQueries.deleteEmptyComplete()
+            }
         }
     }
 
     override suspend fun removeItemsByAnimeAndEpisodeIds(animeId: Long, episodeIds: List<Long>) {
         if (episodeIds.isEmpty()) return
-        database.transaction {
-            database.queue_itemsQueries.deleteByAnimeAndEpisodeIds(animeId, episodeIds)
-            database.queue_blocksQueries.deleteEmptyComplete()
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                database.queue_itemsQueries.deleteByAnimeAndEpisodeIds(animeId, episodeIds)
+                database.queue_blocksQueries.deleteEmptyComplete()
+            }
         }
     }
 
     override suspend fun removeBlock(blockId: Long) {
-        // Items go with it through the foreign key.
-        database.queue_blocksQueries.delete(blockId)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            // Items go with it through the foreign key.
+            database.queue_blocksQueries.delete(blockId)
+        }
     }
 
     override suspend fun clear() {
-        database.transaction {
-            database.queue_itemsQueries.deleteAll()
-            database.queue_blocksQueries.deleteAll()
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): the whole transaction on one
+        // IO thread rather than each statement on the caller's. Required, not
+        // tidiness: the reads inside now dispatch themselves, so an unwrapped
+        // transaction would run its statements on different threads.
+        withIOContext {
+            database.transaction {
+                database.queue_itemsQueries.deleteAll()
+                database.queue_blocksQueries.deleteAll()
+            }
         }
     }
 
     override suspend fun count(): Long {
-        return database.queue_itemsQueries.countItems().awaitAsOne()
+        return database.queue_itemsQueries.countItems().awaitOne()
     }
 
     override suspend fun getAllQueuedAnimeIds(): Set<Long> {
         // The column is nullable in the table; the query's WHERE excludes the
         // nulls, which SQLDelight's generated type does not know about.
-        return database.queue_itemsQueries.getAllQueuedAnimeIds().awaitAsList().filterNotNull().toSet()
+        return database.queue_itemsQueries.getAllQueuedAnimeIds().awaitList().filterNotNull().toSet()
     }
 
     /**
@@ -231,7 +301,7 @@ class QueueRepositoryImpl(
      * two rows has somewhere to go without renumbering everything after it.
      */
     private suspend fun nextBlockPosition(): Long {
-        val max = database.queue_blocksQueries.maxPosition().awaitAsOneOrNull()
+        val max = database.queue_blocksQueries.maxPosition().awaitOneOrNull()
         return max?.plus(POSITION_STEP) ?: FIRST_POSITION
     }
 
@@ -255,7 +325,7 @@ class QueueRepositoryImpl(
         }
         if (existingIndex != -1) return existingIndex
 
-        val blocks = database.queue_blocksQueries.getAllBlocks(::mapBlock).awaitAsList()
+        val blocks = database.queue_blocksQueries.getAllBlocks(::mapBlock).awaitList()
         val laterBlockIds = blocks.dropWhile { it.id != blockId }.drop(1).mapTo(mutableSetOf()) { it.id }
         val nextBlockItem = all.indexOfFirst { it.blockId in laterBlockIds }
         return if (nextBlockItem == -1) all.size else nextBlockItem
@@ -264,7 +334,7 @@ class QueueRepositoryImpl(
     /** Writes the new rows into the gap at [insertAt]. */
     private suspend fun insertItemsAt(blockId: Long, insertAt: Int, items: List<QueueItem.New>) {
         if (items.isEmpty()) return
-        val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitAsList()
+        val all = database.queue_itemsQueries.getAllItems(::mapItem).awaitList()
         check(insertAt in 0..all.size)
         // AM (QUEUE_SPARSE_POSITIONS): into the gap between neighbours rather
         // than rewriting every row - see placeItems.
@@ -328,10 +398,13 @@ class QueueRepositoryImpl(
     // <-- AM (QUEUE_SPARSE_POSITIONS)
 
     private suspend fun renumberItems(items: List<QueueItem>) {
-        items.forEachIndexed { index, item ->
-            val position = index.toLong() * POSITION_STEP
-            if (item.position != position) {
-                database.queue_itemsQueries.setPosition(position, item.id)
+        // AM (A_QUERY_RUNS_WHERE_THE_DATABASE_LIVES): a write, off the caller's thread.
+        withIOContext {
+            items.forEachIndexed { index, item ->
+                val position = index.toLong() * POSITION_STEP
+                if (item.position != position) {
+                    database.queue_itemsQueries.setPosition(position, item.id)
+                }
             }
         }
     }

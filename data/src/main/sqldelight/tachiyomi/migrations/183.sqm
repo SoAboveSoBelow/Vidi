@@ -1,0 +1,11 @@
+-- AM (A_AN_UNSTABLE_LISTING_STOPS_BEING_TRACKED): see
+-- data/source_listing_health.sq for what this table is for and why an unstable
+-- listing has to stop being recorded rather than be re-learned every walk.
+
+CREATE TABLE source_listing_health(
+    source INTEGER NOT NULL,
+    listing_key TEXT NOT NULL,
+    failures INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(source, listing_key)
+);

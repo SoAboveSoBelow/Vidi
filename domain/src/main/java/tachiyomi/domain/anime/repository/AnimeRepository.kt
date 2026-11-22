@@ -22,6 +22,10 @@ interface AnimeRepository {
 
     suspend fun getSeenAnimeNotInLibrary(): List<Anime>
 
+    // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME): the same selection in id
+    // order, from just past [afterId], at most [limit] rows. Pass 0 to start.
+    suspend fun getSeenAnimeNotInLibraryAfter(afterId: Long, limit: Long): List<Anime>
+
     suspend fun getLibraryAnime(): List<LibraryAnime>
 
     fun getLibraryAnimeAsFlow(): Flow<List<LibraryAnime>>
@@ -63,6 +67,10 @@ interface AnimeRepository {
     suspend fun removeParentIdByIds(animeIds: List<Long>)
 
     fun getDeletableParentAnime(): Flow<List<DeletableAnime>>
+
+    // AM (A_A_SOURCE_HAS_LIBRARY_DATA_TOO): the library half of the same
+    // question - what a source holds that clearing it would remove.
+    fun getLibraryParentAnime(): Flow<List<DeletableAnime>>
 
     suspend fun getChildrenByParentId(parentId: Long): List<Anime>
     // <-- AY
