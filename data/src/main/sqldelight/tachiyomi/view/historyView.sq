@@ -179,8 +179,8 @@ LIMIT :limit OFFSET :offset;
 -- what qualifies: last_seen > 0, the origin filter, and the title LIKE.
 --
 -- EXISTS rather than a join or IN (SELECT DISTINCT ...) for the reason recorded
--- on getSeenAnimeNotInLibraryAfter in animes.sq: it stops at the first matching
--- row per entry instead of building the whole set.
+-- on getSeenAnimeNotReachableFromLibraryAfter in animes.sq: it stops at the first
+-- matching row per entry instead of building the whole set.
 -- <-- AM (A_HISTORY_IS_READ_A_PAGE_AT_A_TIME)
 historyCount:
 SELECT COUNT(*)

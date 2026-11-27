@@ -66,14 +66,17 @@ class AnimeRepositoryImpl(
         return database.animesQueries.getFavorites(AnimeMapper::mapAnime).awaitList()
     }
 
-    override suspend fun getSeenAnimeNotInLibrary(): List<Anime> {
-        return database.animesQueries.getSeenAnimeNotInLibrary(AnimeMapper::mapAnime).awaitList()
+    // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
+    override suspend fun getSeenAnimeNotReachableFromLibrary(): List<Anime> {
+        return database.animesQueries
+            .getSeenAnimeNotReachableFromLibrary(AnimeMapper::mapAnime)
+            .awaitList()
     }
 
     // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME)
-    override suspend fun getSeenAnimeNotInLibraryAfter(afterId: Long, limit: Long): List<Anime> {
+    override suspend fun getSeenAnimeNotReachableFromLibraryAfter(afterId: Long, limit: Long): List<Anime> {
         return database.animesQueries
-            .getSeenAnimeNotInLibraryAfter(afterId, limit, AnimeMapper::mapAnime)
+            .getSeenAnimeNotReachableFromLibraryAfter(afterId, limit, AnimeMapper::mapAnime)
             .awaitList()
     }
 

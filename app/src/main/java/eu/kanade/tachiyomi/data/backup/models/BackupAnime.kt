@@ -104,6 +104,24 @@ data class BackupAnime(
     // AM (TAG_LIMIT) / AM (TAG_BLACKLIST): rehoused from 211, which is burned.
     @ProtoNumber(707) var tagVisibility: List<BackupTagVisibility> = emptyList(),
     @ProtoNumber(708) var customBlacklistedGenre: List<String>? = null,
+    // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF) -->
+    /**
+     * How many children this merge had when the backup was written, as the
+     * database reported them - not as [mergeChildren] ended up.
+     *
+     * The two differ when the creator dropped a child it could not describe, so
+     * restoring cannot tell from [mergeChildren] alone whether it is looking at
+     * a whole merge or the part of one that survived being written. A restore
+     * that resolves fewer than this says so in the error log instead of
+     * reporting a clean finish, which is what let a merge lose most of its
+     * sources unnoticed.
+     *
+     * Additive and defaulted to 0, which a reader can only treat as "not
+     * stated" - every backup written before this field, and every upstream one,
+     * carries no value here.
+     */
+    @ProtoNumber(709) var mergeChildCount: Int = 0,
+    // <-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
     // <-- AM
 ) {
     fun getAnimeImpl(): Anime {

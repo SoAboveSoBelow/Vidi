@@ -245,6 +245,11 @@ class AnimeBackupCreator(
         val children = mergeChildRepository.getChildrenByMergeParentId(anime.id)
         if (children.isEmpty()) return
 
+        // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF): what the database says
+        // this merge holds, recorded before the mapNotNull below can drop any of
+        // it. Restore compares against this rather than against what it reads.
+        animeObject.mergeChildCount = children.size
+
         val orderingByAnimeId = mergeChildRepository.getChildOrderingByMergeParentId(anime.id)
             .associateBy { it.animeId }
         animeObject.mergeChildren = children.mapNotNull { child ->

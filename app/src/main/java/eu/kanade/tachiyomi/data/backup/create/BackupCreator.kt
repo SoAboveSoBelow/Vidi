@@ -2,6 +2,8 @@ package eu.kanade.tachiyomi.data.backup.create
 
 import android.content.Context
 import android.net.Uri
+// AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
+import aniyomi.domain.merge.repository.MergeChildRepository
 import com.hippo.unifile.UniFile
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
@@ -53,6 +55,8 @@ class BackupCreator(
     private val getFavorites: GetFavorites,
     private val backupPreferences: BackupPreferences,
     private val animeRepository: AnimeRepository,
+    // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
+    private val mergeChildRepository: MergeChildRepository,
     private val categoriesBackupCreator: CategoriesBackupCreator,
     private val animeBackupCreator: AnimeBackupCreator,
     private val preferenceBackupCreator: PreferenceBackupCreator,
@@ -132,12 +136,34 @@ class BackupCreator(
 
                         getFavorites.await().forEach { write(it) }
 
+                        // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF) -->
+                        // The children of merged entries that the walk above
+                        // cannot reach, because "remove originals from library"
+                        // cleared their favorite flag.
+                        //
+                        // Not behind options.seenEntries: these are not entries
+                        // the user merely watched, they are what their merged
+                        // entries are made of, and a merge whose children are
+                        // absent from the file cannot be rebuilt on restore -
+                        // MergeRestorer skips a child it cannot resolve, so the
+                        // merge comes back holding only the part of itself that
+                        // qualified some other way. They are written whenever
+                        // the entries themselves are.
+                        //
+                        // They stay favorite = 0 on the wire, so restoring one
+                        // puts it back as a child without putting it in the
+                        // library - which is the whole point of the flag having
+                        // been cleared.
+                        mergeChildRepository.getNonFavoriteLibraryChildren()
+                            .forEach { write(it) }
+                        // <-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
+
                         if (options.seenEntries) {
                             // Walked by id so the whole non-library side is
                             // never resident at once.
                             var afterId = 0L
                             while (true) {
-                                val batch = animeRepository.getSeenAnimeNotInLibraryAfter(
+                                val batch = animeRepository.getSeenAnimeNotReachableFromLibraryAfter(
                                     afterId,
                                     SEEN_ENTRY_BATCH_SIZE,
                                 )

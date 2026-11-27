@@ -76,6 +76,18 @@ interface MergeChildRepository {
     /** Reactive [getLibraryChildAnimeIds]; emits on membership and favorite changes. */
     fun getLibraryChildAnimeIdsAsFlow(): Flow<Set<Long>>
 
+    // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF) -->
+    /**
+     * The [getLibraryChildAnimeIds] set as whole entries, limited to the ones
+     * carrying favorite = 0.
+     *
+     * For the backup, which walks the library by that flag and so missed every
+     * child whose favorite had been cleared. Favorited children are left out
+     * because that walk already writes them.
+     */
+    suspend fun getNonFavoriteLibraryChildren(): List<Anime>
+    // <-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
+
     /** Highest priority currently used in [mergeParentId], or null if empty. */
     suspend fun maxPriority(mergeParentId: Long): Long?
 

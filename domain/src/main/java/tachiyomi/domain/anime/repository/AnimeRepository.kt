@@ -20,11 +20,15 @@ interface AnimeRepository {
 
     suspend fun getFavorites(): List<Anime>
 
-    suspend fun getSeenAnimeNotInLibrary(): List<Anime>
+    // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF): seen entries that the
+    // library cannot reach - not favorited AND not a child of a favorited
+    // merged entry. Was getSeenAnimeNotInLibrary, which named only the first
+    // half of that test.
+    suspend fun getSeenAnimeNotReachableFromLibrary(): List<Anime>
 
     // AM (A_BACKUP_IS_WRITTEN_ONE_ENTRY_AT_A_TIME): the same selection in id
     // order, from just past [afterId], at most [limit] rows. Pass 0 to start.
-    suspend fun getSeenAnimeNotInLibraryAfter(afterId: Long, limit: Long): List<Anime>
+    suspend fun getSeenAnimeNotReachableFromLibraryAfter(afterId: Long, limit: Long): List<Anime>
 
     suspend fun getLibraryAnime(): List<LibraryAnime>
 

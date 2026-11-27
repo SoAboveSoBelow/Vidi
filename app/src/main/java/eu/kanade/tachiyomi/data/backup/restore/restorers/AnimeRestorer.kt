@@ -520,7 +520,7 @@ class AnimeRestorer(
                     // the browse feed's entries are not backed up, so a
                     // restored row could only be a watch - they are: the feed
                     // writes progress through the same LibraryProgressStore,
-                    // and getSeenAnimeNotInLibrary selects on
+                    // and getSeenAnimeNotReachableFromLibrary selects on
                     // `seen = 1 OR last_second_seen != 0`, which that progress
                     // satisfies. So every card ever scrolled past came back as
                     // genuinely watched, collapsing the one distinction

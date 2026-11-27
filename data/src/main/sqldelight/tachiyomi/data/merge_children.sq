@@ -156,6 +156,31 @@ FROM merge_children MC
 JOIN animes P ON P._id = MC.merge_parent_id
 WHERE P.favorite = 1;
 
+-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF) -->
+-- The same set as getLibraryMergeChildAnimeIds, as whole rows and restricted
+-- to the children that carry favorite = 0.
+--
+-- A backup walks the library by animes.favorite, so a child whose favorite was
+-- cleared by "remove originals from library" was written only if it happened to
+-- also qualify as a seen entry - at least one episode with progress. A child
+-- with none was in no part of the file, and a merge child the restore cannot
+-- find is dropped silently by MergeRestorer, which is why a restored merge came
+-- back holding some of its sources and not the rest.
+--
+-- Membership here, not the flag, is what makes a child reachable - the same
+-- principle the reference implementation applies, which writes every row of its
+-- merge table unconditionally.
+--
+-- favorite = 0 because the favorited ones are already written by the library
+-- walk; writing them twice would put two records for one entry in the file.
+getNonFavoriteLibraryMergeChildren:
+SELECT DISTINCT A.*
+FROM animes A
+JOIN merge_children MC ON MC.anime_id = A._id
+JOIN animes P ON P._id = MC.merge_parent_id
+WHERE P.favorite = 1 AND A.favorite = 0;
+-- <-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
+
 -- AM (NAMED_SEASONS) -->
 -- Moves every child in one season into another - used when a season is
 -- deleted and its sources fall back to the default season.

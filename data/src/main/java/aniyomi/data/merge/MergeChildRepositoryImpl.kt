@@ -139,6 +139,14 @@ class MergeChildRepositoryImpl(
         return database.merge_childrenQueries.getLibraryMergeChildAnimeIds().awaitList().toSet()
     }
 
+    // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF) -->
+    override suspend fun getNonFavoriteLibraryChildren(): List<Anime> {
+        return database.merge_childrenQueries.getNonFavoriteLibraryMergeChildren(
+            AnimeMapper::mapAnime,
+        ).awaitList()
+    }
+    // <-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
+
     override fun getLibraryChildAnimeIdsAsFlow(): Flow<Set<Long>> {
         return database.merge_childrenQueries.getLibraryMergeChildAnimeIds()
             .subscribeToList()

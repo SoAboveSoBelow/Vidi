@@ -114,9 +114,9 @@ WHERE favorite = 1;
 -- progress outside the library, identical rows at every offset: 24-31 ms per
 -- 200-row batch -> 0.5-1.1 ms, and the complete 192-batch walk 5,626 -> 122 ms.
 --
--- getSeenAnimeNotInLibrary, which wants the whole set rather than a page of it,
--- measured FLAT either way (153 vs 153 ms, same 38,333 rows): asked for every
--- row, the DISTINCT list is built once and is no worse than the correlated
+-- getSeenAnimeNotReachableFromLibrary, which wants the whole set rather than a
+-- page of it, measured FLAT either way (153 vs 153 ms, same 38,333 rows): asked
+-- for every row, the DISTINCT list is built once and is no worse than the correlated
 -- probe. It is rewritten anyway so one predicate has one spelling, not for
 -- speed - the quadratic cost was never in this query, only in paging with it.
 --
@@ -124,7 +124,23 @@ WHERE favorite = 1;
 -- tried and rejected: SQLite does match it against this predicate, but it only
 -- took the batch from 0.65 to 0.55 ms - under perception either way - for
 -- 560 KB and another index to maintain on every episode write.
-getSeenAnimeNotInLibraryAfter:
+-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF) -->
+-- Renamed from getSeenAnimeNotInLibrary[After]. Two things are excluded now,
+-- and only one of them is the favorite flag: children of favorited merged
+-- entries carry favorite = 0 but are reachable from the library through
+-- merge_children (see getLibraryMergeChildAnimeIds there), so "not in library"
+-- was never true of them. The backup writes them from
+-- getNonFavoriteLibraryMergeChildren, and without the exclusion below any child
+-- that also has progress would be written twice.
+--
+-- The name says "not reachable from" rather than "not in" so a later caller
+-- wanting the plain favorite test does not reach for this one by its name and
+-- silently lose merge children.
+--
+-- Cost is one index seek per candidate on merge_children_anime_id_index,
+-- stopping at the first row; that table holds a row per membership, not per
+-- entry.
+getSeenAnimeNotReachableFromLibraryAfter:
 SELECT *
 FROM animes
 WHERE favorite = 0 AND _id > :afterId
@@ -134,10 +150,16 @@ AND EXISTS (
     WHERE episodes.anime_id = animes._id
     AND (episodes.seen = 1 OR episodes.last_second_seen != 0)
 )
+AND NOT EXISTS (
+    SELECT 1
+    FROM merge_children MC
+    JOIN animes P ON P._id = MC.merge_parent_id
+    WHERE MC.anime_id = animes._id AND P.favorite = 1
+)
 ORDER BY _id
 LIMIT :limit;
 
-getSeenAnimeNotInLibrary:
+getSeenAnimeNotReachableFromLibrary:
 SELECT *
 FROM animes
 WHERE favorite = 0
@@ -146,7 +168,14 @@ AND EXISTS (
     FROM episodes
     WHERE episodes.anime_id = animes._id
     AND (episodes.seen = 1 OR episodes.last_second_seen != 0)
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM merge_children MC
+    JOIN animes P ON P._id = MC.merge_parent_id
+    WHERE MC.anime_id = animes._id AND P.favorite = 1
 );
+-- <-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
 -- <-- AM (A_PROGRESS_IS_A_PER_ENTRY_QUESTION)
 
 getAllAnime:

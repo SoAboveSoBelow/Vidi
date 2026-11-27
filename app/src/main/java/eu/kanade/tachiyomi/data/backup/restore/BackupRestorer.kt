@@ -236,7 +236,24 @@ class BackupRestorer(
 
             try {
                 entryExtrasRestorer.restore(anime, backupAnime, resolver)
-                mergeRestorer.restore(anime, backupAnime, resolver)
+                // AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF) -->
+                // A merge that came back holding less than it had is reported
+                // where every other restore problem already is. Silence here is
+                // how an entry built from a hundred sources could restore as
+                // thirty and still look like a clean finish.
+                val mergeResult = mergeRestorer.restore(anime, backupAnime, resolver)
+                if (!mergeResult.complete) {
+                    val sourceName = sourceMapping[backupAnime.source] ?: backupAnime.source.toString()
+                    val detail = if (mergeResult.keptExisting) {
+                        "kept this device's ${mergeResult.declared - mergeResult.resolved} " +
+                            "unmatched sources instead of replacing them"
+                    } else {
+                        "${mergeResult.declared - mergeResult.resolved} of " +
+                            "${mergeResult.declared} merged sources not found"
+                    }
+                    errors.add(Date() to "${backupAnime.title} [$sourceName]: $detail")
+                }
+                // <-- AM (A_BACKUP_CARRIES_WHAT_A_MERGE_IS_MADE_OF)
                 downloadStateRestorer.restore(anime, backupAnime, resolver)
             } catch (e: Exception) {
                 ensureActive()
